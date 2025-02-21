@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.2
+
+### Patch Changes
+
+- [`3f1ad74`](https://github.com/cloudflare/agents/commit/3f1ad7466bb74574131cd4ffdf7ce4d116f03d70) Thanks [@threepointone](https://github.com/threepointone)! - export some types, use a default agent name
+
 ## 0.0.1
 
 ### Patch Changes
