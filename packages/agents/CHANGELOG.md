@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.5
+
+### Patch Changes
+
+- [`7dab6bc`](https://github.com/cloudflare/agents/commit/7dab6bcb4429cfa02dfdb62bbce59fd29e94308f) Thanks [@threepointone](https://github.com/threepointone)! - more on agentFetch
+
 ## 0.0.4
 
 ### Patch Changes
