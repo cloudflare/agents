@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.4
+
+### Patch Changes
+
+- [`411c149`](https://github.com/cloudflare/agents/commit/411c1490c79373d8e7959fd90cfcdc4a0d87290f) Thanks [@threepointone](https://github.com/threepointone)! - actually fix client fetch
+
 ## 0.0.3
 
 ### Patch Changes
