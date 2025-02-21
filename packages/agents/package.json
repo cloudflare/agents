@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {

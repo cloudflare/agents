@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.6
+
+### Patch Changes
+
+- [`acbd0f6`](https://github.com/cloudflare/agents/commit/acbd0f6e1375a42ba1ad577b68f6a8264f6e9827) Thanks [@threepointone](https://github.com/threepointone)! - .state/.setState/.onStateUpdate
+
 ## 0.0.5
 
 ### Patch Changes
