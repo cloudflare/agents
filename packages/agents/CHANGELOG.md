@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.7
+
+### Patch Changes
+
+- [`0680a02`](https://github.com/cloudflare/agents/commit/0680a0245c41959588895c0d2bd39c98ca189a38) Thanks [@threepointone](https://github.com/threepointone)! - remove email mentions from readme
+
 ## 0.0.6
 
 ### Patch Changes
