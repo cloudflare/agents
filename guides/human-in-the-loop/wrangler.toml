@@ -1,0 +1,5 @@
+name = "human-in-the-loop"
+main = "./src/server.ts"
+compatibility_date = "2025-02-21"
+
+assets = {}
