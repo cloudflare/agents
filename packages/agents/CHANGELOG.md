@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.10
+
+### Patch Changes
+
+- [#15](https://github.com/cloudflare/agents/pull/15) [`ecd9324`](https://github.com/cloudflare/agents/commit/ecd9324d8470c521dd3566446d7afae1fa0c1b9f) Thanks [@elithrar](https://github.com/elithrar)! - env type fixes
+
 ## 0.0.9
 
 ### Patch Changes
