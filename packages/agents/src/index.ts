@@ -387,7 +387,7 @@ export class Agent<
 export type AgentNamespace<Agentic extends Agent<unknown>> =
   DurableObjectNamespace<Agentic>;
 
-export function routeAgentRequest<Env extends Record<string, unknown>>(
+export function routeAgentRequest<Env>(
   request: Request,
   env: Env,
   options?: PartyServerOptions<Env>
@@ -398,7 +398,7 @@ export function routeAgentRequest<Env extends Record<string, unknown>>(
   });
 }
 
-export async function routeAgentEmail<Env extends Record<string, unknown>>(
+export async function routeAgentEmail<Env>(
   email: ForwardableEmailMessage,
   env: Env,
   options?: PartyServerOptions<Env>
