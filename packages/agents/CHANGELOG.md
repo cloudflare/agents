@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.8
+
+### Patch Changes
+
+- [`619dac5`](https://github.com/cloudflare/agents/commit/619dac55e11543609f2a0869b6a3f05a78fa83fd) Thanks [@threepointone](https://github.com/threepointone)! - new useChat, with multiplayer, syncing, persistence; updated HITL guide with useChat
+
 ## 0.0.7
 
 ### Patch Changes
