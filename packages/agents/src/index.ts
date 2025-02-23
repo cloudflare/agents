@@ -45,10 +45,7 @@ function getNextCronTime(cron: string) {
 
 const STATE_ROW_ID = "cf_state_row_id";
 
-export class Agent<
-  Env = Record<string, unknown>,
-  State = unknown
-> extends Server<Env> {
+export class Agent<Env, State = unknown> extends Server<Env> {
   #state = undefined as State | undefined;
   state: State | undefined;
 
@@ -392,9 +389,9 @@ export function routeAgentRequest<Env>(
   env: Env,
   options?: PartyServerOptions<Env>
 ) {
-  return routePartykitRequest(request, env, {
+  return routePartykitRequest(request, env as Record<string, unknown>, {
     prefix: "agents",
-    ...options,
+    ...(options as PartyServerOptions<Record<string, unknown>>),
   });
 }
 
