@@ -235,6 +235,35 @@ export class ThinkingAgent extends Agent {
 }
 ```
 
+Connect to your agent's state from React:
+
+```tsx
+import { useState } from "react";
+import { useAgent } from "@cloudflare/agents/react";
+
+function StateInterface() {
+  const [state, setState] = useState({ counter: 0 });
+
+  const agent = useAgent({
+    agent: "thinking-agent",
+    onStateUpdate: (newState) => setState(newState),
+  });
+
+  const increment = () => {
+    agent.setState({ counter: state.counter + 1 });
+  };
+
+  return (
+    <div>
+      <div>Count: {state.counter}</div>
+      <button onClick={increment}>Increment</button>
+    </div>
+  );
+}
+```
+
+This creates a synchronized state that automatically updates across all connected clients.
+
 ### ⏳ Temporal Patterns
 
 Schedule moments of action and reflection:
@@ -256,6 +285,14 @@ export class TimeAwareAgent extends Agent {
 
   async quickInsight(data) {
     await this.analyze(data.focus);
+  }
+
+  async dailySynthesis(data) {
+    await this.synthesize(data.depth);
+  }
+
+  async yearlyAnalysis() {
+    await this.analyze();
   }
 }
 ```
@@ -279,7 +316,7 @@ export class DialogueAgent extends AIChatAgent {
         const stream = streamText({
           model: ai("gpt-4"),
           messages,
-          onFinish,
+          onFinish, // call onFinish so that messages get saved
         });
 
         stream.mergeIntoDataStream(dataStream);
@@ -289,7 +326,65 @@ export class DialogueAgent extends AIChatAgent {
 }
 ```
 
-### 🌅 The Path Forward
+#### Creating the Interface
+
+Connect with your agent through a React interface:
+
+```tsx
+import { useAgent } from "@cloudflare/agents/react";
+import { useAgentChat } from "@cloudflare/agents/ai-react";
+
+function ChatInterface() {
+  // Connect to the agent
+  const agent = useAgent({
+    agent: "dialogue-agent",
+  });
+
+  // Set up the chat interaction
+  const { messages, input, handleInputChange, handleSubmit, clearHistory } =
+    useAgentChat({
+      agent,
+      maxSteps: 5,
+    });
+
+  return (
+    <div className="chat-interface">
+      {/* Message History */}
+      <div className="message-flow">
+        {messages.map((message) => (
+          <div key={message.id} className="message">
+            <div className="role">{message.role}</div>
+            <div className="content">{message.content}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Input Area */}
+      <form onSubmit={handleSubmit} className="input-area">
+        <input
+          value={input}
+          onChange={handleInputChange}
+          placeholder="Type your message..."
+          className="message-input"
+        />
+      </form>
+
+      <button onClick={clearHistory} className="clear-button">
+        Clear Chat
+      </button>
+    </div>
+  );
+}
+```
+
+This creates:
+
+- Real-time message streaming
+- Simple message history
+- Intuitive input handling
+- Easy conversation reset
+
+### 💬 The Path Forward
 
 We're developing new dimensions of agent capability:
 
