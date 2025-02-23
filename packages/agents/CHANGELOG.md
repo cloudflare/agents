@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.9
+
+### Patch Changes
+
+- [`8335b4b`](https://github.com/cloudflare/agents/commit/8335b4bdfc17d4cc47ca5b03d0dad7f9c64ce6a1) Thanks [@threepointone](https://github.com/threepointone)! - fix some types
+
 ## 0.0.8
 
 ### Patch Changes
