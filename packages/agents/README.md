@@ -7,12 +7,7 @@ Built on Cloudflare's Durable Objects, `@cloudflare/agents` gives a stateful env
 ### examples
 
 - [Building effective AI agents with Cloudflare](/guides/anthropic-patterns/README.md): A deep dive into implementing the major 5 LLM agent patterns with `@cloudflare/agents`.
-
-Coming soon -
-
-- [Humans in the loop, forever](#): A look at running AI agents that can interact with humans and run for years.
-- [Adding agents to an existing application/stack](#): A guide to adding agents to an existing application/stack.
-- (and more soon)
+- [Humans in the loop, forever](/guides/humans-in-the-loop/README.md): A look at running AI agents that can interact with humans and run for years.
 
 ### get started
 
@@ -312,8 +307,6 @@ Cloudflare Agents can be developed and tested locally with `wrangler dev` or `vi
 ### bring your own X
 
 You can use any of the included solutions, or bring your own services. Have your own vector database/rag service? Maybe you want to use resend for emails? It all works great in the connectivity cloud!
-
-### python agents (coming soon)
 
 ### self hosting (coming soon)
 
