@@ -1,7 +1,10 @@
 ### 🧠 `@cloudflare/agents` - A Framework for Digital Intelligence
+
 ![agents-header](https://github.com/user-attachments/assets/f6d99eeb-1803-4495-9c5e-3cf07a37b402)
 
 Welcome to a new chapter in software development, where AI agents persist, think, and act with purpose. The `@cloudflare/agents` framework creates an environment where artificial intelligence can flourish - maintaining state, engaging in meaningful interactions, and evolving over time.
+
+_This project is in active development. Join us in shaping the future of intelligent agents._
 
 #### The Nature of Agents
 
