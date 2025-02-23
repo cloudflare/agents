@@ -128,12 +128,10 @@ export class APIAgent extends Agent {
   async onRequest(request) {
     const data = await request.json();
 
-    return new Response(
-      JSON.stringify({
-        insight: await this.process(data),
-        moment: Date.now(),
-      })
-    );
+    return Response.json({
+      insight: await this.process(data),
+      moment: Date.now(),
+    });
   }
 }
 ```
