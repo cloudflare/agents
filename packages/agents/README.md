@@ -34,14 +34,16 @@ npm install @cloudflare/agents
 
 ```ts
 import { Agent } from "@cloudflare/agents";
-import openai from "openai";
+import { OpenAI } from "openai";
 
 export class MyAgent extends Agent {
   async onRequest(request) {
     // ... run your agentic workflow in here
     // use ai sdk, langchain, direct calls to openai, anthropic, etc.
     // combine with KV, D1, R2, vectorize, etc.
-    const llm = openai("gpt-4o");
+		const llm = new OpenAI({
+			apiKey: this.env.OPENAI_API_KEY,
+		});
     const result = await llm.chat.completions.create({
       model: "gpt-4o",
       messages: [{ role: "user", content: "Hello, world!" }],
@@ -67,7 +69,14 @@ export class MyAgent extends Agent {
         "class_name": "MyAgent"
       }
     ]
-  }
+  },
+	"migrations": [
+		{
+			"tag": "v1",
+			// Mandatory for the Agent to store state
+			"new_sqlite_classes": ["MyAgent"],
+		},
+	],
 }
 ```
 
