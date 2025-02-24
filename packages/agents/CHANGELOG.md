@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.15
+
+### Patch Changes
+
+- [`9075920`](https://github.com/cloudflare/agents/commit/9075920b732160ca7456ae394812a30f32c99f70) Thanks [@threepointone](https://github.com/threepointone)! - change onChatMessage signature
+
 ## 0.0.14
 
 ### Patch Changes
