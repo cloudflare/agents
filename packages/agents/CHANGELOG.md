@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.12
+
+### Patch Changes
+
+- [`2864acf`](https://github.com/cloudflare/agents/commit/2864acfeab983efa3316c44f339cddb5bc86cd14) Thanks [@threepointone](https://github.com/threepointone)! - chat agent can now saveMessages explicitly
+
 ## 0.0.11
 
 ### Patch Changes
