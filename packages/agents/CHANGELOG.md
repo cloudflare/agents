@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.13
+
+### Patch Changes
+
+- [`066c378`](https://github.com/cloudflare/agents/commit/066c378f4bcfaf2aa231e4e898bf2e22dc81f9f1) Thanks [@threepointone](https://github.com/threepointone)! - setState() doesn't take source anymore
+
 ## 0.0.12
 
 ### Patch Changes
