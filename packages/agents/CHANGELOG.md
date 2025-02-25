@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.18
+
+### Patch Changes
+
+- [`7149fd2`](https://github.com/cloudflare/agents/commit/7149fd27371cd13ae9814bb52f777c6ffc99af62) Thanks [@threepointone](https://github.com/threepointone)! - don't log when state updates on the server
+
 ## 0.0.17
 
 ### Patch Changes
