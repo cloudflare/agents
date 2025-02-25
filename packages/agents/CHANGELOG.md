@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.19
+
+### Patch Changes
+
+- [`9938444`](https://github.com/cloudflare/agents/commit/9938444b0d8d1b4910fc50647ed223a22af564a4) Thanks [@threepointone](https://github.com/threepointone)! - scheduling: do a typecheck/throw error if not a valid method on this
+
 ## 0.0.18
 
 ### Patch Changes
