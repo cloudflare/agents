@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.17
+
+### Patch Changes
+
+- [`54962fe`](https://github.com/cloudflare/agents/commit/54962fe37c09be752fb8d713827337986ad6343a) Thanks [@threepointone](https://github.com/threepointone)! - trigger a release
+
 ## 0.0.16
 
 ### Patch Changes

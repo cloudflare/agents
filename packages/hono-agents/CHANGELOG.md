@@ -1,5 +1,14 @@
 # hono-agents
 
+## 0.0.5
+
+### Patch Changes
+
+- [`54962fe`](https://github.com/cloudflare/agents/commit/54962fe37c09be752fb8d713827337986ad6343a) Thanks [@threepointone](https://github.com/threepointone)! - trigger a release
+
+- Updated dependencies [[`54962fe`](https://github.com/cloudflare/agents/commit/54962fe37c09be752fb8d713827337986ad6343a)]:
+  - agents-sdk@0.0.17
+
 ## 0.0.4
 
 ### Patch Changes
