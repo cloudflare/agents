@@ -39,8 +39,16 @@
     }
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cloudflare/agents.git",
+    "directory": "packages/agents"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
   "description": "A home for your AI agents",
   "dependencies": {
     "cron-schedule": "^5.0.4",
