@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.20
+
+### Patch Changes
+
+- [#32](https://github.com/cloudflare/agents/pull/32) [`3d4e0f9`](https://github.com/cloudflare/agents/commit/3d4e0f9db69303dd2f93de37b4f54fefacb18a33) Thanks [@Cherry](https://github.com/Cherry)! - fix: add repo/bug tracker links to packages
+
 ## 0.0.19
 
 ### Patch Changes
