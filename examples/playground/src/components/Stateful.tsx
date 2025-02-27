@@ -9,6 +9,7 @@ interface State {
   counter: number;
   text: string;
   color: string;
+  initialState: boolean;
 }
 
 export function Stateful({ addToast }: StateProps) {
@@ -16,6 +17,7 @@ export function Stateful({ addToast }: StateProps) {
     counter: 0,
     text: "",
     color: "#3B82F6",
+    initialState: true, // this gets wiped out by the server message
   });
 
   const agent = useAgent<State>({
@@ -51,51 +53,55 @@ export function Stateful({ addToast }: StateProps) {
       <h2 className="state-title">State Sync Demo</h2>
 
       <div className="state-grid">
-        <div className="state-section">
-          <h3 className="section-title">Counter</h3>
-          <div className="counter-controls">
-            <button
-              onClick={handleDecrement}
-              className="counter-button counter-button-decrease"
-            >
-              -
-            </button>
-            <span className="counter-value">{syncedState.counter}</span>
-            <button
-              onClick={handleIncrement}
-              className="counter-button counter-button-increase"
-            >
-              +
-            </button>
-          </div>
-        </div>
+        {!syncedState.initialState && (
+          <>
+            <div className="state-section">
+              <h3 className="section-title">Counter</h3>
+              <div className="counter-controls">
+                <button
+                  onClick={handleDecrement}
+                  className="counter-button counter-button-decrease"
+                >
+                  -
+                </button>
+                <span className="counter-value">{syncedState.counter}</span>
+                <button
+                  onClick={handleIncrement}
+                  className="counter-button counter-button-increase"
+                >
+                  +
+                </button>
+              </div>
+            </div>
 
-        <div className="state-section">
-          <h3 className="section-title">Text Input</h3>
-          <input
-            type="text"
-            value={syncedState.text}
-            onChange={handleTextChange}
-            className="state-input"
-            placeholder="Type to sync..."
-          />
-        </div>
+            <div className="state-section">
+              <h3 className="section-title">Text Input</h3>
+              <input
+                type="text"
+                value={syncedState.text}
+                onChange={handleTextChange}
+                className="state-input"
+                placeholder="Type to sync..."
+              />
+            </div>
 
-        <div className="state-section">
-          <h3 className="section-title">Color Picker</h3>
-          <div className="color-picker-container">
-            <input
-              type="color"
-              value={syncedState.color}
-              onChange={handleColorChange}
-              className="color-picker"
-            />
-            <div
-              className="color-preview"
-              style={{ backgroundColor: syncedState.color }}
-            />
-          </div>
-        </div>
+            <div className="state-section">
+              <h3 className="section-title">Color Picker</h3>
+              <div className="color-picker-container">
+                <input
+                  type="color"
+                  value={syncedState.color}
+                  onChange={handleColorChange}
+                  className="color-picker"
+                />
+                <div
+                  className="color-preview"
+                  style={{ backgroundColor: syncedState.color }}
+                />
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="state-hint">

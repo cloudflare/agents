@@ -44,10 +44,55 @@ function getNextCronTime(cron: string) {
 }
 
 const STATE_ROW_ID = "cf_state_row_id";
+const STATE_WAS_CHANGED = "cf_state_was_changed";
+
+const DEFAULT_STATE = {} as unknown;
 
 export class Agent<Env, State = unknown> extends Server<Env> {
-  #state = undefined as State | undefined;
-  state: State | undefined;
+  #state = DEFAULT_STATE as State;
+  initialState: State = DEFAULT_STATE as State;
+
+  get state(): State {
+    if (this.#state !== DEFAULT_STATE) {
+      // state was previously set, and populated internal state
+      return this.#state;
+    } else {
+      // looks like this is the first time the state is being accessed
+      // check if the state was set in a previous life
+      const wasChanged = this.sql<{ state: "true" | undefined }>`
+        SELECT state FROM cf_agents_state WHERE id = ${STATE_WAS_CHANGED}
+      `;
+
+      // ok, let's pick up the actual state from the db
+      const result = this.sql<{ state: State | undefined }>`
+      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
+    `;
+
+      if (
+        wasChanged[0]?.state === "true" ||
+        // we do this check for people who updated their code before we shipped wasChanged
+        result[0]?.state
+      ) {
+        const state = result[0]?.state as string; // could be null?
+
+        this.#state = JSON.parse(state);
+        return this.#state;
+      }
+
+      // ok, this is the first time the state is being accessed
+      // and the state was not set in a previous life
+      // so we need to set the initial state (if provided)
+      if (this.initialState === DEFAULT_STATE) {
+        // no initial state provided, so we return undefined
+        return undefined as State;
+      } else {
+        // initial state provided, so we set the state,
+        // update db and return the initial state
+        this.setState(this.initialState);
+        return this.initialState;
+      }
+    }
+  }
 
   static options = {
     hibernate: true, // default to hibernate
@@ -80,24 +125,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         state TEXT
       )
     `;
-    const _this = this;
-    Object.defineProperty(this, "state", {
-      get() {
-        if (!_this.#state) {
-          const result = _this.sql<{ state: State | undefined }>`
-      SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
-    `;
-          const state = result[0]?.state as string;
-          if (!state) return undefined;
-          _this.#state = JSON.parse(state);
-          return _this.#state;
-        }
-        return _this.#state;
-      },
-      set(value: State | undefined) {
-        throw new Error("State is read-only, use this.setState instead");
-      },
-    });
 
     void this.ctx.blockConcurrencyWhile(async () => {
       try {
@@ -157,6 +184,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.sql`
     INSERT OR REPLACE INTO cf_agents_state (id, state)
     VALUES (${STATE_ROW_ID}, ${JSON.stringify(state)})
+  `;
+    this.sql`
+    INSERT OR REPLACE INTO cf_agents_state (id, state)
+    VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
   `;
     this.broadcast(
       `cf_agent_state:` +
