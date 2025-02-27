@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.22
+
+### Patch Changes
+
+- [#39](https://github.com/cloudflare/agents/pull/39) [`2afea20`](https://github.com/cloudflare/agents/commit/2afea2023d96204fbe6829c400c7a22baedbad2f) Thanks [@elithrar](https://github.com/elithrar)! - adds JSDoc to public symbols.
+
 ## 0.0.21
 
 ### Patch Changes
