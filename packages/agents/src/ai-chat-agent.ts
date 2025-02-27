@@ -4,7 +4,12 @@ import { appendResponseMessages } from "ai";
 import type { OutgoingMessage, IncomingMessage } from "./ai-types";
 const decoder = new TextDecoder();
 
+/**
+ * Extension of Agent with built-in chat capabilities
+ * @template Env Environment type containing bindings
+ */
 export class AIChatAgent<Env = unknown> extends Agent<Env> {
+  /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
@@ -111,10 +116,10 @@ export class AIChatAgent<Env = unknown> extends Agent<Env> {
     return super.onRequest(request);
   }
 
-  /*
-   * override this to handle incoming messages
-   * @param onFinish - a callback that is called when the response is finished
-   * @returns a Response to send to the client
+  /**
+   * Handle incoming chat messages and generate a response
+   * @param onFinish Callback to be called when the response is finished
+   * @returns Response to send to the client or undefined
    */
   async onChatMessage(
     onFinish: StreamTextOnFinishCallback<any>
@@ -124,8 +129,9 @@ export class AIChatAgent<Env = unknown> extends Agent<Env> {
     );
   }
 
-  /*
-   * You can save messages on the server side
+  /**
+   * Save messages on the server side and trigger AI response
+   * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);

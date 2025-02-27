@@ -15,25 +15,43 @@ export type { Connection, WSMessage, ConnectionContext } from "partyserver";
 
 import { WorkflowEntrypoint as CFWorkflowEntrypoint } from "cloudflare:workers";
 
+/**
+ * A class for creating workflow entry points that can be used with Cloudflare Workers
+ */
 export class WorkflowEntrypoint extends CFWorkflowEntrypoint {}
 
+/**
+ * Represents a scheduled task within an Agent
+ * @template T Type of the payload data
+ */
 export type Schedule<T = string> = {
+  /** Unique identifier for the schedule */
   id: string;
+  /** Name of the method to be called */
   callback: string;
+  /** Data to be passed to the callback */
   payload: T;
 } & (
   | {
+      /** Type of schedule for one-time execution at a specific time */
       type: "scheduled";
+      /** Timestamp when the task should execute */
       time: number;
     }
   | {
+      /** Type of schedule for delayed execution */
       type: "delayed";
+      /** Timestamp when the task should execute */
       time: number;
+      /** Number of seconds to delay execution */
       delayInSeconds: number;
     }
   | {
+      /** Type of schedule for recurring execution based on cron expression */
       type: "cron";
+      /** Timestamp for the next execution */
       time: number;
+      /** Cron expression defining the schedule */
       cron: string;
     }
 );
@@ -48,10 +66,23 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
+/**
+ * Base class for creating Agent implementations
+ * @template Env Environment type containing bindings
+ * @template State State type to store within the Agent
+ */
 export class Agent<Env, State = unknown> extends Server<Env> {
   #state = DEFAULT_STATE as State;
+  
+  /**
+   * Initial state for the Agent
+   * Override to provide default state values
+   */
   initialState: State = DEFAULT_STATE as State;
 
+  /**
+   * Current state of the Agent
+   */
   get state(): State {
     if (this.#state !== DEFAULT_STATE) {
       // state was previously set, and populated internal state
@@ -94,9 +125,21 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
   }
 
+  /**
+   * Agent configuration options
+   */
   static options = {
+    /** Whether the Agent should hibernate when inactive */
     hibernate: true, // default to hibernate
   };
+  
+  /**
+   * Execute SQL queries against the Agent's database
+   * @template T Type of the returned rows
+   * @param strings SQL query template strings
+   * @param values Values to be inserted into the query
+   * @returns Array of query results
+   */
   sql<T = Record<string, any>>(
     strings: TemplateStringsArray,
     ...values: any[]
@@ -200,21 +243,46 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.onStateUpdate(state, source);
   }
 
+  /**
+   * Update the Agent's state
+   * @param state New state to set
+   */
   setState(state: State) {
     this.#setStateInternal(state, "server");
   }
 
+  /**
+   * Called when the Agent's state is updated
+   * @param state Updated state
+   * @param source Source of the state update ("server" or a client connection)
+   */
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
 
+  /**
+   * Called when the Agent receives an email
+   * @param email Email message to process
+   */
   onEmail(email: ForwardableEmailMessage) {
     throw new Error("Not implemented");
   }
+  
+  /**
+   * Render content (not implemented in base class)
+   */
   render() {
     throw new Error("Not implemented");
   }
 
+  /**
+   * Schedule a task to be executed in the future
+   * @template T Type of the payload data
+   * @param when When to execute the task (Date, seconds delay, or cron expression)
+   * @param callback Name of the method to call
+   * @param payload Data to pass to the callback
+   * @returns Schedule object representing the scheduled task
+   */
   async schedule<T = string>(
     when: Date | string | number,
     callback: keyof this,
@@ -294,6 +362,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       throw new Error("Invalid schedule type");
     }
   }
+  
+  /**
+   * Get a scheduled task by ID
+   * @template T Type of the payload data
+   * @param id ID of the scheduled task
+   * @returns The Schedule object or undefined if not found
+   */
   async getSchedule<T = string>(id: string): Promise<Schedule<T> | undefined> {
     const result = this.sql<Schedule<string>>`
       SELECT * FROM cf_agents_schedules WHERE id = ${id}
@@ -302,6 +377,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     return { ...result[0], payload: JSON.parse(result[0].payload) as T };
   }
+  
+  /**
+   * Get scheduled tasks matching the given criteria
+   * @template T Type of the payload data
+   * @param criteria Criteria to filter schedules
+   * @returns Array of matching Schedule objects
+   */
   getSchedules<T = string>(
     criteria: {
       description?: string;
@@ -349,6 +431,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     return result;
   }
 
+  /**
+   * Cancel a scheduled task
+   * @param id ID of the task to cancel
+   * @returns true if the task was cancelled, false otherwise
+   */
   async cancelSchedule(id: string): Promise<boolean> {
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
@@ -372,6 +459,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
   }
 
+  /**
+   * Method called when an alarm fires
+   * Executes any scheduled tasks that are due
+   */
   async alarm() {
     const now = Math.floor(Date.now() / 1000);
 
@@ -416,6 +507,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     await this.scheduleNextAlarm();
   }
 
+  /**
+   * Destroy the Agent, removing all state and scheduled tasks
+   */
   async destroy() {
     // drop all tables
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
@@ -427,13 +521,30 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 }
 
+/**
+ * Namespace for creating Agent instances
+ * @template Agentic Type of the Agent class
+ */
 export type AgentNamespace<Agentic extends Agent<unknown>> =
   DurableObjectNamespace<Agentic>;
 
+/**
+ * Agent's durable context
+ */
 export type AgentContext = DurableObjectState;
 
+/**
+ * Configuration options for Agent routing
+ */
 export type AgentOptions<Env> = PartyServerOptions<Env>;
 
+/**
+ * Route a request to the appropriate Agent
+ * @param request Request to route
+ * @param env Environment containing Agent bindings
+ * @param options Routing options
+ * @returns Response from the Agent or undefined if no route matched
+ */
 export function routeAgentRequest<Env>(
   request: Request,
   env: Env,
@@ -445,12 +556,27 @@ export function routeAgentRequest<Env>(
   });
 }
 
+/**
+ * Route an email to the appropriate Agent
+ * @param email Email message to route
+ * @param env Environment containing Agent bindings
+ * @param options Routing options
+ */
 export async function routeAgentEmail<Env>(
   email: ForwardableEmailMessage,
   env: Env,
   options?: AgentOptions<Env>
 ): Promise<void> {}
 
+/**
+ * Get or create an Agent by name
+ * @template Env Environment type containing bindings
+ * @template T Type of the Agent class
+ * @param namespace Agent namespace
+ * @param name Name of the Agent instance
+ * @param options Options for Agent creation
+ * @returns Promise resolving to an Agent instance stub
+ */
 export function getAgentByName<Env, T extends Agent<Env>>(
   namespace: AgentNamespace<T>,
   name: string,

@@ -3,8 +3,13 @@ import type { Message } from "ai";
 import { useAgent } from "./react";
 import { useEffect, use } from "react";
 import type { OutgoingMessage } from "./ai-types";
+
+/**
+ * Options for the useAgentChat hook
+ */
 type UseAgentChatOptions = Omit<
   Parameters<typeof useChat>[0] & {
+    /** Agent connection from useAgent */
     agent: ReturnType<typeof useAgent>;
   },
   "fetch"
@@ -13,6 +18,11 @@ type UseAgentChatOptions = Omit<
 // TODO: clear cache when the agent is unmounted?
 const requestCache = new Map<string, Promise<any>>();
 
+/**
+ * React hook for building AI chat interfaces using an Agent
+ * @param options Chat options including the agent connection
+ * @returns Chat interface controls and state with added clearHistory method
+ */
 export function useAgentChat(options: UseAgentChatOptions) {
   const { agent, ...rest } = options;
   const url =
@@ -149,6 +159,10 @@ export function useAgentChat(options: UseAgentChatOptions) {
 
   return {
     ...useChatHelpers,
+    /**
+     * Set the chat messages and synchronize with the Agent
+     * @param messages New messages to set
+     */
     setMessages: (messages: Message[]) => {
       useChatHelpers.setMessages(messages);
       agent.send(
@@ -158,6 +172,9 @@ export function useAgentChat(options: UseAgentChatOptions) {
         })
       );
     },
+    /**
+     * Clear chat history on both client and Agent
+     */
     clearHistory: () => {
       useChatHelpers.setMessages([]);
       agent.send(

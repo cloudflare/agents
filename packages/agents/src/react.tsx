@@ -1,15 +1,28 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
 
+/**
+ * Options for the useAgent hook
+ * @template State Type of the Agent's state
+ */
 export type UseAgentOptions<State = unknown> = Omit<
   Parameters<typeof usePartySocket>[0],
   "party" | "room"
 > & {
+  /** Name of the agent to connect to */
   agent: string;
+  /** Name of the specific Agent instance */
   name?: string;
+  /** Called when the Agent's state is updated */
   onStateUpdate?: (state: State, source: "server" | "client") => void;
 };
 
+/**
+ * React hook for connecting to an Agent
+ * @template State Type of the Agent's state
+ * @param options Connection options
+ * @returns WebSocket connection with setState method
+ */
 export function useAgent<State = unknown>(
   options: UseAgentOptions<State>
 ): PartySocket & { setState: (state: State) => void } {
