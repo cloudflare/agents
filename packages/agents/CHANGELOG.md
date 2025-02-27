@@ -1,5 +1,45 @@
 # @cloudflare/agents
 
+## 0.0.21
+
+### Patch Changes
+
+- [#37](https://github.com/cloudflare/agents/pull/37) [`ff0679f`](https://github.com/cloudflare/agents/commit/ff0679f638d377c8629a1fd2762c58045ec397b5) Thanks [@threepointone](https://github.com/threepointone)! - `Agent::initialState`
+
+  You can now set an initial state for an agent
+
+  ```ts
+  type State = {
+    counter: number;
+    text: string;
+    color: string;
+  };
+
+  class MyAgent extends Agent<Env, State> {
+    initialState = {
+      counter: 0,
+      text: "",
+      color: "#3B82F6",
+    };
+
+    doSomething() {
+      console.log(this.state); // {counter: 0, text: "", color: "#3B82F6"}, if you haven't set the state yet
+    }
+  }
+  ```
+
+  As before, this gets synced to useAgent, so you can do:
+
+  ```ts
+  const [state, setState] = useState<State>();
+  const agent = useAgent<State>({
+    agent: "my-agent",
+    onStateUpdate: (state) => {
+      setState(state);
+    },
+  });
+  ```
+
 ## 0.0.20
 
 ### Patch Changes
