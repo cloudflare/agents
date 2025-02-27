@@ -24,7 +24,7 @@ type Env = {
 };
 
 // createAgent is a helper function to generate an agent class
-// with helpers for sending/receiving messages to the client and updating the state
+// with helpers for sending/receiving messages to the client and updating the status
 function createAgent(
   name: string,
   workflow: (
@@ -46,7 +46,7 @@ function createAgent(
     static options = {
       hibernate: true,
     };
-    state: {
+    status: {
       isRunning: boolean;
       output: any;
     } = {
@@ -57,8 +57,8 @@ function createAgent(
     onConnect(connection: Connection) {
       connection.send(
         JSON.stringify({
-          type: "state",
-          state: this.state,
+          type: "status",
+          status: this.status,
         })
       );
     }
@@ -82,31 +82,31 @@ function createAgent(
           this.run({ input: data.input });
           break;
         case "stop":
-          this.setState({ ...this.state, isRunning: false });
+          this.setStatus({ ...this.status, isRunning: false });
           break;
         default:
           console.error("Unknown message type", data.type);
       }
     }
 
-    setState(state: typeof this.state) {
-      this.state = state;
-      this.broadcast(JSON.stringify({ type: "state", state: this.state }));
+    setStatus(status: typeof this.status) {
+      this.status = status;
+      this.broadcast(JSON.stringify({ type: "status", status: this.status }));
     }
 
     async run(data: { input: any }) {
-      if (this.state.isRunning) return;
-      this.setState({ isRunning: true, output: undefined });
+      if (this.status.isRunning) return;
+      this.setStatus({ isRunning: true, output: undefined });
 
       try {
         const result = await workflow(data.input, {
           toast: this.toast,
           openai: this.openai,
         });
-        this.setState({ isRunning: false, output: JSON.stringify(result) });
+        this.setStatus({ isRunning: false, output: JSON.stringify(result) });
       } catch (error) {
         this.toast(`An error occurred: ${error}`);
-        this.setState({ isRunning: false, output: JSON.stringify(error) });
+        this.setStatus({ isRunning: false, output: JSON.stringify(error) });
       }
     }
   };

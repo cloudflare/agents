@@ -17,7 +17,7 @@ type Toast = {
   message: string;
 };
 
-type WorkflowState = {
+type WorkflowStatus = {
   isRunning: boolean;
   output: string;
 };
@@ -134,8 +134,8 @@ function PatternSection({
     onMessage: (e) => {
       const data = JSON.parse(e.data);
       switch (data.type) {
-        case "state":
-          setWorkflowState(data.state);
+        case "status":
+          setWorkflowStatus(data.status);
           break;
         case "toast":
           const event = new CustomEvent("showToast", {
@@ -150,7 +150,7 @@ function PatternSection({
     },
   });
 
-  const [workflowState, setWorkflowState] = useState<WorkflowState>({
+  const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>({
     isRunning: false,
     output: "",
   });
@@ -356,7 +356,7 @@ function PatternSection({
   };
 
   const runWorkflow = async () => {
-    setWorkflowState((prev) => ({ ...prev, isRunning: true }));
+    setWorkflowStatus((prev) => ({ ...prev, isRunning: true }));
 
     try {
       socket.send(
@@ -437,14 +437,14 @@ function PatternSection({
             <button
               className="run-button"
               onClick={runWorkflow}
-              disabled={workflowState.isRunning}
+              disabled={workflowStatus.isRunning}
             >
-              {workflowState.isRunning ? (
+              {workflowStatus.isRunning ? (
                 <>
                   <div className="spinner" />
                   Running...
                 </>
-              ) : workflowState.output ? (
+              ) : workflowStatus.output ? (
                 "Run Again"
               ) : (
                 "Run"
@@ -469,8 +469,8 @@ function PatternSection({
             )} */}
           </div>
           <pre className="workflow-output">
-            {workflowState.output
-              ? formatOutput(workflowState.output)
+            {workflowStatus.output
+              ? formatOutput(workflowStatus.output)
               : `Enter input above and click 'Run' to see ${title} in action`}
           </pre>
         </div>
