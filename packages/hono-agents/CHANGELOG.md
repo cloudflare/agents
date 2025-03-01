@@ -1,5 +1,11 @@
 # hono-agents
 
+## 0.0.11
+
+### Patch Changes
+
+- [#43](https://github.com/cloudflare/agents/pull/43) [`854b9d1`](https://github.com/cloudflare/agents/commit/854b9d16ec84e4c7c51601dc4f1d78dbaad36e6d) Thanks [@ozanmakes](https://github.com/ozanmakes)! - Fix agents prefix in example
+
 ## 0.0.10
 
 ### Patch Changes
