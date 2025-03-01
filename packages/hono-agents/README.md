@@ -56,7 +56,7 @@ app.use(
   "*",
   agentsMiddleware({
     options: {
-      prefix: "/agents", // Handles /agents/* routes only
+      prefix: "agents", // Handles /agents/* routes only
     },
   })
 );
