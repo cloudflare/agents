@@ -2,23 +2,30 @@ import { routeAgentEmail, routeAgentRequest } from "agents-sdk";
 
 import { Scheduler } from "./agents/scheduler";
 import { Stateful } from "./agents/stateful";
+import { EmailAgent } from "./agents/email";
+import { MockEmailService } from "./agents/mock-email";
+// import { emailHandler } from "./agents/email";
 
 export type Env = {
   Scheduler: DurableObjectNamespace<Scheduler>;
   Stateful: DurableObjectNamespace<Stateful>;
+  Email: DurableObjectNamespace<EmailAgent>;
+  MockEmailService: DurableObjectNamespace<MockEmailService<Env>>;
   OPENAI_API_KEY: string;
 };
 
-export { Scheduler, Stateful };
+export { Scheduler, Stateful, EmailAgent, MockEmailService };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    console.log("fetch", request.url);
+    // console.log("env", env);
+    // const url = new URL(request.url);
+
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
   },
-  async email(email: ForwardableEmailMessage, env: Env, ctx: ExecutionContext) {
-    await routeAgentEmail(email, env);
-  },
+  // email: emailHandler,
 } satisfies ExportedHandler<Env>;

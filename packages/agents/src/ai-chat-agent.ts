@@ -8,7 +8,10 @@ const decoder = new TextDecoder();
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
-export class AIChatAgent<Env = unknown> extends Agent<Env> {
+export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
+  Env,
+  State
+> {
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
   constructor(ctx: AgentContext, env: Env) {

@@ -1,0 +1,50 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "playground",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-02-19",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "binding": "ASSETS"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "Scheduler",
+        "class_name": "Scheduler"
+      },
+      {
+        "name": "Stateful",
+        "class_name": "Stateful"
+      },
+      {
+        "name": "EmailAgent",
+        "class_name": "EmailAgent"
+      },
+      {
+        "name": "MockEmailService",
+        "class_name": "MockEmailService"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Scheduler",
+        "Stateful",
+        "EmailAgent",
+        "MockEmailService"
+      ]
+    }
+  ],
+
+  "send_email": [
+    {
+      "name": "SEND_EMAIL"
+    }
+  ]
+}

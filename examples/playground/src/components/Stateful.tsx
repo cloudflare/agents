@@ -50,8 +50,6 @@ export function Stateful({ addToast }: StateProps) {
 
   return (
     <div className="state-container">
-      <h2 className="state-title">State Sync Demo</h2>
-
       <div className="state-grid">
         {!syncedState.initialState && (
           <>

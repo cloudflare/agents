@@ -40,6 +40,6 @@
   },
   "devDependencies": {
     "agents-sdk": "^0.0.22",
-    "hono": "^4.6.17"
+    "hono": "^4.7.2"
   }
 }

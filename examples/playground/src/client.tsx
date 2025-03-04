@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { useState, useEffect } from "react";
 import { Scheduler } from "./components/Scheduler";
 import { Stateful } from "./components/Stateful";
+import Email from "./components/Email";
 
 interface Toast {
   id: string;
@@ -67,7 +68,12 @@ function App() {
           <Scheduler addToast={addToast} />
         </div>
         <div className="col-span-1">
+          <h2 className="text-xl font-bold mb-4">State Sync Demo</h2>
           <Stateful addToast={addToast} />
+        </div>
+        <div className="col-span-1">
+          <h2 className="text-xl font-bold mb-4">Email (wip)</h2>
+          <Email addToast={addToast} />
         </div>
       </div>
     </div>
