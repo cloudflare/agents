@@ -73,7 +73,7 @@ const DEFAULT_STATE = {} as unknown;
  */
 export class Agent<Env, State = unknown> extends Server<Env> {
   #state = DEFAULT_STATE as State;
-  
+
   /**
    * Initial state for the Agent
    * Override to provide default state values
@@ -87,42 +87,40 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     if (this.#state !== DEFAULT_STATE) {
       // state was previously set, and populated internal state
       return this.#state;
-    } else {
-      // looks like this is the first time the state is being accessed
-      // check if the state was set in a previous life
-      const wasChanged = this.sql<{ state: "true" | undefined }>`
+    }
+    // looks like this is the first time the state is being accessed
+    // check if the state was set in a previous life
+    const wasChanged = this.sql<{ state: "true" | undefined }>`
         SELECT state FROM cf_agents_state WHERE id = ${STATE_WAS_CHANGED}
       `;
 
-      // ok, let's pick up the actual state from the db
-      const result = this.sql<{ state: State | undefined }>`
+    // ok, let's pick up the actual state from the db
+    const result = this.sql<{ state: State | undefined }>`
       SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
     `;
 
-      if (
-        wasChanged[0]?.state === "true" ||
-        // we do this check for people who updated their code before we shipped wasChanged
-        result[0]?.state
-      ) {
-        const state = result[0]?.state as string; // could be null?
+    if (
+      wasChanged[0]?.state === "true" ||
+      // we do this check for people who updated their code before we shipped wasChanged
+      result[0]?.state
+    ) {
+      const state = result[0]?.state as string; // could be null?
 
-        this.#state = JSON.parse(state);
-        return this.#state;
-      }
-
-      // ok, this is the first time the state is being accessed
-      // and the state was not set in a previous life
-      // so we need to set the initial state (if provided)
-      if (this.initialState === DEFAULT_STATE) {
-        // no initial state provided, so we return undefined
-        return undefined as State;
-      } else {
-        // initial state provided, so we set the state,
-        // update db and return the initial state
-        this.setState(this.initialState);
-        return this.initialState;
-      }
+      this.#state = JSON.parse(state);
+      return this.#state;
     }
+
+    // ok, this is the first time the state is being accessed
+    // and the state was not set in a previous life
+    // so we need to set the initial state (if provided)
+    if (this.initialState === DEFAULT_STATE) {
+      // no initial state provided, so we return undefined
+      return undefined as State;
+    }
+    // initial state provided, so we set the state,
+    // update db and return the initial state
+    this.setState(this.initialState);
+    return this.initialState;
   }
 
   /**
@@ -132,7 +130,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     /** Whether the Agent should hibernate when inactive */
     hibernate: true, // default to hibernate
   };
-  
+
   /**
    * Execute SQL queries against the Agent's database
    * @template T Type of the returned rows
@@ -140,9 +138,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param values Values to be inserted into the query
    * @returns Array of query results
    */
-  sql<T = Record<string, any>>(
+  sql<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
-    ...values: any[]
+    ...values: (string | number | boolean | null)[]
   ) {
     let query = "";
     try {
@@ -213,8 +211,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       setTimeout(() => {
         if (this.state) {
           connection.send(
-            `cf_agent_state:` +
-              JSON.stringify({ type: "cf_agent_state", state: this.state })
+            `cf_agent_state:${JSON.stringify({
+              type: "cf_agent_state",
+              state: this.state,
+            })}`
           );
         }
         _onConnect(connection, ctx);
@@ -233,11 +233,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
   `;
     this.broadcast(
-      `cf_agent_state:` +
-        JSON.stringify({
-          type: "cf_agent_state",
-          state: state,
-        }),
+      `cf_agent_state:${JSON.stringify({
+        type: "cf_agent_state",
+        state: state,
+      })}`,
       source !== "server" ? [source.id] : []
     );
     this.onStateUpdate(state, source);
@@ -267,7 +266,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   onEmail(email: ForwardableEmailMessage) {
     throw new Error("Not implemented");
   }
-  
+
   /**
    * Render content (not implemented in base class)
    */
@@ -303,8 +302,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       this.sql`
         INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, time)
         VALUES (${id}, ${callback}, ${JSON.stringify(
-        payload
-      )}, 'scheduled', ${timestamp})
+          payload
+        )}, 'scheduled', ${timestamp})
       `;
 
       await this.scheduleNextAlarm();
@@ -316,15 +315,16 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         time: timestamp,
         type: "scheduled",
       };
-    } else if (typeof when === "number") {
+    }
+    if (typeof when === "number") {
       const time = new Date(Date.now() + when * 1000);
       const timestamp = Math.floor(time.getTime() / 1000);
 
       this.sql`
         INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time)
         VALUES (${id}, ${callback}, ${JSON.stringify(
-        payload
-      )}, 'delayed', ${when}, ${timestamp})
+          payload
+        )}, 'delayed', ${when}, ${timestamp})
       `;
 
       await this.scheduleNextAlarm();
@@ -337,15 +337,16 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         time: timestamp,
         type: "delayed",
       };
-    } else if (typeof when === "string") {
+    }
+    if (typeof when === "string") {
       const nextExecutionTime = getNextCronTime(when);
       const timestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
       this.sql`
         INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, cron, time)
         VALUES (${id}, ${callback}, ${JSON.stringify(
-        payload
-      )}, 'cron', ${when}, ${timestamp})
+          payload
+        )}, 'cron', ${when}, ${timestamp})
       `;
 
       await this.scheduleNextAlarm();
@@ -358,11 +359,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         time: timestamp,
         type: "cron",
       };
-    } else {
-      throw new Error("Invalid schedule type");
     }
+    throw new Error("Invalid schedule type");
   }
-  
+
   /**
    * Get a scheduled task by ID
    * @template T Type of the payload data
@@ -377,7 +377,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     return { ...result[0], payload: JSON.parse(result[0].payload) as T };
   }
-  
+
   /**
    * Get scheduled tasks matching the given criteria
    * @template T Type of the payload data
@@ -454,7 +454,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     if (!result) return;
 
     if (result.length > 0 && "time" in result[0]) {
-      const nextTime = result[0].time * 1000;
+      const nextTime = (result[0].time as number) * 1000;
       await this.ctx.storage.setAlarm(nextTime);
     }
   }

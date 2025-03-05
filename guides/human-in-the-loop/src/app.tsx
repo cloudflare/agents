@@ -2,7 +2,7 @@ import { type Message, useChat } from "@ai-sdk/react";
 import { APPROVAL, getToolsRequiringConfirmation } from "./utils";
 import { tools } from "./tools";
 import "./styles.css";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useAgent } from "agents-sdk/react";
 import { useAgentChat } from "agents-sdk/ai-react";
 
@@ -10,19 +10,19 @@ export default function Chat() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const scrollToBottom = () => {
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  }, []);
 
   useEffect(() => {
     // Set initial theme
     document.documentElement.setAttribute("data-theme", theme);
-  }, []);
+  }, [theme]);
 
   // Scroll to bottom on mount
   useEffect(() => {
     scrollToBottom();
-  }, []);
+  }, [scrollToBottom]);
 
   const toggleTheme = () => {
     const newTheme = theme === "dark" ? "light" : "dark";
@@ -48,8 +48,8 @@ export default function Chat() {
 
   // Scroll to bottom when messages change
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    messages.length > 0 && scrollToBottom();
+  }, [messages, scrollToBottom]);
 
   const toolsRequiringConfirmation = getToolsRequiringConfirmation(tools);
 
@@ -66,6 +66,7 @@ export default function Chat() {
     <>
       <div className="controls-container">
         <button
+          type="button"
           onClick={toggleTheme}
           className="theme-switch"
           data-theme={theme}
@@ -73,7 +74,7 @@ export default function Chat() {
         >
           <div className="theme-switch-handle" />
         </button>
-        <button onClick={clearHistory} className="clear-history">
+        <button type="button" onClick={clearHistory} className="clear-history">
           🗑️ Clear History
         </button>
       </div>
@@ -87,11 +88,12 @@ export default function Chat() {
                 switch (part.type) {
                   case "text":
                     return (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: vibes
                       <div key={i} className="message-content">
                         {part.text}
                       </div>
                     );
-                  case "tool-invocation":
+                  case "tool-invocation": {
                     const toolInvocation = part.toolInvocation;
                     const toolCallId = toolInvocation.toolCallId;
 
@@ -114,6 +116,7 @@ export default function Chat() {
                           </span>
                           <div className="button-container">
                             <button
+                              type="button"
                               className="button-approve"
                               onClick={() =>
                                 addToolResult({
@@ -125,6 +128,7 @@ export default function Chat() {
                               Yes
                             </button>
                             <button
+                              type="button"
                               className="button-reject"
                               onClick={() =>
                                 addToolResult({
@@ -139,6 +143,7 @@ export default function Chat() {
                         </div>
                       );
                     }
+                  }
                 }
               })}
               <br />

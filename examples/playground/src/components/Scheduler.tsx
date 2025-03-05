@@ -84,6 +84,7 @@ export function Scheduler({ addToast }: SchedulerProps) {
                 <span className="description">{item.description}</span>
               </div>
               <button
+                type="button"
                 onClick={() => handleDelete(item.id)}
                 className="deleteButton"
                 aria-label="Delete item"

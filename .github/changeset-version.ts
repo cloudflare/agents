@@ -5,5 +5,5 @@ import { execSync } from "node:child_process";
 // So we also run `npm install`, which does this update.
 // This is a workaround until this is handled automatically by `changeset version`.
 // See https://github.com/changesets/changesets/issues/421.
-execSync(`npx changeset version`);
-execSync(`npm install`);
+execSync("npx changeset version");
+execSync("npm install");

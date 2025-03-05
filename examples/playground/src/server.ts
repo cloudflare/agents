@@ -18,10 +18,6 @@ export { Scheduler, Stateful, EmailAgent, MockEmailService };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    console.log("fetch", request.url);
-    // console.log("env", env);
-    // const url = new URL(request.url);
-
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })

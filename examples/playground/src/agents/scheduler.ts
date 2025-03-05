@@ -50,8 +50,8 @@ function convertScheduleToScheduledItem(schedule: Schedule): ScheduledItem {
       schedule.type === "delayed"
         ? `in ${schedule.delayInSeconds} seconds`
         : schedule.type === "cron"
-        ? `at ${schedule.cron}`
-        : `at ${new Date(schedule.time * 1000).toISOString()}`,
+          ? `at ${schedule.cron}`
+          : `at ${new Date(schedule.time * 1000).toISOString()}`,
     nextTrigger: new Date(schedule.time * 1000).toISOString(),
     description: schedule.payload,
     type: schedule.type,
@@ -104,8 +104,8 @@ ${event.input}
         when.type === "scheduled"
           ? when.date
           : when.type === "delayed"
-          ? when.delayInSeconds
-          : when.cron,
+            ? when.delayInSeconds
+            : when.cron,
         "onTask",
         description
       );

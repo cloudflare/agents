@@ -25,15 +25,18 @@ type Env = {
 
 // createAgent is a helper function to generate an agent class
 // with helpers for sending/receiving messages to the client and updating the status
-function createAgent(
+function createAgent<
+  Props extends Record<string, unknown>,
+  Output extends Record<string, unknown>,
+>(
   name: string,
   workflow: (
-    props: any,
+    props: Props,
     ctx: {
       toast: (message: string) => void;
       openai: OpenAIProvider;
     }
-  ) => Promise<any>
+  ) => Promise<Output>
 ) {
   return class AnthropicAgent extends Agent<Env> {
     openai = createOpenAI({
@@ -48,7 +51,7 @@ function createAgent(
     };
     status: {
       isRunning: boolean;
-      output: any;
+      output: string | undefined;
     } = {
       isRunning: false,
       output: undefined,
@@ -94,12 +97,12 @@ function createAgent(
       this.broadcast(JSON.stringify({ type: "status", status: this.status }));
     }
 
-    async run(data: { input: any }) {
+    async run(data: { input: Record<string, string> }) {
       if (this.status.isRunning) return;
       this.setStatus({ isRunning: true, output: undefined });
 
       try {
-        const result = await workflow(data.input, {
+        const result = await workflow(data.input as Props, {
           toast: this.toast,
           openai: this.openai,
         });
@@ -117,7 +120,7 @@ function createAgent(
 // https://sdk.vercel.ai/docs/foundations/agents
 
 // A SequentialProcessing class to process tasks in a sequential manner
-export const Sequential = createAgent(
+export const Sequential = createAgent<{ input: string }, { copy: string }>(
   "Sequential",
   async (
     props: { input: string },
@@ -180,7 +183,7 @@ export const Sequential = createAgent(
 );
 
 // A Routing class to route tasks to the appropriate agent
-export const Routing = createAgent(
+export const Routing = createAgent<{ query: string }, { response: string }>(
   "Routing",
   async (
     props: { query: string },
@@ -230,7 +233,10 @@ export const Routing = createAgent(
 );
 
 // A ParallelProcessing class to process tasks in parallel
-export const Parallel = createAgent(
+export const Parallel = createAgent<
+  { code: string },
+  { reviews: unknown; summary: string }
+>(
   "Parallel",
   async (
     props: { code: string },
@@ -306,7 +312,22 @@ export const Parallel = createAgent(
 );
 
 // An OrchestratorWorker class to orchestrate the workers
-export const Orchestrator = createAgent(
+export const Orchestrator = createAgent<
+  { featureRequest: string },
+  {
+    plan: {
+      files: { purpose: string; filePath: string; changeType: string }[];
+      estimatedComplexity: string;
+    };
+    changes: {
+      file: { purpose: string; filePath: string; changeType: string };
+      implementation: {
+        code: string;
+        explanation: string;
+      };
+    }[];
+  }
+>(
   "Orchestrator",
   async (
     props: { featureRequest: string },

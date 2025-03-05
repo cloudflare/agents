@@ -5,7 +5,7 @@ import {
   type ToolExecutionOptions,
   type ToolSet,
 } from "ai";
-import { z } from "zod";
+import type { z } from "zod";
 
 // Approval string to be shared across frontend and backend
 export const APPROVAL = {
@@ -33,10 +33,11 @@ function isValidToolName<K extends PropertyKey, T extends object>(
 export async function processToolCalls<
   Tools extends ToolSet,
   ExecutableTools extends {
+    // biome-ignore lint/complexity/noBannedTypes: <explanation>
     [Tool in keyof Tools as Tools[Tool] extends { execute: Function }
       ? never
       : Tool]: Tools[Tool];
-  }
+  },
 >(
   {
     dataStream,
@@ -50,6 +51,7 @@ export async function processToolCalls<
     [K in keyof Tools & keyof ExecutableTools]?: (
       args: z.infer<ExecutableTools[K]["parameters"]>,
       context: ToolExecutionOptions
+      // biome-ignore lint/suspicious/noExplicitAny: vibes
     ) => Promise<any>;
   }
 ): Promise<Message[]> {
@@ -69,7 +71,8 @@ export async function processToolCalls<
       if (!(toolName in executeFunctions) || toolInvocation.state !== "result")
         return part;
 
-      let result;
+      // biome-ignore lint/suspicious/noExplicitAny: vibes
+      let result: any;
 
       if (toolInvocation.result === APPROVAL.YES) {
         // Get the tool and check if the tool has an execute function.
@@ -120,7 +123,7 @@ export async function processToolCalls<
 }
 
 export function getToolsRequiringConfirmation<
-  T extends ToolSet
+  T extends ToolSet,
   // E extends {
   //   [K in keyof T as T[K] extends { execute: Function } ? never : K]: T[K];
   // },

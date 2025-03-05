@@ -11,7 +11,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </head>
       <body>
         <div id="app">{children}</div>
-        <script type="module" src="./src/client.tsx" defer></script>
+        <script type="module" src="./src/client.tsx" defer />
       </body>
     </html>
   );

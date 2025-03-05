@@ -57,6 +57,7 @@ export function Stateful({ addToast }: StateProps) {
               <h3 className="section-title">Counter</h3>
               <div className="counter-controls">
                 <button
+                  type="button"
                   onClick={handleDecrement}
                   className="counter-button counter-button-decrease"
                 >
@@ -64,6 +65,7 @@ export function Stateful({ addToast }: StateProps) {
                 </button>
                 <span className="counter-value">{syncedState.counter}</span>
                 <button
+                  type="button"
                   onClick={handleIncrement}
                   className="counter-button counter-button-increase"
                 >

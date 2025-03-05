@@ -143,6 +143,7 @@ export default function Email({ addToast }: EmailProps) {
             <h3 className="section-title">Chat Window</h3>
             <div className="section-controls">
               <button
+                type="button"
                 onClick={clearChatMessages}
                 className="clear-button"
                 title="Clear chat history"
@@ -158,7 +159,7 @@ export default function Email({ addToast }: EmailProps) {
                     onChange={() => setIsChatDisabled(!isChatDisabled)}
                     className="toggle-input"
                   />
-                  <span className="toggle-slider"></span>
+                  <span className="toggle-slider" />
                 </label>
               </div>
             </div>
@@ -209,6 +210,7 @@ export default function Email({ addToast }: EmailProps) {
             <h3 className="section-title">Email Chain</h3>
             <div className="section-controls">
               <button
+                type="button"
                 onClick={clearEmails}
                 className="clear-button"
                 title="Clear email history"
@@ -226,6 +228,7 @@ export default function Email({ addToast }: EmailProps) {
           <div className="emails-container">
             {emails.map((email, index) => (
               <div
+                // biome-ignore lint/suspicious/noArrayIndexKey: vibes
                 key={index}
                 className={`email-item ${
                   email.from?.address === "agent" ? "agent-email" : "user-email"

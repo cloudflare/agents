@@ -1,6 +1,6 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
-import { useAgent } from "./react";
+import type { useAgent } from "./react";
 import { useEffect, use } from "react";
 import type { OutgoingMessage } from "./ai-types";
 
@@ -16,7 +16,7 @@ type UseAgentChatOptions = Omit<
 >;
 
 // TODO: clear cache when the agent is unmounted?
-const requestCache = new Map<string, Promise<any>>();
+const requestCache = new Map<string, Promise<unknown>>();
 
 /**
  * React hook for building AI chat interfaces using an Agent
@@ -25,9 +25,9 @@ const requestCache = new Map<string, Promise<any>>();
  */
 export function useAgentChat(options: UseAgentChatOptions) {
   const { agent, ...rest } = options;
-  const url =
-    agent._pkurl.replace("ws://", "http://").replace("wss://", "https://") +
-    "/get-messages";
+  const url = `${agent._pkurl
+    .replace("ws://", "http://")
+    .replace("wss://", "https://")}/get-messages`;
 
   const initialMessages = use(
     (() => {
@@ -38,7 +38,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
       requestCache.set(url, promise);
       return promise;
     })()
-  );
+  ) as Message[];
 
   async function aiFetch(
     request: RequestInfo | URL,
@@ -155,7 +155,12 @@ export function useAgentChat(options: UseAgentChatOptions) {
       agent.removeEventListener("message", onClearHistory);
       agent.removeEventListener("message", onMessages);
     };
-  }, []);
+  }, [
+    agent.addEventListener,
+    agent.removeEventListener,
+    agent.send,
+    useChatHelpers.setMessages,
+  ]);
 
   return {
     ...useChatHelpers,

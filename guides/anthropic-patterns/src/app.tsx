@@ -1,6 +1,6 @@
 import "./app.css";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { useAgent } from "agents-sdk/react";
 
 import sequentialCode from "./flows/01 sequential.txt?raw";
@@ -137,7 +137,7 @@ function PatternSection({
         case "status":
           setWorkflowStatus(data.status);
           break;
-        case "toast":
+        case "toast": {
           const event = new CustomEvent("showToast", {
             detail: {
               type: data.toast.type as ToastType,
@@ -146,6 +146,7 @@ function PatternSection({
           });
           window.dispatchEvent(event);
           break;
+        }
       }
     },
   });
@@ -244,7 +245,9 @@ function PatternSection({
             name="code"
             value={state.code}
             onChange={handleInputChange}
-            placeholder={`e.g.,\nfunction processUserData(data) {\n  // TODO: Add validation\n  database.save(data);\n  return true;\n}`}
+            placeholder={
+              "e.g.,\nfunction processUserData(data) {\n  // TODO: Add validation\n  database.save(data);\n  return true;\n}"
+            }
             className="workflow-input workflow-textarea"
             rows={4}
           />
@@ -388,6 +391,7 @@ function PatternSection({
         <div className="tab-container">
           <div className="tab-buttons">
             <button
+              type="button"
               className={`tab-button ${
                 activeTab === "diagram" ? "active" : ""
               }`}
@@ -396,6 +400,7 @@ function PatternSection({
               Diagram
             </button>
             <button
+              type="button"
               className={`tab-button ${activeTab === "code" ? "active" : ""}`}
               onClick={() => setActiveTab("code")}
             >
@@ -418,6 +423,7 @@ function PatternSection({
                   {code}
                 </div>
                 <button
+                  type="button"
                   className="expand-button"
                   onClick={() => setIsCodeExpanded(!isCodeExpanded)}
                 >
@@ -435,6 +441,7 @@ function PatternSection({
           <div className="workflow-form">{getFormContent()}</div>
           <div className="workflow-toolbar">
             <button
+              type="button"
               className="run-button"
               onClick={runWorkflow}
               disabled={workflowStatus.isRunning}
@@ -484,10 +491,10 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const sessionId = useMemo(() => getOrCreateSessionId(), []);
 
-  const addToast = (type: ToastType, message: string) => {
+  const addToast = useCallback((type: ToastType, message: string) => {
     const id = Date.now();
     setToasts((prev) => [...prev, { id, type, message }]);
-  };
+  }, []);
 
   const removeToast = (id: number) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
@@ -516,7 +523,7 @@ export default function App() {
     return () => {
       window.removeEventListener("showToast", handleToast as EventListener);
     };
-  }, []);
+  }, [addToast]);
 
   const toggleTheme = () => {
     const newTheme = theme === "light" ? "dark" : "light";
@@ -612,7 +619,7 @@ export default function App() {
         {(
           Object.entries(patterns) as [
             WorkflowType,
-            (typeof patterns)[keyof typeof patterns]
+            (typeof patterns)[keyof typeof patterns],
           ][]
         ).map(([type, pattern], index) => (
           <PatternSection

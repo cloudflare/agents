@@ -1,5 +1,9 @@
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
-import type { Message as ChatMessage, StreamTextOnFinishCallback } from "ai";
+import type {
+  Message as ChatMessage,
+  StreamTextOnFinishCallback,
+  ToolSet,
+} from "ai";
 import { appendResponseMessages } from "ai";
 import type { OutgoingMessage, IncomingMessage } from "./ai-types";
 const decoder = new TextDecoder();
@@ -24,7 +28,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     this.messages = (
       this.sql`select * from cf_ai_chat_agent_messages` || []
     ).map((row) => {
-      return JSON.parse(row.message);
+      return JSON.parse(row.message as string);
     });
   }
 
@@ -47,7 +51,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   override async onMessage(connection: Connection, message: WSMessage) {
     if (typeof message === "string") {
       const data = JSON.parse(message) as IncomingMessage;
-      if (data.type == "cf_agent_chat_init") {
+      if (data.type === "cf_agent_chat_init") {
         connection.setState({
           ...connection.state,
           isChatConnection: true,
@@ -112,7 +116,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       const messages = (
         this.sql`select * from cf_ai_chat_agent_messages` || []
       ).map((row) => {
-        return JSON.parse(row.message);
+        return JSON.parse(row.message as string);
       });
       return new Response(JSON.stringify(messages));
     }
@@ -125,7 +129,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @returns Response to send to the client or undefined
    */
   async onChatMessage(
-    onFinish: StreamTextOnFinishCallback<any>
+    onFinish: StreamTextOnFinishCallback<ToolSet>
   ): Promise<Response | undefined> {
     throw new Error(
       "recieved a chat message, override onChatMessage and return a Response to send to the client"
@@ -161,11 +165,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     excludeBroadcastIds: string[] = []
   ) {
     this.sql`delete from cf_ai_chat_agent_messages`;
-    messages.forEach((message) => {
+    for (const message of messages) {
       this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
         message.id
       },${JSON.stringify(message)})`;
-    });
+    }
     this.messages = messages;
     this.broadcastChatMessage(
       {
@@ -187,23 +191,23 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     for await (const chunk of response.body!) {
       const body = decoder.decode(chunk);
 
-      chatConnections.forEach((conn) => {
+      for (const conn of chatConnections) {
         this.sendChatMessage(conn, {
           id,
           type: "cf_agent_use_chat_response",
           body,
           done: false,
         });
-      });
+      }
     }
 
-    chatConnections.forEach((conn) => {
+    for (const conn of chatConnections) {
       this.sendChatMessage(conn, {
         id,
         type: "cf_agent_use_chat_response",
         body: "",
         done: true,
       });
-    });
+    }
   }
 }

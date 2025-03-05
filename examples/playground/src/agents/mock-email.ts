@@ -22,7 +22,7 @@ export class MockEmailService<Env> extends Agent<Env> {
   }
 
   async onConnect(connection: Connection) {
-    const rawEmails = this.sql`
+    const rawEmails = this.sql<{ _from: string; _to: string; _raw: string }>`
       SELECT * FROM emails
     `;
     const emails: PostalEmail[] = [];
@@ -62,11 +62,11 @@ export class MockEmailService<Env> extends Agent<Env> {
     message: string;
   }): Promise<void> {
     console.log("toInbox", email);
-    const [mail] = this.sql`
+    const [mail] = this.sql<{ _from: string; _to: string; _raw: string }>`
       INSERT INTO emails (id, _from, _to, _raw)
       VALUES (${crypto.randomUUID()}, ${email.from}, ${email.to}, ${
-      email.message
-    })
+        email.message
+      })
       RETURNING *
     `;
     const parsed = await PostalMime.parse(mail._raw);

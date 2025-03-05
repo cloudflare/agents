@@ -96,17 +96,17 @@ Define your agent's domain:
     "bindings": [
       {
         "name": "AIAgent",
-        "class_name": "AIAgent"
-      }
-    ]
+        "class_name": "AIAgent",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
       // Mandatory for the Agent to store state
-      "new_sqlite_classes": ["AIAgent"]
-    }
-  ]
+      "new_sqlite_classes": ["AIAgent"],
+    },
+  ],
 }
 ```
 
@@ -417,14 +417,13 @@ These capabilities will expand your agents' potential while maintaining their re
 
 Welcome to the future of intelligent agents. Create something meaningful. 🌟
 
-
 ### Contributing
 
 Contributions are welcome, but are especially welcome when:
 
-* You have opened an issue as a Request for Comment (RFC) to discuss your proposal, show your thinking, and iterate together.
-* Is not "AI slop": LLMs are powerful tools, but contributions entirely authored by vibe coding are unlikely to meet the quality bar, and will be rejected.
-* You're willing to accept feedback and make sure the changes fit the goals of the `agents-sdk`. Not everything will, and that's OK.
+- You have opened an issue as a Request for Comment (RFC) to discuss your proposal, show your thinking, and iterate together.
+- Is not "AI slop": LLMs are powerful tools, but contributions entirely authored by vibe coding are unlikely to meet the quality bar, and will be rejected.
+- You're willing to accept feedback and make sure the changes fit the goals of the `agents-sdk`. Not everything will, and that's OK.
 
 Small fixes, type bugs, and documentation improvements can be raised directly as PRs.
 

@@ -6,28 +6,28 @@
   "compatibility_flags": ["nodejs_compat"],
 
   "assets": {
-    "binding": "ASSETS"
+    "binding": "ASSETS",
   },
 
   "durable_objects": {
     "bindings": [
       {
         "name": "Scheduler",
-        "class_name": "Scheduler"
+        "class_name": "Scheduler",
       },
       {
         "name": "Stateful",
-        "class_name": "Stateful"
+        "class_name": "Stateful",
       },
       {
         "name": "EmailAgent",
-        "class_name": "EmailAgent"
+        "class_name": "EmailAgent",
       },
       {
         "name": "MockEmailService",
-        "class_name": "MockEmailService"
-      }
-    ]
+        "class_name": "MockEmailService",
+      },
+    ],
   },
 
   "migrations": [
@@ -37,14 +37,14 @@
         "Scheduler",
         "Stateful",
         "EmailAgent",
-        "MockEmailService"
-      ]
-    }
+        "MockEmailService",
+      ],
+    },
   ],
 
   "send_email": [
     {
-      "name": "SEND_EMAIL"
-    }
-  ]
+      "name": "SEND_EMAIL",
+    },
+  ],
 }

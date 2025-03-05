@@ -1,5 +1,5 @@
 import { build } from "tsup";
-import { execSync } from "child_process";
+import { execSync } from "node:child_process";
 
 async function main() {
   await build({
@@ -13,7 +13,7 @@ async function main() {
   });
 
   // then run prettier on the generated .d.ts files
-  execSync(`prettier --write ./dist/*.d.ts`);
+  execSync("prettier --write ./dist/*.d.ts");
 
   process.exit(0);
 }

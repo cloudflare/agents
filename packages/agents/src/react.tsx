@@ -46,7 +46,7 @@ export function useAgent<State = unknown>(
 
   agent.setState = (state: State) => {
     agent.send(
-      "cf_agent_state:" + JSON.stringify({ type: "cf_agent_state", state })
+      `cf_agent_state:${JSON.stringify({ type: "cf_agent_state", state })}`
     );
     options.onStateUpdate?.(state, "client");
   };

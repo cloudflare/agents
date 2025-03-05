@@ -105,7 +105,8 @@ export class EmailAgent extends AIChatAgent<Env> {
   onEmail(email: ForwardableEmailMessage) {
     //
   }
-  async onChatMessage(onFinish: StreamTextOnFinishCallback<any>) {
+  // biome-ignore lint/complexity/noBannedTypes: vibes
+  async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
     const dataStreamResponse = createDataStreamResponse({
       execute: async (dataStream) => {
         const result = streamText({
@@ -113,6 +114,8 @@ export class EmailAgent extends AIChatAgent<Env> {
           messages: this.messages,
           onStepFinish: async (step) => {
             // if ([...this.getConnections()].length === 0) {
+
+            // biome-ignore lint/correctness/noConstantCondition: work in progress
             if (true) {
               // send an email instead
               try {
@@ -124,7 +127,7 @@ export class EmailAgent extends AIChatAgent<Env> {
                 );
                 const emailToSend = await createMockEmail({
                   id: this.ctx.id.toString(),
-                  from: `emailAgent@example.com`,
+                  from: "emailAgent@example.com",
                   name: "emailAgent",
                   to: "theman@example.com",
                   subject: "Email from emailAgent",
