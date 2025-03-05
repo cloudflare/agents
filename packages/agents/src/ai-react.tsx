@@ -3,7 +3,6 @@ import type { Message } from "ai";
 import type { useAgent } from "./react";
 import { useEffect, use } from "react";
 import type { OutgoingMessage } from "./ai-types";
-import { agentStatePrefix } from "./react";
 
 /**
  * Options for the useAgentChat hook
@@ -136,18 +135,20 @@ export function useAgentChat(options: UseAgentChatOptions) {
     );
 
     function onClearHistory(event: MessageEvent) {
-      const data = JSON.parse(
-        event.data.slice(`${agentStatePrefix}:`.length)
-      ) as OutgoingMessage;
+      if (typeof event.data !== "string") {
+        return;
+      }
+      const data = JSON.parse(event.data) as OutgoingMessage;
       if (data.type === "cf_agent_chat_clear") {
         useChatHelpers.setMessages([]);
       }
     }
 
     function onMessages(event: MessageEvent) {
-      const data = JSON.parse(
-        event.data.slice(`${agentStatePrefix}:`.length)
-      ) as OutgoingMessage;
+      if (typeof event.data !== "string") {
+        return;
+      }
+      const data = JSON.parse(event.data) as OutgoingMessage;
       if (data.type === "cf_agent_chat_messages") {
         useChatHelpers.setMessages(data.messages);
       }

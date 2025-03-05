@@ -1,8 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
 
-export const agentStatePrefix = "cf_agent_state";
-
 /**
  * Options for the useAgent hook
  * @template State Type of the Agent's state
@@ -34,12 +32,11 @@ export function useAgent<State = unknown>(
     room: options.name || "default",
     ...options,
     onMessage: (message) => {
-      if (
-        typeof message.data === "string" &&
-        message.data.startsWith(`${agentStatePrefix}:`)
-      ) {
-        const parsedMessage = JSON.parse(message.data.slice(15));
-        options.onStateUpdate?.(parsedMessage.state, "server");
+      if (typeof message.data === "string") {
+        const parsedMessage = JSON.parse(message.data);
+        if (parsedMessage.type === "cf_agent_state") {
+          options.onStateUpdate?.(parsedMessage.state, "server");
+        }
         return;
       }
       options.onMessage?.(message);
@@ -47,9 +44,7 @@ export function useAgent<State = unknown>(
   }) as PartySocket & { setState: (state: State) => void };
 
   agent.setState = (state: State) => {
-    agent.send(
-      `${agentStatePrefix}:${JSON.stringify({ type: agentStatePrefix, state })}`
-    );
+    agent.send(JSON.stringify({ type: "cf_agent_state", state }));
     options.onStateUpdate?.(state, "client");
   };
 

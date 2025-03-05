@@ -193,13 +193,12 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = (connection: Connection, message: WSMessage) => {
-      if (
-        typeof message === "string" &&
-        message.startsWith("cf_agent_state:")
-      ) {
-        const parsed = JSON.parse(message.slice(15));
-        this.#setStateInternal(parsed.state, connection);
-        return;
+      if (typeof message === "string") {
+        const parsed = JSON.parse(message);
+        if (parsed.type === "cf_agent_state") {
+          this.#setStateInternal(parsed.state, connection);
+          return;
+        }
       }
       _onMessage(connection, message);
     };
@@ -211,10 +210,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       setTimeout(() => {
         if (this.state) {
           connection.send(
-            `cf_agent_state:${JSON.stringify({
+            JSON.stringify({
               type: "cf_agent_state",
               state: this.state,
-            })}`
+            })
           );
         }
         _onConnect(connection, ctx);
@@ -233,10 +232,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
   `;
     this.broadcast(
-      `cf_agent_state:${JSON.stringify({
+      JSON.stringify({
         type: "cf_agent_state",
         state: state,
-      })}`,
+      }),
       source !== "server" ? [source.id] : []
     );
     this.onStateUpdate(state, source);
