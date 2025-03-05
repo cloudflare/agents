@@ -1,7 +1,7 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
 
-const agentStatePrefix = "cf_agent_state";
+export const agentStatePrefix = "cf_agent_state";
 
 /**
  * Options for the useAgent hook
