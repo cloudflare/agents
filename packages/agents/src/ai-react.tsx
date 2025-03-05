@@ -137,7 +137,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
 
     function onClearHistory(event: MessageEvent) {
       const data = JSON.parse(
-        event.data.slice(`${agentStatePrefix.length()}:`)
+        event.data.slice(`${agentStatePrefix}:`.length)
       ) as OutgoingMessage;
       if (data.type === "cf_agent_chat_clear") {
         useChatHelpers.setMessages([]);
@@ -146,7 +146,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
 
     function onMessages(event: MessageEvent) {
       const data = JSON.parse(
-        event.data.slice(`${agentStatePrefix.length()}:`)
+        event.data.slice(`${agentStatePrefix}:`.length)
       ) as OutgoingMessage;
       if (data.type === "cf_agent_chat_messages") {
         useChatHelpers.setMessages(data.messages);
