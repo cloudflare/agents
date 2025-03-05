@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.24
+
+### Patch Changes
+
+- [#51](https://github.com/cloudflare/agents/pull/51) [`b244068`](https://github.com/cloudflare/agents/commit/b244068c7266f048493b3796393cfa74bbbd9ec1) Thanks [@elithrar](https://github.com/elithrar)! - Fixes a bug with JSON parsing and the React state hooks.
+
 ## 0.0.23
 
 ### Patch Changes
