@@ -36,8 +36,8 @@ export function useAgent<State = unknown>(
         const parsedMessage = JSON.parse(message.data);
         if (parsedMessage.type === "cf_agent_state") {
           options.onStateUpdate?.(parsedMessage.state, "server");
+          return;
         }
-        return;
       }
       options.onMessage?.(message);
     },
