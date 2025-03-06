@@ -1,5 +1,11 @@
 # hono-agents
 
+## 0.0.15
+
+### Patch Changes
+
+- [#55](https://github.com/cloudflare/agents/pull/55) [`a7acb9f`](https://github.com/cloudflare/agents/commit/a7acb9f28c18dfe8734907dce0882719838e449f) Thanks [@threepointone](https://github.com/threepointone)! - udpate deps
+
 ## 0.0.14
 
 ### Patch Changes
