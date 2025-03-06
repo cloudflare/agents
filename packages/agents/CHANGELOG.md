@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.25
+
+### Patch Changes
+
+- [#53](https://github.com/cloudflare/agents/pull/53) [`877d551`](https://github.com/cloudflare/agents/commit/877d55169a49a767b703e39e0032a4df6681709f) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - fix onMessage not getting called
+
 ## 0.0.24
 
 ### Patch Changes
