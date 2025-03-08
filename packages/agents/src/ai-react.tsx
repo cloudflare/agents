@@ -1,7 +1,7 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
 import type { useAgent } from "./react";
-import { useEffect, use } from "react";
+import { useEffect, useState } from "react";
 import type { OutgoingMessage } from "./ai-types";
 
 /**
@@ -15,9 +15,6 @@ type UseAgentChatOptions = Omit<
   "fetch"
 >;
 
-// TODO: clear cache when the agent is unmounted?
-const requestCache = new Map<string, Promise<unknown>>();
-
 /**
  * React hook for building AI chat interfaces using an Agent
  * @param options Chat options including the agent connection
@@ -29,22 +26,33 @@ export function useAgentChat(options: UseAgentChatOptions) {
     .replace("ws://", "http://")
     .replace("wss://", "https://")}/get-messages`;
 
-  const initialMessages = use(
-    (() => {
-      if (requestCache.has(url)) {
-        return requestCache.get(url)!;
+  const [initialMessages, setInitialMessages] = useState<Message[]>([]);
+
+  // Use useEffect for data fetching on component mount or URL change
+  useEffect(() => {
+    let isMounted = true;
+    const fetchInitialMessages = async () => {
+      try {
+        const response = await fetch(new Request(url));
+        const data = (await response.json()) as Message[];
+        if (isMounted) {
+          setInitialMessages(data);
+        }
+      } catch (error) {
+        console.error("Error fetching initial messages:", error);
       }
-      const promise = fetch(new Request(url), {
-        headers: options.headers,
-      }).then((res) => res.json());
-      requestCache.set(url, promise);
-      return promise;
-    })()
-  ) as Message[];
+    };
+
+    fetchInitialMessages();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [url]);
 
   async function aiFetch(
     request: RequestInfo | URL,
-    options: RequestInit = {}
+    options: RequestInit = {},
   ) {
     // we're going to use a websocket to do the actual "fetching"
     // but still satisfy the type signature of the fetch function
@@ -86,7 +94,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
           }
         }
       },
-      { signal: abortController.signal }
+      { signal: abortController.signal },
     );
 
     let controller: ReadableStreamDefaultController;
@@ -117,7 +125,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
           // dispatcher,
           // duplex
         },
-      })
+      }),
     );
 
     return new Response(stream);
@@ -133,7 +141,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
     agent.send(
       JSON.stringify({
         type: "cf_agent_chat_init",
-      })
+      }),
     );
 
     function onClearHistory(event: MessageEvent) {
@@ -143,6 +151,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
       const data = JSON.parse(event.data) as OutgoingMessage;
       if (data.type === "cf_agent_chat_clear") {
         useChatHelpers.setMessages([]);
+        setInitialMessages([]);
       }
     }
 
@@ -182,7 +191,7 @@ export function useAgentChat(options: UseAgentChatOptions) {
         JSON.stringify({
           type: "cf_agent_chat_messages",
           messages,
-        })
+        }),
       );
     },
     /**
@@ -190,10 +199,11 @@ export function useAgentChat(options: UseAgentChatOptions) {
      */
     clearHistory: () => {
       useChatHelpers.setMessages([]);
+      setInitialMessages([]);
       agent.send(
         JSON.stringify({
           type: "cf_agent_chat_clear",
-        })
+        }),
       );
     },
   };
