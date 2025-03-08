@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 export function unstable_getSchedulePrompt(event: { date: Date }) {
-  return `
+  try {
+    return `
 [Schedule Parser Component]
 
 Current time: ${event.date.toUTCString()}
@@ -48,6 +49,17 @@ Example outputs:
 
 [End Schedule Parser Component]
 `;
+  } catch (e) {
+    console.error("error generating schedule prompt", e);
+    // Return a default prompt as fallback
+    return `
+[Schedule Parser Component]
+Current time: [Error getting current time]
+This component parses natural language scheduling requests into structured format.
+[End Schedule Parser Component]
+`;
+  }
+}
 }
 
 export const unstable_scheduleSchema = z.object({

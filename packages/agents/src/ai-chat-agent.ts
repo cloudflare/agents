@@ -20,16 +20,26 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   messages: ChatMessage[];
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
-    this.sql`create table if not exists cf_ai_chat_agent_messages (
-      id text primary key,
-      message text not null,
-      created_at datetime default current_timestamp
-    )`;
-    this.messages = (
-      this.sql`select * from cf_ai_chat_agent_messages` || []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
+    try {
+      this.sql`create table if not exists cf_ai_chat_agent_messages (
+        id text primary key,
+        message text not null,
+        created_at datetime default current_timestamp
+      )`;
+      
+      const messageRows = this.sql`select * from cf_ai_chat_agent_messages` || [];
+      this.messages = messageRows.map((row) => {
+        try {
+          return JSON.parse(row.message as string);
+        } catch (e) {
+          console.error("failed to parse message", e);
+          return null;
+        }
+      }).filter(Boolean) as ChatMessage[];
+    } catch (e) {
+      console.error("error initializing AIChatAgent", e);
+      this.messages = [];
+    }
   }
 
   private sendChatMessage(connection: Connection, message: OutgoingMessage) {
@@ -112,15 +122,30 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   override async onRequest(request: Request): Promise<Response> {
-    if (request.url.endsWith("/get-messages")) {
-      const messages = (
-        this.sql`select * from cf_ai_chat_agent_messages` || []
-      ).map((row) => {
-        return JSON.parse(row.message as string);
-      });
-      return new Response(JSON.stringify(messages));
+    try {
+      if (request.url.endsWith("/get-messages")) {
+        try {
+          const messageRows = this.sql`select * from cf_ai_chat_agent_messages` || [];
+          const messages = messageRows.map((row) => {
+            try {
+              return JSON.parse(row.message as string);
+            } catch (e) {
+              console.error("failed to parse message", e);
+              return null;
+            }
+          }).filter(Boolean);
+          
+          return Response.json(messages);
+        } catch (e) {
+          console.error("error retrieving messages", e);
+          return Response.json({ error: "Failed to retrieve messages" }, { status: 500 });
+        }
+      }
+      return super.onRequest(request);
+    } catch (e) {
+      console.error("request handling error", e);
+      return Response.json({ error: "Internal server error" }, { status: 500 });
     }
-    return super.onRequest(request);
   }
 
   /**
@@ -141,22 +166,40 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
-    await this.persistMessages(messages);
-    const response = await this.onChatMessage(async ({ response }) => {
-      const finalMessages = appendResponseMessages({
-        messages,
-        responseMessages: response.messages,
-      });
+    try {
+      await this.persistMessages(messages);
+      const response = await this.onChatMessage(async ({ response }) => {
+        try {
+          const finalMessages = appendResponseMessages({
+            messages,
+            responseMessages: response.messages,
+          });
 
-      await this.persistMessages(finalMessages, []);
-    });
-    if (response) {
-      // we're just going to drain the body
-      // @ts-ignore TODO: fix this type error
-      for await (const chunk of response.body!) {
-        decoder.decode(chunk);
+          await this.persistMessages(finalMessages, []);
+        } catch (e) {
+          console.error("error handling chat response in saveMessages", e);
+        }
+      });
+      
+      if (response && response.body) {
+        try {
+          // we're just going to drain the body
+          // @ts-ignore TODO: fix this type error
+          for await (const chunk of response.body) {
+            decoder.decode(chunk);
+          }
+        } catch (e) {
+          console.error("error draining response body", e);
+        } finally {
+          try {
+            response.body.cancel();
+          } catch (e) {
+            console.error("error canceling response body", e);
+          }
+        }
       }
-      response.body?.cancel();
+    } catch (e) {
+      console.error("error in saveMessages", e);
     }
   }
 
@@ -164,50 +207,79 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
-    this.sql`delete from cf_ai_chat_agent_messages`;
-    for (const message of messages) {
-      this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
-        message.id
-      },${JSON.stringify(message)})`;
+    try {
+      this.sql`delete from cf_ai_chat_agent_messages`;
+      
+      for (const message of messages) {
+        try {
+          this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
+            message.id
+          },${JSON.stringify(message)})`;
+        } catch (e) {
+          console.error(`failed to insert message with id ${message.id}`, e);
+        }
+      }
+      
+      this.messages = messages;
+      
+      this.broadcastChatMessage(
+        {
+          type: "cf_agent_chat_messages",
+          messages: messages,
+        },
+        excludeBroadcastIds
+      );
+    } catch (e) {
+      console.error("failed to persist messages", e);
     }
-    this.messages = messages;
-    this.broadcastChatMessage(
-      {
-        type: "cf_agent_chat_messages",
-        messages: messages,
-      },
-      excludeBroadcastIds
-    );
   }
 
   private async reply(id: string, response: Response) {
-    const chatConnections = [...this.getConnections()].filter(
-      (conn: Connection<{ isChatConnection?: boolean }>) =>
-        conn.state?.isChatConnection
-    );
-    // now take chunks out from dataStreamResponse and send them to the client
-
-    // @ts-ignore TODO: fix this type error
-    for await (const chunk of response.body!) {
-      const body = decoder.decode(chunk);
-
-      for (const conn of chatConnections) {
-        this.sendChatMessage(conn, {
-          id,
-          type: "cf_agent_use_chat_response",
-          body,
-          done: false,
-        });
+    try {
+      const chatConnections = [...this.getConnections()].filter(
+        (conn: Connection<{ isChatConnection?: boolean }>) =>
+          conn.state?.isChatConnection
+      );
+      
+      if (!response.body) {
+        console.error("response body is null");
+        return;
       }
-    }
+      
+      try {
+        // now take chunks out from dataStreamResponse and send them to the client
+        // @ts-ignore TODO: fix this type error
+        for await (const chunk of response.body) {
+          try {
+            const body = decoder.decode(chunk);
 
-    for (const conn of chatConnections) {
-      this.sendChatMessage(conn, {
-        id,
-        type: "cf_agent_use_chat_response",
-        body: "",
-        done: true,
-      });
+            for (const conn of chatConnections) {
+              this.sendChatMessage(conn, {
+                id,
+                type: "cf_agent_use_chat_response",
+                body,
+                done: false,
+              });
+            }
+          } catch (e) {
+            console.error("error processing response chunk", e);
+          }
+        }
+      } catch (e) {
+        console.error("error streaming response body", e);
+      } finally {
+        // Ensure we always send the done message, even if streaming failed
+        for (const conn of chatConnections) {
+          this.sendChatMessage(conn, {
+            id,
+            type: "cf_agent_use_chat_response",
+            body: "",
+            done: true,
+          });
+        }
+      }
+    } catch (e) {
+      console.error("failed to reply to chat", e);
     }
   }
 }

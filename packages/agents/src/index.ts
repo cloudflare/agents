@@ -369,12 +369,17 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @returns The Schedule object or undefined if not found
    */
   async getSchedule<T = string>(id: string): Promise<Schedule<T> | undefined> {
-    const result = this.sql<Schedule<string>>`
-      SELECT * FROM cf_agents_schedules WHERE id = ${id}
-    `;
-    if (!result) return undefined;
-
-    return { ...result[0], payload: JSON.parse(result[0].payload) as T };
+    try {
+      const result = this.sql<Schedule<string>>`
+        SELECT * FROM cf_agents_schedules WHERE id = ${id}
+      `;
+      if (!result || result.length === 0) return undefined;
+      
+      return { ...result[0], payload: JSON.parse(result[0].payload) as T };
+    } catch (e) {
+      console.error(`failed to get schedule with id ${id}`, e);
+      return undefined;
+    }
   }
 
   /**
@@ -391,43 +396,48 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       timeRange?: { start?: Date; end?: Date };
     } = {}
   ): Schedule<T>[] {
-    let query = "SELECT * FROM cf_agents_schedules WHERE 1=1";
-    const params = [];
+    try {
+      let query = "SELECT * FROM cf_agents_schedules WHERE 1=1";
+      const params = [];
 
-    if (criteria.id) {
-      query += " AND id = ?";
-      params.push(criteria.id);
+      if (criteria.id) {
+        query += " AND id = ?";
+        params.push(criteria.id);
+      }
+
+      if (criteria.description) {
+        query += " AND description = ?";
+        params.push(criteria.description);
+      }
+
+      if (criteria.type) {
+        query += " AND type = ?";
+        params.push(criteria.type);
+      }
+
+      if (criteria.timeRange) {
+        query += " AND time >= ? AND time <= ?";
+        const start = criteria.timeRange.start || new Date(0);
+        const end = criteria.timeRange.end || new Date(999999999999999);
+        params.push(
+          Math.floor(start.getTime() / 1000),
+          Math.floor(end.getTime() / 1000)
+        );
+      }
+
+      const result = this.ctx.storage.sql
+        .exec(query, ...params)
+        .toArray()
+        .map((row) => ({
+          ...row,
+          payload: JSON.parse(row.payload as string) as T,
+        })) as Schedule<T>[];
+
+      return result;
+    } catch (e) {
+      console.error("failed to get schedules", e);
+      return [];
     }
-
-    if (criteria.description) {
-      query += " AND description = ?";
-      params.push(criteria.description);
-    }
-
-    if (criteria.type) {
-      query += " AND type = ?";
-      params.push(criteria.type);
-    }
-
-    if (criteria.timeRange) {
-      query += " AND time >= ? AND time <= ?";
-      const start = criteria.timeRange.start || new Date(0);
-      const end = criteria.timeRange.end || new Date(999999999999999);
-      params.push(
-        Math.floor(start.getTime() / 1000),
-        Math.floor(end.getTime() / 1000)
-      );
-    }
-
-    const result = this.ctx.storage.sql
-      .exec(query, ...params)
-      .toArray()
-      .map((row) => ({
-        ...row,
-        payload: JSON.parse(row.payload as string) as T,
-      })) as Schedule<T>[];
-
-    return result;
   }
 
   /**
@@ -436,25 +446,33 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @returns true if the task was cancelled, false otherwise
    */
   async cancelSchedule(id: string): Promise<boolean> {
-    this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
-
-    await this.scheduleNextAlarm();
-    return true;
+    try {
+      this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
+      await this.scheduleNextAlarm();
+      return true;
+    } catch (e) {
+      console.error(`failed to cancel schedule with id ${id}`, e);
+      return false;
+    }
   }
 
   private async scheduleNextAlarm() {
-    // Find the next schedule that needs to be executed
-    const result = this.sql`
-      SELECT time FROM cf_agents_schedules 
-      WHERE time > ${Math.floor(Date.now() / 1000)}
-      ORDER BY time ASC 
-      LIMIT 1
-    `;
-    if (!result) return;
+    try {
+      // Find the next schedule that needs to be executed
+      const result = this.sql`
+        SELECT time FROM cf_agents_schedules 
+        WHERE time > ${Math.floor(Date.now() / 1000)}
+        ORDER BY time ASC 
+        LIMIT 1
+      `;
+      if (!result) return;
 
-    if (result.length > 0 && "time" in result[0]) {
-      const nextTime = (result[0].time as number) * 1000;
-      await this.ctx.storage.setAlarm(nextTime);
+      if (result.length > 0 && "time" in result[0]) {
+        const nextTime = (result[0].time as number) * 1000;
+        await this.ctx.storage.setAlarm(nextTime);
+      }
+    } catch (e) {
+      console.error("failed to schedule next alarm", e);
     }
   }
 
@@ -463,60 +481,74 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Executes any scheduled tasks that are due
    */
   async alarm() {
-    const now = Math.floor(Date.now() / 1000);
+    try {
+      const now = Math.floor(Date.now() / 1000);
 
-    // Get all schedules that should be executed now
-    const result = this.sql<Schedule<string>>`
-      SELECT * FROM cf_agents_schedules WHERE time <= ${now}
-    `;
+      // Get all schedules that should be executed now
+      const result = this.sql<Schedule<string>>`
+        SELECT * FROM cf_agents_schedules WHERE time <= ${now}
+      `;
 
-    for (const row of result || []) {
-      const callback = this[row.callback as keyof Agent<Env>];
-      if (!callback) {
-        console.error(`callback ${row.callback} not found`);
-        continue;
-      }
-      try {
-        (
-          callback as (
-            payload: unknown,
-            schedule: Schedule<unknown>
-          ) => Promise<void>
-        ).bind(this)(JSON.parse(row.payload as string), row);
-      } catch (e) {
-        console.error(`error executing callback ${row.callback}`, e);
-      }
-      if (row.type === "cron") {
-        // Update next execution time for cron schedules
-        const nextExecutionTime = getNextCronTime(row.cron);
-        const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
+      for (const row of result || []) {
+        const callback = this[row.callback as keyof Agent<Env>];
+        if (!callback) {
+          console.error(`callback ${row.callback} not found`);
+          continue;
+        }
+        try {
+          (
+            callback as (
+              payload: unknown,
+              schedule: Schedule<unknown>
+            ) => Promise<void>
+          ).bind(this)(JSON.parse(row.payload as string), row);
+        } catch (e) {
+          console.error(`error executing callback ${row.callback}`, e);
+        }
+        
+        try {
+          if (row.type === "cron") {
+            // Update next execution time for cron schedules
+            const nextExecutionTime = getNextCronTime(row.cron);
+            const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
-        this.sql`
-          UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-        `;
-      } else {
-        // Delete one-time schedules after execution
-        this.sql`
-          DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-        `;
+            this.sql`
+              UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
+            `;
+          } else {
+            // Delete one-time schedules after execution
+            this.sql`
+              DELETE FROM cf_agents_schedules WHERE id = ${row.id}
+            `;
+          }
+        } catch (e) {
+          console.error(`failed to update/delete schedule with id ${row.id}`, e);
+        }
       }
+
+      // Schedule the next alarm
+      await this.scheduleNextAlarm();
+    } catch (e) {
+      console.error("failed to process alarm", e);
     }
-
-    // Schedule the next alarm
-    await this.scheduleNextAlarm();
   }
 
   /**
    * Destroy the Agent, removing all state and scheduled tasks
    */
   async destroy() {
-    // drop all tables
-    this.sql`DROP TABLE IF EXISTS cf_agents_state`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
+    try {
+      // drop all tables
+      this.sql`DROP TABLE IF EXISTS cf_agents_state`;
+      this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
 
-    // delete all alarms
-    await this.ctx.storage.deleteAlarm();
-    await this.ctx.storage.deleteAll();
+      // delete all alarms
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+    } catch (e) {
+      console.error("failed to destroy agent", e);
+      throw e;
+    }
   }
 }
 
