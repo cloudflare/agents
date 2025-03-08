@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.27
+
+### Patch Changes
+
+- [`5b96c8a`](https://github.com/cloudflare/agents/commit/5b96c8a2cb26c683b34d41783eaced74216092e1) Thanks [@threepointone](https://github.com/threepointone)! - unstable\_ scheduling prompt helper shouldn't take input text
+
 ## 0.0.26
 
 ### Patch Changes
