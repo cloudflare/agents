@@ -18,4 +18,4 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(console.error);
+main().catch((e) => console.error("build process error", e));
