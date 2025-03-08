@@ -7,23 +7,53 @@ import { z } from "zod";
 
 function getPrompt(event: { date: Date; input: string }) {
   return `
-Today is ${event.date.toUTCString()}.
+[Schedule Parser Component]
 
-Your task is to parse a natural language scheduling request into a structured format. You will receive a text input that describes a task and when it should be scheduled.
+Current time: ${event.date.toUTCString()}
 
-Rules for parsing:
-1. The description should only contain the task itself, without any timing information
-2. All cron patterns must use numbers (0-6) for days, where 0=Sunday
-3. Time can be specified as:
-   - A specific date and time ("scheduled")
-   - A delay in seconds ("delayed")
-   - A recurring pattern ("cron")
-   - No timing information ("no-schedule")
+Input to parse: "${event.input}"
 
-Input to parse:
-"${event.input}"
+This component parses natural language scheduling requests into a structured format. It extracts:
+1. A clean task description (without timing information)
+2. Scheduling details in one of these formats:
+   - scheduled: Specific date/time events
+   - delayed: Relative time delays (in seconds)
+   - cron: Recurring patterns
+   - no-schedule: Tasks without timing
 
-Please provide a structured response following the schema provided.
+Rules:
+- Task descriptions should be clean and focused on the action
+- Use numbers (0-6) for days in cron patterns (0=Sunday)
+- For recurring tasks, use standard cron syntax
+- For relative times, convert to seconds
+- For specific dates, use the current time as reference
+
+Example outputs:
+{
+  "description": "meeting with team",
+  "when": {
+    "type": "scheduled",
+    "date": "tomorrow at 14:00"
+  }
+}
+
+{
+  "description": "backup database",
+  "when": {
+    "type": "cron",
+    "cron": "0 0 * * *"
+  }
+}
+
+{
+  "description": "send report",
+  "when": {
+    "type": "delayed",
+    "delayInSeconds": 1800
+  }
+}
+
+[End Schedule Parser Component]
 `;
 }
 
@@ -363,7 +393,6 @@ evalite<string, Schedule>("Evals for scheduling", {
     ];
   },
   // The task to perform
-
   task: async (input) => {
     const result = await generateObject({
       model: openai("gpt-4o"),
