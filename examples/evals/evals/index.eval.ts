@@ -8,12 +8,22 @@ import { z } from "zod";
 function getPrompt(event: { date: Date; input: string }) {
   return `
 Today is ${event.date.toUTCString()}.
-You are given a string that has a string and probably has a date/time/cron pattern to be input as an object into a scheduler. 
-- Do not include the schedule details in the description. 
-- Use numbers for days in cron patterns.
 
-Here is the string:
-${event.input}
+Your task is to parse a natural language scheduling request into a structured format. You will receive a text input that describes a task and when it should be scheduled.
+
+Rules for parsing:
+1. The description should only contain the task itself, without any timing information
+2. All cron patterns must use numbers (0-6) for days, where 0=Sunday
+3. Time can be specified as:
+   - A specific date and time ("scheduled")
+   - A delay in seconds ("delayed")
+   - A recurring pattern ("cron")
+   - No timing information ("no-schedule")
+
+Input to parse:
+"${event.input}"
+
+Please provide a structured response following the schema provided.
 `;
 }
 
@@ -25,24 +35,44 @@ const getsType = createScorer<string, Schedule>({
   },
 });
 
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
 const getsDetail = createScorer<string, Schedule>({
   name: "getsDetail",
   description: "Checks if the output is the right detail",
-  scorer: ({ input, output, expected }) => {
+  scorer: ({ output, expected }) => {
     switch (expected?.when.type) {
-      case "scheduled":
+      case "scheduled": {
+        assert(
+          output.when.type === "scheduled",
+          "Output is not a scheduled task"
+        );
         return output.when.date.getTime() === expected.when.date.getTime()
           ? 1
           : 0;
-      case "delayed":
+      }
+      case "delayed": {
+        assert(output.when.type === "delayed", "Output is not a delayed task");
         return output.when.delayInSeconds === expected.when.delayInSeconds
           ? 1
           : 0;
-      case "cron":
+      }
+      case "cron": {
+        assert(output.when.type === "cron", "Output is not a cron task");
         return output.when.cron === expected.when.cron ? 1 : 0;
+      }
 
-      case "no-schedule":
+      case "no-schedule": {
+        assert(
+          output.when.type === "no-schedule",
+          "Output is not a no-schedule task"
+        );
         return 1;
+      }
       default:
         return 0;
     }
@@ -246,16 +276,100 @@ evalite<string, Schedule>("Evals for scheduling", {
           when: { type: "cron", cron: "*/10 9-17 * * 1-5" },
         },
       },
+      {
+        input: "send daily digest at 8am on weekdays",
+        expected: {
+          description: "send daily digest",
+          when: { type: "cron", cron: "0 8 * * 1-5" },
+        },
+      },
+      {
+        input: "process invoices every 15 minutes during business hours",
+        expected: {
+          description: "process invoices",
+          when: { type: "cron", cron: "*/15 9-17 * * 1-5" },
+        },
+      },
+      {
+        input: "run backup at 1am and 1pm every day",
+        expected: {
+          description: "run backup",
+          when: { type: "cron", cron: "0 1,13 * * *" },
+        },
+      },
+      {
+        input: "check system status in 45 seconds",
+        expected: {
+          description: "check system status",
+          when: { type: "delayed", delayInSeconds: 45 },
+        },
+      },
+      {
+        input: "generate monthly report on the 1st at 6am",
+        expected: {
+          description: "generate monthly report",
+          when: { type: "cron", cron: "0 6 1 * *" },
+        },
+      },
+      {
+        input: "clean temp files every 2 hours",
+        expected: {
+          description: "clean temp files",
+          when: { type: "cron", cron: "0 */2 * * *" },
+        },
+      },
+      {
+        input: "sync data at 9am and 5pm on weekdays",
+        expected: {
+          description: "sync data",
+          when: { type: "cron", cron: "0 9,17 * * 1-5" },
+        },
+      },
+      {
+        input: "run maintenance at 3am on weekends",
+        expected: {
+          description: "run maintenance",
+          when: { type: "cron", cron: "0 3 * * 0,6" },
+        },
+      },
+      {
+        input: "archive old data at midnight on the last day of each month",
+        expected: {
+          description: "archive old data",
+          when: { type: "cron", cron: "0 0 28-31 * *" },
+        },
+      },
+      {
+        input: "send notification in 3 hours",
+        expected: {
+          description: "send notification",
+          when: { type: "delayed", delayInSeconds: 10800 },
+        },
+      },
+      {
+        input: "run diagnostics at 2am on weekdays",
+        expected: {
+          description: "run diagnostics",
+          when: { type: "cron", cron: "0 2 * * 1-5" },
+        },
+      },
+      {
+        input: "process logs every 30 minutes during business hours",
+        expected: {
+          description: "process logs",
+          when: { type: "cron", cron: "*/30 9-17 * * 1-5" },
+        },
+      },
     ];
   },
   // The task to perform
-  // - TODO: Replace with your LLM call
+
   task: async (input) => {
     const result = await generateObject({
       model: openai("gpt-4o"),
       mode: "json",
-      schemaName: "task",
-      schemaDescription: "A task to be scheduled",
+      // schemaName: "task",
+      // schemaDescription: "A task to be scheduled",
       schema: scheduleSchema, // <- the shape of the object that the scheduler expects
       maxRetries: 5,
       prompt: getPrompt({ date: new Date(), input }),
