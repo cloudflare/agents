@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "evals": "(cd evals; evalite)",
     "build": "tsx ./scripts/build.ts"
   },
   "files": [
@@ -36,6 +37,11 @@
       "types": "./dist/ai-chat-agent.d.ts",
       "require": "./dist/ai-chat-agent.js",
       "import": "./dist/ai-chat-agent.js"
+    },
+    "./schedule": {
+      "types": "./dist/schedule.d.ts",
+      "require": "./dist/schedule.js",
+      "import": "./dist/schedule.js"
     }
   },
   "keywords": [],

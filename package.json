@@ -14,6 +14,7 @@
   "private": true,
   "scripts": {
     "build": "npm run build -w agents-sdk -w hono-agents",
+    "format": "prettier --write .",
     "check": "sherif && prettier --check . && biome lint && tsc"
   },
   "license": "MIT",
@@ -30,6 +31,8 @@
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
     "ai": "^4.1.54",
+    "autoevals": "^0.0.121",
+    "evalite": "^0.9.1",
     "fast-glob": "^3.3.3",
     "partyserver": "^0.0.65",
     "partysocket": "0.0.0-548c226",
@@ -41,6 +44,7 @@
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
     "vite": "^6.2.0",
+    "vitest": "^3.0.8",
     "workers-ai-provider": "^0.1.1",
     "wrangler": "^3.113.0",
     "zod": "^3.24.2"

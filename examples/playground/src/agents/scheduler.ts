@@ -2,6 +2,10 @@ import { z } from "zod";
 import { Agent } from "agents-sdk";
 import type { Env } from "../server";
 import type { Schedule } from "agents-sdk";
+import {
+  unstable_scheduleSchema,
+  unstable_getSchedulePrompt,
+} from "agents-sdk/schedule";
 
 import type {
   ScheduledItem,
@@ -13,35 +17,6 @@ import type { Connection, ConnectionContext } from "agents-sdk";
 
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateObject } from "ai";
-
-const scheduleSchema = z.object({
-  description: z.string().describe("A description of the task"),
-  when: z.discriminatedUnion("type", [
-    z
-      .object({
-        type: z.literal("scheduled"),
-        date: z.coerce.date(),
-      })
-      .describe("A scheduled task for a given date and time"),
-    z
-      .object({
-        type: z.literal("delayed"),
-        delayInSeconds: z.number(),
-      })
-      .describe("A delayed task in seconds"),
-    z
-      .object({
-        type: z.literal("cron"),
-        cron: z.string(),
-      })
-      .describe("A cron pattern"),
-    z
-      .object({
-        type: z.literal("no-schedule"),
-      })
-      .describe("No timing information, just a description of the task"),
-  ]),
-});
 
 function convertScheduleToScheduledItem(schedule: Schedule): ScheduledItem {
   return {
@@ -80,15 +55,12 @@ export class Scheduler extends Agent<Env> {
         mode: "json",
         schemaName: "task",
         schemaDescription: "A task to be scheduled",
-        schema: scheduleSchema, // <- the shape of the object that the scheduler expects
+        schema: unstable_scheduleSchema, // <- the shape of the object that the scheduler expects
         maxRetries: 5,
-        prompt: `
-Today is ${new Date().toUTCString()}.
-You are given a string that has a string and probably has a date/time/cron pattern to be input as an object into a scheduler.
-
-Here is the string:
-${event.input}
-`,
+        prompt: unstable_getSchedulePrompt({
+          date: new Date(),
+          input: event.input,
+        }),
       });
       const { when, description } = result.object;
       if (when.type === "no-schedule") {
