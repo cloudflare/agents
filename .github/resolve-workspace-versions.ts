@@ -10,7 +10,9 @@ import fg from "fast-glob";
 // biome-ignore lint/suspicious/noExplicitAny: vibes
 const packageJsons: Record<string, any> = {};
 
-for await (const file of await fg.glob("./packages/*/package.json")) {
+for await (const file of await fg.glob(
+  "./(packages|examples|guides)/*/package.json"
+)) {
   const packageJson = JSON.parse(fs.readFileSync(file, "utf8"));
   packageJsons[packageJson.name] = {
     file,
@@ -34,7 +36,7 @@ for (const [packageName, { file, packageJson }] of Object.entries(
     for (const [dependencyName, dependencyVersion] of Object.entries(
       packageJson[field] || {}
     )) {
-      if (dependencyVersion === "workspace:*") {
+      if (dependencyName in packageJsons) {
         let actualVersion = packageJsons[dependencyName].packageJson.version;
         if (!actualVersion.startsWith("0.0.0-")) {
           actualVersion = `^${actualVersion}`;
