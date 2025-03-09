@@ -130,6 +130,10 @@ export function useAgentChat(options: UseAgentChatOptions) {
   });
 
   useEffect(() => {
+    if (agent.readyState !== agent.OPEN) {
+      return;
+    }
+
     agent.send(
       JSON.stringify({
         type: "cf_agent_chat_init",
@@ -167,6 +171,8 @@ export function useAgentChat(options: UseAgentChatOptions) {
     agent.addEventListener,
     agent.removeEventListener,
     agent.send,
+    agent.readyState,
+    agent.OPEN,
     useChatHelpers.setMessages,
   ]);
 
