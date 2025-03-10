@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.28
+
+### Patch Changes
+
+- [`8ade3af`](https://github.com/cloudflare/agents/commit/8ade3af36d1b18636adfeb2491805e1368fba9d7) Thanks [@threepointone](https://github.com/threepointone)! - export Schedule type
+
 ## 0.0.27
 
 ### Patch Changes
