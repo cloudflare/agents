@@ -54,29 +54,27 @@ Example outputs:
 
 export const unstable_scheduleSchema = z.object({
   description: z.string().describe("A description of the task"),
-  when: z.discriminatedUnion("type", [
-    z
-      .object({
-        type: z.literal("scheduled"),
-        date: z.coerce.date(),
-      })
-      .describe("A scheduled task for a given date and time"),
-    z
-      .object({
-        type: z.literal("delayed"),
-        delayInSeconds: z.number(),
-      })
-      .describe("A delayed task in seconds"),
-    z
-      .object({
-        type: z.literal("cron"),
-        cron: z.string(),
-      })
-      .describe("A cron pattern"),
-    z
-      .object({
-        type: z.literal("no-schedule"),
-      })
-      .describe("No timing information, just a description of the task"),
-  ]),
+  when: z.object({
+    type: z
+      .enum(["scheduled", "delayed", "cron", "no-schedule"])
+      .describe("The type of scheduling details"),
+    date: z.coerce
+      .date()
+      .optional()
+      .describe(
+        "execute task at the specified date and time (only use if the type is scheduled)"
+      ),
+    delayInSeconds: z
+      .number()
+      .optional()
+      .describe(
+        "execute task after a delay in seconds (only use if the type is delayed)"
+      ),
+    cron: z
+      .string()
+      .optional()
+      .describe(
+        "execute task on a recurring interval specified as cron syntax (only use if the type is cron)"
+      ),
+  }),
 });
