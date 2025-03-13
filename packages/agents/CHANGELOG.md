@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.34
+
+### Patch Changes
+
+- [`39197ab`](https://github.com/cloudflare/agents/commit/39197ab65a08784b4d5851d5844cb5287c43040e) Thanks [@threepointone](https://github.com/threepointone)! - remove `cf_agent_chat_init` message
+
 ## 0.0.33
 
 ### Patch Changes
