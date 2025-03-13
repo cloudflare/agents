@@ -40,22 +40,34 @@ export function useAgentChat(options: UseAgentChatOptions) {
     .replace("ws://", "http://")
     .replace("wss://", "https://")}`;
 
-  const defaultGetInitialMessages = ({ url }: GetInitialMessagesOptions) => {
+  async function defaultGetInitialMessagesFetch({
+    url,
+  }: GetInitialMessagesOptions) {
+    const response = await fetch(new Request(`${url}/get-messages`), {
+      headers: options.headers,
+      credentials: options.credentials,
+    });
+    return response.json<Message[]>();
+  }
+
+  const getInitialMessagesFetch =
+    getInitialMessages || defaultGetInitialMessagesFetch;
+
+  async function doGetInitialMessages(
+    getInitialMessagesOptions: GetInitialMessagesOptions
+  ) {
     if (requestCache.has(url)) {
       return requestCache.get(url)!;
     }
-    const promise = fetch(new Request(`${url}/get-messages`), {
-      headers: options.headers,
-      credentials: options.credentials,
-    }).then((res) => res.json<Message[]>());
+    const promise = getInitialMessagesFetch(getInitialMessagesOptions);
     requestCache.set(url, promise);
     return promise;
-  };
+  }
 
   const initialMessages =
     getInitialMessages !== null
       ? use(
-          (getInitialMessages || defaultGetInitialMessages)({
+          doGetInitialMessages({
             agent: agent.agent,
             name: agent.name,
             url,
