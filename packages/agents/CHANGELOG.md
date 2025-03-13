@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.30
+
+### Patch Changes
+
+- [`db70ceb`](https://github.com/cloudflare/agents/commit/db70ceb22e8d27717ca13cbdcf9d6364a792d1ab) Thanks [@threepointone](https://github.com/threepointone)! - fix async/await error for useAgentChat
+
 ## 0.0.29
 
 ### Patch Changes
