@@ -31,6 +31,10 @@
         "name": "Chat",
         "class_name": "Chat",
       },
+      {
+        "name": "Rpc",
+        "class_name": "Rpc",
+      },
     ],
   },
 
@@ -43,6 +47,7 @@
         "EmailAgent",
         "MockEmailService",
         "Chat",
+        "Rpc",
       ],
     },
   ],

@@ -16,6 +16,108 @@ export type { Connection, WSMessage, ConnectionContext } from "partyserver";
 import { WorkflowEntrypoint as CFWorkflowEntrypoint } from "cloudflare:workers";
 
 /**
+ * RPC request message from client
+ */
+export type RPCRequest = {
+  type: "rpc";
+  id: string;
+  method: string;
+  args: unknown[];
+};
+
+/**
+ * State update message from client
+ */
+export type StateUpdateMessage = {
+  type: "cf_agent_state";
+  state: unknown;
+};
+
+/**
+ * RPC response message to client
+ */
+export type RPCResponse = {
+  type: "rpc";
+  id: string;
+} & (
+  | {
+      success: true;
+      result: unknown;
+      done?: false;
+    }
+  | {
+      success: true;
+      result: unknown;
+      done: true;
+    }
+  | {
+      success: false;
+      error: string;
+    }
+);
+
+/**
+ * Type guard for RPC request messages
+ */
+function isRPCRequest(msg: unknown): msg is RPCRequest {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    msg.type === "rpc" &&
+    "id" in msg &&
+    typeof msg.id === "string" &&
+    "method" in msg &&
+    typeof msg.method === "string" &&
+    "args" in msg &&
+    Array.isArray((msg as RPCRequest).args)
+  );
+}
+
+/**
+ * Type guard for state update messages
+ */
+function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in msg &&
+    msg.type === "cf_agent_state" &&
+    "state" in msg
+  );
+}
+
+/**
+ * Metadata for a callable method
+ */
+export type CallableMetadata = {
+  /** Optional description of what the method does */
+  description?: string;
+  /** Whether the method supports streaming responses */
+  streaming?: boolean;
+};
+
+// biome-ignore lint/complexity/noBannedTypes: <explanation>
+const callableMetadata = new Map<Function, CallableMetadata>();
+
+/**
+ * Decorator that marks a method as callable by clients
+ * @param metadata Optional metadata about the callable method
+ */
+export function unstable_callable(metadata: CallableMetadata = {}) {
+  return function callableDecorator<This, Args extends unknown[], Return>(
+    target: (this: This, ...args: Args) => Return,
+    context: ClassMethodDecoratorContext
+  ) {
+    if (!callableMetadata.has(target)) {
+      callableMetadata.set(target, metadata);
+    }
+
+    return target;
+  };
+}
+
+/**
  * A class for creating workflow entry points that can be used with Cloudflare Workers
  */
 export class WorkflowEntrypoint extends CFWorkflowEntrypoint {}
@@ -192,14 +294,73 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     });
 
     const _onMessage = this.onMessage.bind(this);
-    this.onMessage = (connection: Connection, message: WSMessage) => {
-      if (typeof message === "string") {
-        const parsed = JSON.parse(message);
-        if (parsed.type === "cf_agent_state") {
-          this.#setStateInternal(parsed.state, connection);
-          return;
-        }
+    this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (typeof message !== "string") {
+        _onMessage(connection, message);
+        return;
       }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(message);
+      } catch (e) {
+        console.error("Failed to parse message:", e);
+        return;
+      }
+
+      if (isStateUpdateMessage(parsed)) {
+        this.#setStateInternal(parsed.state as State, connection);
+        return;
+      }
+
+      if (isRPCRequest(parsed)) {
+        try {
+          const { id, method, args } = parsed;
+
+          // Check if method exists and is callable
+          const methodFn = this[method as keyof this];
+          if (typeof methodFn !== "function") {
+            throw new Error(`Method ${method} does not exist`);
+          }
+
+          if (!this.isCallable(method)) {
+            throw new Error(`Method ${method} is not callable`);
+          }
+
+          // biome-ignore lint/complexity/noBannedTypes: <explanation>
+          const metadata = callableMetadata.get(methodFn as Function);
+
+          // For streaming methods, pass a StreamingResponse object
+          if (metadata?.streaming) {
+            const stream = new StreamingResponse(connection, id);
+            await methodFn.apply(this, [stream, ...args]);
+            return;
+          }
+
+          // For regular methods, execute and send response
+          const result = await methodFn.apply(this, args);
+          const response: RPCResponse = {
+            type: "rpc",
+            id,
+            success: true,
+            result,
+            done: true,
+          };
+          connection.send(JSON.stringify(response));
+        } catch (e) {
+          // Send error response
+          const response: RPCResponse = {
+            type: "rpc",
+            id: parsed.id,
+            success: false,
+            error: e instanceof Error ? e.message : "Unknown error occurred",
+          };
+          connection.send(JSON.stringify(response));
+          console.error("RPC error:", e);
+        }
+        return;
+      }
+
       _onMessage(connection, message);
     };
 
@@ -518,6 +679,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
+
+  /**
+   * Get all methods marked as callable on this Agent
+   * @returns A map of method names to their metadata
+   */
+  private isCallable(method: string): boolean {
+    // biome-ignore lint/complexity/noBannedTypes: <explanation>
+    return callableMetadata.has(this[method as keyof this] as Function);
+  }
 }
 
 /**
@@ -585,4 +755,55 @@ export function getAgentByName<Env, T extends Agent<Env>>(
   }
 ) {
   return getServerByName<Env, T>(namespace, name, options);
+}
+
+/**
+ * A wrapper for streaming responses in callable methods
+ */
+export class StreamingResponse {
+  #connection: Connection;
+  #id: string;
+  #closed = false;
+
+  constructor(connection: Connection, id: string) {
+    this.#connection = connection;
+    this.#id = id;
+  }
+
+  /**
+   * Send a chunk of data to the client
+   * @param chunk The data to send
+   */
+  send(chunk: unknown) {
+    if (this.#closed) {
+      throw new Error("StreamingResponse is already closed");
+    }
+    const response: RPCResponse = {
+      type: "rpc",
+      id: this.#id,
+      success: true,
+      result: chunk,
+      done: false,
+    };
+    this.#connection.send(JSON.stringify(response));
+  }
+
+  /**
+   * End the stream and send the final chunk (if any)
+   * @param finalChunk Optional final chunk of data to send
+   */
+  end(finalChunk?: unknown) {
+    if (this.#closed) {
+      throw new Error("StreamingResponse is already closed");
+    }
+    this.#closed = true;
+    const response: RPCResponse = {
+      type: "rpc",
+      id: this.#id,
+      success: true,
+      result: finalChunk,
+      done: true,
+    };
+    this.#connection.send(JSON.stringify(response));
+  }
 }
