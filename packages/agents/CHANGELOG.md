@@ -1,5 +1,15 @@
 # @cloudflare/agents
 
+## 0.0.29
+
+### Patch Changes
+
+- [#79](https://github.com/cloudflare/agents/pull/79) [`1dad549`](https://github.com/cloudflare/agents/commit/1dad5492fbf7e07af76da83767b48af56c503763) Thanks [@threepointone](https://github.com/threepointone)! - clear initial message cache on unmount, add getInitialMessages
+
+  This clears the initial messages cache whenever useAgentChat is unmounted. Additionally, it adds a getInitialMessages option to pass your own custom method for setting initial messages. Setting getInitialMessages:null disables any fetch for initial messages, so that the user can populate initialMessages by themselves if they'd like.
+
+  I also added a chat example to the playground.
+
 ## 0.0.28
 
 ### Patch Changes
