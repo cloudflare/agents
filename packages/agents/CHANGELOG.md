@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.31
+
+### Patch Changes
+
+- [`2c077c7`](https://github.com/cloudflare/agents/commit/2c077c7e800d20679afe23a37b6bbbec87ed53ac) Thanks [@threepointone](https://github.com/threepointone)! - warn if agent/name passed to client isn't in lowercase
+
 ## 0.0.30
 
 ### Patch Changes
