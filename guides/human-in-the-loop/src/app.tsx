@@ -1,4 +1,4 @@
-import { type Message, useChat } from "@ai-sdk/react";
+import type { Message } from "@ai-sdk/react";
 import { APPROVAL, getToolsRequiringConfirmation } from "./utils";
 import { tools } from "./tools";
 import "./styles.css";

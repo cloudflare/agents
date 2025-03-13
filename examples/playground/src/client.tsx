@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { Scheduler } from "./components/Scheduler";
 import { Stateful } from "./components/Stateful";
 import Email from "./components/Email";
+import Chat from "./components/Chat";
 
 interface Toast {
   id: string;
@@ -74,6 +75,10 @@ function App() {
         <div className="col-span-1">
           <h2 className="text-xl font-bold mb-4">Email (wip)</h2>
           <Email addToast={addToast} />
+        </div>
+        <div className="col-span-1">
+          <h2 className="text-xl font-bold mb-4">Chat</h2>
+          <Chat />
         </div>
       </div>
     </div>

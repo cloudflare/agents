@@ -36,6 +36,8 @@ export class AgentClient extends PartySocket {
       "AgentClient.fetch is not implemented, use agentFetch instead"
     );
   }
+  agent: string;
+  name: string;
   constructor(opts: AgentClientOptions) {
     super({
       prefix: "agents",
@@ -43,6 +45,8 @@ export class AgentClient extends PartySocket {
       room: opts.name || "default",
       ...opts,
     });
+    this.agent = opts.agent;
+    this.name = opts.name || "default";
   }
 }
 

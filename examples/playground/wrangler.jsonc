@@ -27,6 +27,10 @@
         "name": "MockEmailService",
         "class_name": "MockEmailService",
       },
+      {
+        "name": "Chat",
+        "class_name": "Chat",
+      },
     ],
   },
 
@@ -38,6 +42,7 @@
         "Stateful",
         "EmailAgent",
         "MockEmailService",
+        "Chat",
       ],
     },
   ],

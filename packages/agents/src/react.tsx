@@ -25,7 +25,11 @@ export type UseAgentOptions<State = unknown> = Omit<
  */
 export function useAgent<State = unknown>(
   options: UseAgentOptions<State>
-): PartySocket & { setState: (state: State) => void } {
+): PartySocket & {
+  agent: string;
+  name: string;
+  setState: (state: State) => void;
+} {
   const agent = usePartySocket({
     prefix: "agents",
     party: options.agent,
@@ -41,12 +45,19 @@ export function useAgent<State = unknown>(
       }
       options.onMessage?.(message);
     },
-  }) as PartySocket & { setState: (state: State) => void };
+  }) as PartySocket & {
+    agent: string;
+    name: string;
+    setState: (state: State) => void;
+  };
 
   agent.setState = (state: State) => {
     agent.send(JSON.stringify({ type: "cf_agent_state", state }));
     options.onStateUpdate?.(state, "client");
   };
+
+  agent.agent = options.agent;
+  agent.name = options.name || "default";
 
   return agent;
 }

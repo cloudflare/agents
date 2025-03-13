@@ -4,6 +4,7 @@ import { Scheduler } from "./agents/scheduler";
 import { Stateful } from "./agents/stateful";
 import { EmailAgent } from "./agents/email";
 import { MockEmailService } from "./agents/mock-email";
+import { Chat } from "./agents/chat";
 // import { emailHandler } from "./agents/email";
 
 export type Env = {
@@ -14,7 +15,7 @@ export type Env = {
   OPENAI_API_KEY: string;
 };
 
-export { Scheduler, Stateful, EmailAgent, MockEmailService };
+export { Scheduler, Stateful, EmailAgent, MockEmailService, Chat };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {

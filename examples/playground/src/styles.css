@@ -537,3 +537,126 @@ body {
   background-color: #e0e0e0;
   color: #333;
 }
+
+/* Chat Component Styles */
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 80vh;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+  background-color: var(--background-color);
+  border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.messages-wrapper {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.message {
+  margin-bottom: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--message-background);
+  color: var(--text-color);
+}
+
+.message-content {
+  margin-top: 8px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.chat-input {
+  width: 100%;
+  padding: 12px;
+  border: 2px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 16px;
+  background-color: var(--input-background);
+  color: var(--text-color);
+  transition: border-color 0.2s ease;
+  box-sizing: border-box;
+}
+
+.chat-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.controls-container {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 12px;
+}
+
+.theme-switch {
+  position: relative;
+  width: 60px;
+  height: 30px;
+  border-radius: 15px;
+  border: none;
+  background-color: var(--switch-background);
+  cursor: pointer;
+  padding: 0;
+}
+
+.theme-switch-handle {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: white;
+  transition: transform 0.2s ease;
+}
+
+[data-theme="dark"] .theme-switch-handle {
+  transform: translateX(30px);
+}
+
+.clear-history {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background-color: var(--button-background);
+  color: var(--text-color);
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.clear-history:hover {
+  background-color: var(--button-hover-background);
+}
+
+/* Theme Variables */
+:root[data-theme="light"] {
+  --background-color: #ffffff;
+  --text-color: #333333;
+  --message-background: #f5f5f5;
+  --input-background: #ffffff;
+  --border-color: #e0e0e0;
+  --accent-color: #007bff;
+  --switch-background: #007bff;
+  --button-background: #f0f0f0;
+  --button-hover-background: #e0e0e0;
+}
+
+:root[data-theme="dark"] {
+  --background-color: #1a1a1a;
+  --text-color: #ffffff;
+  --message-background: #2d2d2d;
+  --input-background: #2d2d2d;
+  --border-color: #404040;
+  --accent-color: #3b82f6;
+  --switch-background: #3b82f6;
+  --button-background: #2d2d2d;
+  --button-hover-background: #404040;
+}

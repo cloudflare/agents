@@ -4,6 +4,12 @@ import type { useAgent } from "./react";
 import { useEffect, use } from "react";
 import type { OutgoingMessage } from "./ai-types";
 
+type GetInitialMessagesOptions = {
+  agent: string;
+  name: string;
+  url: string;
+};
+
 /**
  * Options for the useAgentChat hook
  */
@@ -11,12 +17,17 @@ type UseAgentChatOptions = Omit<
   Parameters<typeof useChat>[0] & {
     /** Agent connection from useAgent */
     agent: ReturnType<typeof useAgent>;
+    getInitialMessages?:
+      | undefined
+      | null
+      // | (() => Message[])
+      | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
   },
   "fetch"
 >;
 
 // TODO: clear cache when the agent is unmounted?
-const requestCache = new Map<string, Promise<unknown>>();
+const requestCache = new Map<string, Promise<Message[]>>();
 
 /**
  * React hook for building AI chat interfaces using an Agent
@@ -24,24 +35,33 @@ const requestCache = new Map<string, Promise<unknown>>();
  * @returns Chat interface controls and state with added clearHistory method
  */
 export function useAgentChat(options: UseAgentChatOptions) {
-  const { agent, ...rest } = options;
+  const { agent, getInitialMessages, ...rest } = options;
   const url = `${agent._pkurl
     .replace("ws://", "http://")
-    .replace("wss://", "https://")}/get-messages`;
+    .replace("wss://", "https://")}`;
 
-  const initialMessages = use(
-    (() => {
-      if (requestCache.has(url)) {
-        return requestCache.get(url)!;
-      }
-      const promise = fetch(new Request(url), {
-        headers: options.headers,
-        credentials: options.credentials,
-      }).then((res) => res.json());
-      requestCache.set(url, promise);
-      return promise;
-    })()
-  ) as Message[];
+  const defaultGetInitialMessages = ({ url }: GetInitialMessagesOptions) => {
+    if (requestCache.has(url)) {
+      return requestCache.get(url)!;
+    }
+    const promise = fetch(new Request(`${url}/get-messages`), {
+      headers: options.headers,
+      credentials: options.credentials,
+    }).then((res) => res.json<Message[]>());
+    requestCache.set(url, promise);
+    return promise;
+  };
+
+  const initialMessages =
+    getInitialMessages !== null
+      ? use(
+          (getInitialMessages || defaultGetInitialMessages)({
+            agent: agent.agent,
+            name: agent.name,
+            url,
+          })
+        )
+      : rest.initialMessages;
 
   async function aiFetch(
     request: RequestInfo | URL,
