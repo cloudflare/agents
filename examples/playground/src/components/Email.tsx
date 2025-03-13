@@ -1,5 +1,4 @@
 import { useAgentChat } from "agents-sdk/ai-react";
-import { agentFetch } from "agents-sdk/client";
 import { useAgent } from "agents-sdk/react";
 import { useState, useEffect } from "react";
 import type { Email as PostalEmail } from "postal-mime";

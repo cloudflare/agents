@@ -1,6 +1,4 @@
 import type { Message } from "@ai-sdk/react";
-// import { APPROVAL, getToolsRequiringConfirmation } from "./utils";
-// import { tools } from "./tools";
 import "./Chat.css";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useAgent } from "agents-sdk/react";
