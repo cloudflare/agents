@@ -63,6 +63,12 @@ export function useAgentChat(options: UseAgentChatOptions) {
         )
       : rest.initialMessages;
 
+  useEffect(() => {
+    return () => {
+      requestCache.delete(url);
+    };
+  }, [url]);
+
   async function aiFetch(
     request: RequestInfo | URL,
     options: RequestInit = {}

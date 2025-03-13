@@ -1,37 +1,36 @@
 import type { Message } from "@ai-sdk/react";
 // import { APPROVAL, getToolsRequiringConfirmation } from "./utils";
 // import { tools } from "./tools";
-// import "./styles.css";
-import { useEffect, useState, useRef, useCallback } from "react";
+import "./Chat.css";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { useAgent } from "agents-sdk/react";
 import { useAgentChat } from "agents-sdk/ai-react";
 
-export default function Chat() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+const ROOMS = [
+  { id: "1", label: "Room 1" },
+  { id: "2", label: "Room 2" },
+  { id: "3", label: "Room 3" },
+];
+
+interface ChatProps {
+  roomId: string;
+}
+
+function ChatRoom({ roomId }: ChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
 
-  useEffect(() => {
-    // Set initial theme
-    document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
-
   // Scroll to bottom on mount
   useEffect(() => {
     scrollToBottom();
   }, [scrollToBottom]);
 
-  const toggleTheme = () => {
-    const newTheme = theme === "dark" ? "light" : "dark";
-    setTheme(newTheme);
-    document.documentElement.setAttribute("data-theme", newTheme);
-  };
-
   const agent = useAgent({
     agent: "chat",
+    name: `chat-${roomId}`,
   });
 
   const { messages, input, handleInputChange, handleSubmit, clearHistory } =
@@ -48,15 +47,6 @@ export default function Chat() {
   return (
     <>
       <div className="controls-container">
-        <button
-          type="button"
-          onClick={toggleTheme}
-          className="theme-switch"
-          data-theme={theme}
-          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-        >
-          <div className="theme-switch-handle" />
-        </button>
         <button type="button" onClick={clearHistory} className="clear-history">
           🗑️ Clear History
         </button>
@@ -90,11 +80,33 @@ export default function Chat() {
           <input
             className="chat-input"
             value={input}
-            placeholder="Say something..."
+            placeholder={`Say something in Room ${roomId}...`}
             onChange={handleInputChange}
           />
         </form>
       </div>
     </>
+  );
+}
+
+export default function Chat() {
+  const [activeRoom, setActiveRoom] = useState(ROOMS[0].id);
+
+  return (
+    <div className="chat-wrapper">
+      <div className="tab-bar">
+        {ROOMS.map((room) => (
+          <button
+            key={room.id}
+            type="button"
+            className={`tab ${activeRoom === room.id ? "active" : ""}`}
+            onClick={() => setActiveRoom(room.id)}
+          >
+            {room.label}
+          </button>
+        ))}
+      </div>
+      <ChatRoom roomId={activeRoom} key={activeRoom} />
+    </div>
   );
 }

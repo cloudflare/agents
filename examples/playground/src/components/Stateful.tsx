@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAgent } from "agents-sdk/react";
+import "./State.css";
 
 interface StateProps {
   addToast: (message: string, type?: "success" | "error" | "info") => void;
