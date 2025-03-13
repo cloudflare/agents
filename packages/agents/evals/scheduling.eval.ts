@@ -10,9 +10,11 @@ import {
   type Schedule,
 } from "../src/schedule";
 
-const model = openai("gpt-4o");
-// const model = google("gemini-2.0-pro-exp-02-05");
-// const model = anthropic("claude-3-5-sonnet-20240620"); // also disable mode: "json"
+//const model = openai("gpt-4o");
+//const model = google("gemini-2.0-pro-exp-02-05");
+//const model = google("gemini-2.0-flash");
+const model = google("gemini-1.5-pro");
+//const model = anthropic("claude-3-5-sonnet-20240620"); // also disable mode: "json"
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -39,7 +41,7 @@ const getsDetail = createScorer<string, Schedule>({
           output.when.type === "scheduled",
           "Output is not a scheduled task"
         );
-        return output.when.date.getTime() === expected.when.date.getTime()
+        return output.when?.date?.getTime() === expected.when?.date?.getTime()
           ? 1
           : 0;
       }
