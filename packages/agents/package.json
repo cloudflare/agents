@@ -1,6 +1,6 @@
 {
   "name": "agents-sdk",
-  "version": "0.0.32",
+  "version": "0.0.33",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {

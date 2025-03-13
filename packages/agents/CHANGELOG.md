@@ -1,5 +1,19 @@
 # @cloudflare/agents
 
+## 0.0.33
+
+### Patch Changes
+
+- [#85](https://github.com/cloudflare/agents/pull/85) [`acbc34e`](https://github.com/cloudflare/agents/commit/acbc34e0122835fbeae3a18b88932cc1b0a1802d) Thanks [@threepointone](https://github.com/threepointone)! - Add RPC support with `unstable_callable` decorator for method exposure. This feature enables:
+
+  - Remote procedure calls from clients to agents
+  - Method decoration with `@unstable_callable` to expose agent methods
+  - Support for both regular and streaming RPC calls
+  - Type-safe RPC calls with automatic response handling
+  - Real-time streaming responses for long-running operations
+
+  Note: The `callable` decorator has been renamed to `unstable_callable` to indicate its experimental status.
+
 ## 0.0.32
 
 ### Patch Changes
