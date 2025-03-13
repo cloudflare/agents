@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.32
+
+### Patch Changes
+
+- [#83](https://github.com/cloudflare/agents/pull/83) [`a9248c7`](https://github.com/cloudflare/agents/commit/a9248c74c3b7af2a0085d15f02712c243e870cc3) Thanks [@threepointone](https://github.com/threepointone)! - add state sync to the regular agent client
+
+  fixes https://github.com/cloudflare/agents/issues/9
+
 ## 0.0.31
 
 ### Patch Changes
