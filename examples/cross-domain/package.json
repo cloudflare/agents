@@ -9,6 +9,5 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
-  "dependencies": {}
+  "description": "A simple demo showing WebSocket and HTTP communication between a React client and Cloudflare Worker server, when running on different domains."
 }

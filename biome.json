@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": ["node_modules", "dist"]
+    "ignore": ["node_modules", "dist", ".wrangler"]
   },
   "formatter": {
     "enabled": false,
