@@ -114,7 +114,14 @@ export function useAgentChat(options: UseAgentChatOptions) {
     agent.addEventListener(
       "message",
       (event) => {
-        const data = JSON.parse(event.data) as OutgoingMessage;
+        let data: OutgoingMessage;
+        try {
+          data = JSON.parse(event.data) as OutgoingMessage;
+        } catch (error) {
+          // silently ignore invalid messages for now
+          // TODO: log errors with log levels
+          return;
+        }
         if (data.type === "cf_agent_use_chat_response") {
           if (data.id === id) {
             controller.enqueue(new TextEncoder().encode(data.body));
@@ -173,7 +180,14 @@ export function useAgentChat(options: UseAgentChatOptions) {
       if (typeof event.data !== "string") {
         return;
       }
-      const data = JSON.parse(event.data) as OutgoingMessage;
+      let data: OutgoingMessage;
+      try {
+        data = JSON.parse(event.data) as OutgoingMessage;
+      } catch (error) {
+        // silently ignore invalid messages for now
+        // TODO: log errors with log levels
+        return;
+      }
       if (data.type === "cf_agent_chat_clear") {
         useChatHelpers.setMessages([]);
       }
@@ -183,7 +197,14 @@ export function useAgentChat(options: UseAgentChatOptions) {
       if (typeof event.data !== "string") {
         return;
       }
-      const data = JSON.parse(event.data) as OutgoingMessage;
+      let data: OutgoingMessage;
+      try {
+        data = JSON.parse(event.data) as OutgoingMessage;
+      } catch (error) {
+        // silently ignore invalid messages for now
+        // TODO: log errors with log levels
+        return;
+      }
       if (data.type === "cf_agent_chat_messages") {
         useChatHelpers.setMessages(data.messages);
       }

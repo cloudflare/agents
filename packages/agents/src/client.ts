@@ -95,9 +95,16 @@ export class AgentClient<State = unknown> extends PartySocket {
 
     this.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
-        const parsedMessage = JSON.parse(event.data);
+        let parsedMessage: Record<string, unknown>;
+        try {
+          parsedMessage = JSON.parse(event.data);
+        } catch (error) {
+          // silently ignore invalid messages for now
+          // TODO: log errors with log levels
+          return;
+        }
         if (parsedMessage.type === "cf_agent_state") {
-          this.#options.onStateUpdate?.(parsedMessage.state, "server");
+          this.#options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
         if (parsedMessage.type === "rpc") {

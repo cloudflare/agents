@@ -50,7 +50,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   override async onMessage(connection: Connection, message: WSMessage) {
     if (typeof message === "string") {
-      const data = JSON.parse(message) as IncomingMessage;
+      let data: IncomingMessage;
+      try {
+        data = JSON.parse(message) as IncomingMessage;
+      } catch (error) {
+        // silently ignore invalid messages for now
+        // TODO: log errors with log levels
+        return;
+      }
       if (
         data.type === "cf_agent_use_chat_request" &&
         data.init.method === "POST"

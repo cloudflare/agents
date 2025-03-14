@@ -296,16 +296,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       if (typeof message !== "string") {
-        _onMessage(connection, message);
-        return;
+        return _onMessage(connection, message);
       }
 
       let parsed: unknown;
       try {
         parsed = JSON.parse(message);
       } catch (e) {
-        console.error("Failed to parse message:", e);
-        return;
+        // silently fail and let the onMessage handler handle it
+        return _onMessage(connection, message);
       }
 
       if (isStateUpdateMessage(parsed)) {
@@ -361,7 +360,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         return;
       }
 
-      _onMessage(connection, message);
+      return _onMessage(connection, message);
     };
 
     const _onConnect = this.onConnect.bind(this);
@@ -705,7 +704,12 @@ export type AgentContext = DurableObjectState;
 /**
  * Configuration options for Agent routing
  */
-export type AgentOptions<Env> = PartyServerOptions<Env>;
+export type AgentOptions<Env> = PartyServerOptions<Env> & {
+  /**
+   * Whether to enable CORS for the Agent
+   */
+  cors?: boolean | HeadersInit | undefined;
+};
 
 /**
  * Route a request to the appropriate Agent
@@ -714,15 +718,53 @@ export type AgentOptions<Env> = PartyServerOptions<Env>;
  * @param options Routing options
  * @returns Response from the Agent or undefined if no route matched
  */
-export function routeAgentRequest<Env>(
+export async function routeAgentRequest<Env>(
   request: Request,
   env: Env,
   options?: AgentOptions<Env>
 ) {
-  return routePartykitRequest(request, env as Record<string, unknown>, {
-    prefix: "agents",
-    ...(options as PartyServerOptions<Record<string, unknown>>),
-  });
+  const corsHeaders =
+    options?.cors === true
+      ? {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Credentials": "true",
+          "Access-Control-Max-Age": "86400",
+        }
+      : options?.cors;
+  let response = await routePartykitRequest(
+    request,
+    env as Record<string, unknown>,
+    {
+      prefix: "agents",
+      ...(options as PartyServerOptions<Record<string, unknown>>),
+    }
+  );
+
+  if (request.method === "OPTIONS") {
+    if (corsHeaders) {
+      return new Response(null, {
+        headers: corsHeaders,
+      });
+    }
+    console.warn(
+      "Recieved an OPTIONS request, but cors was not enabled. Pass `cors: true` or `cors: { ...custom cors headers }` to routeAgentRequest to enable CORS."
+    );
+  }
+
+  if (
+    response &&
+    corsHeaders &&
+    request.headers.get("upgrade") !== "websocket"
+  ) {
+    response = new Response(response.body, {
+      headers: {
+        ...response.headers,
+        ...corsHeaders,
+      },
+    });
+  }
+  return response;
 }
 
 /**

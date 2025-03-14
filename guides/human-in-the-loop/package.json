@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "vite dev",
-    "deploy": "rm -rf dist && vite build && wrangler deploy"
+    "deploy": "vite build && wrangler deploy"
   },
   "keywords": [],
   "author": "",

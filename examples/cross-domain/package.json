@@ -1,0 +1,14 @@
+{
+  "name": "@cloudflare/agents-cross-domain",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "concurrently \"vite dev\" \"wrangler dev\" --kill-others"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {}
+}

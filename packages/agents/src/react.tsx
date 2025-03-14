@@ -85,9 +85,16 @@ export function useAgent<State = unknown>(
     ...options,
     onMessage: (message) => {
       if (typeof message.data === "string") {
-        const parsedMessage = JSON.parse(message.data);
+        let parsedMessage: Record<string, unknown>;
+        try {
+          parsedMessage = JSON.parse(message.data);
+        } catch (error) {
+          // silently ignore invalid messages for now
+          // TODO: log errors with log levels
+          return;
+        }
         if (parsedMessage.type === "cf_agent_state") {
-          options.onStateUpdate?.(parsedMessage.state, "server");
+          options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
         if (parsedMessage.type === "rpc") {

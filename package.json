@@ -34,6 +34,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "ai": "^4.1.59",
     "autoevals": "^0.0.123",
+    "concurrently": "^9.1.2",
     "evalite": "^0.9.1",
     "fast-glob": "^3.3.3",
     "partyserver": "^0.0.65",
