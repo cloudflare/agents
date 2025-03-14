@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.35
+
+### Patch Changes
+
+- [#88](https://github.com/cloudflare/agents/pull/88) [`7532166`](https://github.com/cloudflare/agents/commit/7532166ecfc2bcf4f169907d0dd9c399336212ac) Thanks [@threepointone](https://github.com/threepointone)! - pass `cors:true` to `routeAgentRequest` to automatically use across domains
+
 ## 0.0.34
 
 ### Patch Changes
