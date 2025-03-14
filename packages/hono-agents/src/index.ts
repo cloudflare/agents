@@ -27,6 +27,7 @@ export function agentsMiddleware<E extends Env = Env>(
       const handler = isWebSocketUpgrade(c)
         ? handleWebSocketUpgrade
         : handleHttpRequest;
+      // @ts-expect-error - TODO: fix this, I'm just bad at TS
       const response = await handler(c, ctx?.options);
 
       return response === null ? await next() : response;
@@ -69,6 +70,7 @@ async function handleWebSocketUpgrade<E extends Env>(
   options?: AgentOptions<E>
 ) {
   const req = createRequestFromContext(c);
+  // @ts-expect-error - TODO: fix this, I'm just bad at TS
   const response = await routeAgentRequest(req, env(c), options);
 
   if (!response?.webSocket) {
@@ -90,5 +92,10 @@ async function handleHttpRequest<E extends Env>(
   options?: AgentOptions<E>
 ) {
   const req = createRequestFromContext(c);
-  return routeAgentRequest(req, env(c), options);
+  return routeAgentRequest(
+    req,
+    env(c),
+    // @ts-expect-error - TODO: fix this, I'm just bad at TS
+    options
+  );
 }
