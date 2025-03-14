@@ -727,19 +727,11 @@ export async function routeAgentRequest<Env>(
     options?.cors === true
       ? {
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
           "Access-Control-Allow-Credentials": "true",
           "Access-Control-Max-Age": "86400",
         }
       : options?.cors;
-  let response = await routePartykitRequest(
-    request,
-    env as Record<string, unknown>,
-    {
-      prefix: "agents",
-      ...(options as PartyServerOptions<Record<string, unknown>>),
-    }
-  );
 
   if (request.method === "OPTIONS") {
     if (corsHeaders) {
@@ -748,9 +740,18 @@ export async function routeAgentRequest<Env>(
       });
     }
     console.warn(
-      "Recieved an OPTIONS request, but cors was not enabled. Pass `cors: true` or `cors: { ...custom cors headers }` to routeAgentRequest to enable CORS."
+      "Received an OPTIONS request, but cors was not enabled. Pass `cors: true` or `cors: { ...custom cors headers }` to routeAgentRequest to enable CORS."
     );
   }
+
+  let response = await routePartykitRequest(
+    request,
+    env as Record<string, unknown>,
+    {
+      prefix: "agents",
+      ...(options as PartyServerOptions<Record<string, unknown>>),
+    }
+  );
 
   if (
     response &&

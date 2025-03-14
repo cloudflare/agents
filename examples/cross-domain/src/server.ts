@@ -11,14 +11,40 @@ type Env = {
 
 export class MyAgent extends Agent<Env> {
   onConnect(connection: Connection) {
-    console.log("connected to client:", connection.id);
-    connection.send("message from server");
+    console.log("Client connected:", connection.id);
+    connection.send(`Welcome! You are connected with ID: ${connection.id}`);
   }
+
+  onClose(connection: Connection) {
+    console.log("Client disconnected:", connection.id);
+  }
+
   onMessage(connection: Connection, message: string) {
-    console.log("message from client", message);
+    console.log(`Message from client ${connection.id}:`, message);
+
+    // Echo the message back with a timestamp
+    const response = `Server received "${message}" at ${new Date().toLocaleTimeString()}`;
+    connection.send(response);
+    console.log("response sent to client:", response);
+
+    // Broadcast to other clients
+    for (const conn of this.getConnections()) {
+      if (conn.id !== connection.id) {
+        conn.send(`Client ${connection.id} says: ${message}`);
+      }
+    }
   }
+
   onRequest(request: Request): Response | Promise<Response> {
-    return new Response("response from server");
+    const timestamp = new Date().toLocaleTimeString();
+    return new Response(
+      `Server time: ${timestamp} - Your request has been processed!`,
+      {
+        headers: {
+          "Content-Type": "text/plain",
+        },
+      }
+    );
   }
 }
 

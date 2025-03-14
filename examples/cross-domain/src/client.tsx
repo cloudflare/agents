@@ -1,66 +1,108 @@
 import { useAgent } from "agents-sdk/react";
 import { createRoot } from "react-dom/client";
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { agentFetch } from "agents-sdk/client";
 import "./styles.css";
+
+interface Message {
+  id: string;
+  text: string;
+  timestamp: Date;
+  type: "incoming" | "outgoing";
+}
+
 function App() {
-  const [incomingMessages, setIncomingMessages] = useState<string[]>([]);
-  const [outgoingMessages, setOutgoingMessages] = useState<string[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isConnected, setIsConnected] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+
   const agent = useAgent({
     agent: "my-agent",
     host: "http://localhost:8787",
     onMessage: (message) => {
-      setIncomingMessages((prev) => [...prev, message.data as string]);
+      const newMessage: Message = {
+        id: Math.random().toString(36).substring(7),
+        text: message.data as string,
+        timestamp: new Date(),
+        type: "incoming",
+      };
+      setMessages((prev) => [...prev, newMessage]);
     },
+    onOpen: () => setIsConnected(true),
+    onClose: () => setIsConnected(false),
   });
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!inputRef.current || !inputRef.current.value.trim()) return;
+
+    const text = inputRef.current.value;
+    const newMessage: Message = {
+      id: Math.random().toString(36).substring(7),
+      text,
+      timestamp: new Date(),
+      type: "outgoing",
+    };
+
+    agent.send(text);
+    setMessages((prev) => [...prev, newMessage]);
+    inputRef.current.value = "";
+  };
+
+  const handleFetchRequest = async () => {
+    try {
+      const response = await agentFetch({
+        agent: "my-agent",
+        host: "http://localhost:8787",
+      });
+      const data = await response.text();
+      const newMessage: Message = {
+        id: Math.random().toString(36).substring(7),
+        text: `Server Response: ${data}`,
+        timestamp: new Date(),
+        type: "incoming",
+      };
+      setMessages((prev) => [...prev, newMessage]);
+    } catch (error) {
+      console.error("Error fetching from server:", error);
+    }
+  };
+
+  const formatTime = (date: Date) => {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
+
   return (
-    <>
-      <div>
-        <form
-          onSubmit={(e: React.FormEvent<HTMLFormElement>) => {
-            if (!inputRef.current || !inputRef.current.value.trim()) return;
-            e.preventDefault();
-            const message = inputRef.current.value;
-            agent.send(message);
-            setOutgoingMessages((prev) => [...prev, message]);
-            inputRef.current.value = "";
-          }}
-        >
-          <input type="text" ref={inputRef} />
-          <button type="submit">Send</button>
-        </form>
+    <div className="chat-container">
+      <div className="status-indicator">
+        <div className={`status-dot ${isConnected ? "connected" : ""}`} />
+        {isConnected ? "Connected to server" : "Disconnected"}
       </div>
-      <div>
-        <h2>Incoming Messages</h2>
-        {incomingMessages.map((message) => (
-          <div key={message}>{message}</div>
+
+      <form className="message-form" onSubmit={handleSubmit}>
+        <input
+          type="text"
+          ref={inputRef}
+          className="message-input"
+          placeholder="Type your message..."
+        />
+        <button type="submit">Send</button>
+      </form>
+
+      <div className="messages-section">
+        <h2>Messages</h2>
+        {messages.map((message) => (
+          <div key={message.id} className={`message ${message.type}-message`}>
+            <div>{message.text}</div>
+            <div className="timestamp">{formatTime(message.timestamp)}</div>
+          </div>
         ))}
       </div>
-      <div>
-        <h2>Outgoing Messages</h2>
-        {outgoingMessages.map((message) => (
-          <div key={message}>{message}</div>
-        ))}
-      </div>
-      <button
-        type="button"
-        onClick={async () => {
-          try {
-            const response = await agentFetch({
-              agent: "my-agent",
-              host: "http://localhost:8787",
-            });
-            const data = await response.text();
-            console.log("from server:", data);
-          } catch (error) {
-            console.error("error fetching from server:", error);
-          }
-        }}
-      >
-        Send Request
+
+      <button type="button" onClick={handleFetchRequest}>
+        Send HTTP Request
       </button>
-    </>
+    </div>
   );
 }
 

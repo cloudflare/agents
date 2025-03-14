@@ -91,7 +91,7 @@ export function useAgent<State = unknown>(
         } catch (error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
-          return;
+          return options.onMessage?.(message);
         }
         if (parsedMessage.type === "cf_agent_state") {
           options.onStateUpdate?.(parsedMessage.state as State, "server");
