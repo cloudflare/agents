@@ -1,22 +1,11 @@
-- get started
-- add to an existing project
-- routing
-- human in the loop
-- control flow
-- state
-- sync-engine
-- ai-sdk
-- tools
-- other stacks
-- http/ws
-- email
-- a/v
-- scheduling
-- pause/resume
-- memory
-- evals
-- observability
-- connect anything
-- self hosting
-- how is this different from durable objects?
-- resources / read more
+- [getting-started-with-agents-sdk.md](getting-started-with-agents-sdk.md)
+- [core-agent-functionality.md](core-agent-functionality.md)
+- [building-ai-chat-agents.md](building-ai-chat-agents.md)
+- [scheduling-tasks-with-agents.md](scheduling-tasks-with-agents.md)
+- [react-integration-with-agents-sdk.md](react-integration-with-agents-sdk.md)
+- [integrating-agents-sdk-with-hono.md](integrating-agents-sdk-with-hono.md)
+- [examples-and-recipes.md](examples-and-recipes.md)
+- [configuration-and-deployment.md](configuration-and-deployment.md)
+- [api-reference.md](api-reference.md)
+- [troubleshooting-and-faq.md](troubleshooting-and-faq.md)
+- [contributing-to-agents-sdk.md](contributing-to-agents-sdk.md)
