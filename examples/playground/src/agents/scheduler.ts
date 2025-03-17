@@ -73,10 +73,10 @@ Input to parse: "${event.input}"`,
       }
       const schedule = await this.schedule(
         when.type === "scheduled"
-          ? when.date
+          ? when.date!
           : when.type === "delayed"
-            ? when.delayInSeconds
-            : when.cron,
+            ? when.delayInSeconds!
+            : when.cron!,
         "onTask",
         description
       );
