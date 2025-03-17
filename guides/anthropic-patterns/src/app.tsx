@@ -1,7 +1,7 @@
 import "./app.css";
 
 import { useEffect, useState, useMemo, useCallback } from "react";
-import { useAgent } from "agents-sdk/react";
+import { useAgent } from "agents/react";
 
 import sequentialCode from "./flows/01 sequential.txt?raw";
 import routingCode from "./flows/02 routing.txt?raw";

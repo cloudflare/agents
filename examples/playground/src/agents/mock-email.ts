@@ -3,7 +3,7 @@ import {
   type AgentContext,
   type Connection,
   type WSMessage,
-} from "agents-sdk";
+} from "agents";
 import * as MockEmail from "../mock-cloudflare-email";
 import PostalMime from "postal-mime";
 import { createMimeMessage } from "mimetext";

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAgent } from "agents-sdk/react";
+import { useAgent } from "agents/react";
 import type {
   IncomingMessage,
   OutgoingMessage,

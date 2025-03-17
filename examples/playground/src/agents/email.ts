@@ -1,7 +1,7 @@
-import { AIChatAgent } from "agents-sdk/ai-chat-agent";
+import { AIChatAgent } from "agents/ai-chat-agent";
 import type { Env } from "../server";
 import PostalMime from "postal-mime";
-import { getAgentByName } from "agents-sdk";
+import { getAgentByName } from "agents";
 
 import { createMimeMessage } from "mimetext";
 import { streamText, createDataStreamResponse } from "ai";

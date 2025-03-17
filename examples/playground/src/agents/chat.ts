@@ -1,5 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
-import { AIChatAgent } from "agents-sdk/ai-chat-agent";
+import { AIChatAgent } from "agents/ai-chat-agent";
 import type { StreamTextOnFinishCallback } from "ai";
 import { createDataStreamResponse, streamText } from "ai";
 import type { Env } from "../server";

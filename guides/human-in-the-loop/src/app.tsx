@@ -3,8 +3,8 @@ import { APPROVAL, getToolsRequiringConfirmation } from "./utils";
 import { tools } from "./tools";
 import "./styles.css";
 import { useEffect, useState, useRef, useCallback } from "react";
-import { useAgent } from "agents-sdk/react";
-import { useAgentChat } from "agents-sdk/ai-react";
+import { useAgent } from "agents/react";
+import { useAgentChat } from "agents/ai-react";
 
 export default function Chat() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");

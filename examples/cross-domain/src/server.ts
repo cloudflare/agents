@@ -3,7 +3,7 @@ import {
   routeAgentRequest,
   type AgentNamespace,
   type Connection,
-} from "agents-sdk";
+} from "agents";
 
 type Env = {
   MyAgent: AgentNamespace<MyAgent>;

@@ -1,8 +1,8 @@
 import type { Message } from "@ai-sdk/react";
 import "./Chat.css";
 import { useEffect, useRef, useCallback, useState } from "react";
-import { useAgent } from "agents-sdk/react";
-import { useAgentChat } from "agents-sdk/ai-react";
+import { useAgent } from "agents/react";
+import { useAgentChat } from "agents/ai-react";
 
 const ROOMS = [
   { id: "1", label: "Room 1" },

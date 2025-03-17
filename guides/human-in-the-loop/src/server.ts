@@ -7,8 +7,8 @@ import {
 } from "ai";
 import { processToolCalls } from "./utils";
 import { tools } from "./tools";
-import { type Connection, routeAgentRequest } from "agents-sdk";
-import { AIChatAgent } from "agents-sdk/ai-chat-agent";
+import { type Connection, routeAgentRequest } from "agents";
+import { AIChatAgent } from "agents/ai-chat-agent";
 
 type Env = {
   OPENAI_API_KEY: string;

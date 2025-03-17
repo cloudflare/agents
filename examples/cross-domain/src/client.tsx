@@ -1,7 +1,7 @@
-import { useAgent } from "agents-sdk/react";
+import { useAgent } from "agents/react";
 import { createRoot } from "react-dom/client";
 import { useRef, useState, useEffect } from "react";
-import { agentFetch } from "agents-sdk/client";
+import { agentFetch } from "agents/client";
 import "./styles.css";
 
 interface Message {

@@ -164,7 +164,7 @@ You are an advanced assistant specialized in generating Cloudflare Workers code.
 - Use streaming responses from AI SDKs, including the OpenAI SDK, Workers AI bindings, and/or the Anthropic client SDK.
 - Use the appropriate SDK for the AI service you are using, and follow the user's direction on what provider they wish to use.
 - Prefer the `this.setState` API to manage and store state within an Agent, but don't avoid using `this.sql` to interact directly with the Agent's embedded SQLite database if the use-case benefits from it.
-- When building a client interface to an Agent, use the `useAgent` React hook from the `agents-sdk/react` library to connect to the Agent as the preferred approach.
+- When building a client interface to an Agent, use the `useAgent` React hook from the `agents/react` library to connect to the Agent as the preferred approach.
 - When extending the `Agent` class, ensure you provide the `Env` and the optional state as type parameters - for example, `class AIAgent extends Agent<Env, MyState> { ... }`.
 - Include valid Durable Object bindings in the `wrangler.jsonc` configuration for an Agent.
 - You MUST set the value of `migrations[].new_sqlite_classes` to the name of the Agent class in `wrangler.jsonc`.
@@ -927,15 +927,15 @@ export default {
 </key_points>
 </example>
 
-<example id="agents-sdk">
+<example id="agents">
 <code language="typescript">
 <description>
-Build an AI Agent on Cloudflare Workers, using the agents-sdk, and the state management and syncing APIs built into the agents-sdk.
+Build an AI Agent on Cloudflare Workers, using the agents, and the state management and syncing APIs built into the agents sdk.
 </description>
 
 <code language="typescript">
 // src/index.ts
-import { Agent, AgentNamespace, Connection, ConnectionContext, getAgentByName, routeAgentRequest, WSMessage } from 'agents-sdk';
+import { Agent, AgentNamespace, Connection, ConnectionContext, getAgentByName, routeAgentRequest, WSMessage } from 'agents';
 import { OpenAI } from "openai";
 
 interface Env {
@@ -1143,7 +1143,7 @@ export default {
 
 <code>
 // client.js
-import { AgentClient } from "agents-sdk/client";
+import { AgentClient } from "agents/client";
 
 const connection = new AgentClient({
   agent: "dialogue-agent",
@@ -1164,8 +1164,8 @@ connection.send(
 
 <code>
 // app.tsx
-// React client hook for the agents-sdk
-import { useAgent } from "agents-sdk/react";
+// React client hook for the agents sdk
+import { useAgent } from "agents/react";
 import { useState } from "react";
 
 // useAgent client API
@@ -1239,7 +1239,7 @@ function StateInterface() {
 </configuration>
 <key_points>
 
-- Imports the `Agent` class from the `agents-sdk` package
+- Imports the `Agent` class from the `agents` package
 - Extends the `Agent` class and implements the methods exposed by the `Agent`, including `onRequest` for HTTP requests, or `onConnect` and `onMessage` for WebSockets.
 - Uses the `this.schedule` scheduling API to schedule future tasks.
 - Uses the `this.setState` API within the Agent for syncing state, and uses type parameters to ensure the state is typed.

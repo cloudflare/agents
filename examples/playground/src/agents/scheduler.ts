@@ -1,10 +1,10 @@
-import { Agent } from "agents-sdk";
+import { Agent } from "agents";
 import type { Env } from "../server";
-import type { Schedule } from "agents-sdk";
+import type { Schedule } from "agents";
 import {
   unstable_scheduleSchema,
   unstable_getSchedulePrompt,
-} from "agents-sdk/schedule";
+} from "agents/schedule";
 
 import type {
   ScheduledItem,
@@ -12,7 +12,7 @@ import type {
   IncomingMessage,
 } from "../shared";
 
-import type { Connection, ConnectionContext } from "agents-sdk";
+import type { Connection, ConnectionContext } from "agents";
 
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateObject } from "ai";

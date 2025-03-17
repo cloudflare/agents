@@ -48,7 +48,7 @@ This project is actively evolving. Current focus areas:
 npm create cloudflare@latest -- --template cloudflare/agents-starter
 
 # Or add to existing project
-npm install agents-sdk
+npm install agents
 ```
 
 ## Documentation

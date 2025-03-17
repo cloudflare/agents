@@ -1,8 +1,8 @@
-### 🧠 `agents-sdk` - A Framework for Digital Intelligence
+### 🧠 `agents` - A Framework for Digital Intelligence
 
 ![agents-header](https://github.com/user-attachments/assets/f6d99eeb-1803-4495-9c5e-3cf07a37b402)
 
-Welcome to a new chapter in software development, where AI agents persist, think, and act with purpose. The `agents-sdk` framework creates an environment where artificial intelligence can flourish - maintaining state, engaging in meaningful interactions, and evolving over time.
+Welcome to a new chapter in software development, where AI agents persist, think, and act with purpose. The `agents` framework creates an environment where artificial intelligence can flourish - maintaining state, engaging in meaningful interactions, and evolving over time.
 
 _This project is in active development. Join us in shaping the future of intelligent agents._
 
@@ -36,7 +36,7 @@ Start with a complete environment:
 npm create cloudflare@latest -- --template cloudflare/agents-starter
 
 # Or enhance an existing one
-npm install agents-sdk
+npm install agents
 ```
 
 ### 📝 Your First Agent
@@ -44,7 +44,7 @@ npm install agents-sdk
 Create an agent that bridges thought and action:
 
 ```ts
-import { Agent } from "agents-sdk";
+import { Agent } from "agents";
 
 export class IntelligentAgent extends Agent {
   async onRequest(request) {
@@ -59,7 +59,7 @@ export class IntelligentAgent extends Agent {
 Agents can manifest various forms of understanding:
 
 ```ts
-import { Agent } from "agents-sdk";
+import { Agent } from "agents";
 import { OpenAI } from "openai";
 
 export class AIAgent extends Agent {
@@ -171,7 +171,7 @@ export class DialogueAgent extends Agent {
 For direct connection to your agent:
 
 ```ts
-import { AgentClient } from "agents-sdk/client";
+import { AgentClient } from "agents/client";
 
 const connection = new AgentClient({
   agent: "dialogue-agent",
@@ -195,7 +195,7 @@ connection.send(
 For harmonious integration with React:
 
 ```tsx
-import { useAgent } from "agents-sdk/react";
+import { useAgent } from "agents/react";
 
 function AgentInterface() {
   const connection = useAgent({
@@ -252,7 +252,7 @@ Connect to your agent's state from React:
 
 ```tsx
 import { useState } from "react";
-import { useAgent } from "agents-sdk/react";
+import { useAgent } from "agents/react";
 
 function StateInterface() {
   const [state, setState] = useState({ counter: 0 });
@@ -315,7 +315,7 @@ export class TimeAwareAgent extends Agent {
 Create meaningful conversations with intelligence:
 
 ```ts
-import { AIChatAgent } from "agents-sdk/ai-chat-agent";
+import { AIChatAgent } from "agents/ai-chat-agent";
 import { createOpenAI } from "@ai-sdk/openai";
 
 export class DialogueAgent extends AIChatAgent {
@@ -344,8 +344,8 @@ export class DialogueAgent extends AIChatAgent {
 Connect with your agent through a React interface:
 
 ```tsx
-import { useAgent } from "agents-sdk/react";
-import { useAgentChat } from "agents-sdk/ai-react";
+import { useAgent } from "agents/react";
+import { useAgentChat } from "agents/ai-react";
 
 function ChatInterface() {
   // Connect to the agent
@@ -423,7 +423,7 @@ Contributions are welcome, but are especially welcome when:
 
 - You have opened an issue as a Request for Comment (RFC) to discuss your proposal, show your thinking, and iterate together.
 - Is not "AI slop": LLMs are powerful tools, but contributions entirely authored by vibe coding are unlikely to meet the quality bar, and will be rejected.
-- You're willing to accept feedback and make sure the changes fit the goals of the `agents-sdk`. Not everything will, and that's OK.
+- You're willing to accept feedback and make sure the changes fit the goals of the `agents` sdk. Not everything will, and that's OK.
 
 Small fixes, type bugs, and documentation improvements can be raised directly as PRs.
 

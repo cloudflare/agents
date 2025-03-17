@@ -119,7 +119,7 @@ new_sqlite_classes = ["HumanInTheLoop"]
 wrangler deploy
 ```
 
-4. Connect from your frontend using the React hooks provided by `agents-sdk/react`
+4. Connect from your frontend using the React hooks provided by `agents/react`
 
 ### Best Practices
 

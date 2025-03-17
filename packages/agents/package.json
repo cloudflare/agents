@@ -1,5 +1,5 @@
 {
-  "name": "agents-sdk",
+  "name": "agents",
   "version": "0.0.36",
   "main": "src/index.ts",
   "type": "module",
