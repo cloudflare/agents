@@ -256,7 +256,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       return [...this.ctx.storage.sql.exec(query, ...values)] as T[];
     } catch (e) {
       console.error(`failed to execute sql query: ${query}`, e);
-      throw e;
+      throw this.onError(e);
     }
   }
   constructor(ctx: AgentContext, env: Env) {
@@ -270,7 +270,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     `;
 
     void this.ctx.blockConcurrencyWhile(async () => {
-      try {
+      return this.#tryCatch(async () => {
         // Create alarms table if it doesn't exist
         this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_schedules (
@@ -287,16 +287,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
         // execute any pending alarms and schedule the next alarm
         await this.alarm();
-      } catch (e) {
-        console.error(e);
-        throw e;
-      }
+      });
     });
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       if (typeof message !== "string") {
-        return _onMessage(connection, message);
+        return this.#tryCatch(() => _onMessage(connection, message));
       }
 
       let parsed: unknown;
@@ -304,7 +301,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         parsed = JSON.parse(message);
       } catch (e) {
         // silently fail and let the onMessage handler handle it
-        return _onMessage(connection, message);
+        return this.#tryCatch(() => _onMessage(connection, message));
       }
 
       if (isStateUpdateMessage(parsed)) {
@@ -322,7 +319,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             throw new Error(`Method ${method} does not exist`);
           }
 
-          if (!this.isCallable(method)) {
+          if (!this.#isCallable(method)) {
             throw new Error(`Method ${method} is not callable`);
           }
 
@@ -360,7 +357,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         return;
       }
 
-      return _onMessage(connection, message);
+      return this.#tryCatch(() => _onMessage(connection, message));
     };
 
     const _onConnect = this.onConnect.bind(this);
@@ -376,7 +373,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             })
           );
         }
-        _onConnect(connection, ctx);
+        return this.#tryCatch(() => _onConnect(connection, ctx));
       }, 20);
     };
   }
@@ -398,7 +395,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       }),
       source !== "server" ? [source.id] : []
     );
-    this.onStateUpdate(state, source);
+    return this.#tryCatch(() => this.onStateUpdate(state, source));
   }
 
   /**
@@ -424,6 +421,41 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    */
   onEmail(email: ForwardableEmailMessage) {
     throw new Error("Not implemented");
+  }
+
+  async #tryCatch<T>(fn: () => T | Promise<T>) {
+    try {
+      return await fn();
+    } catch (e) {
+      throw this.onError(e);
+    }
+  }
+
+  override onError(
+    connection: Connection,
+    error: unknown
+  ): void | Promise<void>;
+  override onError(error: unknown): void | Promise<void>;
+  override onError(connectionOrError: Connection | unknown, error?: unknown) {
+    let theError: unknown;
+    if (connectionOrError && error) {
+      theError = error;
+      // this is a websocket connection error
+      console.error(
+        "Error on websocket connection:",
+        (connectionOrError as Connection).id,
+        theError
+      );
+      console.error(
+        "Override onError(connection, error) to handle websocket connection errors"
+      );
+    } else {
+      theError = connectionOrError;
+      // this is a server error
+      console.error("Error on server:", theError);
+      console.error("Override onError(error) to handle server errors");
+    }
+    throw theError;
   }
 
   /**
@@ -465,7 +497,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'scheduled', ${timestamp})
       `;
 
-      await this.scheduleNextAlarm();
+      await this.#scheduleNextAlarm();
 
       return {
         id,
@@ -486,7 +518,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'delayed', ${when}, ${timestamp})
       `;
 
-      await this.scheduleNextAlarm();
+      await this.#scheduleNextAlarm();
 
       return {
         id,
@@ -508,7 +540,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'cron', ${when}, ${timestamp})
       `;
 
-      await this.scheduleNextAlarm();
+      await this.#scheduleNextAlarm();
 
       return {
         id,
@@ -532,7 +564,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     const result = this.sql<Schedule<string>>`
       SELECT * FROM cf_agents_schedules WHERE id = ${id}
     `;
-    if (!result) return undefined;
+    if (!result) {
+      console.error(`schedule ${id} not found`);
+      return undefined;
+    }
 
     return { ...result[0], payload: JSON.parse(result[0].payload) as T };
   }
@@ -598,11 +633,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   async cancelSchedule(id: string): Promise<boolean> {
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
-    await this.scheduleNextAlarm();
+    await this.#scheduleNextAlarm();
     return true;
   }
 
-  private async scheduleNextAlarm() {
+  async #scheduleNextAlarm() {
     // Find the next schedule that needs to be executed
     const result = this.sql`
       SELECT time FROM cf_agents_schedules 
@@ -637,14 +672,14 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         continue;
       }
       try {
-        (
+        await (
           callback as (
             payload: unknown,
             schedule: Schedule<unknown>
           ) => Promise<void>
         ).bind(this)(JSON.parse(row.payload as string), row);
       } catch (e) {
-        console.error(`error executing callback ${row.callback}`, e);
+        console.error(`error executing callback "${row.callback}"`, e);
       }
       if (row.type === "cron") {
         // Update next execution time for cron schedules
@@ -663,7 +698,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
 
     // Schedule the next alarm
-    await this.scheduleNextAlarm();
+    await this.#scheduleNextAlarm();
   }
 
   /**
@@ -683,7 +718,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Get all methods marked as callable on this Agent
    * @returns A map of method names to their metadata
    */
-  private isCallable(method: string): boolean {
+  #isCallable(method: string): boolean {
     // biome-ignore lint/complexity/noBannedTypes: <explanation>
     return callableMetadata.has(this[method as keyof this] as Function);
   }
@@ -756,7 +791,8 @@ export async function routeAgentRequest<Env>(
   if (
     response &&
     corsHeaders &&
-    request.headers.get("upgrade") !== "websocket"
+    request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
+    request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
   ) {
     response = new Response(response.body, {
       headers: {

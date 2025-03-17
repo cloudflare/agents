@@ -32,20 +32,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     });
   }
 
-  private sendChatMessage(connection: Connection, message: OutgoingMessage) {
-    try {
-      connection.send(JSON.stringify(message));
-    } catch (e) {
-      // silently ignore
-    }
+  #sendChatMessage(connection: Connection, message: OutgoingMessage) {
+    connection.send(JSON.stringify(message));
   }
 
-  private broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
-    try {
-      this.broadcast(JSON.stringify(message), exclude);
-    } catch (e) {
-      // silently ignore
-    }
+  #broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
+    this.broadcast(JSON.stringify(message), exclude);
   }
 
   override async onMessage(connection: Connection, message: WSMessage) {
@@ -78,29 +70,32 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           // duplex
         } = data.init;
         const { messages } = JSON.parse(body as string);
-        this.broadcastChatMessage(
+        this.#broadcastChatMessage(
           {
             type: "cf_agent_chat_messages",
             messages,
           },
           [connection.id]
         );
-        await this.persistMessages(messages, [connection.id]);
-        const response = await this.onChatMessage(async ({ response }) => {
-          const finalMessages = appendResponseMessages({
-            messages,
-            responseMessages: response.messages,
-          });
+        await this.#persistMessages(messages, [connection.id]);
+        return this.#tryCatch(async () => {
+          const response = await this.onChatMessage(async ({ response }) => {
+            const finalMessages = appendResponseMessages({
+              messages,
+              responseMessages: response.messages,
+            });
 
-          await this.persistMessages(finalMessages, [connection.id]);
+            await this.#persistMessages(finalMessages, [connection.id]);
+          });
+          if (response) {
+            await this.#reply(data.id, response);
+          }
         });
-        if (response) {
-          await this.reply(data.id, response);
-        }
-      } else if (data.type === "cf_agent_chat_clear") {
+      }
+      if (data.type === "cf_agent_chat_clear") {
         this.sql`delete from cf_ai_chat_agent_messages`;
         this.messages = [];
-        this.broadcastChatMessage(
+        this.#broadcastChatMessage(
           {
             type: "cf_agent_chat_clear",
           },
@@ -108,21 +103,31 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         );
       } else if (data.type === "cf_agent_chat_messages") {
         // replace the messages with the new ones
-        await this.persistMessages(data.messages, [connection.id]);
+        await this.#persistMessages(data.messages, [connection.id]);
       }
     }
   }
 
   override async onRequest(request: Request): Promise<Response> {
-    if (request.url.endsWith("/get-messages")) {
-      const messages = (
-        this.sql`select * from cf_ai_chat_agent_messages` || []
-      ).map((row) => {
-        return JSON.parse(row.message as string);
-      });
-      return new Response(JSON.stringify(messages));
+    return this.#tryCatch(() => {
+      if (request.url.endsWith("/get-messages")) {
+        const messages = (
+          this.sql`select * from cf_ai_chat_agent_messages` || []
+        ).map((row) => {
+          return JSON.parse(row.message as string);
+        });
+        return Response.json(messages);
+      }
+      return super.onRequest(request);
+    });
+  }
+
+  async #tryCatch<T>(fn: () => T | Promise<T>) {
+    try {
+      return await fn();
+    } catch (e) {
+      throw this.onError(e);
     }
-    return super.onRequest(request);
   }
 
   /**
@@ -143,14 +148,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
-    await this.persistMessages(messages);
+    await this.#persistMessages(messages);
     const response = await this.onChatMessage(async ({ response }) => {
       const finalMessages = appendResponseMessages({
         messages,
         responseMessages: response.messages,
       });
 
-      await this.persistMessages(finalMessages, []);
+      await this.#persistMessages(finalMessages, []);
     });
     if (response) {
       // we're just going to drain the body
@@ -162,7 +167,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
-  private async persistMessages(
+  async #persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
@@ -173,7 +178,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       },${JSON.stringify(message)})`;
     }
     this.messages = messages;
-    this.broadcastChatMessage(
+    this.#broadcastChatMessage(
       {
         type: "cf_agent_chat_messages",
         messages: messages,
@@ -182,30 +187,27 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     );
   }
 
-  private async reply(id: string, response: Response) {
+  async #reply(id: string, response: Response) {
     // now take chunks out from dataStreamResponse and send them to the client
+    return this.#tryCatch(async () => {
+      // @ts-expect-error TODO: fix this type error
+      for await (const chunk of response.body!) {
+        const body = decoder.decode(chunk);
 
-    // @ts-expect-error TODO: fix this type error
-    for await (const chunk of response.body!) {
-      const body = decoder.decode(chunk);
-
-      for (const conn of this.getConnections()) {
-        this.sendChatMessage(conn, {
+        this.#broadcastChatMessage({
           id,
           type: "cf_agent_use_chat_response",
           body,
           done: false,
         });
       }
-    }
 
-    for (const conn of this.getConnections()) {
-      this.sendChatMessage(conn, {
+      this.#broadcastChatMessage({
         id,
         type: "cf_agent_use_chat_response",
         body: "",
         done: true,
       });
-    }
+    });
   }
 }
