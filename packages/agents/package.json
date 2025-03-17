@@ -1,6 +1,6 @@
 {
   "name": "agents",
-  "version": "0.0.36",
+  "version": "0.0.37",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {

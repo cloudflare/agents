@@ -1,5 +1,14 @@
 # hono-agents
 
+## 0.0.27
+
+### Patch Changes
+
+- [#92](https://github.com/cloudflare/agents/pull/92) [`fbaa8f7`](https://github.com/cloudflare/agents/commit/fbaa8f799d1c666aba57b38bfc342580f19be70e) Thanks [@threepointone](https://github.com/threepointone)! - Renamed agents-sdk -> agents
+
+- Updated dependencies [[`fbaa8f7`](https://github.com/cloudflare/agents/commit/fbaa8f799d1c666aba57b38bfc342580f19be70e)]:
+  - agents@0.0.37
+
 ## 0.0.26
 
 ### Patch Changes
