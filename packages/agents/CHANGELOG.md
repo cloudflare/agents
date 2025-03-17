@@ -1,5 +1,16 @@
 # @cloudflare/agents
 
+## 0.0.38
+
+### Patch Changes
+
+- [#94](https://github.com/cloudflare/agents/pull/94) [`fb4d0a6`](https://github.com/cloudflare/agents/commit/fb4d0a6a564824a7faba02d7a181ae4b170ba820) Thanks [@threepointone](https://github.com/threepointone)! - better error handling (based on #65 by @elithrar)
+
+  - implement `this.onError` for custom error handling
+  - log errors from more places
+  - catch some missed async errors and log them
+  - mark some methods as actually private
+
 ## 0.0.37
 
 ### Patch Changes
