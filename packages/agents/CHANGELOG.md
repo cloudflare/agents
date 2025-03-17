@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.36
+
+### Patch Changes
+
+- [#74](https://github.com/cloudflare/agents/pull/74) [`7bcdd83`](https://github.com/cloudflare/agents/commit/7bcdd8396d6789b1fc7323be465fbd61311c5181) Thanks [@gingerhendrix](https://github.com/gingerhendrix)! - Replace discriminatedUnion with simple object for Gemini models
+
 ## 0.0.35
 
 ### Patch Changes
