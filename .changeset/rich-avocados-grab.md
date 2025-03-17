@@ -1,5 +1,4 @@
 ---
-"@cloudflare/agents-playground": patch
 "agents-sdk": patch
 ---
 
