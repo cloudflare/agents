@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.39
+
+### Patch Changes
+
+- [#96](https://github.com/cloudflare/agents/pull/96) [`d7d2876`](https://github.com/cloudflare/agents/commit/d7d287608fcdf78a4c914ee0590ea4ef8e81623f) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
 ## 0.0.38
 
 ### Patch Changes
