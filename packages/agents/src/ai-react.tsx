@@ -13,10 +13,10 @@ type GetInitialMessagesOptions = {
 /**
  * Options for the useAgentChat hook
  */
-type UseAgentChatOptions = Omit<
+type UseAgentChatOptions<State> = Omit<
   Parameters<typeof useChat>[0] & {
     /** Agent connection from useAgent */
-    agent: ReturnType<typeof useAgent>;
+    agent: ReturnType<typeof useAgent<State>>;
     getInitialMessages?:
       | undefined
       | null
@@ -34,7 +34,7 @@ const requestCache = new Map<string, Promise<Message[]>>();
  * @param options Chat options including the agent connection
  * @returns Chat interface controls and state with added clearHistory method
  */
-export function useAgentChat(options: UseAgentChatOptions) {
+export function useAgentChat<State>(options: UseAgentChatOptions<State>) {
   const { agent, getInitialMessages, ...rest } = options;
   const url = `${agent._pkurl
     .replace("ws://", "http://")
