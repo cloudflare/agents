@@ -77,7 +77,28 @@ export class TicTacToe extends Agent<Env, TicTacToeState> {
       schema: z.object({
         move: z.array(z.number()),
       }),
-      prompt: `The current board is ${JSON.stringify(board)}. The current player is ${player === "X" ? "O" : "X"}. The other player is ${player}.`,
+      prompt: `You are playing Tic-tac-toe as player ${player === "X" ? "O" : "X"}. Here's the current board state:
+
+${JSON.stringify(board, null, 2)}
+
+Game rules and context:
+- You are playing against ${player}
+- Empty cells are null, X's are "X", O's are "O"
+- Board positions are [row, col] from 0-2
+- You need to respond with a single move as [row, col]
+- Winning patterns: 3 in a row horizontally, vertically, or diagonally
+
+Strategic priorities (in order):
+1. If you can win in one move, take it
+2. If opponent can win in one move, block it
+3. If center is open, take it
+4. If you can create a fork (two potential winning moves), do it
+5. If opponent can create a fork next turn, block it
+6. Take a corner if available
+7. Take any edge
+
+Analyze the board carefully and make the optimal move following these priorities.
+Return only the [row, col] coordinates for your chosen move.`,
     });
     await this.makeMove(
       object.move as [number, number],
