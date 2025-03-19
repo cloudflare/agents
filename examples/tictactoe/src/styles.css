@@ -1,0 +1,253 @@
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
+    Cantarell, sans-serif;
+  margin: 0;
+  padding: 0;
+  background: linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%);
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.game-container {
+  background: white;
+  padding: 2rem;
+  border-radius: 24px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.1);
+  max-width: 500px;
+  width: 90%;
+  margin: 20px;
+}
+
+h1 {
+  color: #1a1a1a;
+  font-size: 2.5rem;
+  margin: 0 0 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.game-icon {
+  font-size: 2.5rem;
+  color: #9c27b0;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  max-width: 400px;
+  margin: 24px auto;
+}
+
+.cell {
+  background: #f8f9fa;
+  border: none;
+  border-radius: 16px;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.5rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+}
+
+.cell:hover:not(.played) {
+  background: #f1f3f5;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1);
+}
+
+.cell.played {
+  cursor: not-allowed;
+}
+
+.cell .material-icons-round {
+  font-size: 2.5rem;
+  transition: transform 0.2s ease;
+}
+
+.cell:hover .material-icons-round {
+  transform: scale(1.1);
+}
+
+.status {
+  font-size: 1.5rem;
+  margin: 20px 0;
+  font-weight: 500;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f8f9fa;
+}
+
+.player-x {
+  color: #2196f3;
+}
+
+.player-o {
+  color: #f44336;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.new-game-button,
+.toggle-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 12px;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+}
+
+.new-game-button {
+  background: #4caf50;
+  color: white;
+}
+
+.new-game-button:hover {
+  background: #43a047;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(76, 175, 80, 0.2);
+}
+
+.toggle-button {
+  background: #f8f9fa;
+  color: #666;
+}
+
+.toggle-button.active {
+  background: #9c27b0;
+  color: white;
+}
+
+.toggle-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(156, 39, 176, 0.2);
+}
+
+.games-counter {
+  color: #666;
+  font-size: 1rem;
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.games-counter .material-icons-round {
+  font-size: 1.2rem;
+  color: #9c27b0;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 24px 0;
+  text-align: center;
+}
+
+.stat-card {
+  background: #f8f9fa;
+  padding: 16px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.stat-card.player-x-stats {
+  background: rgba(33, 150, 243, 0.1);
+}
+
+.stat-card.player-o-stats {
+  background: rgba(244, 67, 54, 0.1);
+}
+
+.stat-card.draw-stats {
+  background: rgba(156, 39, 176, 0.1);
+}
+
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.stat-label {
+  font-size: 0.9rem;
+  color: #666;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stat-card.player-x-stats .stat-value {
+  color: #2196f3;
+}
+
+.stat-card.player-o-stats .stat-value {
+  color: #f44336;
+}
+
+.stat-card.draw-stats .stat-value {
+  color: #9c27b0;
+}
+
+@media (max-width: 480px) {
+  .game-container {
+    padding: 1.5rem;
+    border-radius: 20px;
+  }
+
+  h1 {
+    font-size: 2rem;
+  }
+
+  .game-icon {
+    font-size: 2rem;
+  }
+
+  .cell {
+    border-radius: 12px;
+  }
+
+  .cell .material-icons-round {
+    font-size: 2rem;
+  }
+
+  .stats {
+    gap: 8px;
+  }
+
+  .stat-card {
+    padding: 12px;
+  }
+
+  .stat-value {
+    font-size: 1.25rem;
+  }
+
+  .stat-label {
+    font-size: 0.8rem;
+  }
+}

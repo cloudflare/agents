@@ -1,0 +1,13 @@
+{
+  "name": "@cloudflare/agents-tictactoe",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "concurrently \"vite dev\" \"wrangler dev\" --kill-others"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "A simple demo showing a smart agent playing Tic Tac Toe against a human."
+}
