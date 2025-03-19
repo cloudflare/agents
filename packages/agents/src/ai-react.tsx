@@ -34,7 +34,9 @@ const requestCache = new Map<string, Promise<Message[]>>();
  * @param options Chat options including the agent connection
  * @returns Chat interface controls and state with added clearHistory method
  */
-export function useAgentChat<State>(options: UseAgentChatOptions<State>) {
+export function useAgentChat<State = unknown>(
+  options: UseAgentChatOptions<State>
+) {
   const { agent, getInitialMessages, ...rest } = options;
   const url = `${agent._pkurl
     .replace("ws://", "http://")
