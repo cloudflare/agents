@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.40
+
+### Patch Changes
+
+- [#100](https://github.com/cloudflare/agents/pull/100) [`ee727ca`](https://github.com/cloudflare/agents/commit/ee727caf52071221fbf79fd651f37ce12185bdae) Thanks [@danieljvdm](https://github.com/danieljvdm)! - Pass state generic through `useAgentChat`
+
 ## 0.0.39
 
 ### Patch Changes
