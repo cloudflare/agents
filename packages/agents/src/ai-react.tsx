@@ -112,20 +112,22 @@ export function useAgentChat<State = unknown>(
     signal?.addEventListener("abort", () => {
       // Propagate request cancellation to the Agent
       // We need to communciate cancellation as a websocket message, instead of a request signal
-      agent.send(JSON.stringify({
-        type: "cf_agent_chat_request_cancel",
-        id,
-      }));
+      agent.send(
+        JSON.stringify({
+          type: "cf_agent_chat_request_cancel",
+          id,
+        })
+      );
 
       // NOTE - If we wanted to, we could preserve the "interrupted" message here, with the code below
       //        However, I think it might be the responsibility of the library user to implement that behavior manually?
       //        Reasoning: This code could be subject to collisions, as it "force saves" the messages we have locally
-      //  
+      //
       // agent.send(JSON.stringify({
       //   type: "cf_agent_chat_messages",
       //   messages: ... /* some way of getting current messages ref? */
       // }))
-     
+
       abortController.abort();
     });
 

@@ -87,15 +87,18 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         const abortSignal = this.#getAbortSignal(chatMessageId);
 
         return this.#tryCatch(async () => {
-          const response = await this.onChatMessage(async ({ response }) => {
-            const finalMessages = appendResponseMessages({
-              messages,
-              responseMessages: response.messages,
-            });
+          const response = await this.onChatMessage(
+            async ({ response }) => {
+              const finalMessages = appendResponseMessages({
+                messages,
+                responseMessages: response.messages,
+              });
 
-            await this.#persistMessages(finalMessages, [connection.id]);
-            this.#removeAbortController(chatMessageId)
-          }, abortSignal ? { abortSignal } : undefined);
+              await this.#persistMessages(finalMessages, [connection.id]);
+              this.#removeAbortController(chatMessageId);
+            },
+            abortSignal ? { abortSignal } : undefined
+          );
 
           if (response) {
             await this.#reply(data.id, response);
@@ -230,22 +233,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * For the given message id, look up its associated AbortController
    * If the AbortController does not exist, create and store one in memory
-   * 
+   *
    * returns the AbortSignal associated with the AbortController
    */
-  #getAbortSignal(
-    id: string,
-  ): AbortSignal | undefined {
+  #getAbortSignal(id: string): AbortSignal | undefined {
     // Defensive check, since we're coercing message types at the moment
     if (typeof id !== "string") {
       return undefined;
     }
 
     if (!this.#chatMessageAbortControllers.has(id)) {
-      this.#chatMessageAbortControllers.set(id, new AbortController())
+      this.#chatMessageAbortControllers.set(id, new AbortController());
     }
 
-    return this.#chatMessageAbortControllers.get(id)?.signal
+    return this.#chatMessageAbortControllers.get(id)?.signal;
   }
 
   /**
@@ -261,7 +262,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   #cancelChatRequest(id: string) {
     if (this.#chatMessageAbortControllers.has(id)) {
       const abortController = this.#chatMessageAbortControllers.get(id);
-      abortController?.abort()
+      abortController?.abort();
     }
   }
 
@@ -272,14 +273,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     for (const controller of this.#chatMessageAbortControllers.values()) {
       controller?.abort();
     }
-    this.#chatMessageAbortControllers.clear()
+    this.#chatMessageAbortControllers.clear();
   }
 
   /**
    * When the DO is destroyed, cancel all pending requests
    */
   async destroy() {
-    this.#destroyAbortControllers()
+    this.#destroyAbortControllers();
     await super.destroy();
   }
 }
