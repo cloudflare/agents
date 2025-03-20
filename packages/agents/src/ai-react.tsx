@@ -1,7 +1,7 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
 import type { useAgent } from "./react";
-import { useEffect, use, useCallback } from "react";
+import { useEffect, use } from "react";
 import type { OutgoingMessage } from "./ai-types";
 
 type GetInitialMessagesOptions = {
