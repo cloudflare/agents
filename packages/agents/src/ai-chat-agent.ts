@@ -6,6 +6,7 @@ import type {
 } from "ai";
 import { appendResponseMessages } from "ai";
 import type { OutgoingMessage, IncomingMessage } from "./ai-types";
+
 const decoder = new TextDecoder();
 
 /**
@@ -16,6 +17,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   Env,
   State
 > {
+  /**
+   * Map of message `id`s to `AbortController`s
+   * useful to propagate request cancellation signals for any external calls made by the agent
+   */
+  #chatMessageAbortControllers: Map<string, AbortController>;
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
   constructor(ctx: AgentContext, env: Env) {
@@ -30,6 +36,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     ).map((row) => {
       return JSON.parse(row.message as string);
     });
+
+    this.#chatMessageAbortControllers = new Map();
   }
 
   #broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
@@ -74,6 +82,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           [connection.id]
         );
         await this.#persistMessages(messages, [connection.id]);
+        const { id: requestId, abortSignal } = this.#getLatestMessageAbortSignal(messages) ?? {};
         return this.#tryCatch(async () => {
           const response = await this.onChatMessage(async ({ response }) => {
             const finalMessages = appendResponseMessages({
@@ -82,13 +91,17 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             });
 
             await this.#persistMessages(finalMessages, [connection.id]);
-          });
+            if (requestId) {
+              this.#removeAbortController(requestId)
+            }
+          }, abortSignal ? { signal: abortSignal } : undefined);
           if (response) {
             await this.#reply(data.id, response);
           }
         });
       }
       if (data.type === "cf_agent_chat_clear") {
+        this.#destroyAbortControllers();
         this.sql`delete from cf_ai_chat_agent_messages`;
         this.messages = [];
         this.#broadcastChatMessage(
@@ -100,6 +113,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       } else if (data.type === "cf_agent_chat_messages") {
         // replace the messages with the new ones
         await this.#persistMessages(data.messages, [connection.id]);
+      } else if (data.type === "cf_agent_chat_request_cancel") {
+        this.#cancelChatRequest(data.id);
       }
     }
   }
@@ -129,10 +144,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
+   * @param options.signal A signal to pass to any child requests which can be used to cancel them
    * @returns Response to send to the client or undefined
    */
   async onChatMessage(
-    onFinish: StreamTextOnFinishCallback<ToolSet>
+    onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: { signal: AbortSignal }
   ): Promise<Response | undefined> {
     throw new Error(
       "recieved a chat message, override onChatMessage and return a Response to send to the client"
@@ -205,5 +222,60 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         done: true,
       });
     });
+  }
+
+  /**
+   * If latest message is from the user:
+   * - Create an abort controller for the message
+   * - Return the associated AbortSignal, if it exists.
+   * 
+   * Otherwise, does nothing
+   */
+  #getLatestMessageAbortSignal(
+    messages: ChatMessage[],
+  ): { id: string; abortSignal: AbortSignal | undefined; } | undefined {
+    const lastMessage = messages[messages.length];
+    if (lastMessage?.role === "user") {
+      const id = lastMessage.id
+      if (!this.#chatMessageAbortControllers.has(id)) {
+        this.#chatMessageAbortControllers.set(id, new AbortController())
+      }
+
+      return {
+        id,
+        abortSignal: this.#chatMessageAbortControllers.get(id)?.signal
+      };
+    }
+  }
+
+  #removeAbortController(id: string) {
+    this.#chatMessageAbortControllers.delete(id);
+  }
+
+  /**
+   * Propagate an abort signal for any requests associated with the given message id
+   */
+  #cancelChatRequest(id: string) {
+    if (this.#chatMessageAbortControllers.has(id)) {
+      const abortController = this.#chatMessageAbortControllers.get(id);
+      abortController?.abort()
+    } else {
+      console.debug("Could not find request to cancel:", id);
+    }
+  }
+
+  #destroyAbortControllers() {
+    for (const controller of this.#chatMessageAbortControllers.values()) {
+      controller?.abort();
+    }
+    this.#chatMessageAbortControllers.clear()
+  }
+
+  /**
+   * When the DO is destroyed, cancel all pending requests
+   */
+  async destroy() {
+    this.#destroyAbortControllers()
+    await super.destroy();
   }
 }

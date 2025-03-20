@@ -1,7 +1,7 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
 import type { useAgent } from "./react";
-import { useEffect, use } from "react";
+import { useEffect, use, useCallback } from "react";
 import type { OutgoingMessage } from "./ai-types";
 
 type GetInitialMessagesOptions = {
@@ -225,6 +225,8 @@ export function useAgentChat<State = unknown>(
     useChatHelpers.setMessages,
   ]);
 
+  const stop = useCallback(, [agent, useChatHelpers.stop])
+
   return {
     ...useChatHelpers,
     /**
@@ -250,6 +252,20 @@ export function useAgentChat<State = unknown>(
           type: "cf_agent_chat_clear",
         })
       );
+    },
+    /**
+     * Stop any responses to a user's message
+     * @NOTE - This is confusing. `id` needs to be the user message id that kicked off the chat message response
+     *         I'm starting to think maybe the `stop` should just stop all pending generations?
+     *
+     * @param id The user message id 
+     */
+    stop: (id: string) => {
+      agent.send(JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        id,
+      }))
+      useChatHelpers.stop();
     },
   };
 }
