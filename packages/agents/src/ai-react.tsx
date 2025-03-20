@@ -110,16 +110,16 @@ export function useAgentChat<State = unknown>(
     const abortController = new AbortController();
 
     signal?.addEventListener("abort", () => {
-      console.log("Getting the abort signal inside aiFetch signal prop...")
-      // Propagate request cancellation
+      // Propagate request cancellation to the Agent
+      // We need to communciate cancellation as a websocket message, instead of a request signal
       agent.send(JSON.stringify({
         type: "cf_agent_chat_request_cancel",
         id,
       }));
 
       // NOTE - If we wanted to, we could preserve the "interrupted" message here, with the code below
-      //        However, I think it might be on the user to implement that behavior manually?
-      //        This code could be subject to collisions, as it "force saves" the messages we have locally
+      //        However, I think it might be the responsibility of the library user to implement that behavior manually?
+      //        Reasoning: This code could be subject to collisions, as it "force saves" the messages we have locally
       //  
       // agent.send(JSON.stringify({
       //   type: "cf_agent_chat_messages",
@@ -267,19 +267,5 @@ export function useAgentChat<State = unknown>(
         })
       );
     },
-    /**
-     * Stop any responses to a user's message
-     * @NOTE - This is confusing. `id` needs to be the user message id that kicked off the chat message response
-     *         I'm starting to think maybe the `stop` should just stop all pending generations?
-     *
-     * @param id The user message id 
-     */
-    // stop: (id: string) => {
-    //   agent.send(JSON.stringify({
-    //     type: "cf_agent_chat_request_cancel",
-    //     id,
-    //   }))
-    //   useChatHelpers.stop();
-    // },
   };
 }
