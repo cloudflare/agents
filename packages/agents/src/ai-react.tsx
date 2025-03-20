@@ -225,8 +225,6 @@ export function useAgentChat<State = unknown>(
     useChatHelpers.setMessages,
   ]);
 
-  const stop = useCallback(, [agent, useChatHelpers.stop])
-
   return {
     ...useChatHelpers,
     /**

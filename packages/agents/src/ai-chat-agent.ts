@@ -82,7 +82,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           [connection.id]
         );
         await this.#persistMessages(messages, [connection.id]);
+        console.log("HEYYY MESAGES: ", JSON.stringify(messages, null, 2))
         const { id: requestId, abortSignal } = this.#getLatestMessageAbortSignal(messages) ?? {};
+        console.debug("id:", requestId)
+        console.debug("abortSignal:", abortSignal);
         return this.#tryCatch(async () => {
           const response = await this.onChatMessage(async ({ response }) => {
             const finalMessages = appendResponseMessages({
@@ -149,7 +152,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async onChatMessage(
     onFinish: StreamTextOnFinishCallback<ToolSet>,
-    options?: { signal: AbortSignal }
+    options?: { signal: AbortSignal | undefined }
   ): Promise<Response | undefined> {
     throw new Error(
       "recieved a chat message, override onChatMessage and return a Response to send to the client"
@@ -234,7 +237,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   #getLatestMessageAbortSignal(
     messages: ChatMessage[],
   ): { id: string; abortSignal: AbortSignal | undefined; } | undefined {
-    const lastMessage = messages[messages.length];
+    const lastMessage = messages[messages.length - 1];
     if (lastMessage?.role === "user") {
       const id = lastMessage.id
       if (!this.#chatMessageAbortControllers.has(id)) {
@@ -261,6 +264,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       abortController?.abort()
     } else {
       console.debug("Could not find request to cancel:", id);
+      this.#debugChatMessageAbortControllers();
     }
   }
 
@@ -269,6 +273,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       controller?.abort();
     }
     this.#chatMessageAbortControllers.clear()
+  }
+
+  #debugChatMessageAbortControllers() {
+    console.debug("#debugChatMessageAbortControllers");
+    for (const id of this.#chatMessageAbortControllers.keys()) {
+      console.debug("cancellable id:", id);
+    }
   }
 
   /**
