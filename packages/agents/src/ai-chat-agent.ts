@@ -82,10 +82,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           [connection.id]
         );
         await this.#persistMessages(messages, [connection.id]);
-        console.log("HEYYY MESAGES: ", JSON.stringify(messages, null, 2))
-        const { id: requestId, abortSignal } = this.#getLatestMessageAbortSignal(messages) ?? {};
-        console.debug("id:", requestId)
-        console.debug("abortSignal:", abortSignal);
+
+        const chatMessageId = data.id;
+        const abortSignal = this.#getAbortSignalForMessage(chatMessageId);
+
         return this.#tryCatch(async () => {
           const response = await this.onChatMessage(async ({ response }) => {
             const finalMessages = appendResponseMessages({
@@ -94,10 +94,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             });
 
             await this.#persistMessages(finalMessages, [connection.id]);
-            if (requestId) {
-              this.#removeAbortController(requestId)
-            }
-          }, abortSignal ? { signal: abortSignal } : undefined);
+            this.#removeAbortController(chatMessageId)
+          }, abortSignal ? { abortSignal } : undefined);
+
           if (response) {
             await this.#reply(data.id, response);
           }
@@ -152,7 +151,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async onChatMessage(
     onFinish: StreamTextOnFinishCallback<ToolSet>,
-    options?: { signal: AbortSignal | undefined }
+    options?: { abortSignal: AbortSignal | undefined }
   ): Promise<Response | undefined> {
     throw new Error(
       "recieved a chat message, override onChatMessage and return a Response to send to the client"
@@ -234,21 +233,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * 
    * Otherwise, does nothing
    */
-  #getLatestMessageAbortSignal(
-    messages: ChatMessage[],
-  ): { id: string; abortSignal: AbortSignal | undefined; } | undefined {
-    const lastMessage = messages[messages.length - 1];
-    if (lastMessage?.role === "user") {
-      const id = lastMessage.id
-      if (!this.#chatMessageAbortControllers.has(id)) {
-        this.#chatMessageAbortControllers.set(id, new AbortController())
-      }
-
-      return {
-        id,
-        abortSignal: this.#chatMessageAbortControllers.get(id)?.signal
-      };
+  #getAbortSignalForMessage(
+    id: string,
+  ): AbortSignal | undefined {
+    if (typeof id !== "string") {
+      // TODO - Remove
+      console.debug("#getAbortSignalForMessage received a non-string id:", id)
+      return undefined;
     }
+
+    if (!this.#chatMessageAbortControllers.has(id)) {
+      this.#chatMessageAbortControllers.set(id, new AbortController())
+    }
+
+    return this.#chatMessageAbortControllers.get(id)?.signal
   }
 
   #removeAbortController(id: string) {

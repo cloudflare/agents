@@ -110,6 +110,22 @@ export function useAgentChat<State = unknown>(
     const abortController = new AbortController();
 
     signal?.addEventListener("abort", () => {
+      console.log("Getting the abort signal inside aiFetch signal prop...")
+      // Propagate request cancellation
+      agent.send(JSON.stringify({
+        type: "cf_agent_chat_request_cancel",
+        id,
+      }));
+
+      // NOTE - If we wanted to, we could preserve the "interrupted" message here, with the code below
+      //        However, I think it might be on the user to implement that behavior manually?
+      //        This code could be subject to collisions, as it "force saves" the messages we have locally
+      //  
+      // agent.send(JSON.stringify({
+      //   type: "cf_agent_chat_messages",
+      //   messages: ... /* some way of getting current messages ref? */
+      // }))
+     
       abortController.abort();
     });
 
@@ -258,12 +274,12 @@ export function useAgentChat<State = unknown>(
      *
      * @param id The user message id 
      */
-    stop: (id: string) => {
-      agent.send(JSON.stringify({
-        type: "cf_agent_chat_request_cancel",
-        id,
-      }))
-      useChatHelpers.stop();
-    },
+    // stop: (id: string) => {
+    //   agent.send(JSON.stringify({
+    //     type: "cf_agent_chat_request_cancel",
+    //     id,
+    //   }))
+    //   useChatHelpers.stop();
+    // },
   };
 }
