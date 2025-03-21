@@ -91,10 +91,6 @@ async function handleHttpRequest<E extends Env>(
   options?: AgentOptions<E>
 ) {
   const req = createRequestFromContext(c);
-  
-  return routeAgentRequest(
-    req,
-    env(c) satisfies Env,
-    options
-  );
+
+  return routeAgentRequest(req, env(c) satisfies Env, options);
 }
