@@ -1,4 +1,4 @@
-import { createOpenAI } from "@ai-sdk/openai";
+import { openai } from "@ai-sdk/openai";
 import {
   createDataStreamResponse,
   streamText,
@@ -36,10 +36,6 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
             },
           }
         );
-
-        const openai = createOpenAI({
-          apiKey: this.env.OPENAI_API_KEY,
-        });
 
         const result = streamText({
           model: openai("gpt-4o"),
