@@ -1,10 +1,36 @@
 import { DurableObject } from "cloudflare:workers";
 import { Agent } from "./";
-import { Hono } from "hono";
-import { cors } from "hono/cors";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEEdgeTransport } from "./lib/sseEdge.ts";
-import type { Connection } from "partyserver";
+import type { Connection } from "./";
+
+// CORS helper function
+function handleCORS(
+  request: Request,
+  corsOptions?: CORSOptions
+): Response | null {
+  const origin = request.headers.get("Origin") || "*";
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": corsOptions?.origin || origin,
+    "Access-Control-Allow-Methods":
+      corsOptions?.methods || "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": corsOptions?.headers || "Content-Type",
+    "Access-Control-Max-Age": (corsOptions?.maxAge || 86400).toString(),
+  };
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders });
+  }
+
+  return null;
+}
+
+interface CORSOptions {
+  origin?: string;
+  methods?: string;
+  headers?: string;
+  maxAge?: number;
+}
 
 export abstract class McpAgent<
   Env = unknown,
@@ -95,34 +121,74 @@ export abstract class McpAgent<
       corsOptions,
     }: {
       binding?: string;
-      corsOptions?: Parameters<typeof cors>[0];
+      corsOptions?: CORSOptions;
     } = {}
   ) {
-    const router = new Hono<{
-      Bindings: Record<string, DurableObjectNamespace<McpAgent>>;
-    }>();
+    const basePattern = new URLPattern({ pathname: path });
+    const messagePattern = new URLPattern({ pathname: `${path}/message` });
 
-    router.get(path, cors(corsOptions), async (c) => {
-      const namespace = c.env[binding];
-      const object = namespace.get(namespace.newUniqueId());
-      // @ts-ignore
-      object._init(c.executionCtx.props);
-      return (await object.onSSE(path)) as unknown as Response;
-    });
+    return {
+      fetch: async (
+        request: Request,
+        env: Record<string, DurableObjectNamespace<McpAgent>>,
+        ctx: ExecutionContext
+      ) => {
+        // Handle CORS preflight
+        const corsResponse = handleCORS(request, corsOptions);
+        if (corsResponse) return corsResponse;
 
-    router.post(`${path}/message`, cors(corsOptions), async (c) => {
-      const namespace = c.env[binding];
-      const sessionId = c.req.query("sessionId");
-      if (!sessionId) {
-        return new Response(
-          `Missing sessionId. Expected POST to ${path} to initiate new one`,
-          { status: 400 }
-        );
-      }
-      const object = namespace.get(namespace.idFromString(sessionId));
-      return (await object.onMCPMessage(c.req.raw)) as unknown as Response;
-    });
+        const url = new URL(request.url);
+        const namespace = env[binding];
 
-    return router;
+        if (request.method === "GET" && basePattern.test(url)) {
+          const object = namespace.get(namespace.newUniqueId());
+          // @ts-ignore
+          await object._init(ctx.props);
+          const response = await object.onSSE(path);
+
+          // Convert headers to a plain object
+          const headerObj: Record<string, string> = {};
+          response.headers.forEach((value, key) => {
+            headerObj[key] = value;
+          });
+          headerObj["Access-Control-Allow-Origin"] = corsOptions?.origin || "*";
+
+          // Clone the response to get a new body stream
+          // const clonedResponse = response.clone();
+          return new Response(response.body as unknown as BodyInit, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: headerObj,
+          });
+        }
+
+        if (request.method === "POST" && messagePattern.test(url)) {
+          const sessionId = url.searchParams.get("sessionId");
+          if (!sessionId) {
+            return new Response(
+              `Missing sessionId. Expected POST to ${path} to initiate new one`,
+              { status: 400 }
+            );
+          }
+          const object = namespace.get(namespace.idFromString(sessionId));
+          const response = await object.onMCPMessage(request);
+
+          // Convert headers to a plain object
+          const headerObj: Record<string, string> = {};
+          response.headers.forEach((value, key) => {
+            headerObj[key] = value;
+          });
+          headerObj["Access-Control-Allow-Origin"] = corsOptions?.origin || "*";
+
+          return new Response(response.body as unknown as BodyInit, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: headerObj,
+          });
+        }
+
+        return new Response("Not Found", { status: 404 });
+      },
+    };
   }
 }
