@@ -42,6 +42,11 @@
       "types": "./dist/schedule.d.ts",
       "require": "./dist/schedule.js",
       "import": "./dist/schedule.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "require": "./dist/mcp.js",
+      "import": "./dist/mcp.js"
     }
   },
   "keywords": [],
@@ -61,5 +66,9 @@
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.65",
     "partysocket": "0.0.0-548c226"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
+    "hono": "^4.7.5"
   }
 }
