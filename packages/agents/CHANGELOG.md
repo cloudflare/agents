@@ -1,5 +1,16 @@
 # @cloudflare/agents
 
+## 0.0.42
+
+### Patch Changes
+
+- [#107](https://github.com/cloudflare/agents/pull/107) [`4f3dfc7`](https://github.com/cloudflare/agents/commit/4f3dfc710797697aedaa29cef64923533a2cb071) Thanks [@threepointone](https://github.com/threepointone)! - update deps, allow sub/path/prefix, AND_BINDINGS_LIKE_THIS
+
+  of note,
+
+  - the partyserver update now allows for prefixes that/have/sub/paths
+  - bindings THAT_LOOK_LIKE_THIS are correctly converted to kebabcase now
+
 ## 0.0.41
 
 ### Patch Changes
