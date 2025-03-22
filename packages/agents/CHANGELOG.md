@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.43
+
+### Patch Changes
+
+- [#111](https://github.com/cloudflare/agents/pull/111) [`eb6827a`](https://github.com/cloudflare/agents/commit/eb6827a8b97b3ce5f7e06afbe83a01201350d26a) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+  replace the beta release of partysocket with a real one
+
 ## 0.0.42
 
 ### Patch Changes

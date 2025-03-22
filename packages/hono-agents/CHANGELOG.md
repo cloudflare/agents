@@ -1,5 +1,14 @@
 # hono-agents
 
+## 0.0.33
+
+### Patch Changes
+
+- [#109](https://github.com/cloudflare/agents/pull/109) [`dd6a9e3`](https://github.com/cloudflare/agents/commit/dd6a9e35a0b9f43464f5e5d38b0f765d7e6be5c4) Thanks [@danieljvdm](https://github.com/danieljvdm)! - Fix type errors in hono-agents, remove @ts-expect-error
+
+- Updated dependencies [[`eb6827a`](https://github.com/cloudflare/agents/commit/eb6827a8b97b3ce5f7e06afbe83a01201350d26a)]:
+  - agents@0.0.43
+
 ## 0.0.32
 
 ### Patch Changes
