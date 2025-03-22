@@ -169,8 +169,9 @@ Return only the [row, col] coordinates for your chosen move.`,
 
 export default {
   async fetch(request: Request, env: Env) {
+    console.log("fetch", request.url);
     return (
-      (await routeAgentRequest(request, env)) ||
+      (await routeAgentRequest(request, env, { prefix: "some/prefix" })) ||
       new Response("Not found", { status: 404 })
     );
   },

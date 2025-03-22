@@ -31,6 +31,7 @@ function App() {
   });
   const agent = useAgent<TicTacToeState>({
     agent: "tic-tac-toe",
+    prefix: "some/prefix",
     onStateUpdate: (state) => {
       setState(state);
     },

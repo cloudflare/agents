@@ -65,7 +65,7 @@
     "cron-schedule": "^5.0.4",
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.66",
-    "partysocket": "0.0.0-548c226"
+    "partysocket": "1.1.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.7.0"
