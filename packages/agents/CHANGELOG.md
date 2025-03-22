@@ -1,5 +1,32 @@
 # @cloudflare/agents
 
+## 0.0.43
+
+### Patch Changes
+
+- [#111](https://github.com/cloudflare/agents/pull/111) [`eb6827a`](https://github.com/cloudflare/agents/commit/eb6827a8b97b3ce5f7e06afbe83a01201350d26a) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+  replace the beta release of partysocket with a real one
+
+## 0.0.42
+
+### Patch Changes
+
+- [#107](https://github.com/cloudflare/agents/pull/107) [`4f3dfc7`](https://github.com/cloudflare/agents/commit/4f3dfc710797697aedaa29cef64923533a2cb071) Thanks [@threepointone](https://github.com/threepointone)! - update deps, allow sub/path/prefix, AND_BINDINGS_LIKE_THIS
+
+  of note,
+
+  - the partyserver update now allows for prefixes that/have/sub/paths
+  - bindings THAT_LOOK_LIKE_THIS are correctly converted to kebabcase now
+
+## 0.0.41
+
+### Patch Changes
+
+- [#106](https://github.com/cloudflare/agents/pull/106) [`1d1b74c`](https://github.com/cloudflare/agents/commit/1d1b74ce9f4a5f5fc698da280da71c08f0a7c7ce) Thanks [@geelen](https://github.com/geelen)! - Adding the first iteration of McpAgent
+
+- [#103](https://github.com/cloudflare/agents/pull/103) [`9be8008`](https://github.com/cloudflare/agents/commit/9be80083a80a89c1b106599bda28d4a8aa7292f2) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
 ## 0.0.40
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "agents",
-  "version": "0.0.40",
+  "version": "0.0.43",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
@@ -42,6 +42,11 @@
       "types": "./dist/schedule.d.ts",
       "require": "./dist/schedule.js",
       "import": "./dist/schedule.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "require": "./dist/mcp.js",
+      "import": "./dist/mcp.js"
     }
   },
   "keywords": [],
@@ -59,7 +64,10 @@
   "dependencies": {
     "cron-schedule": "^5.0.4",
     "nanoid": "^5.1.5",
-    "partyserver": "^0.0.65",
-    "partysocket": "0.0.0-548c226"
+    "partyserver": "^0.0.66",
+    "partysocket": "1.1.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0"
   }
 }

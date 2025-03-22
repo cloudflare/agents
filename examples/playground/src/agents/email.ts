@@ -6,8 +6,8 @@ import { getAgentByName } from "agents";
 import { createMimeMessage } from "mimetext";
 import { streamText, createDataStreamResponse } from "ai";
 import type { StreamTextOnFinishCallback } from "ai";
-import { createOpenAI } from "@ai-sdk/openai";
 import * as MockEmail from "../mock-cloudflare-email";
+import { model } from "../model";
 export async function sendEmail(
   id: DurableObjectId,
   EMAIL: SendEmail,
@@ -75,10 +75,6 @@ async function createMockEmail(options: {
   return mockEmailMessage;
 }
 export class EmailAgent extends AIChatAgent<Env> {
-  openai = createOpenAI({
-    apiKey: this.env.OPENAI_API_KEY,
-  });
-
   async onRequest(request: Request) {
     const url = new URL(request.url);
     if (url.pathname.endsWith("/api/email") && request.method === "POST") {
@@ -110,7 +106,7 @@ export class EmailAgent extends AIChatAgent<Env> {
     const dataStreamResponse = createDataStreamResponse({
       execute: async (dataStream) => {
         const result = streamText({
-          model: this.openai("gpt-4o"),
+          model,
           messages: this.messages,
           onStepFinish: async (step) => {
             // if ([...this.getConnections()].length === 0) {

@@ -1,4 +1,4 @@
-import { createOpenAI } from "@ai-sdk/openai";
+import { openai } from "@ai-sdk/openai";
 import {
   Agent,
   routeAgentRequest,
@@ -29,9 +29,6 @@ export type TicTacToeState = {
 };
 
 export class TicTacToe extends Agent<Env, TicTacToeState> {
-  openai = createOpenAI({
-    apiKey: this.env.OPENAI_API_KEY,
-  });
   initialState: TicTacToeState = {
     board: [
       [null, null, null],
@@ -72,7 +69,7 @@ export class TicTacToe extends Agent<Env, TicTacToeState> {
 
     // now use AI to make a move
     const { object } = await generateObject({
-      model: this.openai("gpt-4o"),
+      model: openai("gpt-4o"),
       schema: z.object({
         move: z.array(z.number()),
       }),
@@ -172,8 +169,9 @@ Return only the [row, col] coordinates for your chosen move.`,
 
 export default {
   async fetch(request: Request, env: Env) {
+    console.log("fetch", request.url);
     return (
-      (await routeAgentRequest(request, env)) ||
+      (await routeAgentRequest(request, env, { prefix: "some/prefix" })) ||
       new Response("Not found", { status: 404 })
     );
   },

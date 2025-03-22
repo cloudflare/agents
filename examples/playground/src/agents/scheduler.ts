@@ -14,8 +14,8 @@ import type {
 
 import type { Connection, ConnectionContext } from "agents";
 
-import { createOpenAI } from "@ai-sdk/openai";
 import { generateObject } from "ai";
+import { model } from "../model";
 
 function convertScheduleToScheduledItem(schedule: Schedule): ScheduledItem {
   return {
@@ -33,13 +33,6 @@ function convertScheduleToScheduledItem(schedule: Schedule): ScheduledItem {
 }
 
 export class Scheduler extends Agent<Env> {
-  openai = createOpenAI({
-    apiKey: this.env.OPENAI_API_KEY,
-    // baseURL: `https://gateway.ai.cloudflare.com/v1/${this.env.AI_GATEWAY_ACCOUNT_ID}/${this.env.AI_GATEWAY_ID}/openai`,
-    // headers: {
-    //   "cf-aig-authorization": `Bearer ${this.env.AI_GATEWAY_TOKEN}`,
-    // },
-  });
   onConnect(
     connection: Connection,
     ctx: ConnectionContext
@@ -50,7 +43,7 @@ export class Scheduler extends Agent<Env> {
     const event = JSON.parse(message) as IncomingMessage;
     if (event.type === "schedule") {
       const result = await generateObject({
-        model: this.openai("gpt-4o"),
+        model,
         mode: "json",
         schemaName: "task",
         schemaDescription: "A task to be scheduled",

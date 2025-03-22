@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "start": "concurrently \"vite dev\" \"wrangler dev\" --kill-others"
+    "start": "vite dev"
   },
   "keywords": [],
   "author": "",

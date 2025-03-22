@@ -316,18 +316,14 @@ Create meaningful conversations with intelligence:
 
 ```ts
 import { AIChatAgent } from "agents/ai-chat-agent";
-import { createOpenAI } from "@ai-sdk/openai";
+import { openai } from "@ai-sdk/openai";
 
 export class DialogueAgent extends AIChatAgent {
   async onChatMessage(onFinish) {
     return createDataStreamResponse({
       execute: async (dataStream) => {
-        const ai = createOpenAI({
-          apiKey: this.env.OPENAI_API_KEY,
-        });
-
         const stream = streamText({
-          model: ai("gpt-4o"),
+          model: openai("gpt-4o"),
           messages: this.messages,
           onFinish, // call onFinish so that messages get saved
         });
