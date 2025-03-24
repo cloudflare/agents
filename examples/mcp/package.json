@@ -1,0 +1,16 @@
+{
+  "name": "@cloudflare/agents-mcp-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"wrangler dev\" --kill-others"
+  },
+  "keywords": [],
+  "author": "",
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "vite": "^6.2.2",
+    "wrangler": "^4.4.0",
+    "zod": "^3.22.3"
+  }
+}
