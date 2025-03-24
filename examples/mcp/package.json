@@ -3,14 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"wrangler dev\" --kill-others"
+    "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"vite dev\" --kill-others"
   },
   "keywords": [],
   "author": "",
+  "dependencies": {
+    "mcp-remote": "^0.0.5"
+  },
   "devDependencies": {
-    "concurrently": "^9.1.2",
-    "vite": "^6.2.2",
-    "wrangler": "^4.4.0",
-    "zod": "^3.22.3"
+    "@modelcontextprotocol/inspector": "^0.6.0"
   }
 }
