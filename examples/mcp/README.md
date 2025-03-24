@@ -29,7 +29,10 @@ export class MyMCP extends McpAgent<Env> {
       // ...
     });
 
-    this.server.tool("add", "Add two numbers together", { a: z.number(), b: z.number() },
+    this.server.tool(
+      "add",
+      "Add two numbers together",
+      { a: z.number(), b: z.number() },
       async ({ a, b }) => {
         // ...
       }
@@ -37,4 +40,3 @@ export class MyMCP extends McpAgent<Env> {
   }
 }
 ```
-
