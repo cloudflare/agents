@@ -8,6 +8,7 @@ type Env = {
 
 type State = { counter: number };
 
+// biome-ignore lint/complexity/noBannedTypes: <explanation>
 export class MyMCP extends McpAgent<Env, State, {}> {
   server = new McpServer({
     name: "Demo",
@@ -19,7 +20,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   };
 
   async init() {
-    this.server.resource(`counter`, `mcp://resource/counter`, (uri) => {
+    this.server.resource("counter", "mcp://resource/counter", (uri) => {
       return {
         contents: [{ uri: uri.href, text: String(this.state.counter) }],
       };
