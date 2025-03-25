@@ -4,7 +4,7 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest",
     "evals": "(cd evals; evalite)",
     "build": "tsx ./scripts/build.ts"
   },
@@ -47,6 +47,11 @@
       "types": "./dist/mcp.d.ts",
       "require": "./dist/mcp.js",
       "import": "./dist/mcp.js"
+    },
+    "./mcp-agent": {
+      "types": "./dist/mcp-agent.d.ts",
+      "require": "./dist/mcp-agent.js",
+      "import": "./dist/mcp-agent.js"
     }
   },
   "keywords": [],
@@ -62,12 +67,13 @@
   "license": "MIT",
   "description": "A home for your AI agents",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
     "cron-schedule": "^5.0.4",
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.66",
     "partysocket": "1.1.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.7.0"
+    "vitest": "^3.0.9"
   }
 }

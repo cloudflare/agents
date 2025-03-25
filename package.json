@@ -50,7 +50,7 @@
     "vite": "^6.2.2",
     "vitest": "^3.0.9",
     "workers-ai-provider": "^0.2.0",
-    "wrangler": "^4.3.0",
+    "wrangler": "^4.4.0",
     "zod": "^3.24.2"
   },
   "workspaces": [
