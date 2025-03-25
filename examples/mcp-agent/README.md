@@ -13,8 +13,6 @@ To make your Agent MCP compatible, all you need to do is implement the methods o
 - (OPTIONAL) `createTransport` - the transport to use (uses `HTTPTransport` by default)
 - (OPTIONAL) `onRequest` - if you want to update the standard `onRequest` behavior.
 
-**Note:** The `MCPAgent` class overrides the standard `Agent`'s `fetch` method to send all requests under `/mcp` to the MCP server.
-
 ### Running the example
 
 1. Run the dev server
