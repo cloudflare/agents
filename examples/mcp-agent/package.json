@@ -1,0 +1,17 @@
+{
+  "name": "@cloudflare/agents-mcp-agent-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types"
+  },
+  "keywords": [],
+  "author": "Felix Nordén <felixnorden@ignio.dev>",
+  "dependencies": {
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/inspector": "^0.6.0"
+  }
+}

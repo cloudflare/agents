@@ -1,0 +1,20 @@
+{
+  "name": "mcp-agent-demo",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-03-14",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RANDOM",
+        "class_name": "RandomMCPAgent"
+
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RandomMCPAgent"]
+    }
+  ]
+}
