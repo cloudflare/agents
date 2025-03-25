@@ -47,7 +47,7 @@
     "tsup": "^8.4.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
-    "vite": "^6.2.2",
+    "vite": "^6.2.3",
     "vitest": "^3.0.9",
     "workers-ai-provider": "^0.2.0",
     "wrangler": "^4.3.0",
