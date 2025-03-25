@@ -143,7 +143,7 @@ export class HTTPServerTransport implements Transport {
           "Content-Type": "application/json",
           "X-Session-Id": this.sessionId ?? "",
         },
-      }),
+      })
     );
   }
 
@@ -152,9 +152,8 @@ export class HTTPServerTransport implements Transport {
       await new Promise((resolve) =>
         setTimeout(() => {
           resolve(undefined);
-        }, 0),
+        }, 0)
       );
     }
   }
 }
-

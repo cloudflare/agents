@@ -6,15 +6,14 @@
     "bindings": [
       {
         "name": "RANDOM",
-        "class_name": "RandomMCPAgent"
-
-      }
-    ]
+        "class_name": "RandomMCPAgent",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["RandomMCPAgent"]
-    }
-  ]
+      "new_sqlite_classes": ["RandomMCPAgent"],
+    },
+  ],
 }

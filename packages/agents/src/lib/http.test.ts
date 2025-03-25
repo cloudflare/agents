@@ -31,7 +31,7 @@ describe("HTTPClientTransport", () => {
     };
 
     await expect(clientTransport.send(message)).rejects.toThrow(
-      "Transport not started",
+      "Transport not started"
     );
   });
 
@@ -90,7 +90,7 @@ describe("HTTPClientTransport", () => {
         jsonrpc: "2.0",
         method: "test",
         id: "1",
-      }),
+      })
     ).rejects.toThrow("HTTP error! status: 500");
 
     expect(onErrorMock).toHaveBeenCalled();
@@ -151,7 +151,7 @@ describe("HTTPServerTransport", () => {
       id: "1",
     };
     expect(async () => await transport.send(message)).rejects.toThrowError(
-      new Error("Transport not started"),
+      new Error("Transport not started")
     );
   });
 
@@ -194,7 +194,7 @@ describe("HTTPServerTransport", () => {
     const responseBody = await response?.json();
     expect(responseBody).toEqual([responseMessage]);
     expect(response?.headers.get("X-Session-Id")).toBe(
-      "test-server-session-id",
+      "test-server-session-id"
     );
   });
 
@@ -249,7 +249,7 @@ describe("HTTPServerTransport", () => {
     const endTime = Date.now();
 
     const responseBody = JSONRPCResponseSchema.array().parse(
-      await response?.json(),
+      await response?.json()
     );
 
     expect(endTime - startTime).toBeGreaterThanOrEqual(100);
@@ -301,7 +301,7 @@ describe("HTTPServerTransport", () => {
         setTimeout(() => {
           ++tries;
           resolve(undefined);
-        }, 0),
+        }, 0)
       );
     }
     const response = responseMap.get(request);
@@ -311,4 +311,3 @@ describe("HTTPServerTransport", () => {
     return response;
   }
 });
-
