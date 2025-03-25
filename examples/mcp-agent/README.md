@@ -70,7 +70,7 @@ Below is a simple agent with an `example` tool returning "Hello world".
 See [`src/server.ts`]("./src/server.ts") for a (slightly) more in-depth example.
 
 ```ts
-export class RandomMCPAgent extends MCPAgent<Env> {
+export class DemoMCPAgent extends MCPAgent<Env> {
   async onRequest(request: Request): Promise<Response> {
     if (request.method !== "GET") {
       return new Response("Unsupported method", { status: 400 });
