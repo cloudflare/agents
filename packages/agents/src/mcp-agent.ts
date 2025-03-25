@@ -62,18 +62,12 @@ export default abstract class MCPAgent<Env, State = unknown> extends Agent<Env, 
     return await this.#transport(request)
   }
 
-  /**
-   * Handles incoming HTTP requests by creating a transport, connecting it to the server,
-   * and processing the request through the MCP protocol.
-   * @param request - The incoming HTTP request to proces
-   * @returns A promise that resolves to the HTTP response
-   */
-  async fetch(request: Request) {
+  async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url)
     if (url.pathname.startsWith('/mcp')) {
       return this.onMCPRequest(request)
     }
-    return super.fetch(request)
+    return super.onRequest(request)
   }
 
   async #transport(request: Request, max = 100) {
