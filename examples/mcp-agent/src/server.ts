@@ -10,10 +10,10 @@ import { WorkerEntrypoint } from 'cloudflare:workers'
 
 export class RandomMCPAgent extends MCPAgent<Env> {
   async onRequest(request: Request): Promise<Response> {
-    if (request.method !== 'GET') {
-      return new Response('Unsupported method', { status: 400 })
+    if (request.method === 'GET') {
+      return new Response(JSON.stringify({ data: await this.random() }))
     }
-    return new Response(JSON.stringify({ data: await this.random() }))
+    return super.onRequest(request)
   }
 
   createServerParams(): [Implementation, ServerOptions] {
