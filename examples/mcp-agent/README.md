@@ -73,9 +73,9 @@ See [`src/server.ts`]("./src/server.ts") for a (slightly) more in-depth example.
 export class DemoMCPAgent extends MCPAgent<Env> {
   async onRequest(request: Request): Promise<Response> {
     if (request.method !== "GET") {
-      return new Response("Unsupported method", { status: 400 });
+      return new Response(JSON.stringify({ data: await this.random() }));
     }
-    return new Response(JSON.stringify({ data: await this.random() }));
+    return super.onRequest(request);
   }
 
   createServerParams(): [Implementation, ServerOptions] {
