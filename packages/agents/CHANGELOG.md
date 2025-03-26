@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.46
+
+### Patch Changes
+
+- [`7c40201`](https://github.com/cloudflare/agents/commit/7c402012fa43c606e5455a13604ef7a6369989ed) Thanks [@threepointone](https://github.com/threepointone)! - mark context as unstable\_
+
 ## 0.0.45
 
 ### Patch Changes
