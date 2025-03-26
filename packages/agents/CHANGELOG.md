@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.45
+
+### Patch Changes
+
+- [#122](https://github.com/cloudflare/agents/pull/122) [`d045755`](https://github.com/cloudflare/agents/commit/d045755a3f465481531ca7556317c0a0be811438) Thanks [@threepointone](https://github.com/threepointone)! - `import {context} from 'agents';`
+
+  Export the current agent, request, and connection from a shared context. Particularly useful for tool calls that might not have access to the current agent in their module scope.
+
 ## 0.0.44
 
 ### Patch Changes
