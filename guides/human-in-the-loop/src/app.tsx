@@ -1,6 +1,6 @@
 import type { Message } from "@ai-sdk/react";
-import { APPROVAL, getToolsRequiringConfirmation } from "./utils";
-import { tools } from "./tools";
+import { APPROVAL } from "./utils";
+import type { tools } from "./tools";
 import "./styles.css";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useAgent } from "agents/react";
@@ -51,14 +51,19 @@ export default function Chat() {
     messages.length > 0 && scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  const toolsRequiringConfirmation = getToolsRequiringConfirmation(tools);
+  // List of tools that require human confirmation
+  const toolsRequiringConfirmation: (keyof typeof tools)[] = [
+    "getWeatherInformation",
+  ];
 
   const pendingToolCallConfirmation = messages.some((m: Message) =>
     m.parts?.some(
       (part) =>
         part.type === "tool-invocation" &&
         part.toolInvocation.state === "call" &&
-        toolsRequiringConfirmation.includes(part.toolInvocation.toolName)
+        toolsRequiringConfirmation.includes(
+          part.toolInvocation.toolName as keyof typeof tools
+        )
     )
   );
 
@@ -100,7 +105,7 @@ export default function Chat() {
                     // render confirmation tool (client-side tool with user interaction)
                     if (
                       toolsRequiringConfirmation.includes(
-                        toolInvocation.toolName
+                        toolInvocation.toolName as keyof typeof tools
                       ) &&
                       toolInvocation.state === "call"
                     ) {
