@@ -36,7 +36,7 @@ export abstract class McpAgent<
   Env = unknown,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>,
-> extends DurableObject {
+> extends DurableObject<Env> {
   /**
    * Since McpAgent's _aren't_ yet real "Agents" (they route differently, don't support
    * websockets, don't support hibernation), let's only expose a couple of the methods
