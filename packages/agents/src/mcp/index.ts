@@ -1,8 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
 import { Agent } from "../";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEEdgeServerTransport } from "./sse-edge";
 import type { Connection } from "../";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+
+const MAXIMUM_MESSAGE_SIZE = 4 * 1024 * 1024; // 4MB
 
 // CORS helper function
 function handleCORS(
@@ -32,27 +36,74 @@ interface CORSOptions {
   maxAge?: number;
 }
 
+class McpTransport implements Transport {
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
+  sessionId?: string;
+
+  #getWebSocket: () => WebSocket | null;
+  #started = false;
+  constructor(getWebSocket: () => WebSocket | null) {
+    this.#getWebSocket = getWebSocket;
+  }
+
+  async start() {
+    // The transport does not manage the WebSocket connection since it's terminated
+    // by the Durable Object in order to allow hibernation. There's nothing to initialize.
+    if (this.#started) {
+      throw new Error("Transport already started");
+    }
+    this.#started = true;
+  }
+
+  async send(message: JSONRPCMessage) {
+    if (!this.#started) {
+      throw new Error("Transport not started");
+    }
+    const websocket = this.#getWebSocket();
+    if (!websocket) {
+      throw new Error("WebSocket not connected");
+    }
+    try {
+      websocket.send(JSON.stringify(message));
+    } catch (error) {
+      this.onerror?.(error as Error);
+      throw error;
+    }
+  }
+
+  async close() {
+    // Similar to start, the only thing to do is to pass the event on to the server
+    this.onclose?.();
+  }
+}
+
 export abstract class McpAgent<
   Env = unknown,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>,
 > extends DurableObject<Env> {
+  #status: "zero" | "starting" | "started" = "zero";
+  #transport?: McpTransport;
+
   /**
    * Since McpAgent's _aren't_ yet real "Agents" (they route differently, don't support
    * websockets, don't support hibernation), let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
    */
   readonly #agent: Agent<Env, State>;
+
   protected constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const self = this;
 
     // Since McpAgent's _aren't_ yet real "Agents" (they route differently, they don't support
-    // websockets, hibernation, scheduling etc), let's only expose a couple of the methods
+    // scheduling etc, let's only expose a couple of the methods
     // to the outer class for now.
     this.#agent = new (class extends Agent<Env, State> {
       static options = {
-        hibernate: false,
+        hibernate: true,
       };
 
       onStateUpdate(state: State | undefined, source: Connection | "server") {
@@ -82,18 +133,26 @@ export abstract class McpAgent<
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
+  async onStart() {
+    this.props = (await this.ctx.storage.get("props")) as Props;
+    this.init();
+
+    // Connect to the MCP server
+    this.#transport = new McpTransport(() => this.getWebSocket());
+    await this.server.connect(this.#transport);
+  }
 
   /**
    * McpAgent API
    */
   abstract server: McpServer;
-  private transport!: SSEEdgeServerTransport;
   props!: Props;
   initRun = false;
 
   abstract init(): Promise<void>;
 
   async _init(props: Props) {
+    this.ctx.storage.put("props", props);
     this.props = props;
     if (!this.initRun) {
       this.initRun = true;
@@ -101,17 +160,165 @@ export abstract class McpAgent<
     }
   }
 
-  async onSSE(path: string): Promise<Response> {
-    this.transport = new SSEEdgeServerTransport(
-      `${path}/message`,
-      this.ctx.id.toString()
-    );
-    await this.server.connect(this.transport);
-    return this.transport.sseResponse;
+  async #initialize(): Promise<void> {
+    await this.ctx.blockConcurrencyWhile(async () => {
+      this.#status = "starting";
+      await this.onStart();
+      this.#status = "started";
+    });
   }
 
-  async onMCPMessage(request: Request): Promise<Response> {
-    return this.transport.handlePostMessage(request);
+  // Allow the worker to fetch a websocket connection to the agent
+  async fetch(request: Request): Promise<Response> {
+    if (this.#status !== "started") {
+      // This means the server "woke up" after hibernation
+      // so we need to hydrate it again
+      await this.#initialize();
+    }
+
+    // Only handle WebSocket upgrade requests
+    if (request.headers.get("Upgrade") !== "websocket") {
+      return new Response("Expected WebSocket Upgrade request", {
+        status: 400,
+      });
+    }
+
+    const url = new URL(request.url);
+    const sessionId = url.searchParams.get("sessionId");
+    if (!sessionId) {
+      return new Response("Missing sessionId", { status: 400 });
+    }
+
+    // Create a WebSocket pair
+    const webSocketPair = new WebSocketPair();
+    const [client, server] = Object.values(webSocketPair);
+
+    // Accept the WebSocket with hibernation support
+    this.ctx.acceptWebSocket(server);
+
+    // Set up event handlers
+    server.addEventListener("message", async (event) => {
+      await this.webSocketMessage(server, event.data);
+    });
+
+    server.addEventListener("close", async (event) => {
+      await this.webSocketClose(
+        server,
+        event.code || 1000,
+        event.reason || "",
+        event.wasClean || false
+      );
+    });
+
+    server.addEventListener("error", async (event) => {
+      await this.webSocketError(server, new Error("WebSocket error"));
+    });
+
+    // Connect to the MCP server
+    this.#transport = new McpTransport(() => this.getWebSocket());
+    await this.server.connect(this.#transport);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    });
+  }
+
+  getWebSocket() {
+    const websockets = this.ctx.getWebSockets();
+    if (websockets.length === 0) {
+      return null;
+    }
+    return websockets[0];
+  }
+
+  async onMCPMessage(sessionId: string, request: Request): Promise<Response> {
+    if (this.#status !== "started") {
+      // This means the server "woke up" after hibernation
+      // so we need to hydrate it again
+      await this.#initialize();
+    }
+    try {
+      const contentType = request.headers.get("content-type") || "";
+      if (!contentType.includes("application/json")) {
+        return new Response(`Unsupported content-type: ${contentType}`, {
+          status: 400,
+        });
+      }
+
+      // check if the request body is too large
+      const contentLength = Number.parseInt(
+        request.headers.get("content-length") || "0",
+        10
+      );
+      if (contentLength > MAXIMUM_MESSAGE_SIZE) {
+        return new Response(`Request body too large: ${contentLength} bytes`, {
+          status: 400,
+        });
+      }
+
+      // Clone the request before reading the body to avoid stream issues
+      const message = await request.json();
+      let parsedMessage: JSONRPCMessage;
+      try {
+        parsedMessage = JSONRPCMessageSchema.parse(message);
+      } catch (error) {
+        this.#transport?.onerror?.(error as Error);
+        throw error;
+      }
+
+      this.#transport?.onmessage?.(parsedMessage);
+      return new Response("Accepted", { status: 202 });
+    } catch (error) {
+      this.#transport?.onerror?.(error as Error);
+      return new Response(String(error), { status: 400 });
+    }
+  }
+
+  // This is unused since there are no incoming websocket messages
+  async webSocketMessage(ws: WebSocket, event: ArrayBuffer | string) {
+    let message: JSONRPCMessage;
+    try {
+      // Ensure event is a string
+      const data =
+        typeof event === "string" ? event : new TextDecoder().decode(event);
+      message = JSONRPCMessageSchema.parse(JSON.parse(data));
+    } catch (error) {
+      this.#transport?.onerror?.(error as Error);
+      return;
+    }
+
+    if (this.#status !== "started") {
+      // This means the server "woke up" after hibernation
+      // so we need to hydrate it again
+      await this.#initialize();
+    }
+
+    this.#transport?.onmessage?.(message);
+  }
+
+  // WebSocket event handlers for hibernation support
+  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    if (this.#status !== "started") {
+      // This means the server "woke up" after hibernation
+      // so we need to hydrate it again
+      await this.#initialize();
+    }
+    this.#transport?.onerror?.(error as Error);
+  }
+
+  async webSocketClose(
+    ws: WebSocket,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<void> {
+    if (this.#status !== "started") {
+      // This means the server "woke up" after hibernation
+      // so we need to hydrate it again
+      await this.#initialize();
+    }
+    this.#transport?.onclose?.();
   }
 
   static mount(
@@ -140,28 +347,91 @@ export abstract class McpAgent<
         const url = new URL(request.url);
         const namespace = env[binding];
 
+        // Handle SSE connections
         if (request.method === "GET" && basePattern.test(url)) {
-          const object = namespace.get(namespace.newUniqueId());
+          // Create a unique session ID for this connection
+          const sessionId = namespace.newUniqueId().toString();
+
+          // Create a Transform Stream for SSE
+          const { readable, writable } = new TransformStream();
+          const writer = writable.getWriter();
+          const encoder = new TextEncoder();
+
+          // Send the endpoint event
+          const endpointMessage = `event: endpoint\ndata: ${encodeURI(`${path}/message`)}?sessionId=${sessionId}\n\n`;
+          writer.write(encoder.encode(endpointMessage));
+
+          // Get the Durable Object
+          const id = namespace.idFromString(sessionId);
+          const doStub = namespace.get(id);
+
+          // Initialize the object
           // @ts-ignore
-          await object._init(ctx.props);
-          const response = await object.onSSE(path);
+          await doStub._init(ctx.props);
 
-          // Convert headers to a plain object
-          const headerObj: Record<string, string> = {};
-          response.headers.forEach((value, key) => {
-            headerObj[key] = value;
+          // Connect to the Durable Object via WebSocket
+          const url = new URL(request.url);
+          url.searchParams.set("sessionId", sessionId);
+          const response = await doStub.fetch(
+            new Request(url, {
+              headers: {
+                Upgrade: "websocket",
+              },
+            })
+          );
+
+          // Get the WebSocket
+          const ws = response.webSocket;
+          if (!ws) {
+            console.error("Failed to establish WebSocket connection");
+            await writer.close();
+            return;
+          }
+
+          // Accept the WebSocket
+          ws.accept();
+
+          // Handle messages from the Durable Object
+          ws.addEventListener("message", async (event) => {
+            try {
+              // Send the message as an SSE event
+              const messageText = `event: message\ndata: ${event.data}\n\n`;
+              await writer.write(encoder.encode(messageText));
+            } catch (error) {
+              console.error("Error forwarding message to SSE:", error);
+            }
           });
-          headerObj["Access-Control-Allow-Origin"] = corsOptions?.origin || "*";
 
-          // Clone the response to get a new body stream
-          // const clonedResponse = response.clone();
-          return new Response(response.body as unknown as BodyInit, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: headerObj,
+          // Handle WebSocket errors
+          ws.addEventListener("error", async (error) => {
+            try {
+              await writer.close();
+            } catch (e) {
+              // Ignore errors when closing
+            }
+          });
+
+          // Handle WebSocket closure
+          ws.addEventListener("close", async () => {
+            try {
+              await writer.close();
+            } catch (error) {
+              console.error("Error closing SSE connection:", error);
+            }
+          });
+
+          // Return the SSE response
+          return new Response(readable, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+            },
           });
         }
 
+        // Handle MCP messages
         if (request.method === "POST" && messagePattern.test(url)) {
           const sessionId = url.searchParams.get("sessionId");
           if (!sessionId) {
@@ -170,20 +440,27 @@ export abstract class McpAgent<
               { status: 400 }
             );
           }
+
+          // Get the Durable Object
           const object = namespace.get(namespace.idFromString(sessionId));
-          const response = await object.onMCPMessage(request);
 
-          // Convert headers to a plain object
-          const headerObj: Record<string, string> = {};
-          response.headers.forEach((value, key) => {
-            headerObj[key] = value;
+          // Forward the request to the Durable Object
+          const response = await object.onMCPMessage(sessionId, request);
+
+          // Add CORS headers
+          const headers = new Headers();
+          response.headers.forEach?.((value, key) => {
+            headers.set(key, value);
           });
-          headerObj["Access-Control-Allow-Origin"] = corsOptions?.origin || "*";
+          headers.set(
+            "Access-Control-Allow-Origin",
+            corsOptions?.origin || "*"
+          );
 
-          return new Response(response.body as unknown as BodyInit, {
+          return new Response(await response.text(), {
             status: response.status,
             statusText: response.statusText,
-            headers: headerObj,
+            headers,
           });
         }
 
