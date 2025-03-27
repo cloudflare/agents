@@ -94,7 +94,6 @@ export abstract class McpAgent<
    * McpAgent API
    */
   abstract server: McpServer;
-  webSocket?: WebSocket;
   props!: Props;
   initRun = false;
 
@@ -124,15 +123,18 @@ export abstract class McpAgent<
       });
     }
 
+    const url = new URL(request.url);
+    const sessionId = url.searchParams.get("sessionId");
+    if (!sessionId) {
+      return new Response("Missing sessionId", { status: 400 });
+    }
+
     // Create a WebSocket pair
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
 
     // Accept the WebSocket with hibernation support
     this.ctx.acceptWebSocket(server);
-
-    // Store the WebSocket
-    this.webSocket = server;
 
     // Set up event handlers
     server.addEventListener("message", async (event) => {
@@ -161,9 +163,15 @@ export abstract class McpAgent<
     });
   }
 
-  async onMCPMessage(request: Request): Promise<Response> {
-    console.log("onMCPMessage", this.webSocket);
+  getWebSocket() {
+    const websockets = this.ctx.getWebSockets();
+    if (websockets.length === 0) {
+      return null;
+    }
+    return websockets[0];
+  }
 
+  async onMCPMessage(sessionId: string, request: Request): Promise<Response> {
     try {
       const contentType = request.headers.get("content-type") || "";
       if (!contentType.includes("application/json")) {
@@ -199,14 +207,14 @@ export abstract class McpAgent<
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
-    console.log("send", message, this.webSocket);
+    const websocket = this.getWebSocket();
 
-    if (!this.webSocket) {
+    if (!websocket) {
       throw new Error("WebSocket not connected");
     }
 
     try {
-      this.webSocket.send(JSON.stringify(message));
+      websocket.send(JSON.stringify(message));
     } catch (error) {
       this.onerror?.(error as Error);
       throw error;
@@ -214,19 +222,11 @@ export abstract class McpAgent<
   }
 
   async close(): Promise<void> {
-    console.log("closing webSocket");
-    if (this.webSocket) {
-      try {
-        this.webSocket.close();
-      } catch (error) {
-        // Ignore errors when closing
-      }
-      this.webSocket = undefined;
-    }
+    // TODO
     this.onclose?.();
   }
 
-  // Process WebSocket messages
+  // This is unused since there are no incoming websocket messages
   async webSocketMessage(ws: WebSocket, event: ArrayBuffer | string) {
     let message: JSONRPCMessage;
     try {
@@ -244,8 +244,6 @@ export abstract class McpAgent<
 
   // Handle message from any source
   async handleMessage(message: unknown): Promise<void> {
-    console.log("handleMessage", message);
-
     let parsedMessage: JSONRPCMessage;
     try {
       parsedMessage = JSONRPCMessageSchema.parse(message);
@@ -254,13 +252,17 @@ export abstract class McpAgent<
       throw error;
     }
 
+    // ISSUE: After hibernation, this.onmessage is undefined and this.server is a
+    // brand new instance of McpServer without our tools since init is not re-run
+    // on wake up.
+    console.log("onmessage", this.onmessage);
+    console.log("this.server", this.server);
     this.onmessage?.(parsedMessage);
   }
 
   // WebSocket event handlers for hibernation support
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
     this.onerror?.(error as Error);
-    this.webSocket = undefined;
   }
 
   async webSocketClose(
@@ -269,7 +271,6 @@ export abstract class McpAgent<
     reason: string,
     wasClean: boolean
   ): Promise<void> {
-    this.webSocket = undefined;
     this.onclose?.();
   }
 
@@ -303,7 +304,6 @@ export abstract class McpAgent<
         if (request.method === "GET" && basePattern.test(url)) {
           // Create a unique session ID for this connection
           const sessionId = namespace.newUniqueId().toString();
-          console.log("sessionId", sessionId);
 
           // Create a Transform Stream for SSE
           const { readable, writable } = new TransformStream();
@@ -323,8 +323,10 @@ export abstract class McpAgent<
           await doStub._init(ctx.props);
 
           // Connect to the Durable Object via WebSocket
+          let url = new URL(request.url);
+          url.searchParams.set("sessionId", sessionId);
           const response = await doStub.fetch(
-            new Request(request.url, {
+            new Request(url, {
               headers: {
                 Upgrade: "websocket",
               },
@@ -355,7 +357,6 @@ export abstract class McpAgent<
 
           // Handle WebSocket errors
           ws.addEventListener("error", async (error) => {
-            console.error("WebSocket error:", error);
             try {
               await writer.close();
             } catch (e) {
@@ -386,7 +387,6 @@ export abstract class McpAgent<
         // Handle MCP messages
         if (request.method === "POST" && messagePattern.test(url)) {
           const sessionId = url.searchParams.get("sessionId");
-          console.log("sessionId", sessionId);
           if (!sessionId) {
             return new Response(
               `Missing sessionId. Expected POST to ${path} to initiate new one`,
@@ -398,7 +398,7 @@ export abstract class McpAgent<
           const object = namespace.get(namespace.idFromString(sessionId));
 
           // Forward the request to the Durable Object
-          const response = await object.onMCPMessage(request);
+          const response = await object.onMCPMessage(sessionId, request);
 
           // Add CORS headers
           const headers = new Headers();
