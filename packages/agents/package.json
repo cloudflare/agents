@@ -38,6 +38,11 @@
       "require": "./dist/ai-chat-agent.js",
       "import": "./dist/ai-chat-agent.js"
     },
+    "./ai-types": {
+      "types": "./dist/ai-types.d.ts",
+      "require": "./dist/ai-types.js",
+      "import": "./dist/ai-types.js"
+    },
     "./schedule": {
       "types": "./dist/schedule.d.ts",
       "require": "./dist/schedule.js",
