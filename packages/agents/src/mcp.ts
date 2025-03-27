@@ -162,9 +162,7 @@ export abstract class McpAgent<
   }
 
   async onMCPMessage(request: Request): Promise<Response> {
-    if (!this.webSocket) {
-      return new Response("WebSocket not connected", { status: 500 });
-    }
+    console.log("onMCPMessage", this.webSocket);
 
     try {
       const contentType = request.headers.get("content-type") || "";
@@ -201,6 +199,8 @@ export abstract class McpAgent<
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
+    console.log("send", message, this.webSocket);
+
     if (!this.webSocket) {
       throw new Error("WebSocket not connected");
     }
@@ -214,6 +214,7 @@ export abstract class McpAgent<
   }
 
   async close(): Promise<void> {
+    console.log("closing webSocket");
     if (this.webSocket) {
       try {
         this.webSocket.close();
@@ -243,6 +244,8 @@ export abstract class McpAgent<
 
   // Handle message from any source
   async handleMessage(message: unknown): Promise<void> {
+    console.log("handleMessage", message);
+
     let parsedMessage: JSONRPCMessage;
     try {
       parsedMessage = JSONRPCMessageSchema.parse(message);
@@ -300,11 +303,16 @@ export abstract class McpAgent<
         if (request.method === "GET" && basePattern.test(url)) {
           // Create a unique session ID for this connection
           const sessionId = namespace.newUniqueId().toString();
+          console.log("sessionId", sessionId);
 
           // Create a Transform Stream for SSE
           const { readable, writable } = new TransformStream();
           const writer = writable.getWriter();
           const encoder = new TextEncoder();
+
+          // Send the endpoint event
+          const endpointMessage = `event: endpoint\ndata: ${encodeURI(`${path}/message`)}?sessionId=${sessionId}\n\n`;
+          writer.write(encoder.encode(endpointMessage));
 
           // Get the Durable Object
           const id = namespace.idFromString(sessionId);
@@ -378,6 +386,7 @@ export abstract class McpAgent<
         // Handle MCP messages
         if (request.method === "POST" && messagePattern.test(url)) {
           const sessionId = url.searchParams.get("sessionId");
+          console.log("sessionId", sessionId);
           if (!sessionId) {
             return new Response(
               `Missing sessionId. Expected POST to ${path} to initiate new one`,
@@ -389,16 +398,19 @@ export abstract class McpAgent<
           const object = namespace.get(namespace.idFromString(sessionId));
 
           // Forward the request to the Durable Object
-          const response = await object.fetch(request);
+          const response = await object.onMCPMessage(request);
 
           // Add CORS headers
-          const headers = new Headers(response.headers);
+          const headers = new Headers();
+          response.headers.forEach?.((value, key) => {
+            headers.set(key, value);
+          });
           headers.set(
             "Access-Control-Allow-Origin",
             corsOptions?.origin || "*"
           );
 
-          return new Response(response.body, {
+          return new Response(await response.text(), {
             status: response.status,
             statusText: response.statusText,
             headers,
