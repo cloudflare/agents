@@ -44,9 +44,14 @@
       "import": "./dist/schedule.js"
     },
     "./mcp": {
-      "types": "./dist/mcp.d.ts",
-      "require": "./dist/mcp.js",
-      "import": "./dist/mcp.js"
+      "types": "./dist/mcp/index.d.ts",
+      "require": "./dist/mcp/index.js",
+      "import": "./dist/mcp/index.js"
+    },
+    "./mcp/client": {
+      "types": "./dist/mcp/client.d.ts",
+      "require": "./dist/mcp/client.js",
+      "import": "./dist/mcp/client.js"
     }
   },
   "keywords": [],

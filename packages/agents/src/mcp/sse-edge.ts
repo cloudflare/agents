@@ -2,6 +2,11 @@
 
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
+  SSEClientTransport,
+  type SSEClientTransportOptions,
+} from "@modelcontextprotocol/sdk/client/sse.js";
+
+import {
   type JSONRPCMessage,
   JSONRPCMessageSchema,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -11,7 +16,7 @@ const MAXIMUM_MESSAGE_SIZE = 4 * 1024 * 1024; // 4MB
 /**
  * This transport is compatible with Cloudflare Workers and other edge environments
  */
-export class SSEEdgeTransport implements Transport {
+export class SSEEdgeServerTransport implements Transport {
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   readonly stream: ReadableStream<Uint8Array>;
   private closed = false;
@@ -137,5 +142,36 @@ export class SSEEdgeTransport implements Transport {
 
     const messageText = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
     this.controller.enqueue(new TextEncoder().encode(messageText));
+  }
+}
+
+export class SSEEdgeClientTransport extends SSEClientTransport {
+  /**
+   * Creates a new EdgeSSEClientTransport, which overrides fetch to be compatible with the CF workers environment
+   */
+  constructor(
+    private url: URL,
+    options: SSEClientTransportOptions
+  ) {
+    // biome-ignore lint/suspicious/noExplicitAny: Overriding fetch, type doesn't matter here
+    const fetchOverride = (url: any, options = {}) => {
+      const workerOptions = {
+        ...options,
+      };
+      // Remove unsupported properties
+      // @ts-ignore
+      // biome-ignore lint/performance/noDelete: workaround for workers environment
+      delete workerOptions.mode;
+
+      // Call the original fetch with fixed options
+      return global.fetch(url, workerOptions);
+    };
+
+    super(url, {
+      ...options,
+      eventSourceInit: {
+        fetch: fetchOverride,
+      },
+    });
   }
 }
