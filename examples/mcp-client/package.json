@@ -1,9 +1,9 @@
 {
-  "name": "@cloudflare/agents-mcp-example",
+  "name": "@cloudflare/agents-mcp-client-example",
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"vite dev\" --kill-others"
+    "start": "vite dev"
   },
   "keywords": [],
   "author": "",

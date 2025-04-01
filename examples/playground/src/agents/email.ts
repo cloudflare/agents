@@ -98,7 +98,7 @@ export class EmailAgent extends AIChatAgent<Env> {
     return super.onRequest(request);
   }
 
-  onEmail(email: ForwardableEmailMessage) {
+  async onEmail(email: ForwardableEmailMessage) {
     //
   }
   // biome-ignore lint/complexity/noBannedTypes: vibes

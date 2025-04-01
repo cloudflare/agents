@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import { Agent } from "./";
+import { Agent } from "../";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { SSEEdgeTransport } from "./lib/sseEdge.ts";
-import type { Connection } from "./";
+import { SSEEdgeServerTransport } from "./sse-edge";
+import type { Connection } from "../";
 
 // CORS helper function
 function handleCORS(
@@ -36,7 +36,7 @@ export abstract class McpAgent<
   Env = unknown,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>,
-> extends DurableObject {
+> extends DurableObject<Env> {
   /**
    * Since McpAgent's _aren't_ yet real "Agents" (they route differently, don't support
    * websockets, don't support hibernation), let's only expose a couple of the methods
@@ -87,7 +87,7 @@ export abstract class McpAgent<
    * McpAgent API
    */
   abstract server: McpServer;
-  private transport!: SSEEdgeTransport;
+  private transport!: SSEEdgeServerTransport;
   props!: Props;
   initRun = false;
 
@@ -102,7 +102,7 @@ export abstract class McpAgent<
   }
 
   async onSSE(path: string): Promise<Response> {
-    this.transport = new SSEEdgeTransport(
+    this.transport = new SSEEdgeServerTransport(
       `${path}/message`,
       this.ctx.id.toString()
     );

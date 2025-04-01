@@ -1,5 +1,33 @@
 # hono-agents
 
+## 0.0.37
+
+### Patch Changes
+
+- Updated dependencies [[`6dc3b6a`](https://github.com/cloudflare/agents/commit/6dc3b6aa2b4137f0a3022932d2038def9e03f5d2), [`7ff0509`](https://github.com/cloudflare/agents/commit/7ff050994c223bbd1cb390e3a085b31023c2554f)]:
+  - agents@0.0.47
+
+## 0.0.36
+
+### Patch Changes
+
+- Updated dependencies [[`7c40201`](https://github.com/cloudflare/agents/commit/7c402012fa43c606e5455a13604ef7a6369989ed)]:
+  - agents@0.0.46
+
+## 0.0.35
+
+### Patch Changes
+
+- Updated dependencies [[`d045755`](https://github.com/cloudflare/agents/commit/d045755a3f465481531ca7556317c0a0be811438)]:
+  - agents@0.0.45
+
+## 0.0.34
+
+### Patch Changes
+
+- Updated dependencies [[`6e66bd4`](https://github.com/cloudflare/agents/commit/6e66bd4471d1eef10043297208033bd172898f10), [`82d5412`](https://github.com/cloudflare/agents/commit/82d54121a6fa8c035a1e2d6b036165eae0624899)]:
+  - agents@0.0.44
+
 ## 0.0.33
 
 ### Patch Changes

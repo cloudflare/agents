@@ -11,6 +11,8 @@ import {
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 export type { Connection, WSMessage, ConnectionContext } from "partyserver";
 
 import { WorkflowEntrypoint as CFWorkflowEntrypoint } from "cloudflare:workers";
@@ -168,6 +170,12 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
+export const unstable_context = new AsyncLocalStorage<{
+  agent: Agent<unknown>;
+  connection: Connection | undefined;
+  request: Request | undefined;
+}>();
+
 /**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
@@ -292,89 +300,100 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
-      if (typeof message !== "string") {
-        return this.#tryCatch(() => _onMessage(connection, message));
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(message);
-      } catch (e) {
-        // silently fail and let the onMessage handler handle it
-        return this.#tryCatch(() => _onMessage(connection, message));
-      }
-
-      if (isStateUpdateMessage(parsed)) {
-        this.#setStateInternal(parsed.state as State, connection);
-        return;
-      }
-
-      if (isRPCRequest(parsed)) {
-        try {
-          const { id, method, args } = parsed;
-
-          // Check if method exists and is callable
-          const methodFn = this[method as keyof this];
-          if (typeof methodFn !== "function") {
-            throw new Error(`Method ${method} does not exist`);
+      return unstable_context.run(
+        { agent: this, connection, request: undefined },
+        async () => {
+          if (typeof message !== "string") {
+            return this.#tryCatch(() => _onMessage(connection, message));
           }
 
-          if (!this.#isCallable(method)) {
-            throw new Error(`Method ${method} is not callable`);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(message);
+          } catch (e) {
+            // silently fail and let the onMessage handler handle it
+            return this.#tryCatch(() => _onMessage(connection, message));
           }
 
-          // biome-ignore lint/complexity/noBannedTypes: <explanation>
-          const metadata = callableMetadata.get(methodFn as Function);
-
-          // For streaming methods, pass a StreamingResponse object
-          if (metadata?.streaming) {
-            const stream = new StreamingResponse(connection, id);
-            await methodFn.apply(this, [stream, ...args]);
+          if (isStateUpdateMessage(parsed)) {
+            this.#setStateInternal(parsed.state as State, connection);
             return;
           }
 
-          // For regular methods, execute and send response
-          const result = await methodFn.apply(this, args);
-          const response: RPCResponse = {
-            type: "rpc",
-            id,
-            success: true,
-            result,
-            done: true,
-          };
-          connection.send(JSON.stringify(response));
-        } catch (e) {
-          // Send error response
-          const response: RPCResponse = {
-            type: "rpc",
-            id: parsed.id,
-            success: false,
-            error: e instanceof Error ? e.message : "Unknown error occurred",
-          };
-          connection.send(JSON.stringify(response));
-          console.error("RPC error:", e);
-        }
-        return;
-      }
+          if (isRPCRequest(parsed)) {
+            try {
+              const { id, method, args } = parsed;
 
-      return this.#tryCatch(() => _onMessage(connection, message));
+              // Check if method exists and is callable
+              const methodFn = this[method as keyof this];
+              if (typeof methodFn !== "function") {
+                throw new Error(`Method ${method} does not exist`);
+              }
+
+              if (!this.#isCallable(method)) {
+                throw new Error(`Method ${method} is not callable`);
+              }
+
+              // biome-ignore lint/complexity/noBannedTypes: <explanation>
+              const metadata = callableMetadata.get(methodFn as Function);
+
+              // For streaming methods, pass a StreamingResponse object
+              if (metadata?.streaming) {
+                const stream = new StreamingResponse(connection, id);
+                await methodFn.apply(this, [stream, ...args]);
+                return;
+              }
+
+              // For regular methods, execute and send response
+              const result = await methodFn.apply(this, args);
+              const response: RPCResponse = {
+                type: "rpc",
+                id,
+                success: true,
+                result,
+                done: true,
+              };
+              connection.send(JSON.stringify(response));
+            } catch (e) {
+              // Send error response
+              const response: RPCResponse = {
+                type: "rpc",
+                id: parsed.id,
+                success: false,
+                error:
+                  e instanceof Error ? e.message : "Unknown error occurred",
+              };
+              connection.send(JSON.stringify(response));
+              console.error("RPC error:", e);
+            }
+            return;
+          }
+
+          return this.#tryCatch(() => _onMessage(connection, message));
+        }
+      );
     };
 
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = (connection: Connection, ctx: ConnectionContext) => {
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
-      setTimeout(() => {
-        if (this.state) {
-          connection.send(
-            JSON.stringify({
-              type: "cf_agent_state",
-              state: this.state,
-            })
-          );
+      return unstable_context.run(
+        { agent: this, connection, request: ctx.request },
+        async () => {
+          setTimeout(() => {
+            if (this.state) {
+              connection.send(
+                JSON.stringify({
+                  type: "cf_agent_state",
+                  state: this.state,
+                })
+              );
+            }
+            return this.#tryCatch(() => _onConnect(connection, ctx));
+          }, 20);
         }
-        return this.#tryCatch(() => _onConnect(connection, ctx));
-      }, 20);
+      );
     };
   }
 
@@ -395,7 +414,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       }),
       source !== "server" ? [source.id] : []
     );
-    return this.#tryCatch(() => this.onStateUpdate(state, source));
+    return this.#tryCatch(() => {
+      const { connection, request } = unstable_context.getStore() || {};
+      return unstable_context.run(
+        { agent: this, connection, request },
+        async () => {
+          return this.onStateUpdate(state, source);
+        }
+      );
+    });
   }
 
   /**
@@ -420,7 +447,12 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param email Email message to process
    */
   onEmail(email: ForwardableEmailMessage) {
-    throw new Error("Not implemented");
+    return unstable_context.run(
+      { agent: this, connection: undefined, request: undefined },
+      async () => {
+        console.error("onEmail not implemented");
+      }
+    );
   }
 
   async #tryCatch<T>(fn: () => T | Promise<T>) {
@@ -580,7 +612,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    */
   getSchedules<T = string>(
     criteria: {
-      description?: string;
       id?: string;
       type?: "scheduled" | "delayed" | "cron";
       timeRange?: { start?: Date; end?: Date };
@@ -592,11 +623,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     if (criteria.id) {
       query += " AND id = ?";
       params.push(criteria.id);
-    }
-
-    if (criteria.description) {
-      query += " AND description = ?";
-      params.push(criteria.description);
     }
 
     if (criteria.type) {
@@ -671,16 +697,21 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         console.error(`callback ${row.callback} not found`);
         continue;
       }
-      try {
-        await (
-          callback as (
-            payload: unknown,
-            schedule: Schedule<unknown>
-          ) => Promise<void>
-        ).bind(this)(JSON.parse(row.payload as string), row);
-      } catch (e) {
-        console.error(`error executing callback "${row.callback}"`, e);
-      }
+      await unstable_context.run(
+        { agent: this, connection: undefined, request: undefined },
+        async () => {
+          try {
+            await (
+              callback as (
+                payload: unknown,
+                schedule: Schedule<unknown>
+              ) => Promise<void>
+            ).bind(this)(JSON.parse(row.payload as string), row);
+          } catch (e) {
+            console.error(`error executing callback "${row.callback}"`, e);
+          }
+        }
+      );
       if (row.type === "cron") {
         // Update next execution time for cron schedules
         const nextExecutionTime = getNextCronTime(row.cron);

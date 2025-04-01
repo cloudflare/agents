@@ -3,7 +3,7 @@ import { execSync } from "node:child_process";
 
 async function main() {
   await build({
-    entry: ["src/*.ts", "src/*.tsx"],
+    entry: ["src/*.ts", "src/*.tsx", "src/mcp/index.ts", "src/mcp/client.ts"],
     splitting: true,
     sourcemap: true,
     clean: true,
