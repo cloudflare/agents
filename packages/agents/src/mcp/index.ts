@@ -135,7 +135,7 @@ export abstract class McpAgent<
   }
   async onStart() {
     this.props = (await this.ctx.storage.get("props")) as Props;
-    this.init();
+    this.init?.();
 
     // Connect to the MCP server
     this.#transport = new McpTransport(() => this.getWebSocket());
@@ -349,8 +349,11 @@ export abstract class McpAgent<
 
         // Handle SSE connections
         if (request.method === "GET" && basePattern.test(url)) {
-          // Create a unique session ID for this connection
-          const sessionId = namespace.newUniqueId().toString();
+          // Use a session ID if one is passed in, or create a unique
+          // session ID for this connection
+          const sessionId =
+            url.searchParams.get("sessionId") ||
+            namespace.newUniqueId().toString();
 
           // Create a Transform Stream for SSE
           const { readable, writable } = new TransformStream();
@@ -370,10 +373,10 @@ export abstract class McpAgent<
           await doStub._init(ctx.props);
 
           // Connect to the Durable Object via WebSocket
-          const url = new URL(request.url);
-          url.searchParams.set("sessionId", sessionId);
+          const upgradeUrl = new URL(request.url);
+          upgradeUrl.searchParams.set("sessionId", sessionId);
           const response = await doStub.fetch(
-            new Request(url, {
+            new Request(upgradeUrl, {
               headers: {
                 Upgrade: "websocket",
               },
@@ -394,6 +397,29 @@ export abstract class McpAgent<
           // Handle messages from the Durable Object
           ws.addEventListener("message", async (event) => {
             try {
+              const message = JSON.parse(event.data);
+
+              // validate that the message is a valid JSONRPC message
+              // https://www.jsonrpc.org/specification#response_object
+              if (!(typeof message.id === "number" || message.id === null)) {
+                throw new Error("Invalid jsonrpc message id");
+              }
+
+              if (message.jsonrpc !== "2.0") {
+                throw new Error("Invalid jsonrpc version");
+              }
+
+              // must have either result or error field
+              if (
+                (message.hasOwnProperty("result") ? 1 : 0) +
+                  (message.hasOwnProperty("error") ? 1 : 0) !==
+                1
+              ) {
+                throw new Error(
+                  "Invalid jsonrpc message. Must have either result or error field"
+                );
+              }
+
               // Send the message as an SSE event
               const messageText = `event: message\ndata: ${event.data}\n\n`;
               await writer.write(encoder.encode(messageText));
@@ -457,7 +483,7 @@ export abstract class McpAgent<
             corsOptions?.origin || "*"
           );
 
-          return new Response(await response.text(), {
+          return new Response(response.body as unknown as BodyInit, {
             status: response.status,
             statusText: response.statusText,
             headers,
