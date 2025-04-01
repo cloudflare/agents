@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-MCP: Hibernate-able transport 
+MCP: Hibernate-able transport
