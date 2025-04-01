@@ -5,6 +5,27 @@ import type { RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 
 /**
+ * Convert a camelCase string to a kebab-case string
+ * @param str The string to convert
+ * @returns The kebab-case string
+ */
+function camelCaseToKebabCase(str: string): string {
+  // If string is all uppercase, convert to lowercase
+  if (str === str.toUpperCase() && str !== str.toLowerCase()) {
+    return str.toLowerCase().replace(/_/g, "-");
+  }
+
+  // Otherwise handle camelCase to kebab-case
+  let kebabified = str.replace(
+    /[A-Z]/g,
+    (letter) => `-${letter.toLowerCase()}`
+  );
+  kebabified = kebabified.startsWith("-") ? kebabified.slice(1) : kebabified;
+  // Convert any remaining underscores to hyphens and remove trailing -'s
+  return kebabified.replace(/_/g, "-").replace(/-$/, "");
+}
+
+/**
  * Options for the useAgent hook
  * @template State Type of the Agent's state
  */
@@ -38,6 +59,7 @@ export function useAgent<State = unknown>(
     streamOptions?: StreamOptions
   ) => Promise<T>;
 } {
+  const agentNamespace = camelCaseToKebabCase(options.agent);
   // Keep track of pending RPC calls
   const pendingCallsRef = useRef(
     new Map<
@@ -80,7 +102,7 @@ export function useAgent<State = unknown>(
 
   const agent = usePartySocket({
     prefix: "agents",
-    party: options.agent,
+    party: agentNamespace,
     room: options.name || "default",
     ...options,
     onMessage: (message) => {
@@ -145,7 +167,7 @@ export function useAgent<State = unknown>(
   };
 
   agent.call = call;
-  agent.agent = options.agent;
+  agent.agent = agentNamespace;
   agent.name = options.name || "default";
 
   // warn if agent or name isn't in lowercase
