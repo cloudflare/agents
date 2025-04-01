@@ -612,7 +612,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    */
   getSchedules<T = string>(
     criteria: {
-      description?: string;
       id?: string;
       type?: "scheduled" | "delayed" | "cron";
       timeRange?: { start?: Date; end?: Date };
@@ -624,11 +623,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     if (criteria.id) {
       query += " AND id = ?";
       params.push(criteria.id);
-    }
-
-    if (criteria.description) {
-      query += " AND description = ?";
-      params.push(criteria.description);
     }
 
     if (criteria.type) {
