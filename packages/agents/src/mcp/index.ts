@@ -86,6 +86,7 @@ export abstract class McpAgent<
 > extends DurableObject<Env> {
   #status: "zero" | "starting" | "started" = "zero";
   #transport?: McpTransport;
+  #connected = false;
 
   /**
    * Since McpAgent's _aren't_ yet real "Agents" (they route differently, don't support
@@ -152,7 +153,7 @@ export abstract class McpAgent<
   abstract init(): Promise<void>;
 
   async _init(props: Props) {
-    this.ctx.storage.put("props", props);
+    await this.ctx.storage.put("props", props);
     this.props = props;
     if (!this.initRun) {
       this.initRun = true;
@@ -193,26 +194,13 @@ export abstract class McpAgent<
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
 
-    // Accept the WebSocket with hibernation support
+    // For now, each agent can only have one connection
+    // If we get an upgrade while already connected, we should error
+    if (this.#connected) {
+      return new Response("WebSocket already connected", { status: 400 });
+    }
     this.ctx.acceptWebSocket(server);
-
-    // Set up event handlers
-    server.addEventListener("message", async (event) => {
-      await this.webSocketMessage(server, event.data);
-    });
-
-    server.addEventListener("close", async (event) => {
-      await this.webSocketClose(
-        server,
-        event.code || 1000,
-        event.reason || "",
-        event.wasClean || false
-      );
-    });
-
-    server.addEventListener("error", async (event) => {
-      await this.webSocketError(server, new Error("WebSocket error"));
-    });
+    this.#connected = true;
 
     // Connect to the MCP server
     this.#transport = new McpTransport(() => this.getWebSocket());
@@ -319,6 +307,7 @@ export abstract class McpAgent<
       await this.#initialize();
     }
     this.#transport?.onclose?.();
+    this.#connected = false;
   }
 
   static mount(
@@ -411,9 +400,8 @@ export abstract class McpAgent<
 
               // must have either result or error field
               if (
-                (message.hasOwnProperty("result") ? 1 : 0) +
-                  (message.hasOwnProperty("error") ? 1 : 0) !==
-                1
+                !Object.hasOwn(message, "result") &&
+                !Object.hasOwn(message, "error")
               ) {
                 throw new Error(
                   "Invalid jsonrpc message. Must have either result or error field"
