@@ -38,14 +38,26 @@ export function useAgentChat<State = unknown>(
   options: UseAgentChatOptions<State>
 ) {
   const { agent, getInitialMessages, ...rest } = options;
-  const url = `${agent._pkurl
-    .replace("ws://", "http://")
-    .replace("wss://", "https://")}`;
+
+  const agentUrl = new URL(
+    `${
+      // @ts-expect-error we're using a protected _url property that includes query params
+      (agent._url as string)
+        .replace("ws://", "http://")
+        .replace("wss://", "https://")
+    }`
+  );
+
+  // delete the _pk query param
+  agentUrl.searchParams.delete("_pk");
+  const agentUrlString = agentUrl.toString();
 
   async function defaultGetInitialMessagesFetch({
     url,
   }: GetInitialMessagesOptions) {
-    const response = await fetch(new Request(`${url}/get-messages`), {
+    const getMessagesUrl = new URL(url);
+    getMessagesUrl.pathname += "/get-messages";
+    const response = await fetch(getMessagesUrl.toString(), {
       headers: options.headers,
       credentials: options.credentials,
     });
@@ -58,11 +70,11 @@ export function useAgentChat<State = unknown>(
   function doGetInitialMessages(
     getInitialMessagesOptions: GetInitialMessagesOptions
   ) {
-    if (requestCache.has(url)) {
-      return requestCache.get(url)!;
+    if (requestCache.has(agentUrlString)) {
+      return requestCache.get(agentUrlString)!;
     }
     const promise = getInitialMessagesFetch(getInitialMessagesOptions);
-    requestCache.set(url, promise);
+    requestCache.set(agentUrlString, promise);
     return promise;
   }
 
@@ -72,16 +84,16 @@ export function useAgentChat<State = unknown>(
           doGetInitialMessages({
             agent: agent.agent,
             name: agent.name,
-            url,
+            url: agentUrlString,
           })
         )
       : rest.initialMessages;
 
   useEffect(() => {
     return () => {
-      requestCache.delete(url);
+      requestCache.delete(agentUrlString);
     };
-  }, [url]);
+  }, [agentUrlString]);
 
   async function aiFetch(
     request: RequestInfo | URL,
