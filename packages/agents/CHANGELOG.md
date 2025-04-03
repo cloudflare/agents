@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.50
+
+### Patch Changes
+
+- [#142](https://github.com/cloudflare/agents/pull/142) [`1461795`](https://github.com/cloudflare/agents/commit/146179598b05945ee07e95261e6a83979c9a07d9) Thanks [@threepointone](https://github.com/threepointone)! - ai-chat-agent: pass query params correctly in /get-messages
+
 ## 0.0.49
 
 ### Patch Changes
