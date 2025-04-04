@@ -46,6 +46,27 @@ export type AgentClientFetchOptions = Omit<
 };
 
 /**
+ * Convert a camelCase string to a kebab-case string
+ * @param str The string to convert
+ * @returns The kebab-case string
+ */
+function camelCaseToKebabCase(str: string): string {
+  // If string is all uppercase, convert to lowercase
+  if (str === str.toUpperCase() && str !== str.toLowerCase()) {
+    return str.toLowerCase().replace(/_/g, "-");
+  }
+
+  // Otherwise handle camelCase to kebab-case
+  let kebabified = str.replace(
+    /[A-Z]/g,
+    (letter) => `-${letter.toLowerCase()}`
+  );
+  kebabified = kebabified.startsWith("-") ? kebabified.slice(1) : kebabified;
+  // Convert any remaining underscores to hyphens and remove trailing -'s
+  return kebabified.replace(/_/g, "-").replace(/-$/, "");
+}
+
+/**
  * WebSocket client for connecting to an Agent
  */
 export class AgentClient<State = unknown> extends PartySocket {
@@ -71,27 +92,16 @@ export class AgentClient<State = unknown> extends PartySocket {
   >();
 
   constructor(options: AgentClientOptions<State>) {
+    const agentNamespace = camelCaseToKebabCase(options.agent);
     super({
       prefix: "agents",
-      party: options.agent,
+      party: agentNamespace,
       room: options.name || "default",
       ...options,
     });
-    this.agent = options.agent;
+    this.agent = agentNamespace;
     this.name = options.name || "default";
     this.#options = options;
-
-    // warn if agent or name isn't in lowercase
-    if (this.agent !== this.agent.toLowerCase()) {
-      console.warn(
-        `Agent name: ${this.agent} should probably be in lowercase. Received: ${this.agent}`
-      );
-    }
-    if (this.name !== this.name.toLowerCase()) {
-      console.warn(
-        `Agent instance name: ${this.name} should probably be in lowercase. Received: ${this.name}`
-      );
-    }
 
     this.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
@@ -183,22 +193,12 @@ export class AgentClient<State = unknown> extends PartySocket {
  * @returns Promise resolving to a Response
  */
 export function agentFetch(opts: AgentClientFetchOptions, init?: RequestInit) {
-  // warn if agent or name isn't in lowercase
-  if (opts.agent !== opts.agent.toLowerCase()) {
-    console.warn(
-      `Agent name: ${opts.agent} should probably be in lowercase. Received: ${opts.agent}`
-    );
-  }
-  if (opts.name && opts.name !== opts.name.toLowerCase()) {
-    console.warn(
-      `Agent instance name: ${opts.name} should probably be in lowercase. Received: ${opts.name}`
-    );
-  }
+  const agentNamespace = camelCaseToKebabCase(opts.agent);
 
   return PartySocket.fetch(
     {
       prefix: "agents",
-      party: opts.agent,
+      party: agentNamespace,
       room: opts.name || "default",
       ...opts,
     },

@@ -1,6 +1,6 @@
 {
   "name": "agents",
-  "version": "0.0.47",
+  "version": "0.0.50",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
@@ -49,9 +49,14 @@
       "import": "./dist/schedule.js"
     },
     "./mcp": {
-      "types": "./dist/mcp.d.ts",
-      "require": "./dist/mcp.js",
-      "import": "./dist/mcp.js"
+      "types": "./dist/mcp/index.d.ts",
+      "require": "./dist/mcp/index.js",
+      "import": "./dist/mcp/index.js"
+    },
+    "./mcp/client": {
+      "types": "./dist/mcp/client.d.ts",
+      "require": "./dist/mcp/client.js",
+      "import": "./dist/mcp/client.js"
     }
   },
   "keywords": [],
@@ -67,12 +72,10 @@
   "license": "MIT",
   "description": "A home for your AI agents",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.8.0",
     "cron-schedule": "^5.0.4",
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.66",
     "partysocket": "1.1.3"
-  },
-  "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.8.0"
   }
 }
