@@ -18,4 +18,8 @@ async function main() {
   process.exit(0);
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  // Build failures should fail
+  console.error(err);
+  process.exit(1);
+});
