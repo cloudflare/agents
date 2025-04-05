@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.52
+
+### Patch Changes
+
+- [#151](https://github.com/cloudflare/agents/pull/151) [`e376805`](https://github.com/cloudflare/agents/commit/e376805ccd88b08e853b1894cc703e6f67f2ed1d) Thanks [@threepointone](https://github.com/threepointone)! - useAgent: don't throw when `query` is an async url provider
+
 ## 0.0.51
 
 ### Patch Changes
