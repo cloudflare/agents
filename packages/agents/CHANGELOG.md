@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.51
+
+### Patch Changes
+
+- [#146](https://github.com/cloudflare/agents/pull/146) [`316f98c`](https://github.com/cloudflare/agents/commit/316f98c3f70792f6daa86d3e92f8a466b5509bb5) Thanks [@threepointone](https://github.com/threepointone)! - remove lowercase warning for agent names
+
 ## 0.0.50
 
 ### Patch Changes
