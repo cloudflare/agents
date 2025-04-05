@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.53
+
+### Patch Changes
+
+- [#149](https://github.com/cloudflare/agents/pull/149) [`49e8b36`](https://github.com/cloudflare/agents/commit/49e8b362d77a68f2e891f655b9971b737e394f9e) Thanks [@irvinebroque](https://github.com/irvinebroque)! - Automatically change "/" path to "/\*" in MCP server mount() method
+
 ## 0.0.52
 
 ### Patch Changes
