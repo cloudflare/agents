@@ -4,7 +4,10 @@
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
-    "directory": "public",
+    "directory": "dist/client",
+  },
+  "vars": {
+    "HOST": "<DEPLOYED_HOSTNAME>",
   },
   "durable_objects": {
     "bindings": [
@@ -20,4 +23,9 @@
       "new_sqlite_classes": ["MyAgent"],
     },
   ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+    },
+  },
 }

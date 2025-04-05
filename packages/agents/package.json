@@ -72,5 +72,8 @@
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.66",
     "partysocket": "1.1.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.8.0"
   }
 }

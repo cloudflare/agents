@@ -8,7 +8,7 @@ body {
   background-color: #f5f5f5;
 }
 
-.chat-container {
+.container {
   background: white;
   border-radius: 12px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
@@ -16,13 +16,13 @@ body {
   margin-bottom: 20px;
 }
 
-.message-form {
+.mcp-form {
   display: flex;
   gap: 10px;
   margin-bottom: 20px;
 }
 
-.message-input {
+.mcp-input {
   flex: 1;
   padding: 12px;
   border: 1px solid #ddd;
@@ -30,7 +30,7 @@ body {
   font-size: 16px;
 }
 
-.message-input:focus {
+.mcp-input:focus {
   outline: none;
   border-color: #0066ff;
 }
@@ -50,11 +50,11 @@ button:hover {
   background-color: #0052cc;
 }
 
-.messages-section {
+.mcp-section {
   margin-bottom: 30px;
 }
 
-.messages-section h2 {
+.mcp-section h2 {
   color: #333;
   font-size: 1.2em;
   margin-bottom: 15px;
@@ -62,28 +62,16 @@ button:hover {
   border-bottom: 2px solid #eee;
 }
 
-.message {
-  padding: 12px 16px;
+.mcp-server {
+  padding: 8px 8px;
   margin: 8px 0;
   border-radius: 8px;
-  max-width: 80%;
-}
-
-.incoming-message {
+  max-width: 100%;
+  display: flex;
+  flex-direction: row;
   background-color: #f0f0f0;
   margin-right: auto;
-}
-
-.outgoing-message {
-  background-color: #0066ff;
-  color: white;
-  margin-left: auto;
-}
-
-.timestamp {
-  font-size: 12px;
-  color: #666;
-  margin-top: 4px;
+  justify-content: space-between;
 }
 
 .status-indicator {
@@ -92,12 +80,28 @@ button:hover {
   gap: 8px;
   color: #666;
   font-size: 14px;
-  margin-bottom: 16px;
+  margin-top: 6px;
 }
 
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  background-color: #666;
+}
+
+.status-dot.connected {
   background-color: #22c55e;
+}
+
+.code {
+  font-family: monospace;
+  background-color: #f0f0f0;
+  padding: 8px;
+  margin: 8px 0;
+  border-radius: 4px;
+}
+
+.mcp-servers {
+  margin-top: 8px;
 }
