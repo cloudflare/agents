@@ -320,8 +320,10 @@ export abstract class McpAgent<
       corsOptions?: CORSOptions;
     } = {}
   ) {
-    const basePattern = new URLPattern({ pathname: path });
-    const messagePattern = new URLPattern({ pathname: `${path}/message` });
+    let pathname = path;
+    if (path === "/") { pathname = "/*" }
+    const basePattern = new URLPattern({ pathname });
+    const messagePattern = new URLPattern({ pathname: `${pathname}/message` });
 
     return {
       fetch: async (
@@ -350,7 +352,7 @@ export abstract class McpAgent<
           const encoder = new TextEncoder();
 
           // Send the endpoint event
-          const endpointMessage = `event: endpoint\ndata: ${encodeURI(`${path}/message`)}?sessionId=${sessionId}\n\n`;
+          const endpointMessage = `event: endpoint\ndata: ${encodeURI(`${pathname}/message`)}?sessionId=${sessionId}\n\n`;
           writer.write(encoder.encode(endpointMessage));
 
           // Get the Durable Object
@@ -450,7 +452,7 @@ export abstract class McpAgent<
           const sessionId = url.searchParams.get("sessionId");
           if (!sessionId) {
             return new Response(
-              `Missing sessionId. Expected POST to ${path} to initiate new one`,
+              `Missing sessionId. Expected POST to ${pathname} to initiate new one`,
               { status: 400 }
             );
           }
