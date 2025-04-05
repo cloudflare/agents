@@ -321,7 +321,9 @@ export abstract class McpAgent<
     } = {}
   ) {
     let pathname = path;
-    if (path === "/") { pathname = "/*" }
+    if (path === "/") {
+      pathname = "/*";
+    }
     const basePattern = new URLPattern({ pathname });
     const messagePattern = new URLPattern({ pathname: `${pathname}/message` });
 
