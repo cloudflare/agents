@@ -1,5 +1,17 @@
 # @cloudflare/agents
 
+## 0.0.54
+
+### Patch Changes
+
+- [#140](https://github.com/cloudflare/agents/pull/140) [`2f5cb3a`](https://github.com/cloudflare/agents/commit/2f5cb3ac4a9fbb9dc79b137b74336681f60be5a0) Thanks [@cmsparks](https://github.com/cmsparks)! - Remote MCP Client with auth support
+
+  This PR adds:
+
+  - Support for authentication for MCP Clients (Via a DO based auth provider)
+  - Some improvements to the client API per #135
+  - A more in depth example of MCP Client, which allows you to add any number of remote MCP servers with or without auth
+
 ## 0.0.53
 
 ### Patch Changes
