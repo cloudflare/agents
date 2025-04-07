@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.55
+
+### Patch Changes
+
+- [#159](https://github.com/cloudflare/agents/pull/159) [`b8377c1`](https://github.com/cloudflare/agents/commit/b8377c1efcd00fa2719676edc9e8d2ef02a20a23) Thanks [@jmorrell-cloudflare](https://github.com/jmorrell-cloudflare)! - Fix issues with McpAgent and setState introduced by hibernation changes
+
 ## 0.0.54
 
 ### Patch Changes
