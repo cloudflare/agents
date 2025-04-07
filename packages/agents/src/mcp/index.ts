@@ -99,11 +99,7 @@ export abstract class McpAgent<
     super(ctx, env);
     const self = this;
 
-    // Since McpAgent's _aren't_ yet real "Agents" (they route differently, they don't support
-    // scheduling etc, let's only expose a couple of the methods
-    // to the outer class for now.
     this.#agent = new (class extends Agent<Env, State> {
-      initialState: State = self.initialState;
       static options = {
         hibernate: true,
       };
@@ -111,7 +107,7 @@ export abstract class McpAgent<
       onStateUpdate(state: State | undefined, source: Connection | "server") {
         return self.onStateUpdate(state, source);
       }
-    })(this.ctx, this.env);
+    })(ctx, env);
   }
 
   /**
@@ -137,9 +133,6 @@ export abstract class McpAgent<
   async onStart() {
     const self = this;
 
-    // Since McpAgent's _aren't_ yet real "Agents" (they route differently, they don't support
-    // scheduling etc, let's only expose a couple of the methods
-    // to the outer class for now.
     this.#agent = new (class extends Agent<Env, State> {
       initialState: State = self.initialState;
       static options = {
