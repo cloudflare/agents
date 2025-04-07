@@ -227,7 +227,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       // no initial state provided, so we return undefined
       return undefined as State;
     }
-
     // initial state provided, so we set the state,
     // update db and return the initial state
     this.setState(this.initialState);
