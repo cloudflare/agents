@@ -93,7 +93,7 @@ export abstract class McpAgent<
    * websockets, don't support hibernation), let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
    */
-  readonly #agent: Agent<Env, State>;
+  #agent: Agent<Env, State>;
 
   protected constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -103,6 +103,7 @@ export abstract class McpAgent<
     // scheduling etc, let's only expose a couple of the methods
     // to the outer class for now.
     this.#agent = new (class extends Agent<Env, State> {
+      initialState: State = self.initialState;
       static options = {
         hibernate: true,
       };
@@ -110,7 +111,11 @@ export abstract class McpAgent<
       onStateUpdate(state: State | undefined, source: Connection | "server") {
         return self.onStateUpdate(state, source);
       }
-    })(ctx, env);
+    })(this.ctx, this.env);
+  }
+
+  logAgent() {
+    console.log("agent.state", this.#agent.state);
   }
 
   /**
@@ -118,7 +123,6 @@ export abstract class McpAgent<
    */
   initialState!: State;
   get state() {
-    if (this.initialState) this.#agent.initialState = this.initialState;
     return this.#agent.state;
   }
   sql<T = Record<string, string | number | boolean | null>>(
@@ -135,6 +139,22 @@ export abstract class McpAgent<
     // override this to handle state updates
   }
   async onStart() {
+    const self = this;
+
+    // Since McpAgent's _aren't_ yet real "Agents" (they route differently, they don't support
+    // scheduling etc, let's only expose a couple of the methods
+    // to the outer class for now.
+    this.#agent = new (class extends Agent<Env, State> {
+      initialState: State = self.initialState;
+      static options = {
+        hibernate: true,
+      };
+
+      onStateUpdate(state: State | undefined, source: Connection | "server") {
+        return self.onStateUpdate(state, source);
+      }
+    })(this.ctx, this.env);
+
     this.props = (await this.ctx.storage.get("props")) as Props;
     this.init?.();
 
@@ -190,26 +210,30 @@ export abstract class McpAgent<
       return new Response("Missing sessionId", { status: 400 });
     }
 
-    // Create a WebSocket pair
-    const webSocketPair = new WebSocketPair();
-    const [client, server] = Object.values(webSocketPair);
+    const resp = await this.#agent.fetch(request);
 
-    // For now, each agent can only have one connection
-    // If we get an upgrade while already connected, we should error
-    if (this.#connected) {
-      return new Response("WebSocket already connected", { status: 400 });
-    }
-    this.ctx.acceptWebSocket(server);
-    this.#connected = true;
+    // Create a WebSocket pair
+    // const webSocketPair = new WebSocketPair();
+    // const [client, server] = Object.values(webSocketPair);
+
+    // // For now, each agent can only have one connection
+    // // If we get an upgrade while already connected, we should error
+    // if (this.#connected) {
+    //   return new Response("WebSocket already connected", { status: 400 });
+    // }
+    // this.ctx.acceptWebSocket(server);
+    // this.#connected = true;
 
     // Connect to the MCP server
     this.#transport = new McpTransport(() => this.getWebSocket());
     await this.server.connect(this.#transport);
 
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    });
+    // return new Response(null, {
+    //   status: 101,
+    //   webSocket: client,
+    // });
+
+    return resp;
   }
 
   getWebSocket() {
@@ -255,6 +279,7 @@ export abstract class McpAgent<
         throw error;
       }
 
+      console.log("onmessage", parsedMessage);
       this.#transport?.onmessage?.(parsedMessage);
       return new Response("Accepted", { status: 202 });
     } catch (error) {
@@ -372,6 +397,7 @@ export abstract class McpAgent<
             new Request(upgradeUrl, {
               headers: {
                 Upgrade: "websocket",
+                "x-partykit-room": sessionId,
               },
             })
           );
@@ -395,6 +421,7 @@ export abstract class McpAgent<
               // validate that the message is a valid JSONRPC message
               // https://www.jsonrpc.org/specification#response_object
               if (!(typeof message.id === "number" || message.id === null)) {
+                console.log("invalid message id", message);
                 throw new Error("Invalid jsonrpc message id");
               }
 
