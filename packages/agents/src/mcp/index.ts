@@ -114,10 +114,6 @@ export abstract class McpAgent<
     })(this.ctx, this.env);
   }
 
-  logAgent() {
-    console.log("agent.state", this.#agent.state);
-  }
-
   /**
    * Agents API allowlist
    */
@@ -279,7 +275,6 @@ export abstract class McpAgent<
         throw error;
       }
 
-      console.log("onmessage", parsedMessage);
       this.#transport?.onmessage?.(parsedMessage);
       return new Response("Accepted", { status: 202 });
     } catch (error) {
@@ -421,7 +416,6 @@ export abstract class McpAgent<
               // validate that the message is a valid JSONRPC message
               // https://www.jsonrpc.org/specification#response_object
               if (!(typeof message.id === "number" || message.id === null)) {
-                console.log("invalid message id", message);
                 throw new Error("Invalid jsonrpc message id");
               }
 

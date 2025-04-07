@@ -194,11 +194,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Current state of the Agent
    */
   get state(): State {
-    console.log("state()");
-
     if (this.#state !== DEFAULT_STATE) {
       // state was previously set, and populated internal state
-      console.log("state was previously set, and populated internal state");
       return this.#state;
     }
     // looks like this is the first time the state is being accessed
@@ -206,8 +203,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     const wasChanged = this.sql<{ state: "true" | undefined }>`
         SELECT state FROM cf_agents_state WHERE id = ${STATE_WAS_CHANGED}
       `;
-
-    console.log("wasChanged", wasChanged);
 
     // ok, let's pick up the actual state from the db
     const result = this.sql<{ state: State | undefined }>`
@@ -224,24 +219,18 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       this.#state = JSON.parse(state);
       return this.#state;
     }
-    console.log("here");
 
     // ok, this is the first time the state is being accessed
     // and the state was not set in a previous life
     // so we need to set the initial state (if provided)
     if (this.initialState === DEFAULT_STATE) {
-      console.log("no initial state provided, so we return undefined");
       // no initial state provided, so we return undefined
       return undefined as State;
     }
 
-    console.log("this.initialState", this.initialState);
     // initial state provided, so we set the state,
     // update db and return the initial state
     this.setState(this.initialState);
-    console.log(
-      "initial state provided, so we set the state, update db and return the initial state"
-    );
     return this.initialState;
   }
 
@@ -442,7 +431,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param state New state to set
    */
   setState(state: State) {
-    console.log("setState", state);
     this.#setStateInternal(state, "server");
   }
 
