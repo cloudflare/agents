@@ -75,35 +75,6 @@ export function useAgent<State = unknown>(
   // TODO: if options.query is a function, then use
   // "use()" to get the value and pass it
   // as a query parameter to usePartySocket
-
-  // Create the call method
-  const call = useCallback(
-    <T = unknown,>(
-      method: string,
-      args: unknown[] = [],
-      streamOptions?: StreamOptions
-    ): Promise<T> => {
-      return new Promise((resolve, reject) => {
-        const id = Math.random().toString(36).slice(2);
-        pendingCallsRef.current.set(id, {
-          resolve: resolve as (value: unknown) => void,
-          reject,
-          stream: streamOptions,
-        });
-
-        const request: RPCRequest = {
-          type: "rpc",
-          id,
-          method,
-          args,
-        };
-
-        agent.send(JSON.stringify(request));
-      });
-    },
-    []
-  );
-
   const agent = usePartySocket({
     prefix: "agents",
     party: agentNamespace,
@@ -164,6 +135,33 @@ export function useAgent<State = unknown>(
       streamOptions?: StreamOptions
     ) => Promise<T>;
   };
+  // Create the call method
+  const call = useCallback(
+    <T = unknown,>(
+      method: string,
+      args: unknown[] = [],
+      streamOptions?: StreamOptions
+    ): Promise<T> => {
+      return new Promise((resolve, reject) => {
+        const id = Math.random().toString(36).slice(2);
+        pendingCallsRef.current.set(id, {
+          resolve: resolve as (value: unknown) => void,
+          reject,
+          stream: streamOptions,
+        });
+
+        const request: RPCRequest = {
+          type: "rpc",
+          id,
+          method,
+          args,
+        };
+
+        agent.send(JSON.stringify(request));
+      });
+    },
+    [agent]
+  );
 
   agent.setState = (state: State) => {
     agent.send(JSON.stringify({ type: "cf_agent_state", state }));
