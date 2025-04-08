@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.57
+
+### Patch Changes
+
+- [#163](https://github.com/cloudflare/agents/pull/163) [`956c772`](https://github.com/cloudflare/agents/commit/956c772712962dfeef21d2b7ab6740600b308596) Thanks [@brishin](https://github.com/brishin)! - Fix: Missing agent dep in useCallback
+
+- [#164](https://github.com/cloudflare/agents/pull/164) [`3824fd4`](https://github.com/cloudflare/agents/commit/3824fd4dfdd99c80cba5ea031e950a460d495256) Thanks [@threepointone](https://github.com/threepointone)! - revert https://github.com/cloudflare/agents/pull/161
+
 ## 0.0.56
 
 ### Patch Changes
