@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.56
+
+### Patch Changes
+
+- [#161](https://github.com/cloudflare/agents/pull/161) [`1f6598e`](https://github.com/cloudflare/agents/commit/1f6598eda2d6c4528797870fe74529e41142ff96) Thanks [@threepointone](https://github.com/threepointone)! - mcp: remove duplicate agent init, await root .init()
+
 ## 0.0.55
 
 ### Patch Changes
