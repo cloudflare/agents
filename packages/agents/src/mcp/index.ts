@@ -93,7 +93,22 @@ export abstract class McpAgent<
    * websockets, don't support hibernation), let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
    */
-  #agent!: Agent<Env, State>;
+  #agent: Agent<Env, State>;
+
+  protected constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    const self = this;
+
+    this.#agent = new (class extends Agent<Env, State> {
+      static options = {
+        hibernate: true,
+      };
+
+      onStateUpdate(state: State | undefined, source: Connection | "server") {
+        return self.onStateUpdate(state, source);
+      }
+    })(ctx, env);
+  }
 
   /**
    * Agents API allowlist
@@ -130,7 +145,7 @@ export abstract class McpAgent<
     })(this.ctx, this.env);
 
     this.props = (await this.ctx.storage.get("props")) as Props;
-    await this.init?.();
+    this.init?.();
 
     // Connect to the MCP server
     this.#transport = new McpTransport(() => this.getWebSocket());
