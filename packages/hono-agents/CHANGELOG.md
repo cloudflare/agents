@@ -1,5 +1,18 @@
 # hono-agents
 
+## 0.0.49
+
+### Patch Changes
+
+- [#168](https://github.com/cloudflare/agents/pull/168) [`2781f7d`](https://github.com/cloudflare/agents/commit/2781f7d7275bfada743c6c5531aab42db5e675a7) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+- [#170](https://github.com/cloudflare/agents/pull/170) [`21cc416`](https://github.com/cloudflare/agents/commit/21cc4160026771a3c8cc82f33edb5426112a22d5) Thanks [@threepointone](https://github.com/threepointone)! - fix: redirects with hono-agents
+
+  fixes https://github.com/cloudflare/agents/issues/156
+
+- Updated dependencies [[`2781f7d`](https://github.com/cloudflare/agents/commit/2781f7d7275bfada743c6c5531aab42db5e675a7)]:
+  - agents@0.0.59
+
 ## 0.0.48
 
 ### Patch Changes
