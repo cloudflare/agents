@@ -8,5 +8,8 @@
     "deploy": "wrangler deploy"
   },
   "keywords": [],
-  "author": ""
+  "author": "",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.9.0"
+  }
 }
