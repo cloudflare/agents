@@ -16,49 +16,68 @@ import {
   type ListResourceTemplatesResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type {
-  SSEClientTransport,
-  SSEClientTransportOptions,
-} from "@modelcontextprotocol/sdk/client/sse.js";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 export class MCPClientConnection {
   client: Client;
-  transport: SSEClientTransport;
-  connected: boolean;
+  connectionState:
+    | "authenticating"
+    | "connecting"
+    | "ready"
+    | "discovering"
+    | "failed" = "connecting";
   instructions?: string;
-  tools: Tool[];
-  prompts: Prompt[];
-  resources: Resource[];
-  resourceTemplates: ResourceTemplate[];
+  tools: Tool[] = [];
+  prompts: Prompt[] = [];
+  resources: Resource[] = [];
+  resourceTemplates: ResourceTemplate[] = [];
   serverCapabilities: ServerCapabilities | undefined;
 
   constructor(
-    url: URL,
+    public url: URL,
     private info: ConstructorParameters<typeof Client>[0],
-    opts: {
+    private options: {
       transport: SSEClientTransportOptions;
       client: ConstructorParameters<typeof Client>[1];
       capabilities: ClientCapabilities;
     } = { transport: {}, client: {}, capabilities: {} }
   ) {
-    this.transport = new SSEEdgeClientTransport(url, opts.transport);
-    this.client = new Client(info, opts.client);
-    this.client.registerCapabilities(opts.capabilities);
-    this.connected = false;
-    this.tools = [];
-    this.prompts = [];
-    this.resources = [];
-    this.resourceTemplates = [];
+    this.client = new Client(info, options.client);
+    this.client.registerCapabilities(options.capabilities);
   }
 
-  async init() {
-    await this.client.connect(this.transport);
+  /**
+   * Initialize a client connection
+   *
+   * @param code Optional OAuth code to initialize the connection with if auth hasn't been initialized
+   * @returns
+   */
+  async init(code?: string, clientId?: string) {
+    try {
+      const transport = new SSEEdgeClientTransport(
+        this.url,
+        this.options.transport
+      );
+      if (code) {
+        await transport.finishAuth(code);
+      }
+      await this.client.connect(transport);
+      // biome-ignore lint/suspicious/noExplicitAny: allow for the error check here
+    } catch (e: any) {
+      if (e.toString().includes("Unauthorized")) {
+        // unauthorized, we should wait for the user to authenticate
+        this.connectionState = "authenticating";
+        return;
+      }
+      this.connectionState = "failed";
+      throw e;
+    }
+
+    this.connectionState = "discovering";
 
     this.serverCapabilities = await this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
-      throw new Error(
-        `The MCP Server ${this.info.name} failed to return server capabilities`
-      );
+      throw new Error("The MCP Server failed to return server capabilities");
     }
 
     const [instructions, tools, resources, prompts, resourceTemplates] =
@@ -75,6 +94,8 @@ export class MCPClientConnection {
     this.resources = resources;
     this.prompts = prompts;
     this.resourceTemplates = resourceTemplates;
+
+    this.connectionState = "ready";
   }
 
   /**

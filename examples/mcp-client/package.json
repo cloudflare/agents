@@ -3,14 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "vite dev"
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "wrangler deploy"
   },
   "keywords": [],
   "author": "",
   "dependencies": {
-    "mcp-remote": "^0.0.10"
-  },
-  "devDependencies": {
-    "@modelcontextprotocol/inspector": "^0.7.0"
+    "@modelcontextprotocol/sdk": "^1.9.0"
   }
 }

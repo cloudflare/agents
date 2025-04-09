@@ -50,18 +50,6 @@ function isWebSocketUpgrade(c: Context): boolean {
 }
 
 /**
- * Creates a new Request object from the Hono context
- * Preserves the original request's URL, method, headers, and body
- */
-function createRequestFromContext(c: Context) {
-  return new Request(c.req.url, {
-    method: c.req.method,
-    headers: c.req.header(),
-    body: c.req.raw.body,
-  });
-}
-
-/**
  * Handles WebSocket upgrade requests
  * Returns a WebSocket upgrade response if successful, null otherwise
  */
@@ -69,8 +57,11 @@ async function handleWebSocketUpgrade<E extends Env>(
   c: Context<E>,
   options?: AgentOptions<E>
 ) {
-  const req = createRequestFromContext(c);
-  const response = await routeAgentRequest(req, env(c) satisfies Env, options);
+  const response = await routeAgentRequest(
+    c.req.raw,
+    env(c) satisfies Env,
+    options
+  );
 
   if (!response?.webSocket) {
     return null;
@@ -90,7 +81,5 @@ async function handleHttpRequest<E extends Env>(
   c: Context<E>,
   options?: AgentOptions<E>
 ) {
-  const req = createRequestFromContext(c);
-
-  return routeAgentRequest(req, env(c) satisfies Env, options);
+  return routeAgentRequest(c.req.raw, env(c) satisfies Env, options);
 }

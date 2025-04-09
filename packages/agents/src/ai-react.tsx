@@ -40,12 +40,10 @@ export function useAgentChat<State = unknown>(
   const { agent, getInitialMessages, ...rest } = options;
 
   const agentUrl = new URL(
-    `${
-      // @ts-expect-error we're using a protected _url property that includes query params
-      (agent._url as string)
-        .replace("ws://", "http://")
-        .replace("wss://", "https://")
-    }`
+    `${// @ts-expect-error we're using a protected _url property that includes query params
+    ((agent._url as string | null) || agent._pkurl)
+      ?.replace("ws://", "http://")
+      .replace("wss://", "https://")}`
   );
 
   // delete the _pk query param

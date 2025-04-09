@@ -1,106 +1,144 @@
 import { useAgent } from "agents/react";
 import { createRoot } from "react-dom/client";
-import { useRef, useState } from "react";
-import { agentFetch } from "agents/client";
+import { useMemo, useRef, useState } from "react";
 import "./styles.css";
+import type { State } from "./server";
+import { agentFetch } from "agents/client";
 
-interface Message {
-  id: string;
-  text: string;
-  timestamp: Date;
-  type: "incoming" | "outgoing";
+let sessionId = localStorage.getItem("sessionId");
+if (!sessionId) {
+  sessionId = crypto.randomUUID();
+  localStorage.setItem("sessionId", sessionId);
 }
+// TODO: clear sessionId on logout
 
 function App() {
-  const [messages, setMessages] = useState<Message[]>([]);
   const [isConnected, setIsConnected] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const mcpInputRef = useRef<HTMLInputElement>(null);
+  const [mcpState, setMcpState] = useState<State>({
+    servers: {},
+    tools: [],
+    prompts: [],
+    resources: [],
+  });
 
   const agent = useAgent({
     agent: "my-agent",
-    onMessage: (message) => {
-      const newMessage: Message = {
-        id: Math.random().toString(36).substring(7),
-        text: message.data as string,
-        timestamp: new Date(),
-        type: "incoming",
-      };
-      setMessages((prev) => [...prev, newMessage]);
-    },
+    name: sessionId!,
     onOpen: () => setIsConnected(true),
     onClose: () => setIsConnected(false),
+    onStateUpdate: (state: State) => {
+      setMcpState(state);
+    },
   });
 
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  function openPopup(authUrl: string) {
+    window.open(
+      authUrl,
+      "popupWindow",
+      "width=600,height=800,resizable=yes,scrollbars=yes,toolbar=yes,menubar=no,location=no,directories=no,status=yes"
+    );
+  }
+
+  const handleMcpSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!inputRef.current || !inputRef.current.value.trim()) return;
+    if (!mcpInputRef.current || !mcpInputRef.current.value.trim()) return;
 
-    const text = inputRef.current.value;
-    const newMessage: Message = {
-      id: Math.random().toString(36).substring(7),
-      text,
-      timestamp: new Date(),
-      type: "outgoing",
-    };
-
-    agent.send(text);
-    setMessages((prev) => [...prev, newMessage]);
-    inputRef.current.value = "";
-  };
-
-  const handleFetchRequest = async () => {
-    try {
-      const response = await agentFetch({
+    const serverUrl = mcpInputRef.current.value;
+    agentFetch(
+      {
+        host: agent.host,
         agent: "my-agent",
-        host: window.location.host,
-      });
-      const data = await response.text();
-      const newMessage: Message = {
-        id: Math.random().toString(36).substring(7),
-        text: `Server Response: ${data}`,
-        timestamp: new Date(),
-        type: "incoming",
-      };
-      setMessages((prev) => [...prev, newMessage]);
-    } catch (error) {
-      console.error("Error fetching from server:", error);
-    }
-  };
-
-  const formatTime = (date: Date) => {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        name: sessionId!,
+        path: "add-mcp",
+      },
+      {
+        method: "POST",
+        body: JSON.stringify({ url: serverUrl }),
+      }
+    );
+    setMcpState({
+      ...mcpState,
+      servers: {
+        ...mcpState.servers,
+        placeholder: {
+          url: serverUrl,
+          state: "connecting",
+        },
+      },
+    });
   };
 
   return (
-    <div className="chat-container">
+    <div className="container">
       <div className="status-indicator">
         <div className={`status-dot ${isConnected ? "connected" : ""}`} />
         {isConnected ? "Connected to server" : "Disconnected"}
       </div>
 
-      <form className="message-form" onSubmit={handleSubmit}>
-        <input
-          type="text"
-          ref={inputRef}
-          className="message-input"
-          placeholder="Type your message..."
-        />
-        <button type="submit">Send</button>
-      </form>
+      <div className="mcp-servers">
+        <form className="mcp-form" onSubmit={handleMcpSubmit}>
+          <input
+            type="text"
+            ref={mcpInputRef}
+            className="mcp-input"
+            placeholder="MCP Server URL"
+          />
+          <button type="submit">Add MCP Server</button>
+        </form>
+      </div>
 
-      <div className="messages-section">
-        <h2>Messages</h2>
-        {messages.map((message) => (
-          <div key={message.id} className={`message ${message.type}-message`}>
-            <div>{message.text}</div>
-            <div className="timestamp">{formatTime(message.timestamp)}</div>
+      <div className="mcp-section">
+        <h2>MCP Servers</h2>
+        {Object.entries(mcpState.servers).map(([id, server]) => (
+          <div key={id} className={"mcp-server"}>
+            <div>
+              <div>URL: {server.url}</div>
+              <div className="status-indicator">
+                <div
+                  className={`status-dot ${server.state === "ready" ? "connected" : ""}`}
+                />
+                {server.state} (id: {id})
+              </div>
+            </div>
+            {server.state === "authenticating" && server.authUrl && (
+              <button
+                type="button"
+                onClick={() => openPopup(server.authUrl as string)}
+              >
+                Authorize
+              </button>
+            )}
           </div>
         ))}
       </div>
 
-      <button type="button" onClick={handleFetchRequest}>
-        Send HTTP Request
-      </button>
+      <div className="messages-section">
+        <h2>Server Data</h2>
+        <h3>Tools</h3>
+        {mcpState.tools.map((tool) => (
+          <div key={`${tool.name}-${tool.serverId}`}>
+            <b>{tool.name}</b>
+            <pre className="code">{JSON.stringify(tool, null, 2)}</pre>
+          </div>
+        ))}
+
+        <h3>Prompts</h3>
+        {mcpState.prompts.map((prompt) => (
+          <div key={`${prompt.name}-${prompt.serverId}`}>
+            <b>{prompt.name}</b>
+            <pre className="code">{JSON.stringify(prompt, null, 2)}</pre>
+          </div>
+        ))}
+
+        <h3>Resources</h3>
+        {mcpState.resources.map((resource) => (
+          <div key={`${resource.name}-${resource.serverId}`}>
+            <b>{resource.name}</b>
+            <pre className="code">{JSON.stringify(resource, null, 2)}</pre>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
