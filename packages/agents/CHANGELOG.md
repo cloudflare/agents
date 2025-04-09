@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.58
+
+### Patch Changes
+
+- [`33b22fe`](https://github.com/cloudflare/agents/commit/33b22fe146bb8b721b4d33c607a044ea64c0706a) Thanks [@threepointone](https://github.com/threepointone)! - don't import WorkflowEntrypoint
+
+  fixes https://github.com/cloudflare/agents/issues/166
+
 ## 0.0.57
 
 ### Patch Changes
