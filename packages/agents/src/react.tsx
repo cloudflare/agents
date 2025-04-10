@@ -72,34 +72,9 @@ export function useAgent<State = unknown>(
     >()
   );
 
-  // Create the call method
-  const call = useCallback(
-    <T = unknown,>(
-      method: string,
-      args: unknown[] = [],
-      streamOptions?: StreamOptions
-    ): Promise<T> => {
-      return new Promise((resolve, reject) => {
-        const id = Math.random().toString(36).slice(2);
-        pendingCallsRef.current.set(id, {
-          resolve: resolve as (value: unknown) => void,
-          reject,
-          stream: streamOptions,
-        });
-
-        const request: RPCRequest = {
-          type: "rpc",
-          id,
-          method,
-          args,
-        };
-
-        agent.send(JSON.stringify(request));
-      });
-    },
-    []
-  );
-
+  // TODO: if options.query is a function, then use
+  // "use()" to get the value and pass it
+  // as a query parameter to usePartySocket
   const agent = usePartySocket({
     prefix: "agents",
     party: agentNamespace,
@@ -160,6 +135,33 @@ export function useAgent<State = unknown>(
       streamOptions?: StreamOptions
     ) => Promise<T>;
   };
+  // Create the call method
+  const call = useCallback(
+    <T = unknown,>(
+      method: string,
+      args: unknown[] = [],
+      streamOptions?: StreamOptions
+    ): Promise<T> => {
+      return new Promise((resolve, reject) => {
+        const id = Math.random().toString(36).slice(2);
+        pendingCallsRef.current.set(id, {
+          resolve: resolve as (value: unknown) => void,
+          reject,
+          stream: streamOptions,
+        });
+
+        const request: RPCRequest = {
+          type: "rpc",
+          id,
+          method,
+          args,
+        };
+
+        agent.send(JSON.stringify(request));
+      });
+    },
+    [agent]
+  );
 
   agent.setState = (state: State) => {
     agent.send(JSON.stringify({ type: "cf_agent_state", state }));
@@ -170,15 +172,10 @@ export function useAgent<State = unknown>(
   agent.agent = agentNamespace;
   agent.name = options.name || "default";
 
-  // warn if agent or name isn't in lowercase
+  // warn if agent isn't in lowercase
   if (agent.agent !== agent.agent.toLowerCase()) {
     console.warn(
       `Agent name: ${agent.agent} should probably be in lowercase. Received: ${agent.agent}`
-    );
-  }
-  if (agent.name !== agent.name.toLowerCase()) {
-    console.warn(
-      `Agent instance name: ${agent.name} should probably be in lowercase. Received: ${agent.name}`
     );
   }
 

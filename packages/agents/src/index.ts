@@ -15,8 +15,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 export type { Connection, WSMessage, ConnectionContext } from "partyserver";
 
-import { WorkflowEntrypoint as CFWorkflowEntrypoint } from "cloudflare:workers";
-
 /**
  * RPC request message from client
  */
@@ -118,11 +116,6 @@ export function unstable_callable(metadata: CallableMetadata = {}) {
     return target;
   };
 }
-
-/**
- * A class for creating workflow entry points that can be used with Cloudflare Workers
- */
-export class WorkflowEntrypoint extends CFWorkflowEntrypoint {}
 
 /**
  * Represents a scheduled task within an Agent

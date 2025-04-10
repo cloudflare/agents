@@ -1,6 +1,6 @@
 {
   "name": "agents",
-  "version": "0.0.50",
+  "version": "0.0.59",
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
@@ -57,6 +57,11 @@
       "types": "./dist/mcp/client.d.ts",
       "require": "./dist/mcp/client.js",
       "import": "./dist/mcp/client.js"
+    },
+    "./mcp/do-oauth-client-provider": {
+      "types": "./dist/mcp/do-oauth-client-provider.d.ts",
+      "require": "./dist/mcp/do-oauth-client-provider.js",
+      "import": "./dist/mcp/do-oauth-client-provider.js"
     }
   },
   "keywords": [],
@@ -72,7 +77,7 @@
   "license": "MIT",
   "description": "A home for your AI agents",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.8.0",
+    "@modelcontextprotocol/sdk": "^1.9.0",
     "cron-schedule": "^5.0.4",
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.66",

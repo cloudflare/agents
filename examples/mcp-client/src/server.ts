@@ -1,104 +1,101 @@
-import {
-  Agent,
-  routeAgentRequest,
-  type AgentNamespace,
-  type Connection,
-} from "agents";
+import { Agent, routeAgentRequest, type AgentNamespace } from "agents";
 import { MCPClientManager } from "agents/mcp/client";
-import { z } from "zod";
+import type {
+  Tool,
+  Prompt,
+  Resource,
+} from "@modelcontextprotocol/sdk/types.js";
 
 type Env = {
   MyAgent: AgentNamespace<MyAgent>;
+  HOST: string;
 };
 
-export class MyAgent extends Agent<Env> {
-  private mcp = new MCPClientManager();
+export type Server = {
+  url: string;
+  state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
+  authUrl?: string;
+};
 
-  constructor(
-    public ctx: DurableObjectState,
-    public env: Env
-  ) {
-    super(ctx, env);
-  }
+export type State = {
+  servers: Record<string, Server>;
+  tools: (Tool & { serverId: string })[];
+  prompts: (Prompt & { serverId: string })[];
+  resources: (Resource & { serverId: string })[];
+};
 
-  async onStart(): Promise<void> {
-    console.log("Registering servers");
-    // connect to the same server twice, which ensures that namespacing works as expected
-    await this.mcp.connectToServer(new URL("http://localhost:5174/sse"), {
-      name: "mcp-server-1",
-      version: "1.0.0",
-    });
-    await this.mcp.connectToServer(new URL("http://localhost:5174/sse"), {
-      name: "mcp-server-2",
-      version: "1.0.0",
-    });
-    console.log("Registered servers");
-  }
+export class MyAgent extends Agent<Env, State> {
+  initialState = {
+    servers: {},
+    tools: [],
+    prompts: [],
+    resources: [],
+  };
 
-  onConnect(connection: Connection) {
-    console.log("Client connected:", connection.id);
-    connection.send(`Welcome! You are connected with ID: ${connection.id}`);
-    connection.send(
-      `The following MCP servers are connected: ${Object.keys(this.mcp.mcpConnections).join(", ")}`
-    );
-    connection.send(`Available tools: ${JSON.stringify(this.mcp.listTools())}`);
-    connection.send(
-      `Available resources: ${JSON.stringify(this.mcp.listResources())}`
-    );
-    connection.send(
-      `Available prompts: ${JSON.stringify(this.mcp.listPrompts())}`
-    );
-  }
+  mcp = new MCPClientManager("my-agent", "1.0.0", {
+    baseCallbackUri: `${this.env.HOST}/agents/my-agent/${this.name}/callback`,
+    storage: this.ctx.storage,
+  });
 
-  onClose(connection: Connection) {
-    console.log("Client disconnected:", connection.id);
-  }
-
-  async onMessage(connection: Connection, message: string) {
-    console.log(`Message from client ${connection.id}:`, message);
-
-    // call a tool as a test
-    const tools = this.mcp.listTools();
-    const res = await this.mcp.callTool(
-      {
-        ...tools[0],
-        arguments: {
-          a: 1,
-        },
+  setServerState(id: string, state: Server) {
+    this.setState({
+      ...this.state,
+      servers: {
+        ...this.state.servers,
+        [id]: state,
       },
-      // biome-ignore lint/suspicious/noExplicitAny: Not using the response type, doesn't matter
-      z.any() as any,
-      { timeout: 1000 }
-    );
+    });
+  }
 
-    // Echo the message back with a timestamp
-    const response = `Server received "${message}" at ${new Date().toLocaleTimeString()}`;
-    connection.send(`Calling tool: ${tools[0].name}`);
-    connection.send(response);
-    connection.send(`Called tool ${JSON.stringify(tools[0])}`);
-    connection.send(JSON.stringify(res.content));
-    console.log("response sent to client:", response);
+  async refreshServerData() {
+    this.setState({
+      ...this.state,
+      prompts: this.mcp.listPrompts(),
+      tools: this.mcp.listTools(),
+      resources: this.mcp.listResources(),
+    });
+  }
 
-    // Broadcast to other clients
-    for (const conn of this.getConnections()) {
-      if (conn.id !== connection.id) {
-        conn.send(`Client ${connection.id} says: ${message}`);
-        conn.send(`Called tool ${JSON.stringify(tools[0])}`);
-        conn.send(JSON.stringify(res.content));
+  async addMcpServer(url: string): Promise<string> {
+    console.log(`Registering server: ${url}`);
+    const { id, authUrl } = await this.mcp.connect(url);
+    this.setServerState(id, {
+      url,
+      authUrl,
+      state: this.mcp.mcpConnections[id].connectionState,
+    });
+    return authUrl ?? "";
+  }
+
+  async onRequest(request: Request): Promise<Response> {
+    if (this.mcp.isCallbackRequest(request)) {
+      try {
+        const { serverId } = await this.mcp.handleCallbackRequest(request);
+        this.setServerState(serverId, {
+          url: this.state.servers[serverId].url,
+          state: this.mcp.mcpConnections[serverId].connectionState,
+        });
+        await this.refreshServerData();
+        // Hack: autoclosing window because a redirect fails for some reason
+        // return Response.redirect('http://localhost:5173/', 301)
+        return new Response("<script>window.close();</script>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+        // biome-ignore lint/suspicious/noExplicitAny: just bubbling an error up
+      } catch (e: any) {
+        return new Response(e, { status: 401 });
       }
     }
-  }
 
-  onRequest(request: Request): Response | Promise<Response> {
-    const timestamp = new Date().toLocaleTimeString();
-    return new Response(
-      `Server time: ${timestamp} - Your request has been processed!`,
-      {
-        headers: {
-          "Content-Type": "text/plain",
-        },
-      }
-    );
+    const reqUrl = new URL(request.url);
+    if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {
+      const mcpServer = (await request.json()) as { url: string };
+      const authUrl = await this.addMcpServer(mcpServer.url);
+      return new Response(authUrl, { status: 200 });
+    }
+
+    return new Response("Not found", { status: 404 });
   }
 }
 
