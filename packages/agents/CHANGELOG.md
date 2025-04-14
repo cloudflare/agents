@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.60
+
+### Patch Changes
+
+- [#173](https://github.com/cloudflare/agents/pull/173) [`49fb428`](https://github.com/cloudflare/agents/commit/49fb4282870c77ab9f3ab2a4ae49b7b60cabbfb2) Thanks [@cmsparks](https://github.com/cmsparks)! - fix: require authProvider on client connect and handle client "Method not found" initialization errors
+
 ## 0.0.59
 
 ### Patch Changes
