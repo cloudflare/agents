@@ -5,6 +5,7 @@ import type {
   Prompt,
   Resource,
 } from "@modelcontextprotocol/sdk/types.js";
+import { DurableObjectOAuthClientProvider } from "agents/mcp/do-oauth-client-provider";
 
 type Env = {
   MyAgent: AgentNamespace<MyAgent>;
@@ -32,10 +33,7 @@ export class MyAgent extends Agent<Env, State> {
     resources: [],
   };
 
-  mcp = new MCPClientManager("my-agent", "1.0.0", {
-    baseCallbackUri: `${this.env.HOST}/agents/my-agent/${this.name}/callback`,
-    storage: this.ctx.storage,
-  });
+  mcp = new MCPClientManager("my-agent", "1.0.0");
 
   setServerState(id: string, state: Server) {
     this.setState({
@@ -58,12 +56,22 @@ export class MyAgent extends Agent<Env, State> {
 
   async addMcpServer(url: string): Promise<string> {
     console.log(`Registering server: ${url}`);
-    const { id, authUrl } = await this.mcp.connect(url);
+    const authProvider = new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      `${this.env.HOST}/agents/my-agent/${this.name}/callback`
+    );
+    const { id, authUrl } = await this.mcp.connect(url, {
+      transport: { authProvider },
+    });
     this.setServerState(id, {
       url,
       authUrl,
       state: this.mcp.mcpConnections[id].connectionState,
     });
+    if (this.mcp.mcpConnections[id].connectionState === "ready") {
+      await this.refreshServerData();
+    }
     return authUrl ?? "";
   }
 

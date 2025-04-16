@@ -17,6 +17,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 
 export class MCPClientConnection {
   client: Client;
@@ -35,9 +36,11 @@ export class MCPClientConnection {
 
   constructor(
     public url: URL,
-    private info: ConstructorParameters<typeof Client>[0],
-    private options: {
-      transport: SSEClientTransportOptions;
+    info: ConstructorParameters<typeof Client>[0],
+    public options: {
+      transport: SSEClientTransportOptions & {
+        authProvider?: AgentsOAuthProvider;
+      };
       client: ConstructorParameters<typeof Client>[1];
       capabilities: ClientCapabilities;
     } = { transport: {}, client: {}, capabilities: {} }
@@ -61,6 +64,7 @@ export class MCPClientConnection {
       if (code) {
         await transport.finishAuth(code);
       }
+
       await this.client.connect(transport);
       // biome-ignore lint/suspicious/noExplicitAny: allow for the error check here
     } catch (e: any) {
@@ -164,9 +168,11 @@ export class MCPClientConnection {
     let toolsAgg: Tool[] = [];
     let toolsResult: ListToolsResult = { tools: [] };
     do {
-      toolsResult = await this.client.listTools({
-        cursor: toolsResult.nextCursor,
-      });
+      toolsResult = await this.client
+        .listTools({
+          cursor: toolsResult.nextCursor,
+        })
+        .catch(capabilityErrorHandler({ tools: [] }, "tools/list"));
       toolsAgg = toolsAgg.concat(toolsResult.tools);
     } while (toolsResult.nextCursor);
     return toolsAgg;
@@ -176,9 +182,11 @@ export class MCPClientConnection {
     let resourcesAgg: Resource[] = [];
     let resourcesResult: ListResourcesResult = { resources: [] };
     do {
-      resourcesResult = await this.client.listResources({
-        cursor: resourcesResult.nextCursor,
-      });
+      resourcesResult = await this.client
+        .listResources({
+          cursor: resourcesResult.nextCursor,
+        })
+        .catch(capabilityErrorHandler({ resources: [] }, "resources/list"));
       resourcesAgg = resourcesAgg.concat(resourcesResult.resources);
     } while (resourcesResult.nextCursor);
     return resourcesAgg;
@@ -188,9 +196,11 @@ export class MCPClientConnection {
     let promptsAgg: Prompt[] = [];
     let promptsResult: ListPromptsResult = { prompts: [] };
     do {
-      promptsResult = await this.client.listPrompts({
-        cursor: promptsResult.nextCursor,
-      });
+      promptsResult = await this.client
+        .listPrompts({
+          cursor: promptsResult.nextCursor,
+        })
+        .catch(capabilityErrorHandler({ prompts: [] }, "prompts/list"));
       promptsAgg = promptsAgg.concat(promptsResult.prompts);
     } while (promptsResult.nextCursor);
     return promptsAgg;
@@ -202,11 +212,31 @@ export class MCPClientConnection {
       resourceTemplates: [],
     };
     do {
-      templatesResult = await this.client.listResourceTemplates({
-        cursor: templatesResult.nextCursor,
-      });
+      templatesResult = await this.client
+        .listResourceTemplates({
+          cursor: templatesResult.nextCursor,
+        })
+        .catch(
+          capabilityErrorHandler(
+            { resourceTemplates: [] },
+            "resources/templates/list"
+          )
+        );
       templatesAgg = templatesAgg.concat(templatesResult.resourceTemplates);
     } while (templatesResult.nextCursor);
     return templatesAgg;
   }
+}
+
+function capabilityErrorHandler<T>(empty: T, method: string) {
+  return (e: { code: number }) => {
+    // server is badly behaved and returning invalid capabilities. This commonly occurs for resource templates
+    if (e.code === -32601) {
+      console.error(
+        `The server advertised support for the capability ${method.split("/")[0]}, but returned "Method not found" for '${method}'.`
+      );
+      return empty;
+    }
+    throw e;
+  };
 }

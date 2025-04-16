@@ -7,20 +7,22 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
+// This allows us to track authentication for a specific server and associated dynamic client registration
 export interface AgentsOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
+  serverId: string | undefined;
 }
 
 export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   private authUrl_: string | undefined;
+  private serverId_: string | undefined;
+  private clientId_: string | undefined;
 
   constructor(
     public storage: DurableObjectStorage,
     public clientName: string,
-    public sessionId: string,
-    public redirectUrl: string,
-    private clientId_?: string
+    public baseRedirectUrl: string
   ) {}
 
   get clientMetadata(): OAuthClientMetadata {
@@ -34,9 +36,13 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     };
   }
 
+  get redirectUrl() {
+    return `${this.baseRedirectUrl}/${this.serverId}`;
+  }
+
   get clientId() {
     if (!this.clientId_) {
-      throw new Error("no clientId");
+      throw new Error("Trying to access clientId before it was set");
     }
     return this.clientId_;
   }
@@ -45,8 +51,19 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     this.clientId_ = clientId_;
   }
 
+  get serverId() {
+    if (!this.serverId_) {
+      throw new Error("Trying to access serverId before it was set");
+    }
+    return this.serverId_;
+  }
+
+  set serverId(serverId_: string) {
+    this.serverId_ = serverId_;
+  }
+
   keyPrefix(clientId: string) {
-    return `/${this.clientName}/${this.sessionId}/${clientId}`;
+    return `/${this.clientName}/${this.serverId}/${clientId}`;
   }
 
   clientInfoKey(clientId: string) {

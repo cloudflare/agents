@@ -3,7 +3,13 @@ import { execSync } from "node:child_process";
 
 async function main() {
   await build({
-    entry: ["src/*.ts", "src/*.tsx", "src/mcp/index.ts", "src/mcp/client.ts"],
+    entry: [
+      "src/*.ts",
+      "src/*.tsx",
+      "src/mcp/index.ts",
+      "src/mcp/client.ts",
+      "src/mcp/do-oauth-client-provider.ts",
+    ],
     splitting: true,
     sourcemap: true,
     clean: true,

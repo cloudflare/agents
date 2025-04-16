@@ -15,16 +15,14 @@ import type {
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import {
-  DurableObjectOAuthClientProvider,
-  type AgentsOAuthProvider,
-} from "./do-oauth-client-provider";
+import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 
 /**
  * Utility class that aggregates multiple MCP clients into one
  */
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
+  private callbackUrls: string[] = [];
 
   /**
    * @param name Name of the MCP client
@@ -33,8 +31,7 @@ export class MCPClientManager {
    */
   constructor(
     private name: string,
-    private version: string,
-    private auth?: { baseCallbackUri: string; storage: DurableObjectStorage }
+    private version: string
   ) {}
 
   /**
@@ -46,7 +43,7 @@ export class MCPClientManager {
    */
   async connect(
     url: string,
-    opts: {
+    options: {
       // Allows you to reconnect to a server (in the case of a auth reconnect)
       // Doesn't handle session reconnection
       reconnect?: {
@@ -56,32 +53,21 @@ export class MCPClientManager {
       };
       // we're overriding authProvider here because we want to be able to access the auth URL
       transport?: SSEClientTransportOptions & {
-        authProvider: AgentsOAuthProvider;
+        authProvider?: AgentsOAuthProvider;
       };
       client?: ConstructorParameters<typeof Client>[1];
       capabilities?: ClientCapabilities;
     } = {}
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    const id = opts.reconnect?.id ?? crypto.randomUUID();
+    const id = options.reconnect?.id ?? crypto.randomUUID();
 
-    // if we have global auth for the manager AND there's no authProvider override
-    // then let's setup an auth provider
-
-    if (this.auth) {
+    if (!options.transport?.authProvider) {
       console.warn(
-        "Using .auth configuration to generate an oauth provider, this is temporary and will be removed in the next version. Instead use transport.authProvider to provide an auth provider"
+        "No authProvider provided in the transport options. This client will only support unauthenticated remote MCP Servers"
       );
+    } else {
+      options.transport.authProvider.serverId = id;
     }
-
-    const authProvider: AgentsOAuthProvider | undefined = this.auth
-      ? new DurableObjectOAuthClientProvider(
-          this.auth.storage,
-          this.name,
-          id,
-          `${this.auth.baseCallbackUri}/${id}`,
-          opts.reconnect?.oauthClientId
-        )
-      : opts.transport?.authProvider;
 
     this.mcpConnections[id] = new MCPClientConnection(
       new URL(url),
@@ -90,43 +76,53 @@ export class MCPClientManager {
         version: this.version,
       },
       {
-        transport: {
-          ...opts.transport,
-          authProvider,
-        },
-        client: opts.client ?? {},
-        capabilities: opts.client ?? {},
+        transport: options.transport ?? {},
+        client: options.client ?? {},
+        capabilities: options.client ?? {},
       }
     );
 
     await this.mcpConnections[id].init(
-      opts.reconnect?.oauthCode,
-      opts.reconnect?.oauthClientId
+      options.reconnect?.oauthCode,
+      options.reconnect?.oauthClientId
     );
+
+    const authUrl = options.transport?.authProvider?.authUrl;
+    if (authUrl && options.transport?.authProvider?.redirectUrl) {
+      this.callbackUrls.push(
+        options.transport.authProvider.redirectUrl.toString()
+      );
+    }
 
     return {
       id,
-      authUrl: authProvider?.authUrl,
+      authUrl,
     };
   }
 
   isCallbackRequest(req: Request): boolean {
-    if (this.auth?.baseCallbackUri) {
-      return (
-        req.url.startsWith(this.auth.baseCallbackUri) && req.method === "GET"
-      );
-    }
-    return false;
+    return (
+      req.method === "GET" &&
+      !!this.callbackUrls.find((url) => {
+        return req.url.startsWith(url);
+      })
+    );
   }
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
+    const urlMatch = this.callbackUrls.find((url) => {
+      return req.url.startsWith(url);
+    });
+    if (!urlMatch) {
+      throw new Error(
+        `No callback URI match found for the request url: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
+      );
+    }
     const code = url.searchParams.get("code");
     const clientId = url.searchParams.get("state");
-    let serverId = req.url
-      .replace(this.auth!.baseCallbackUri, "")
-      .split("?")[0];
-    serverId = serverId.replaceAll("/", "");
+    const urlParams = urlMatch.split("/");
+    const serverId = urlParams[urlParams.length - 1];
     if (!code) {
       throw new Error("Unauthorized: no code provided");
     }
@@ -144,14 +140,25 @@ export class MCPClientManager {
       );
     }
 
+    const conn = this.mcpConnections[serverId];
+    if (!conn.options.transport.authProvider) {
+      throw new Error(
+        "Trying to finalize authentication for a server connection without an authProvider"
+      );
+    }
+
+    conn.options.transport.authProvider.clientId = clientId;
+    conn.options.transport.authProvider.serverId = serverId;
+
     // reconnect to server with authorization
-    const serverUrl = this.mcpConnections[serverId].url.toString();
+    const serverUrl = conn.url.toString();
     await this.connect(serverUrl, {
       reconnect: {
         id: serverId,
         oauthClientId: clientId,
         oauthCode: code,
       },
+      ...conn.options,
     });
 
     if (this.mcpConnections[serverId].connectionState === "authenticating") {
