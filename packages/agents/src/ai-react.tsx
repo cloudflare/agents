@@ -1,7 +1,7 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
 import type { useAgent } from "./react";
-import { useEffect, use } from "react";
+import { useEffect, use, useState } from "react";
 import type { OutgoingMessage } from "./ai-types";
 
 type GetInitialMessagesOptions = {
@@ -37,7 +37,8 @@ const requestCache = new Map<string, Promise<Message[]>>();
 export function useAgentChat<State = unknown>(
   options: UseAgentChatOptions<State>
 ) {
-  const { agent, getInitialMessages, ...rest } = options;
+  const { agent, getInitialMessages, onError, ...rest } = options;
+  const [error, setError] = useState<Error|undefined>()
 
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
@@ -55,11 +56,18 @@ export function useAgentChat<State = unknown>(
   }: GetInitialMessagesOptions) {
     const getMessagesUrl = new URL(url);
     getMessagesUrl.pathname += "/get-messages";
-    const response = await fetch(getMessagesUrl.toString(), {
-      headers: options.headers,
-      credentials: options.credentials,
-    });
-    return response.json<Message[]>();
+    try {
+      const response = await fetch(getMessagesUrl.toString(), {
+        headers: options.headers,
+        credentials: options.credentials,
+      });
+      return response.json<Message[]>();
+    } catch (e) {
+      const errorInstance = new Error(`Error getting messages: ${e}`);
+      onError?.(errorInstance);
+      setError(errorInstance);
+      return [];
+    }
   }
 
   const getInitialMessagesFetch =
@@ -129,9 +137,10 @@ export function useAgentChat<State = unknown>(
         let data: OutgoingMessage;
         try {
           data = JSON.parse(event.data) as OutgoingMessage;
-        } catch (error) {
-          // silently ignore invalid messages for now
-          // TODO: log errors with log levels
+        } catch (e) {
+          const errorInstance = new Error(`Error parsing onClearHistory messages: ${e}`);
+          onError?.(errorInstance)
+          setError(errorInstance);
           return;
         }
         if (data.type === "cf_agent_use_chat_response") {
@@ -195,9 +204,10 @@ export function useAgentChat<State = unknown>(
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (error) {
-        // silently ignore invalid messages for now
-        // TODO: log errors with log levels
+      } catch (e) {
+        const errorInstance = new Error(`Error parsing onClearHistory messages: ${e}`);
+        onError?.(errorInstance)
+        setError(errorInstance);
         return;
       }
       if (data.type === "cf_agent_chat_clear") {
@@ -212,9 +222,10 @@ export function useAgentChat<State = unknown>(
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (error) {
-        // silently ignore invalid messages for now
-        // TODO: log errors with log levels
+      } catch (e) {
+        const errorInstance = new Error(`Error parsing onMessages messages: ${e}`);
+        onError?.(errorInstance)
+        setError(errorInstance);
         return;
       }
       if (data.type === "cf_agent_chat_messages") {
@@ -233,10 +244,12 @@ export function useAgentChat<State = unknown>(
     agent.addEventListener,
     agent.removeEventListener,
     useChatHelpers.setMessages,
+    onError,
   ]);
 
   return {
     ...useChatHelpers,
+    error: useChatHelpers.error ?? error,
     /**
      * Set the chat messages and synchronize with the Agent
      * @param messages New messages to set
