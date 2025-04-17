@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { Agent } from "../";
+import type { WSMessage } from "../";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Connection } from "../";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
@@ -36,7 +37,7 @@ interface CORSOptions {
   maxAge?: number;
 }
 
-class McpTransport implements Transport {
+class McpSSETransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage) => void;
@@ -79,18 +80,19 @@ class McpTransport implements Transport {
   }
 }
 
+type Protocol = "sse" | "streamable" | "unset";
+
 export abstract class McpAgent<
   Env = unknown,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>,
 > extends DurableObject<Env> {
   #status: "zero" | "starting" | "started" = "zero";
-  #transport?: McpTransport;
-  #connected = false;
+  #transport?: Transport;
+  #protocol: Protocol = "unset";
 
   /**
-   * Since McpAgent's _aren't_ yet real "Agents" (they route differently, don't support
-   * websockets, don't support hibernation), let's only expose a couple of the methods
+   * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
    */
   #agent: Agent<Env, State>;
@@ -106,6 +108,13 @@ export abstract class McpAgent<
 
       onStateUpdate(state: State | undefined, source: Connection | "server") {
         return self.onStateUpdate(state, source);
+      }
+
+      async onMessage(
+        connection: Connection,
+        message: WSMessage
+      ): Promise<void> {
+        return self.onMessage(connection, message);
       }
     })(ctx, env);
   }
@@ -142,14 +151,21 @@ export abstract class McpAgent<
       onStateUpdate(state: State | undefined, source: Connection | "server") {
         return self.onStateUpdate(state, source);
       }
+
+      async onMessage(connection: Connection, event: WSMessage) {
+        return self.onMessage(connection, event);
+      }
     })(this.ctx, this.env);
 
     this.props = (await this.ctx.storage.get("props")) as Props;
+    this.#protocol = (await this.ctx.storage.get("protocol")) as Protocol;
     this.init?.();
 
     // Connect to the MCP server
-    this.#transport = new McpTransport(() => this.getWebSocket());
-    await this.server.connect(this.#transport);
+    if (this.#protocol === "sse") {
+      this.#transport = new McpSSETransport(() => this.getWebSocket());
+      await this.server.connect(this.#transport);
+    }
   }
 
   /**
@@ -163,6 +179,7 @@ export abstract class McpAgent<
 
   async _init(props: Props) {
     await this.ctx.storage.put("props", props);
+    await this.ctx.storage.put("protocol", "unset");
     this.props = props;
     if (!this.initRun) {
       this.initRun = true;
@@ -194,28 +211,36 @@ export abstract class McpAgent<
     }
 
     const url = new URL(request.url);
-    const sessionId = url.searchParams.get("sessionId");
-    if (!sessionId) {
-      return new Response("Missing sessionId", { status: 400 });
+    const path = url.pathname;
+
+    // This session is going to communicate via the SSE protocol
+    switch (path) {
+      case "/sse": {
+        // For SSE connections, we can only have one open connection per session
+        // If we get an upgrade while already connected, we should error
+        const websockets = this.ctx.getWebSockets();
+        if (websockets.length > 0) {
+          return new Response("WebSocket already connected", { status: 400 });
+        }
+
+        // This connection must use the SSE protocol
+        await this.ctx.storage.put("protocol", "sse");
+        this.#protocol = "sse";
+
+        // Connect to the MCP server
+        if (!this.#transport) {
+          this.#transport = new McpSSETransport(() => this.getWebSocket());
+          await this.server.connect(this.#transport);
+        }
+
+        // Defer to the Agent's fetch method to handle the WebSocket connection
+        return this.#agent.fetch(request);
+      }
+      default:
+        return new Response("Internal Server Error: Expected /sse path", {
+          status: 500,
+        });
     }
-
-    // For now, each agent can only have one connection
-    // If we get an upgrade while already connected, we should error
-    if (this.#connected) {
-      return new Response("WebSocket already connected", { status: 400 });
-    }
-
-    // Defer to the Agent's fetch method to handle the WebSocket connection
-    // PartyServer does a lot to manage the connections under the hood
-    const response = await this.#agent.fetch(request);
-
-    this.#connected = true;
-
-    // Connect to the MCP server
-    this.#transport = new McpTransport(() => this.getWebSocket());
-    await this.server.connect(this.#transport);
-
-    return response;
   }
 
   getWebSocket() {
@@ -226,51 +251,8 @@ export abstract class McpAgent<
     return websockets[0];
   }
 
-  async onMCPMessage(sessionId: string, request: Request): Promise<Response> {
-    if (this.#status !== "started") {
-      // This means the server "woke up" after hibernation
-      // so we need to hydrate it again
-      await this.#initialize();
-    }
-    try {
-      const contentType = request.headers.get("content-type") || "";
-      if (!contentType.includes("application/json")) {
-        return new Response(`Unsupported content-type: ${contentType}`, {
-          status: 400,
-        });
-      }
-
-      // check if the request body is too large
-      const contentLength = Number.parseInt(
-        request.headers.get("content-length") || "0",
-        10
-      );
-      if (contentLength > MAXIMUM_MESSAGE_SIZE) {
-        return new Response(`Request body too large: ${contentLength} bytes`, {
-          status: 400,
-        });
-      }
-
-      // Clone the request before reading the body to avoid stream issues
-      const message = await request.json();
-      let parsedMessage: JSONRPCMessage;
-      try {
-        parsedMessage = JSONRPCMessageSchema.parse(message);
-      } catch (error) {
-        this.#transport?.onerror?.(error as Error);
-        throw error;
-      }
-
-      this.#transport?.onmessage?.(parsedMessage);
-      return new Response("Accepted", { status: 202 });
-    } catch (error) {
-      this.#transport?.onerror?.(error as Error);
-      return new Response(String(error), { status: 400 });
-    }
-  }
-
-  // This is unused since there are no incoming websocket messages
-  async webSocketMessage(ws: WebSocket, event: ArrayBuffer | string) {
+  // All messages received here. This is currently never called
+  async onMessage(connection: Connection, event: WSMessage) {
     let message: JSONRPCMessage;
     try {
       // Ensure event is a string
@@ -282,13 +264,56 @@ export abstract class McpAgent<
       return;
     }
 
+    this.#transport?.onmessage?.(message);
+  }
+
+  // All messages received over SSE after the initial connection has been established
+  // will be passed here
+  async onSSEMcpMessage(
+    sessionId: string,
+    request: Request
+  ): Promise<Error | null> {
     if (this.#status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
       await this.#initialize();
     }
 
-    this.#transport?.onmessage?.(message);
+    // Since we address the DO via both the protocol and the session id,
+    // this should never happen, but let's enforce it just in case
+    if (this.#protocol !== "sse") {
+      return new Error("Internal Server Error: Expected SSE protocol");
+    }
+
+    try {
+      const message = await request.json();
+      let parsedMessage: JSONRPCMessage;
+      try {
+        parsedMessage = JSONRPCMessageSchema.parse(message);
+      } catch (error) {
+        this.#transport?.onerror?.(error as Error);
+        throw error;
+      }
+
+      this.#transport?.onmessage?.(parsedMessage);
+      return null;
+    } catch (error) {
+      this.#transport?.onerror?.(error as Error);
+      return error as Error;
+    }
+  }
+
+  // Delegate all websocket events to the underlying agent
+  async webSocketMessage(
+    ws: WebSocket,
+    event: ArrayBuffer | string
+  ): Promise<void> {
+    if (this.#status !== "started") {
+      // This means the server "woke up" after hibernation
+      // so we need to hydrate it again
+      await this.#initialize();
+    }
+    return await this.#agent.webSocketMessage(ws, event);
   }
 
   // WebSocket event handlers for hibernation support
@@ -298,7 +323,7 @@ export abstract class McpAgent<
       // so we need to hydrate it again
       await this.#initialize();
     }
-    this.#transport?.onerror?.(error as Error);
+    return await this.#agent.webSocketError(ws, error);
   }
 
   async webSocketClose(
@@ -312,11 +337,23 @@ export abstract class McpAgent<
       // so we need to hydrate it again
       await this.#initialize();
     }
-    this.#transport?.onclose?.();
-    this.#connected = false;
+    return await this.#agent.webSocketClose(ws, code, reason, wasClean);
   }
 
   static mount(
+    path: string,
+    {
+      binding = "MCP_OBJECT",
+      corsOptions,
+    }: {
+      binding?: string;
+      corsOptions?: CORSOptions;
+    } = {}
+  ) {
+    return McpAgent.serveSSE(path, { binding, corsOptions });
+  }
+
+  static serveSSE(
     path: string,
     {
       binding = "MCP_OBJECT",
@@ -346,7 +383,7 @@ export abstract class McpAgent<
         const url = new URL(request.url);
         const namespace = env[binding];
 
-        // Handle SSE connections
+        // Handle initial SSE connection
         if (request.method === "GET" && basePattern.test(url)) {
           // Use a session ID if one is passed in, or create a unique
           // session ID for this connection
@@ -364,7 +401,7 @@ export abstract class McpAgent<
           writer.write(encoder.encode(endpointMessage));
 
           // Get the Durable Object
-          const id = namespace.idFromString(sessionId);
+          const id = namespace.idFromName(`sse:${sessionId}`);
           const doStub = namespace.get(id);
 
           // Initialize the object
@@ -372,7 +409,8 @@ export abstract class McpAgent<
 
           // Connect to the Durable Object via WebSocket
           const upgradeUrl = new URL(request.url);
-          upgradeUrl.searchParams.set("sessionId", sessionId);
+          // enforce that the path that the DO receives is always /sse
+          upgradeUrl.pathname = "/sse";
           const response = await doStub.fetch(
             new Request(upgradeUrl, {
               headers: {
@@ -445,7 +483,9 @@ export abstract class McpAgent<
           });
         }
 
-        // Handle MCP messages
+        // Handle incoming MCP messages. These will be passed to McpAgent
+        // but the response will be sent back via the open SSE connection
+        // so we only need to return a 202 Accepted response for success
         if (request.method === "POST" && messagePattern.test(url)) {
           const sessionId = url.searchParams.get("sessionId");
           if (!sessionId) {
@@ -455,26 +495,54 @@ export abstract class McpAgent<
             );
           }
 
+          const contentType = request.headers.get("content-type") || "";
+          if (!contentType.includes("application/json")) {
+            return new Response(`Unsupported content-type: ${contentType}`, {
+              status: 400,
+            });
+          }
+
+          // check if the request body is too large
+          const contentLength = Number.parseInt(
+            request.headers.get("content-length") || "0",
+            10
+          );
+          if (contentLength > MAXIMUM_MESSAGE_SIZE) {
+            return new Response(
+              `Request body too large: ${contentLength} bytes`,
+              {
+                status: 400,
+              }
+            );
+          }
+
           // Get the Durable Object
-          const object = namespace.get(namespace.idFromString(sessionId));
+          const id = namespace.idFromName(`sse:${sessionId}`);
+          const doStub = namespace.get(id);
 
           // Forward the request to the Durable Object
-          const response = await object.onMCPMessage(sessionId, request);
+          const error = await doStub.onSSEMcpMessage(sessionId, request);
 
-          // Add CORS headers
-          const headers = new Headers();
-          response.headers.forEach?.((value, key) => {
-            headers.set(key, value);
-          });
-          headers.set(
-            "Access-Control-Allow-Origin",
-            corsOptions?.origin || "*"
-          );
+          if (error) {
+            return new Response(error.message, {
+              status: 400,
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+                "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+              },
+            });
+          }
 
-          return new Response(response.body as unknown as BodyInit, {
-            status: response.status,
-            statusText: response.statusText,
-            headers,
+          return new Response("Accepted", {
+            status: 202,
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+            },
           });
         }
 
