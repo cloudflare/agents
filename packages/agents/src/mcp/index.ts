@@ -213,14 +213,14 @@ export abstract class McpAgent<
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // This session is going to communicate via the SSE protocol
     switch (path) {
+      // This session is going to communicate via the SSE protocol
       case "/sse": {
         // For SSE connections, we can only have one open connection per session
         // If we get an upgrade while already connected, we should error
         const websockets = this.ctx.getWebSockets();
         if (websockets.length > 0) {
-          return new Response("WebSocket already connected", { status: 400 });
+          return new Response("Websocket already connected", { status: 400 });
         }
 
         // This connection must use the SSE protocol
