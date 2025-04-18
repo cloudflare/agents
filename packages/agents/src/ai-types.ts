@@ -65,4 +65,9 @@ export type IncomingMessage =
       type: "cf_agent_chat_messages";
       /** Array of chat messages */
       messages: ChatMessage[];
+    }
+  | {
+      /** Indicates the user wants to stop generation of this message */
+      type: "cf_agent_chat_request_cancel";
+      id: string;
     };
