@@ -229,11 +229,7 @@ export function useAgentChat<State = unknown>(
       agent.removeEventListener("message", onClearHistory);
       agent.removeEventListener("message", onMessages);
     };
-  }, [
-    agent.addEventListener,
-    agent.removeEventListener,
-    useChatHelpers.setMessages,
-  ]);
+  }, [agent, useChatHelpers.setMessages]);
 
   return {
     ...useChatHelpers,
