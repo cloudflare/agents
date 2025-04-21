@@ -1,5 +1,14 @@
 # hono-agents
 
+## 0.0.51
+
+### Patch Changes
+
+- [#183](https://github.com/cloudflare/agents/pull/183) [`bbe9a73`](https://github.com/cloudflare/agents/commit/bbe9a73ac7e844258abd6c3e0b17ecbb375301ba) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+- Updated dependencies [[`ba5a5fe`](https://github.com/cloudflare/agents/commit/ba5a5fedae6b8ea6e83a3116ea115f5a9465ef0a), [`1bfd6a7`](https://github.com/cloudflare/agents/commit/1bfd6a77f2c2019b54f40f5a72ff7e4b4df57157)]:
+  - agents@0.0.61
+
 ## 0.0.50
 
 ### Patch Changes
