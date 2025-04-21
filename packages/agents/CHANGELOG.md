@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.62
+
+### Patch Changes
+
+- [#197](https://github.com/cloudflare/agents/pull/197) [`b30ffda`](https://github.com/cloudflare/agents/commit/b30ffda6d7bfd11f5346310c8cdb0f369f505560) Thanks [@threepointone](https://github.com/threepointone)! - fix websocket missing message trigger
+
 ## 0.0.61
 
 ### Patch Changes
