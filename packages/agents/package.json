@@ -4,8 +4,9 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "evals": "(cd evals; evalite)",
+    "check:test": "vitest -r src/tests --watch false",
+    "test": "vitest -r src/tests",
+    "tevals": "(cd evals; evalite)",
     "build": "tsx ./scripts/build.ts"
   },
   "files": [
