@@ -819,7 +819,7 @@ export abstract class McpAgent<
               error: {
                 code: -32000,
                 message:
-                  "Not Acceptable: Client must accept application/json and text/event-stream",
+                  "Not Acceptable: Client must accept both application/json and text/event-stream",
               },
               id: null,
             });
@@ -927,10 +927,11 @@ export abstract class McpAgent<
           // fetch the agent DO
           const id = namespace.idFromName(`streamable-http:${sessionId}`);
           const doStub = namespace.get(id);
+          const isInitialized = await doStub.isInitialized();
 
           if (isInitializationRequest) {
             await doStub._init(ctx.props);
-          } else if (!doStub.isInitialized()) {
+          } else if (!isInitialized) {
             // if we have gotten here, then a session id that was never initialized
             // was provided
             const body = JSON.stringify({
@@ -941,7 +942,7 @@ export abstract class McpAgent<
               },
               id: null,
             });
-            return new Response(body, { status: 400 });
+            return new Response(body, { status: 404 });
           }
 
           // We've evaluated all the error conditions! Now it's time to establish

@@ -262,14 +262,80 @@ describe("McpAgent Streamable HTTP Transport", () => {
     );
 
     expect(response.status).toBe(400);
-    const errorData = (await response.json()) as { id: null };
+    const errorData = (await response.json()) as { id: string | number | null };
     expectErrorResponse(errorData, -32000, /Bad Request/);
     expect(errorData.id).toBeNull();
   });
 
-  // should reject invalid session ID
-  // should reject POST requests without proper Accept header
-  // should reject unsupported Content-Type
+  it("should reject invalid session ID", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
+
+    // Now try with invalid session ID
+    const response = await sendPostRequest(
+      ctx,
+      baseUrl,
+      TEST_MESSAGES.toolsList,
+      "invalid-session-id"
+    );
+
+    expect(response.status).toBe(404);
+    const errorData = await response.json();
+    expectErrorResponse(errorData, -32001, /Session not found/);
+  });
+
+  it("should reject POST requests without proper Accept header", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
+
+    // Try POST without Accept: text/event-stream
+    const request = new Request(baseUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json", // Missing text/event-stream
+        "mcp-session-id": sessionId,
+      },
+      body: JSON.stringify(TEST_MESSAGES.toolsList),
+    });
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(406);
+    const errorData = await response.json();
+    console.log(errorData);
+
+    expectErrorResponse(
+      errorData,
+      -32000,
+      /Client must accept both application\/json and text\/event-stream/
+    );
+  });
+
+  it("should reject unsupported Content-Type", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
+
+    // Try POST with text/plain Content-Type
+    const request = new Request(baseUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain",
+        Accept: "application/json, text/event-stream",
+        "mcp-session-id": sessionId,
+      },
+      body: "This is plain text",
+    });
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(415);
+    const errorData = await response.json();
+    expectErrorResponse(
+      errorData,
+      -32000,
+      /Content-Type must be application\/json/
+    );
+  });
+
   // should handle JSON-RPC batch notification messages with 202 response
   // should handle batch request messages with SSE stream for responses
   // should properly handle invalid JSON data
