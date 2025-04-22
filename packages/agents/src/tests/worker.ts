@@ -25,4 +25,18 @@ export class TestMcpAgent extends McpAgent {
   }
 }
 
-export default TestMcpAgent.serveSSE("/sse");
+export default {
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/sse" || url.pathname === "/sse/message") {
+      return TestMcpAgent.serveSSE("/sse").fetch(request, env, ctx);
+    }
+
+    if (url.pathname === "/mcp") {
+      return TestMcpAgent.serve("/mcp").fetch(request, env, ctx);
+    }
+
+    return new Response("Not found", { status: 404 });
+  },
+};

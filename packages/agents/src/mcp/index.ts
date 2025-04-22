@@ -912,7 +912,7 @@ export abstract class McpAgent<
             const body = JSON.stringify({
               jsonrpc: "2.0",
               error: {
-                code: -32600,
+                code: -32000,
                 message: "Bad Request: Mcp-Session-Id header is required",
               },
               id: null,
@@ -991,7 +991,7 @@ export abstract class McpAgent<
           ws.accept();
 
           // Handle messages from the Durable Object
-          ws.addEventListener("message", async (event) => {
+          ws.addEventListener("message", (event) => {
             try {
               const data =
                 typeof event.data === "string"
@@ -1022,7 +1022,7 @@ export abstract class McpAgent<
 
               // Send the message as an SSE event
               const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
-              await writer.write(encoder.encode(messageText));
+              Promise.resolve(writer.write(encoder.encode(messageText)));
 
               // If we have received all the responses, close the connection
               if (requestIds.size === messages.length) {
@@ -1034,18 +1034,18 @@ export abstract class McpAgent<
           });
 
           // Handle WebSocket errors
-          ws.addEventListener("error", async (error) => {
+          ws.addEventListener("error", (error) => {
             try {
-              await writer.close();
+              Promise.resolve(writer.close());
             } catch (e) {
               // Ignore errors when closing
             }
           });
 
           // Handle WebSocket closure
-          ws.addEventListener("close", async () => {
+          ws.addEventListener("close", () => {
             try {
-              await writer.close();
+              Promise.resolve(writer.close());
             } catch (error) {
               console.error("Error closing SSE connection:", error);
             }
