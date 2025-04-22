@@ -3,9 +3,9 @@ compatibility_date = "2025-04-17"
 compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
-name = "McpAgent"
-class_name = "MCP_OBJECT"
+name = "MCP_OBJECT"
+class_name = "TestMcpAgent"
 
  [[migrations]]
 tag = "v1" # Should be unique for each entry
-new_classes = ["McpAgent"]
+new_sqlite_classes = ["TestMcpAgent"]

@@ -180,7 +180,7 @@ export abstract class McpAgent<
   abstract init(): Promise<void>;
 
   async _init(props: Props) {
-    await this.ctx.storage.put("props", props);
+    await this.ctx.storage.put("props", props ?? {});
     await this.ctx.storage.put("transportType", "unset");
     this.props = props;
     if (!this.initRun) {
@@ -377,7 +377,7 @@ export abstract class McpAgent<
         request: Request,
         env: Record<string, DurableObjectNamespace<McpAgent>>,
         ctx: ExecutionContext
-      ) => {
+      ): Promise<Response> => {
         // Handle CORS preflight
         const corsResponse = handleCORS(request, corsOptions);
         if (corsResponse) return corsResponse;
@@ -428,7 +428,9 @@ export abstract class McpAgent<
           if (!ws) {
             console.error("Failed to establish WebSocket connection");
             await writer.close();
-            return;
+            return new Response("Failed to establish WebSocket connection", {
+              status: 500,
+            });
           }
 
           // Accept the WebSocket
