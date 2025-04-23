@@ -320,11 +320,14 @@ export abstract class McpAgent<
       });
     }
 
+    // This request does not come from the user. The worker generates this
+    // request to generate a websocket connection to the agent.
     const url = new URL(request.url);
+    // This is not the path that the user requested, but the path that the worker
+    // generated. We'll use this path to determine which transport to use.
     const path = url.pathname;
 
     switch (path) {
-      // This session is going to communicate via the SSE protocol
       case "/sse": {
         // For SSE connections, we can only have one open connection per session
         // If we get an upgrade while already connected, we should error
@@ -333,7 +336,7 @@ export abstract class McpAgent<
           return new Response("Websocket already connected", { status: 400 });
         }
 
-        // This connection must use the SSE protocol
+        // This session must always use the SSE transporo
         await this.ctx.storage.put("transportType", "sse");
         this.#transportType = "sse";
 
@@ -354,8 +357,8 @@ export abstract class McpAgent<
           await this.server.connect(this.#transport);
         }
 
-        // This session must use the streamable-http protocol
-        await this.ctx.storage.put("protocol", "streamable-http");
+        // This session must always use the streamable-http transport
+        await this.ctx.storage.put("transportType", "streamable-http");
         this.#transportType = "streamable-http";
 
         return this.#agent.fetch(request);
