@@ -6,7 +6,7 @@
   "scripts": {
     "check:test": "vitest -r src/tests --watch false",
     "test": "vitest -r src/tests",
-    "tevals": "(cd evals; evalite)",
+    "evals": "(cd evals; evalite)",
     "build": "tsx ./scripts/build.ts"
   },
   "files": [
