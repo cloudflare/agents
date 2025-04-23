@@ -589,7 +589,7 @@ export abstract class McpAgent<
           ws.accept();
 
           // Handle messages from the Durable Object
-          ws.addEventListener("message", (event) => {
+          ws.addEventListener("message", async (event) => {
             try {
               const message = JSON.parse(event.data);
 
@@ -604,25 +604,25 @@ export abstract class McpAgent<
 
               // Send the message as an SSE event
               const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
-              Promise.resolve(writer.write(encoder.encode(messageText)));
+              await writer.write(encoder.encode(messageText));
             } catch (error) {
               console.error("Error forwarding message to SSE:", error);
             }
           });
 
           // Handle WebSocket errors
-          ws.addEventListener("error", (error) => {
+          ws.addEventListener("error", async (error) => {
             try {
-              Promise.resolve(writer.close());
+              await writer.close();
             } catch (e) {
               // Ignore errors when closing
             }
           });
 
           // Handle WebSocket closure
-          ws.addEventListener("close", () => {
+          ws.addEventListener("close", async () => {
             try {
-              Promise.resolve(writer.close());
+              await writer.close();
             } catch (error) {
               console.error("Error closing SSE connection:", error);
             }
@@ -951,7 +951,7 @@ export abstract class McpAgent<
           ws.accept();
 
           // Handle messages from the Durable Object
-          ws.addEventListener("message", (event) => {
+          ws.addEventListener("message", async (event) => {
             try {
               const data =
                 typeof event.data === "string"
@@ -979,7 +979,7 @@ export abstract class McpAgent<
 
               // Send the message as an SSE event
               const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
-              Promise.resolve(writer.write(encoder.encode(messageText)));
+              await writer.write(encoder.encode(messageText));
 
               // If we have received all the responses, close the connection
               if (requestIds.size === 0) {
@@ -991,18 +991,18 @@ export abstract class McpAgent<
           });
 
           // Handle WebSocket errors
-          ws.addEventListener("error", (error) => {
+          ws.addEventListener("error", async (error) => {
             try {
-              Promise.resolve(writer.close());
+              await writer.close();
             } catch (e) {
               // Ignore errors when closing
             }
           });
 
           // Handle WebSocket closure
-          ws.addEventListener("close", () => {
+          ws.addEventListener("close", async () => {
             try {
-              Promise.resolve(writer.close());
+              await writer.close();
             } catch (error) {
               console.error("Error closing SSE connection:", error);
             }
