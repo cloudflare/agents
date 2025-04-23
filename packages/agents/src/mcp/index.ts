@@ -13,6 +13,10 @@ import type {
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   InitializeRequestSchema,
+  isJSONRPCError,
+  isJSONRPCNotification,
+  isJSONRPCRequest,
+  isJSONRPCResponse,
   JSONRPCErrorSchema,
   JSONRPCMessageSchema,
   JSONRPCNotificationSchema,
@@ -48,67 +52,6 @@ interface CORSOptions {
   methods?: string;
   headers?: string;
   maxAge?: number;
-}
-
-type ParseMessageResult =
-  | {
-      type: "request";
-      message: JSONRPCRequest;
-      isInitializationRequest: boolean;
-    }
-  | {
-      type: "notification";
-      message: JSONRPCNotification;
-    }
-  | {
-      type: "response";
-      message: JSONRPCResponse;
-    }
-  | {
-      type: "error";
-      message: JSONRPCError;
-    };
-
-// TODO: Swap to https://github.com/modelcontextprotocol/typescript-sdk/pull/281
-// when it gets released
-function parseMessage(message: JSONRPCMessage): ParseMessageResult {
-  const requestResult = JSONRPCRequestSchema.safeParse(message);
-  if (requestResult.success) {
-    return {
-      type: "request",
-      message: requestResult.data,
-      isInitializationRequest:
-        InitializeRequestSchema.safeParse(message).success,
-    };
-  }
-
-  const notificationResult = JSONRPCNotificationSchema.safeParse(message);
-  if (notificationResult.success) {
-    return {
-      type: "notification",
-      message: notificationResult.data,
-    };
-  }
-
-  const responseResult = JSONRPCResponseSchema.safeParse(message);
-  if (responseResult.success) {
-    return {
-      type: "response",
-      message: responseResult.data,
-    };
-  }
-
-  const errorResult = JSONRPCErrorSchema.safeParse(message);
-  if (errorResult.success) {
-    return {
-      type: "error",
-      message: errorResult.data,
-    };
-  }
-
-  // JSONRPCMessage is a union of these 4 types, so if we have a valid
-  // JSONRPCMessage, we should not get this error
-  throw new Error("Invalid message");
 }
 
 class McpSSETransport implements Transport {
@@ -154,7 +97,7 @@ class McpSSETransport implements Transport {
   }
 }
 
-type TransportType = "sse" | "streamable" | "unset";
+type TransportType = "sse" | "streamable-http" | "unset";
 
 class McpStreamableHttpTransport implements Transport {
   onclose?: () => void;
@@ -200,35 +143,29 @@ class McpStreamableHttpTransport implements Transport {
     }
 
     let websocket: WebSocket | null = null;
-    const parsedMessage = parseMessage(message);
-    switch (parsedMessage.type) {
-      // These types have an id
-      case "response":
-      case "error":
-        websocket = this.#getWebSocketForMessageID(
-          parsedMessage.message.id.toString()
+
+    if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
+      websocket = this.#getWebSocketForMessageID(message.id.toString());
+      if (!websocket) {
+        throw new Error(
+          `Could not find WebSocket for message id: ${message.id}`
         );
-        if (!websocket) {
-          throw new Error(
-            `Could not find WebSocket for message id: ${parsedMessage.message.id}`
-          );
-        }
-        break;
-      // requests have an ID but are originated by the server so do not correspond to
-      // any active connection
-      case "request":
-        websocket = this.#getWebSocketForGetRequest();
-        break;
-      // Notifications do not have an id
-      case "notification":
-        websocket = this.#getWebSocketForGetRequest();
-        break;
+      }
+    } else if (isJSONRPCRequest(message)) {
+      // requests originating from the server must be sent over the
+      // the connection created by a GET request
+      websocket = this.#getWebSocketForGetRequest();
+    } else if (isJSONRPCNotification(message)) {
+      // notifications do not have an id
+      // but do have a relatedRequestId field
+      // so that they can be sent to the correct connection
+      websocket = null;
     }
 
     try {
       websocket?.send(JSON.stringify(message));
-      if (parsedMessage.type === "response") {
-        this.#notifyResponseIdSent(parsedMessage.message.id.toString());
+      if (isJSONRPCResponse(message)) {
+        this.#notifyResponseIdSent(message.id.toString());
       }
     } catch (error) {
       this.onerror?.(error as Error);
@@ -242,8 +179,6 @@ class McpStreamableHttpTransport implements Transport {
   }
 }
 
-type Protocol = "sse" | "streamable-http" | "unset";
-
 export abstract class McpAgent<
   Env = unknown,
   State = unknown,
@@ -252,6 +187,7 @@ export abstract class McpAgent<
   #status: "zero" | "starting" | "started" = "zero";
   #transport?: Transport;
   #transportType: TransportType = "unset";
+  #requestIdToConnectionId: Map<string | number, string> = new Map();
 
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
@@ -329,7 +265,7 @@ export abstract class McpAgent<
     if (this.#transportType === "sse") {
       this.#transport = new McpSSETransport(() => this.getWebSocket());
       await this.server.connect(this.#transport);
-    } else if (this.#protocol === "streamable-http") {
+    } else if (this.#transportType === "streamable-http") {
       this.#transport = new McpStreamableHttpTransport(
         (id) => this.getWebSocketForResponseID(id),
         (id) => this.#requestIdToConnectionId.delete(id)
@@ -420,7 +356,7 @@ export abstract class McpAgent<
 
         // This session must use the streamable-http protocol
         await this.ctx.storage.put("protocol", "streamable-http");
-        this.#protocol = "streamable-http";
+        this.#transportType = "streamable-http";
 
         return this.#agent.fetch(request);
       }
@@ -454,7 +390,7 @@ export abstract class McpAgent<
   async onMessage(connection: Connection, event: WSMessage) {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
-    if (this.#protocol !== "streamable-http") {
+    if (this.#transportType !== "streamable-http") {
       const err = new Error(
         "Internal Server Error: Expected streamable-http protocol"
       );
@@ -475,18 +411,8 @@ export abstract class McpAgent<
 
     // We need to map every incoming message to the connection that it came in on
     // so that we can send relevant responses and notifications back on the same connection
-    const parsedMessage = parseMessage(message);
-    switch (parsedMessage.type) {
-      case "request":
-        this.#requestIdToConnectionId.set(
-          parsedMessage.message.id.toString(),
-          connection.id
-        );
-        break;
-      case "response":
-      case "notification":
-      case "error":
-        break;
+    if (isJSONRPCRequest(message)) {
+      this.#requestIdToConnectionId.set(message.id.toString(), connection.id);
     }
 
     this.#transport?.onmessage?.(message);
@@ -883,7 +809,6 @@ export abstract class McpAgent<
           }
 
           let messages: JSONRPCMessage[] = [];
-          let parsedMessages: ParseMessageResult[] = [];
 
           // Try to parse each message as JSON RPC. Fail if any message is invalid
           for (const msg of arrayMessage) {
@@ -901,13 +826,12 @@ export abstract class McpAgent<
           }
 
           messages = arrayMessage.map((msg) => JSONRPCMessageSchema.parse(msg));
-          parsedMessages = messages.map(parseMessage);
 
           // Before we pass the messages to the agent, there's another error condition we need to enforce
           // Check if this is an initialization request
           // https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle/
-          const isInitializationRequest = parsedMessages.some(
-            (msg) => msg.type === "request" && msg.isInitializationRequest
+          const isInitializationRequest = messages.some(
+            (msg) => InitializeRequestSchema.safeParse(msg).success
           );
 
           if (isInitializationRequest && sessionId) {
@@ -1041,18 +965,13 @@ export abstract class McpAgent<
                 return;
               }
 
-              // If the message is a response, add the id to the set of request ids
-              const parsedMessage = parseMessage(result.data);
-              switch (parsedMessage.type) {
-                case "response":
-                case "error":
-                  // remove each received response from the set of request ids
-                  // if the set is empty, we close the connection
-                  requestIds.delete(parsedMessage.message.id);
-                  break;
-                case "notification":
-                case "request":
-                  break;
+              // If the message is a response or an error, remove the id from the set of
+              // request ids
+              if (
+                isJSONRPCResponse(result.data) ||
+                isJSONRPCError(result.data)
+              ) {
+                requestIds.delete(result.data.id);
               }
 
               // Send the message as an SSE event
@@ -1088,8 +1007,8 @@ export abstract class McpAgent<
 
           // If there are no requests, we send the messages to the agent and acknowledge the request with a 202
           // since we don't expect any responses back through this connection
-          const hasOnlyNotificationsOrResponses = parsedMessages.every(
-            (msg) => msg.type === "notification" || msg.type === "response"
+          const hasOnlyNotificationsOrResponses = messages.every(
+            (msg) => isJSONRPCNotification(msg) || isJSONRPCResponse(msg)
           );
           if (hasOnlyNotificationsOrResponses) {
             for (const message of messages) {
@@ -1103,18 +1022,11 @@ export abstract class McpAgent<
           }
 
           for (const message of messages) {
-            const parsedMessage = parseMessage(message);
-            switch (parsedMessage.type) {
-              case "request":
-                // add each request id that we send off to a set
-                // so that we can keep track of which requests we
-                // still need a response for
-                requestIds.add(parsedMessage.message.id);
-                break;
-              case "notification":
-              case "response":
-              case "error":
-                break;
+            if (isJSONRPCRequest(message)) {
+              // add each request id that we send off to a set
+              // so that we can keep track of which requests we
+              // still need a response for
+              requestIds.add(message.id);
             }
             ws.send(JSON.stringify(message));
           }
