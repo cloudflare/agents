@@ -269,7 +269,6 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
   it("should reject invalid session ID", async () => {
     const ctx = createExecutionContext();
-    const sessionId = await initializeServer(ctx);
 
     // Now try with invalid session ID
     const response = await sendPostRequest(

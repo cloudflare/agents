@@ -285,8 +285,6 @@ export abstract class McpAgent<
 
   async _init(props: Props) {
     await this.ctx.storage.put("props", props ?? {});
-
-    // if transportType is not set, set it to unset
     if (!this.ctx.storage.get("transportType")) {
       await this.ctx.storage.put("transportType", "unset");
     }
@@ -297,13 +295,17 @@ export abstract class McpAgent<
     }
   }
 
+  async setInitialized() {
+    await this.ctx.storage.put("initialized", true);
+  }
+
   async isInitialized() {
     if (this.#status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
       await this.#initialize();
     }
-    return this.initRun;
+    return (await this.ctx.storage.get("initialized")) === true;
   }
 
   async #initialize(): Promise<void> {
@@ -907,7 +909,7 @@ export abstract class McpAgent<
           const isInitialized = await doStub.isInitialized();
 
           if (isInitializationRequest) {
-            await doStub._init(ctx.props);
+            await doStub.setInitialized();
           } else if (!isInitialized) {
             // if we have gotten here, then a session id that was never initialized
             // was provided
