@@ -10,6 +10,6 @@
   "keywords": [],
   "author": "",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.9.0"
+    "@modelcontextprotocol/sdk": "^1.10.0"
   }
 }
