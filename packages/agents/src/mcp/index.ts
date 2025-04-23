@@ -89,7 +89,7 @@ export abstract class McpAgent<
 > extends DurableObject<Env> {
   #status: "zero" | "starting" | "started" = "zero";
   #transport?: Transport;
-  #protocol: TransportType = "unset";
+  #transportType: TransportType = "unset";
 
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
@@ -158,11 +158,13 @@ export abstract class McpAgent<
     })(this.ctx, this.env);
 
     this.props = (await this.ctx.storage.get("props")) as Props;
-    this.#protocol = (await this.ctx.storage.get("protocol")) as TransportType;
+    this.#transportType = (await this.ctx.storage.get(
+      "transportType"
+    )) as TransportType;
     this.init?.();
 
     // Connect to the MCP server
-    if (this.#protocol === "sse") {
+    if (this.#transportType === "sse") {
       this.#transport = new McpSSETransport(() => this.getWebSocket());
       await this.server.connect(this.#transport);
     }
@@ -179,7 +181,7 @@ export abstract class McpAgent<
 
   async _init(props: Props) {
     await this.ctx.storage.put("props", props);
-    await this.ctx.storage.put("protocol", "unset");
+    await this.ctx.storage.put("transportType", "unset");
     this.props = props;
     if (!this.initRun) {
       this.initRun = true;
@@ -224,8 +226,8 @@ export abstract class McpAgent<
         }
 
         // This connection must use the SSE protocol
-        await this.ctx.storage.put("protocol", "sse");
-        this.#protocol = "sse";
+        await this.ctx.storage.put("transportType", "sse");
+        this.#transportType = "sse";
 
         // Connect to the MCP server
         if (!this.#transport) {
@@ -281,7 +283,7 @@ export abstract class McpAgent<
 
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
-    if (this.#protocol !== "sse") {
+    if (this.#transportType !== "sse") {
       return new Error("Internal Server Error: Expected SSE protocol");
     }
 
