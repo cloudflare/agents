@@ -80,7 +80,7 @@ class McpSSETransport implements Transport {
   }
 }
 
-type Protocol = "sse" | "streamable" | "unset";
+type TransportType = "sse" | "streamable" | "unset";
 
 export abstract class McpAgent<
   Env = unknown,
@@ -89,7 +89,7 @@ export abstract class McpAgent<
 > extends DurableObject<Env> {
   #status: "zero" | "starting" | "started" = "zero";
   #transport?: Transport;
-  #protocol: Protocol = "unset";
+  #protocol: TransportType = "unset";
 
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
@@ -158,7 +158,7 @@ export abstract class McpAgent<
     })(this.ctx, this.env);
 
     this.props = (await this.ctx.storage.get("props")) as Props;
-    this.#protocol = (await this.ctx.storage.get("protocol")) as Protocol;
+    this.#protocol = (await this.ctx.storage.get("protocol")) as TransportType;
     this.init?.();
 
     // Connect to the MCP server
