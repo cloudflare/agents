@@ -302,7 +302,6 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     expect(response.status).toBe(406);
     const errorData = await response.json();
-    console.log(errorData);
 
     expectErrorResponse(
       errorData,
@@ -336,159 +335,147 @@ describe("McpAgent Streamable HTTP Transport", () => {
     );
   });
 
-  // should handle JSON-RPC batch notification messages with 202 response
-  // should handle batch request messages with SSE stream for responses
-  // should properly handle invalid JSON data
-  // should return 400 error for invalid JSON-RPC messages
-  // should reject requests to uninitialized server
-  // should send response messages to the connection that sent the request
-
-  it("allows for a connection to be established and returns an event with the session id", async () => {
+  it("should handle JSON-RPC batch notification messages with 202 response", async () => {
     const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
 
-    const request = new Request("http://example.com/sse");
-    const sseStream = await worker.fetch(request, env, ctx);
+    // Send batch of notifications (no IDs)
+    const batchNotifications: JSONRPCMessage[] = [
+      { jsonrpc: "2.0", method: "someNotification1", params: {} },
+      { jsonrpc: "2.0", method: "someNotification2", params: {} },
+    ];
+    const response = await sendPostRequest(
+      ctx,
+      baseUrl,
+      batchNotifications,
+      sessionId
+    );
 
-    const reader = sseStream.body?.getReader();
-    const { done, value } = await reader!.read();
-    const event = new TextDecoder().decode(value);
-
-    // We are not done yet, we expect more events
-    expect(done).toBe(false);
-
-    const lines = event.split("\n");
-    expect(lines[0]).toEqual("event: endpoint");
-    expect(lines[1]).toMatch(/^data: \/sse\/message\?sessionId=.*$/);
+    expect(response.status).toBe(202);
   });
 
-  it("allows the tools to be listed once a session is established", async () => {
+  it("should handle batch request messages with SSE stream for responses", async () => {
     const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
 
-    const request = new Request("http://example.com/sse");
-    const sseStream = await worker.fetch(request, env, ctx);
-
-    const reader = sseStream.body?.getReader();
-    let { done, value } = await reader!.read();
-    const event = new TextDecoder().decode(value);
-
-    // parse the session id from the event
-    const lines = event.split("\n");
-    const sessionId = lines[1].split("=")[1];
-    expect(sessionId).toBeDefined();
-
-    // send a message to the session to list the tools
-    const toolsRequest = new Request(
-      `http://example.com/sse/message?sessionId=${sessionId}`,
+    // Send batch of requests
+    const batchRequests: JSONRPCMessage[] = [
+      { jsonrpc: "2.0", method: "tools/list", params: {}, id: "req-1" },
       {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "tools/list",
-          id: "1",
-        }),
-      }
-    );
-
-    const toolsResponse = await worker.fetch(toolsRequest, env, ctx);
-    expect(toolsResponse.status).toBe(202);
-    expect(toolsResponse.headers.get("Content-Type")).toBe("text/event-stream");
-    expect(await toolsResponse.text()).toBe("Accepted");
-
-    ({ done, value } = await reader!.read());
-
-    expect(done).toBe(false);
-    const toolsEvent = new TextDecoder().decode(value);
-    // We expect the following event:
-    // event: message
-    // data: {"jsonrpc":"2.0", ... lots of other stuff ...}
-    const jsonResponse = JSON.parse(
-      toolsEvent.split("\n")[1].replace("data: ", "")
-    );
-
-    expect(jsonResponse.jsonrpc).toBe("2.0");
-    expect(jsonResponse.id).toBe("1");
-    expect(jsonResponse.result.tools).toBeDefined();
-    expect(jsonResponse.result.tools.length).toBe(1);
-    expect(jsonResponse.result.tools[0]).toEqual({
-      name: "greet",
-      description: "A simple greeting tool",
-      inputSchema: {
-        type: "object",
-        properties: {
-          name: {
-            type: "string",
-            description: "Name to greet",
-          },
-        },
-        required: ["name"],
-        additionalProperties: false,
-        $schema: "http://json-schema.org/draft-07/schema#",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: { name: "greet", arguments: { name: "BatchUser" } },
+        id: "req-2",
       },
-    });
+    ];
+    const response = await sendPostRequest(
+      ctx,
+      baseUrl,
+      batchRequests,
+      sessionId
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("text/event-stream");
+
+    const reader = response.body?.getReader();
+
+    // The responses may come in any order or together in one chunk
+    const { value: value1 } = await reader!.read();
+    const text1 = new TextDecoder().decode(value1);
+    const { value: value2 } = await reader!.read();
+    const text2 = new TextDecoder().decode(value2);
+
+    const combinedText = text1 + text2;
+
+    // Check that both responses were sent on the same stream
+    expect(combinedText).toContain('"id":"req-1"');
+    expect(combinedText).toContain('"tools"'); // tools/list result
+    expect(combinedText).toContain('"id":"req-2"');
+    expect(combinedText).toContain("Hello, BatchUser"); // tools/call result
   });
 
-  it("allows a tool to be invoked once a session is established", async () => {
+  it("should properly handle invalid JSON data", async () => {
     const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
 
-    const request = new Request("http://example.com/sse");
-    const sseStream = await worker.fetch(request, env, ctx);
+    // Send invalid JSON
+    const request = new Request(baseUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "mcp-session-id": sessionId,
+      },
+      body: "This is not valid JSON",
+    });
+    const response = await worker.fetch(request, env, ctx);
 
-    const reader = sseStream.body?.getReader();
-    let { done, value } = await reader!.read();
-    const event = new TextDecoder().decode(value);
+    expect(response.status).toBe(400);
+    const errorData = await response.json();
+    expectErrorResponse(errorData, -32700, /Parse error/);
+  });
 
-    // parse the session id from the event
-    const lines = event.split("\n");
-    const sessionId = lines[1].split("=")[1];
-    expect(sessionId).toBeDefined();
+  it("should return 400 error for invalid JSON-RPC messages", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
 
-    // send a message to the session to list the tools
-    const toolsRequest = new Request(
-      `http://example.com/sse/message?sessionId=${sessionId}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "tools/call",
-          id: "1",
-          params: {
-            name: "greet",
-            arguments: { name: "Citizen" },
-          },
-        }),
-      }
+    // Invalid JSON-RPC (missing required jsonrpc version)
+    const invalidMessage = { method: "tools/list", params: {}, id: 1 }; // missing jsonrpc version
+    const response = await sendPostRequest(
+      ctx,
+      baseUrl,
+      invalidMessage as JSONRPCMessage,
+      sessionId
     );
 
-    const toolsResponse = await worker.fetch(toolsRequest, env, ctx);
-    expect(toolsResponse.status).toBe(202);
-    expect(toolsResponse.headers.get("Content-Type")).toBe("text/event-stream");
-    expect(await toolsResponse.text()).toBe("Accepted");
-
-    ({ done, value } = await reader!.read());
-
-    expect(done).toBe(false);
-    const toolsEvent = new TextDecoder().decode(value);
-    const jsonResponse = JSON.parse(
-      toolsEvent.split("\n")[1].replace("data: ", "")
-    );
-
-    expect(jsonResponse).toEqual({
+    expect(response.status).toBe(400);
+    const errorData = await response.json();
+    expect(errorData).toMatchObject({
       jsonrpc: "2.0",
-      id: "1",
-      result: {
-        content: [
-          {
-            type: "text",
-            text: "Hello, Citizen!",
-          },
-        ],
-      },
+      error: expect.anything(),
     });
+  });
+
+  it("should send response messages to the connection that sent the request", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
+
+    const message1: JSONRPCMessage = {
+      jsonrpc: "2.0",
+      method: "tools/list",
+      params: {},
+      id: "req-1",
+    };
+
+    const message2: JSONRPCMessage = {
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: {
+        name: "greet",
+        arguments: { name: "Connection2" },
+      },
+      id: "req-2",
+    };
+
+    // Make two concurrent fetch connections for different requests
+    const req1 = sendPostRequest(ctx, baseUrl, message1, sessionId);
+    const req2 = sendPostRequest(ctx, baseUrl, message2, sessionId);
+
+    // Get both responses
+    const [response1, response2] = await Promise.all([req1, req2]);
+    const reader1 = response1.body?.getReader();
+    const reader2 = response2.body?.getReader();
+
+    // Read responses from each stream (requires each receives its specific response)
+    const { value: value1 } = await reader1!.read();
+    const text1 = new TextDecoder().decode(value1);
+    expect(text1).toContain('"id":"req-1"');
+    expect(text1).toContain('"tools"'); // tools/list result
+
+    const { value: value2 } = await reader2!.read();
+    const text2 = new TextDecoder().decode(value2);
+    expect(text2).toContain('"id":"req-2"');
+    expect(text2).toContain("Hello, Connection2"); // tools/call result
   });
 });

@@ -858,17 +858,49 @@ export abstract class McpAgent<
           }
 
           let sessionId = request.headers.get("mcp-session-id");
+          let rawMessage: unknown;
 
-          const rawMessage = await request.json();
+          try {
+            rawMessage = await request.json();
+          } catch (error) {
+            const body = JSON.stringify({
+              jsonrpc: "2.0",
+              error: {
+                code: -32700,
+                message: "Parse error: Invalid JSON",
+              },
+              id: null,
+            });
+            return new Response(body, { status: 400 });
+          }
+
+          // Make sure the message is an array to simplify logic
+          let arrayMessage: unknown[];
+          if (Array.isArray(rawMessage)) {
+            arrayMessage = rawMessage;
+          } else {
+            arrayMessage = [rawMessage];
+          }
+
           let messages: JSONRPCMessage[] = [];
           let parsedMessages: ParseMessageResult[] = [];
 
-          // handle batch and single messages
-          if (Array.isArray(rawMessage)) {
-            messages = rawMessage.map((msg) => JSONRPCMessageSchema.parse(msg));
-          } else {
-            messages = [JSONRPCMessageSchema.parse(rawMessage)];
+          // Try to parse each message as JSON RPC. Fail if any message is invalid
+          for (const msg of arrayMessage) {
+            if (!JSONRPCMessageSchema.safeParse(msg).success) {
+              const body = JSON.stringify({
+                jsonrpc: "2.0",
+                error: {
+                  code: -32700,
+                  message: "Parse error: Invalid JSON-RPC message",
+                },
+                id: null,
+              });
+              return new Response(body, { status: 400 });
+            }
           }
+
+          messages = arrayMessage.map((msg) => JSONRPCMessageSchema.parse(msg));
           parsedMessages = messages.map(parseMessage);
 
           // Before we pass the messages to the agent, there's another error condition we need to enforce
@@ -1014,7 +1046,9 @@ export abstract class McpAgent<
               switch (parsedMessage.type) {
                 case "response":
                 case "error":
-                  requestIds.add(parsedMessage.message.id);
+                  // remove each received response from the set of request ids
+                  // if the set is empty, we close the connection
+                  requestIds.delete(parsedMessage.message.id);
                   break;
                 case "notification":
                 case "request":
@@ -1026,7 +1060,7 @@ export abstract class McpAgent<
               Promise.resolve(writer.write(encoder.encode(messageText)));
 
               // If we have received all the responses, close the connection
-              if (requestIds.size === messages.length) {
+              if (requestIds.size === 0) {
                 ws.close();
               }
             } catch (error) {
@@ -1072,6 +1106,9 @@ export abstract class McpAgent<
             const parsedMessage = parseMessage(message);
             switch (parsedMessage.type) {
               case "request":
+                // add each request id that we send off to a set
+                // so that we can keep track of which requests we
+                // still need a response for
                 requestIds.add(parsedMessage.message.id);
                 break;
               case "notification":
