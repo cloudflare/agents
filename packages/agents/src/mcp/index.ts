@@ -589,43 +589,52 @@ export abstract class McpAgent<
           ws.accept();
 
           // Handle messages from the Durable Object
-          ws.addEventListener("message", async (event) => {
-            try {
-              const message = JSON.parse(event.data);
+          ws.addEventListener("message", (event) => {
+            async function onMessage(event: MessageEvent) {
+              try {
+                const message = JSON.parse(event.data);
 
-              // validate that the message is a valid JSONRPC message
-              const result = JSONRPCMessageSchema.safeParse(message);
-              if (!result.success) {
-                // The message was not a valid JSONRPC message, so we will drop it
-                // PartyKit will broadcast state change messages to all connected clients
-                // and we need to filter those out so they are not passed to MCP clients
-                return;
+                // validate that the message is a valid JSONRPC message
+                const result = JSONRPCMessageSchema.safeParse(message);
+                if (!result.success) {
+                  // The message was not a valid JSONRPC message, so we will drop it
+                  // PartyKit will broadcast state change messages to all connected clients
+                  // and we need to filter those out so they are not passed to MCP clients
+                  return;
+                }
+
+                // Send the message as an SSE event
+                const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
+                await writer.write(encoder.encode(messageText));
+              } catch (error) {
+                console.error("Error forwarding message to SSE:", error);
               }
-
-              // Send the message as an SSE event
-              const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
-              await writer.write(encoder.encode(messageText));
-            } catch (error) {
-              console.error("Error forwarding message to SSE:", error);
             }
+            onMessage(event).catch(console.error);
           });
 
           // Handle WebSocket errors
-          ws.addEventListener("error", async (error) => {
-            try {
-              await writer.close();
-            } catch (e) {
-              // Ignore errors when closing
+          ws.addEventListener("error", (error) => {
+            async function onError(error: Event) {
+              try {
+                await writer.close();
+              } catch (e) {
+                // Ignore errors when closing
+              }
             }
+            onError(error).catch(console.error);
           });
 
           // Handle WebSocket closure
-          ws.addEventListener("close", async () => {
-            try {
-              await writer.close();
-            } catch (error) {
-              console.error("Error closing SSE connection:", error);
+          ws.addEventListener("close", () => {
+            async function onClose() {
+              try {
+                await writer.close();
+              } catch (error) {
+                console.error("Error closing SSE connection:", error);
+              }
             }
+            onClose().catch(console.error);
           });
 
           // Return the SSE response
@@ -951,61 +960,70 @@ export abstract class McpAgent<
           ws.accept();
 
           // Handle messages from the Durable Object
-          ws.addEventListener("message", async (event) => {
-            try {
-              const data =
-                typeof event.data === "string"
-                  ? event.data
-                  : new TextDecoder().decode(event.data);
-              const message = JSON.parse(data);
+          ws.addEventListener("message", (event) => {
+            async function onMessage(event: MessageEvent) {
+              try {
+                const data =
+                  typeof event.data === "string"
+                    ? event.data
+                    : new TextDecoder().decode(event.data);
+                const message = JSON.parse(data);
 
-              // validate that the message is a valid JSONRPC message
-              const result = JSONRPCMessageSchema.safeParse(message);
-              if (!result.success) {
-                // The message was not a valid JSONRPC message, so we will drop it
-                // PartyKit will broadcast state change messages to all connected clients
-                // and we need to filter those out so they are not passed to MCP clients
-                return;
+                // validate that the message is a valid JSONRPC message
+                const result = JSONRPCMessageSchema.safeParse(message);
+                if (!result.success) {
+                  // The message was not a valid JSONRPC message, so we will drop it
+                  // PartyKit will broadcast state change messages to all connected clients
+                  // and we need to filter those out so they are not passed to MCP clients
+                  return;
+                }
+
+                // If the message is a response or an error, remove the id from the set of
+                // request ids
+                if (
+                  isJSONRPCResponse(result.data) ||
+                  isJSONRPCError(result.data)
+                ) {
+                  requestIds.delete(result.data.id);
+                }
+
+                // Send the message as an SSE event
+                const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
+                await writer.write(encoder.encode(messageText));
+
+                // If we have received all the responses, close the connection
+                if (requestIds.size === 0) {
+                  ws!.close();
+                }
+              } catch (error) {
+                console.error("Error forwarding message to SSE:", error);
               }
-
-              // If the message is a response or an error, remove the id from the set of
-              // request ids
-              if (
-                isJSONRPCResponse(result.data) ||
-                isJSONRPCError(result.data)
-              ) {
-                requestIds.delete(result.data.id);
-              }
-
-              // Send the message as an SSE event
-              const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
-              await writer.write(encoder.encode(messageText));
-
-              // If we have received all the responses, close the connection
-              if (requestIds.size === 0) {
-                ws.close();
-              }
-            } catch (error) {
-              console.error("Error forwarding message to SSE:", error);
             }
+            onMessage(event).catch(console.error);
           });
 
           // Handle WebSocket errors
-          ws.addEventListener("error", async (error) => {
-            try {
-              await writer.close();
-            } catch (e) {
-              // Ignore errors when closing
+          ws.addEventListener("error", (error) => {
+            async function onError(error: Event) {
+              try {
+                await writer.close();
+              } catch (e) {
+                // Ignore errors when closing
+              }
             }
+            onError(error).catch(console.error);
           });
 
           // Handle WebSocket closure
-          ws.addEventListener("close", async () => {
-            try {
-              await writer.close();
-            } catch (error) {
-              console.error("Error closing SSE connection:", error);
+          ws.addEventListener("close", () => {
+            async function onClose() {
+              try {
+                await writer.close();
+              } catch (error) {
+                console.error("Error closing SSE connection:", error);
+              }
             }
+            onClose().catch(console.error);
           });
 
           // If there are no requests, we send the messages to the agent and acknowledge the request with a 202
