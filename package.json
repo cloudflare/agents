@@ -16,7 +16,8 @@
     "build": "npm run build -w agents -w hono-agents",
     "format": "prettier --write .",
     "typecheck": "npx tsx scripts/typecheck.ts",
-    "check": "sherif && prettier --check . && biome lint && npm run typecheck"
+    "check": "sherif && prettier --check . && biome lint && npm run typecheck",
+    "test": "npm run test -w agents"
   },
   "license": "MIT",
   "version": "0.0.0",
