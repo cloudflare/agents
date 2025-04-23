@@ -300,11 +300,6 @@ export abstract class McpAgent<
   }
 
   async isInitialized() {
-    if (this.#status !== "started") {
-      // This means the server "woke up" after hibernation
-      // so we need to hydrate it again
-      await this.#initialize();
-    }
     return (await this.ctx.storage.get("initialized")) === true;
   }
 
