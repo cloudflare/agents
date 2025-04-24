@@ -23,6 +23,7 @@ import {
   JSONRPCRequestSchema,
   JSONRPCResponseSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
@@ -277,7 +278,7 @@ export abstract class McpAgent<
   /**
    * McpAgent API
    */
-  abstract server: McpServer;
+  abstract server: McpServer | Server;
   props!: Props;
   initRun = false;
 
