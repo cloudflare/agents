@@ -23,6 +23,7 @@ import {
   JSONRPCRequestSchema,
   JSONRPCResponseSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
@@ -259,7 +260,7 @@ export abstract class McpAgent<
     this.#transportType = (await this.ctx.storage.get(
       "transportType"
     )) as TransportType;
-    this.init?.();
+    await this._init(this.props);
 
     // Connect to the MCP server
     if (this.#transportType === "sse") {
@@ -277,7 +278,7 @@ export abstract class McpAgent<
   /**
    * McpAgent API
    */
-  abstract server: McpServer;
+  abstract server: McpServer | Server;
   props!: Props;
   initRun = false;
 
@@ -285,7 +286,9 @@ export abstract class McpAgent<
 
   async _init(props: Props) {
     await this.ctx.storage.put("props", props ?? {});
-    await this.ctx.storage.put("transportType", "unset");
+    if (!this.ctx.storage.get("transportType")) {
+      await this.ctx.storage.put("transportType", "unset");
+    }
     this.props = props;
     if (!this.initRun) {
       this.initRun = true;
@@ -293,8 +296,12 @@ export abstract class McpAgent<
     }
   }
 
-  isInitialized() {
-    return this.initRun;
+  async setInitialized() {
+    await this.ctx.storage.put("initialized", true);
+  }
+
+  async isInitialized() {
+    return (await this.ctx.storage.get("initialized")) === true;
   }
 
   async #initialize(): Promise<void> {
@@ -898,7 +905,7 @@ export abstract class McpAgent<
           const isInitialized = await doStub.isInitialized();
 
           if (isInitializationRequest) {
-            await doStub._init(ctx.props);
+            await doStub.setInitialized();
           } else if (!isInitialized) {
             // if we have gotten here, then a session id that was never initialized
             // was provided
