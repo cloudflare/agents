@@ -201,10 +201,10 @@ export class MCPClientManager {
    */
   callTool(
     params: CallToolRequest["params"] & { serverId: string },
-    resultSchema:
+    resultSchema?:
       | typeof CallToolResultSchema
       | typeof CompatibilityCallToolResultSchema,
-    options: RequestOptions
+    options?: RequestOptions
   ) {
     const unqualifiedName = params.name.replace(`${params.serverId}.`, "");
     return this.mcpConnections[params.serverId].client.callTool(
