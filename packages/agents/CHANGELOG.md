@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.64
+
+### Patch Changes
+
+- [#206](https://github.com/cloudflare/agents/pull/206) [`0c4b61c`](https://github.com/cloudflare/agents/commit/0c4b61cc78d6520523eed23a41b0b851ac763753) Thanks [@threepointone](https://github.com/threepointone)! - mcp client: result schema and options are optional
+
 ## 0.0.63
 
 ### Patch Changes
