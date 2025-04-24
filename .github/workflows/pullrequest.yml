@@ -21,6 +21,7 @@ jobs:
       - uses: actions/setup-node@v3
 
       - run: npm install
+      - run: npx playwright install --with-deps
       - run: npm run build
       - run: npm run check
       - run: CI=true npm run test

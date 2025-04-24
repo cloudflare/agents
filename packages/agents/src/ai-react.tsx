@@ -1,8 +1,8 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
-import type { useAgent } from "./react";
-import { useEffect, use } from "react";
+import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
+import type { useAgent } from "./react";
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -26,7 +26,6 @@ type UseAgentChatOptions<State> = Omit<
   "fetch"
 >;
 
-// TODO: clear cache when the agent is unmounted?
 const requestCache = new Map<string, Promise<Message[]>>();
 
 /**
@@ -72,26 +71,42 @@ export function useAgentChat<State = unknown>(
       return requestCache.get(agentUrlString)!;
     }
     const promise = getInitialMessagesFetch(getInitialMessagesOptions);
+    // immediately cache the promise so that we don't
+    // create multiple requests for the same agent during multiple
+    // concurrent renders
     requestCache.set(agentUrlString, promise);
     return promise;
   }
 
-  const initialMessages =
-    getInitialMessages !== null
-      ? use(
-          doGetInitialMessages({
-            agent: agent.agent,
-            name: agent.name,
-            url: agentUrlString,
-          })
-        )
-      : rest.initialMessages;
+  const initialMessagesPromise =
+    getInitialMessages === null
+      ? null
+      : doGetInitialMessages({
+          agent: agent.agent,
+          name: agent.name,
+          url: agentUrlString,
+        });
+  const initialMessages = initialMessagesPromise
+    ? use(initialMessagesPromise)
+    : (rest.initialMessages ?? []);
 
+  // manages adding and removing the promise from the cache
   useEffect(() => {
+    if (!initialMessagesPromise) {
+      return;
+    }
+    // this effect is responsible for removing the promise from the cache
+    // when the component unmounts or the promise changes,
+    // but that means it also must add the promise to the cache
+    // so that multiple arbitrary effect runs produce the expected state
+    // when resolved.
+    requestCache.set(agentUrlString, initialMessagesPromise!);
     return () => {
-      requestCache.delete(agentUrlString);
+      if (requestCache.get(agentUrlString) === initialMessagesPromise) {
+        requestCache.delete(agentUrlString);
+      }
     };
-  }, [agentUrlString]);
+  }, [agentUrlString, initialMessagesPromise]);
 
   async function aiFetch(
     request: RequestInfo | URL,
