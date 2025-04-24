@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.65
+
+### Patch Changes
+
+- [#205](https://github.com/cloudflare/agents/pull/205) [`3f532ba`](https://github.com/cloudflare/agents/commit/3f532bafda1a24ab6a2e8872302093bbc5b51b61) Thanks [@threepointone](https://github.com/threepointone)! - Let .server on McpAgent be a Server or McpServer
+
+- [#208](https://github.com/cloudflare/agents/pull/208) [`85d8edd`](https://github.com/cloudflare/agents/commit/85d8eddc7ab62499cc27100adcd0894be0c8c974) Thanks [@a-type](https://github.com/a-type)! - Fix: resolved a problem in useAgentChat where initial messages would be refetched on re-render when using React StrictMode
+
 ## 0.0.64
 
 ### Patch Changes
