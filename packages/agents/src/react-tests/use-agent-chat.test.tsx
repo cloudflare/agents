@@ -27,6 +27,7 @@ describe("useAgentChat", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
       send: vi.fn(),
+      // biome-ignore lint/suspicious/noExplicitAny: <explanation>
     } as any;
 
     const testMessages = [
