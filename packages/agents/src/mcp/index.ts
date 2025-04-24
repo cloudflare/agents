@@ -532,17 +532,22 @@ export abstract class McpAgent<
     const messagePattern = new URLPattern({ pathname: `${pathname}/message` });
 
     return {
-      fetch: async (
+      async fetch<Env>(
         request: Request,
-        env: Record<string, DurableObjectNamespace<McpAgent>>,
+        env: Env,
         ctx: ExecutionContext
-      ): Promise<Response> => {
+      ): Promise<Response> {
         // Handle CORS preflight
         const corsResponse = handleCORS(request, corsOptions);
         if (corsResponse) return corsResponse;
 
         const url = new URL(request.url);
-        const namespace = env[binding];
+
+        // Ensure we have an MCP agent as a binding
+        // TODO: How can we address this in a type-safe way??
+        const namespace = env[
+          binding
+        ] as unknown as DurableObjectNamespace<McpAgent>;
 
         // Handle initial SSE connection
         if (request.method === "GET" && basePattern.test(url)) {
