@@ -546,6 +546,9 @@ export abstract class McpAgent<
 
         // Ensure we have a binding of some sort
         if (bindingValue == null || typeof bindingValue !== "object") {
+          console.error(
+            `Could not find McpAgent binding for ${binding}. Did you update your wrangler configuration?`
+          );
           return new Response("Invalid binding", { status: 500 });
         }
 
@@ -765,6 +768,9 @@ export abstract class McpAgent<
 
         // Ensure we have a binding of some sort
         if (bindingValue == null || typeof bindingValue !== "object") {
+          console.error(
+            `Could not find McpAgent binding for ${binding}. Did you update your wrangler configuration?`
+          );
           return new Response("Invalid binding", { status: 500 });
         }
 
