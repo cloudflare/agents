@@ -558,7 +558,14 @@ export abstract class McpAgent<
           const encoder = new TextEncoder();
 
           // Send the endpoint event
-          const endpointMessage = `event: endpoint\ndata: ${encodeURI(`${pathname}/message`)}?sessionId=${sessionId}\n\n`;
+          // Use a dummy base URL because pathname is relative.
+          // This allows using URL/URLSearchParams for robust parameter handling.
+          const dummyBase = 'http://localhost'; // Any valid base works
+          const endpointUrl = new URL(encodeURI(`${pathname}/message`), dummyBase);
+          endpointUrl.searchParams.set('sessionId', sessionId); 
+          // Reconstruct the relative URL string (pathname + search + hash)
+          const relativeUrlWithSession = endpointUrl.pathname + endpointUrl.search + endpointUrl.hash;
+          const endpointMessage = `event: endpoint\ndata: ${relativeUrlWithSession}\n\n`;
           writer.write(encoder.encode(endpointMessage));
 
           // Get the Durable Object
