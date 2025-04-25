@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.67
+
+### Patch Changes
+
+- [#219](https://github.com/cloudflare/agents/pull/219) [`aa5f972`](https://github.com/cloudflare/agents/commit/aa5f972ee2942107addafd45d6163ae56579f862) Thanks [@jmorrell-cloudflare](https://github.com/jmorrell-cloudflare)! - Fix type error for McpAgent.serve and McpAgent.serveSSE
+
 ## 0.0.66
 
 ### Patch Changes
