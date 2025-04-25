@@ -81,7 +81,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           },
           [connection.id]
         );
-        await this.#persistMessages(messages, [connection.id]);
+        await this.persistMessages(messages, [connection.id]);
 
         const chatMessageId = data.id;
         const abortSignal = this.#getAbortSignal(chatMessageId);
@@ -94,7 +94,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 responseMessages: response.messages,
               });
 
-              await this.#persistMessages(finalMessages, [connection.id]);
+              await this.persistMessages(finalMessages, [connection.id]);
               this.#removeAbortController(chatMessageId);
             },
             abortSignal ? { abortSignal } : undefined
@@ -117,7 +117,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         );
       } else if (data.type === "cf_agent_chat_messages") {
         // replace the messages with the new ones
-        await this.#persistMessages(data.messages, [connection.id]);
+        await this.persistMessages(data.messages, [connection.id]);
       } else if (data.type === "cf_agent_chat_request_cancel") {
         // propagate an abort signal for the associated request
         this.#cancelChatRequest(data.id);
@@ -168,14 +168,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
-    await this.#persistMessages(messages);
+    await this.persistMessages(messages);
     const response = await this.onChatMessage(async ({ response }) => {
       const finalMessages = appendResponseMessages({
         messages,
         responseMessages: response.messages,
       });
 
-      await this.#persistMessages(finalMessages, []);
+      await this.persistMessages(finalMessages, []);
     });
     if (response) {
       // we're just going to drain the body
@@ -187,7 +187,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
-  async #persistMessages(
+  async persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
