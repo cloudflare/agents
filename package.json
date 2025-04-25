@@ -61,5 +61,8 @@
   "overrides": {
     "esbuild": "^0.25.1"
   },
-  "packageManager": "npm@11.3.0"
+  "packageManager": "npm@11.3.0",
+  "dependencies": {
+    "applicationinsights": "^3.6.0"
+  }
 }
