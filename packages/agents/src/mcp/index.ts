@@ -196,6 +196,10 @@ export abstract class McpAgent<
    */
   #agent: Agent<Env, State>;
 
+  get mcp() {
+    return this.#agent.mcp;
+  }
+
   protected constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const self = this;

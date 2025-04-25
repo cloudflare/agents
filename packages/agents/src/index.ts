@@ -12,6 +12,7 @@ import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { MCPClientManager } from "./mcp/client";
 
 export type { Connection, WSMessage, ConnectionContext } from "partyserver";
 
@@ -176,6 +177,11 @@ export const unstable_context = new AsyncLocalStorage<{
  */
 export class Agent<Env, State = unknown> extends Server<Env> {
   #state = DEFAULT_STATE as State;
+
+  #ParentClass: typeof Agent<Env, State> =
+    Object.getPrototypeOf(this).constructor;
+
+  mcp: MCPClientManager = new MCPClientManager(this.#ParentClass.name, "0.0.1");
 
   /**
    * Initial state for the Agent

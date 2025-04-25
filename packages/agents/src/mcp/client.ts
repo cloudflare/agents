@@ -16,6 +16,7 @@ import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import { jsonSchema, type ToolSet } from "ai";
 
 /**
  * Utility class that aggregates multiple MCP clients into one
@@ -173,6 +174,35 @@ export class MCPClientManager {
    */
   listTools(): NamespacedData["tools"] {
     return getNamespacedData(this.mcpConnections, "tools");
+  }
+
+  /**
+   * @returns a set of tools that you can use with the AI SDK
+   */
+  unstable_getAITools(): ToolSet {
+    return Object.fromEntries(
+      getNamespacedData(this.mcpConnections, "tools").map((tool) => {
+        return [
+          tool.name,
+          {
+            parameters: jsonSchema(tool.inputSchema),
+            description: tool.description,
+            execute: async (args) => {
+              const result = await this.callTool({
+                name: tool.name,
+                arguments: args,
+                serverId: tool.serverId,
+              });
+              if (result.isError) {
+                // @ts-expect-error TODO we should fix this
+                throw new Error(result.content[0].text);
+              }
+              return result;
+            },
+          },
+        ];
+      })
+    );
   }
 
   /**
