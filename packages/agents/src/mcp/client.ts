@@ -60,6 +60,18 @@ export class MCPClientManager {
       capabilities?: ClientCapabilities;
     } = {}
   ): Promise<{ id: string; authUrl: string | undefined }> {
+    const { host, pathname } = new URL(url);
+    for (const connection of Object.values(this.mcpConnections)) {
+      if (
+        connection.url.host === host &&
+        connection.url.pathname === pathname
+      ) {
+        throw new Error(
+          `Connection with host: ${host} and pathname: ${pathname} already exists`
+        );
+      }
+    }
+
     const id = options.reconnect?.id ?? crypto.randomUUID();
 
     if (!options.transport?.authProvider) {
