@@ -558,7 +558,11 @@ export abstract class McpAgent<
           const encoder = new TextEncoder();
 
           // Send the endpoint event
-          const endpointMessage = `event: endpoint\ndata: ${encodeURI(`${pathname}/message`)}?sessionId=${sessionId}\n\n`;
+          const endpointUrl = new URL(request.url)
+          endpointUrl.pathname = encodeURI(`${pathname}/message`)
+          endpointUrl.searchParams.set('sessionId', sessionId)
+          const relativeUrlWithSession = endpointUrl.pathname + endpointUrl.search + endpointUrl.hash;
+          const endpointMessage = `event: endpoint\ndata: ${relativeUrlWithSession}\n\n`;
           writer.write(encoder.encode(endpointMessage));
 
           // Get the Durable Object
