@@ -164,11 +164,33 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
-export const unstable_context = new AsyncLocalStorage<{
+const agentContext = new AsyncLocalStorage<{
   agent: Agent<unknown>;
   connection: Connection | undefined;
   request: Request | undefined;
 }>();
+
+export function getCurrentAgent<
+  T extends Agent<unknown, unknown> = Agent<unknown, unknown>,
+>(): {
+  agent: T;
+  connection: Connection | undefined;
+  request: Request<unknown, CfProperties<unknown>> | undefined;
+} {
+  const store = agentContext.getStore() as
+    | {
+        agent: T;
+        connection: Connection | undefined;
+        request: Request<unknown, CfProperties<unknown>> | undefined;
+      }
+    | undefined;
+  if (!store) {
+    throw new Error(
+      "No agent context found, this means you're trying to access the current agent when none of them are running."
+    );
+  }
+  return store;
+}
 
 /**
  * Base class for creating Agent implementations
@@ -299,7 +321,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
-      return unstable_context.run(
+      return agentContext.run(
         { agent: this, connection, request: undefined },
         async () => {
           if (typeof message !== "string") {
@@ -377,7 +399,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.onConnect = (connection: Connection, ctx: ConnectionContext) => {
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
-      return unstable_context.run(
+      return agentContext.run(
         { agent: this, connection, request: ctx.request },
         async () => {
           setTimeout(() => {
@@ -414,8 +436,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       source !== "server" ? [source.id] : []
     );
     return this.#tryCatch(() => {
-      const { connection, request } = unstable_context.getStore() || {};
-      return unstable_context.run(
+      const { connection, request } = agentContext.getStore() || {};
+      return agentContext.run(
         { agent: this, connection, request },
         async () => {
           return this.onStateUpdate(state, source);
@@ -446,7 +468,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param email Email message to process
    */
   onEmail(email: ForwardableEmailMessage) {
-    return unstable_context.run(
+    return agentContext.run(
       { agent: this, connection: undefined, request: undefined },
       async () => {
         console.error("onEmail not implemented");
@@ -696,7 +718,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         console.error(`callback ${row.callback} not found`);
         continue;
       }
-      await unstable_context.run(
+      await agentContext.run(
         { agent: this, connection: undefined, request: undefined },
         async () => {
           try {
