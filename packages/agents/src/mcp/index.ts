@@ -180,6 +180,8 @@ class McpStreamableHttpTransport implements Transport {
   }
 }
 
+type MaybePromise<T> = T | Promise<T>;
+
 export abstract class McpAgent<
   Env = unknown,
   State = unknown,
@@ -266,23 +268,25 @@ export abstract class McpAgent<
     )) as TransportType;
     await this._init(this.props);
 
+    const server = await this.server;
+
     // Connect to the MCP server
     if (this.#transportType === "sse") {
       this.#transport = new McpSSETransport(() => this.getWebSocket());
-      await this.server.connect(this.#transport);
+      await server.connect(this.#transport);
     } else if (this.#transportType === "streamable-http") {
       this.#transport = new McpStreamableHttpTransport(
         (id) => this.getWebSocketForResponseID(id),
         (id) => this.#requestIdToConnectionId.delete(id)
       );
-      await this.server.connect(this.#transport);
+      await server.connect(this.#transport);
     }
   }
 
   /**
    * McpAgent API
    */
-  abstract server: McpServer | Server;
+  abstract server: MaybePromise<McpServer | Server>;
   props!: Props;
   initRun = false;
 
@@ -337,6 +341,7 @@ export abstract class McpAgent<
     // This is not the path that the user requested, but the path that the worker
     // generated. We'll use this path to determine which transport to use.
     const path = url.pathname;
+    const server = await this.server;
 
     switch (path) {
       case "/sse": {
@@ -353,7 +358,7 @@ export abstract class McpAgent<
 
         if (!this.#transport) {
           this.#transport = new McpSSETransport(() => this.getWebSocket());
-          await this.server.connect(this.#transport);
+          await server.connect(this.#transport);
         }
 
         // Defer to the Agent's fetch method to handle the WebSocket connection
@@ -365,7 +370,7 @@ export abstract class McpAgent<
             (id) => this.getWebSocketForResponseID(id),
             (id) => this.#requestIdToConnectionId.delete(id)
           );
-          await this.server.connect(this.#transport);
+          await server.connect(this.#transport);
         }
 
         // This session must always use the streamable-http transport
