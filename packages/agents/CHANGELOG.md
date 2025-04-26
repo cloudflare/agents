@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.71
+
+### Patch Changes
+
+- [#228](https://github.com/cloudflare/agents/pull/228) [`f973b54`](https://github.com/cloudflare/agents/commit/f973b540fc2b5fdd1a4a7a0d473bb26c785fa2c3) Thanks [@threepointone](https://github.com/threepointone)! - mcp client: fix tool name generation
+
 ## 0.0.70
 
 ### Patch Changes
