@@ -222,7 +222,9 @@ export class MCPClientManager {
    * @param id The id of the connection to close
    */
   async closeConnection(id: string) {
-    return this.mcpConnections[id].client.close();
+    if (!this.mcpConnections[id]) {
+      throw new Error(`Connection with id "${id}" does not exist.`);
+    }
   }
 
   /**
