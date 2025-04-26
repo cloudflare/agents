@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.69
+
+### Patch Changes
+
+- [#224](https://github.com/cloudflare/agents/pull/224) [`b342dcf`](https://github.com/cloudflare/agents/commit/b342dcfcce1192935d83585312b777cd96c33e71) Thanks [@threepointone](https://github.com/threepointone)! - getCurrentAgent()
+
 ## 0.0.68
 
 ### Patch Changes
