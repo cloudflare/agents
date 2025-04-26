@@ -9,6 +9,8 @@ import parallelCode from "./flows/03 parallel.txt?raw";
 import orchestratorCode from "./flows/04 orchestrator.txt?raw";
 import evaluatorCode from "./flows/05 evaluator.txt?raw";
 
+import { nanoid } from "nanoid";
+
 type ToastType = "success" | "error" | "info";
 
 type Toast = {
@@ -110,7 +112,7 @@ function getOrCreateSessionId() {
   const stored = globalThis.localStorage?.getItem("sessionId");
   if (stored) return stored;
 
-  const newId = crypto.randomUUID();
+  const newId = nanoid(8);
   globalThis.localStorage?.setItem("sessionId", newId);
   return newId;
 }

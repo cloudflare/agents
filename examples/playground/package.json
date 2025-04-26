@@ -14,6 +14,7 @@
   "dependencies": {
     "cronstrue": "^2.59.0",
     "mimetext": "^3.0.27",
+    "nanoid": "^5.1.5",
     "postal-mime": "^2.4.3"
   }
 }

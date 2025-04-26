@@ -6,6 +6,7 @@ import { Stateful } from "./components/Stateful";
 import Email from "./components/Email";
 import Chat from "./components/Chat";
 import RPC from "./components/RPC";
+import { nanoid } from "nanoid";
 
 interface Toast {
   id: string;
@@ -40,7 +41,7 @@ function App() {
     type: "success" | "error" | "info" = "success"
   ) => {
     const newToast: Toast = {
-      id: crypto.randomUUID(),
+      id: nanoid(8),
       message,
       type,
     };

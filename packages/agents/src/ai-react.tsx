@@ -3,6 +3,7 @@ import type { Message } from "ai";
 import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import type { useAgent } from "./react";
+import { nanoid } from "nanoid";
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -131,7 +132,7 @@ export function useAgentChat<State = unknown>(
       window,
       //  dispatcher, duplex
     } = options;
-    const id = crypto.randomUUID();
+    const id = nanoid(8);
     const abortController = new AbortController();
 
     signal?.addEventListener("abort", () => {

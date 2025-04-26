@@ -17,6 +17,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { jsonSchema, type ToolSet } from "ai";
+import { nanoid } from "nanoid";
 
 /**
  * Utility class that aggregates multiple MCP clients into one
@@ -60,7 +61,7 @@ export class MCPClientManager {
       capabilities?: ClientCapabilities;
     } = {}
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    const id = options.reconnect?.id ?? crypto.randomUUID();
+    const id = options.reconnect?.id ?? nanoid(8);
 
     if (!options.transport?.authProvider) {
       console.warn(
@@ -183,7 +184,7 @@ export class MCPClientManager {
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
-          tool.name,
+          `${tool.serverId}.${tool.name}`,
           {
             parameters: jsonSchema(tool.inputSchema),
             description: tool.description,

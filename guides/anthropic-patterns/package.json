@@ -7,6 +7,9 @@
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy"
   },
+  "dependencies": {
+    "nanoid": "^5.1.5"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

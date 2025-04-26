@@ -1,13 +1,14 @@
 import { useAgent } from "agents/react";
 import { createRoot } from "react-dom/client";
-import { useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import "./styles.css";
 import type { State } from "./server";
 import { agentFetch } from "agents/client";
+import { nanoid } from "nanoid";
 
 let sessionId = localStorage.getItem("sessionId");
 if (!sessionId) {
-  sessionId = crypto.randomUUID();
+  sessionId = nanoid(8);
   localStorage.setItem("sessionId", sessionId);
 }
 // TODO: clear sessionId on logout
