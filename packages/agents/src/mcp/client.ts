@@ -184,7 +184,7 @@ export class MCPClientManager {
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
-          `${tool.serverId}.${tool.name}`,
+          `${tool.serverId}_${tool.name}`,
           {
             parameters: jsonSchema(tool.inputSchema),
             description: tool.description,
