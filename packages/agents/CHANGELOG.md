@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.70
+
+### Patch Changes
+
+- [#226](https://github.com/cloudflare/agents/pull/226) [`5b7f03e`](https://github.com/cloudflare/agents/commit/5b7f03e6126498da25b4e84f83569c06f76b4cbd) Thanks [@threepointone](https://github.com/threepointone)! - mcp client: closeConnection(id) and closeAllConnections()
+
 ## 0.0.69
 
 ### Patch Changes
