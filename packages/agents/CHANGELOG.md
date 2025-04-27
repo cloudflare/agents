@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.72
+
+### Patch Changes
+
+- [`a25eb55`](https://github.com/cloudflare/agents/commit/a25eb55790f8be7b47d4aabac91e167c49ac18a4) Thanks [@threepointone](https://github.com/threepointone)! - don't throw if no current agent
+
 ## 0.0.71
 
 ### Patch Changes
