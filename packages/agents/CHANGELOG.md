@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.74
+
+### Patch Changes
+
+- [`ad0054b`](https://github.com/cloudflare/agents/commit/ad0054be3b6beffcf77dff616b02a3ab1e60bbb5) Thanks [@threepointone](https://github.com/threepointone)! - fool typescript into thinking agent will always be defined in getCurrentAgent()
+
 ## 0.0.73
 
 ### Patch Changes
