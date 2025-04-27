@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.75
+
+### Patch Changes
+
+- [`6c24007`](https://github.com/cloudflare/agents/commit/6c240075fb435642407f3a8751a12f3c8df53b6c) Thanks [@threepointone](https://github.com/threepointone)! - Revert "fool typescript into thinking agent will always be defined in ge…
+
 ## 0.0.74
 
 ### Patch Changes
