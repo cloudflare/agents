@@ -82,10 +82,10 @@
   "description": "A home for your AI agents",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.2",
-    "ai": "^4.3.9",
+    "ai": "^4.3.10",
     "cron-schedule": "^5.0.4",
     "nanoid": "^5.1.5",
-    "partyserver": "^0.0.67",
+    "partyserver": "^0.0.68",
     "partysocket": "1.1.3",
     "zod": "^3.24.3"
   },
