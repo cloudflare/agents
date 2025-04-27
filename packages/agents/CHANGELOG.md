@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.73
+
+### Patch Changes
+
+- [#231](https://github.com/cloudflare/agents/pull/231) [`ba99b7c`](https://github.com/cloudflare/agents/commit/ba99b7c789df990ca82191fbd174402dbce79b42) Thanks [@threepointone](https://github.com/threepointone)! - update deps to pick up a potential fix for onStart not firing
+
 ## 0.0.72
 
 ### Patch Changes
