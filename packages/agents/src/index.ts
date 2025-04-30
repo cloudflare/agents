@@ -194,6 +194,88 @@ export function getCurrentAgent<
   return store;
 }
 
+type EventPlugin<S = unknown> = {
+  onStateUpdate?: (data: {
+    namespace: string;
+    instance: string;
+    state: S;
+    // Source is either the string "server" or the connection id
+    source: "server" | string;
+  }) => void;
+
+  onStart?: (data: { namespace: string; instance: string }) => void;
+
+  onBroadcast?: (data: {
+    namespace: string;
+    instance: string;
+    message: string | { type: "binary"; size: number };
+    without: string[] | undefined;
+  }) => void;
+
+  onMessage?: (data: {
+    namespace: string;
+    instance: string;
+    message: string | { type: "binary"; size: number };
+    connectionId: string;
+  }) => void;
+
+  onSend?: (data: {
+    namespace: string;
+    instance: string;
+    message: string | { type: "binary"; size: number };
+    connectionId: string;
+  }) => void;
+
+  onConnect?: (data: {
+    namespace: string;
+    instance: string;
+    connectionId: string;
+  }) => void;
+
+  onClose?: (data: {
+    namespace: string;
+    instance: string;
+    connectionId: string;
+    code: number;
+    reason: string;
+    wasClean: boolean;
+  }) => void;
+
+  onRequest?: (data: {
+    namespace: string;
+    instance: string;
+    request: Request;
+  }) => void;
+
+  // The return value of `onRequest` is an onResponse event
+  onResponse?: (data: {
+    namespace: string;
+    instance: string;
+    request: Request;
+    response: Response;
+  }) => void;
+
+  onError?: (data: {
+    namespace: string;
+    instance: string;
+    connection: string;
+    error: {
+      message: string;
+      stack?: string;
+    };
+  }) => void;
+
+  // TODO: Add support for email events
+  // onEmail?: (data: {
+  //   //
+  // }) => void;
+
+  // TODO: add support for alarm events
+  // onAlarm?: (data: {
+  //   //
+  // }) => void;
+};
+
 /**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
@@ -206,6 +288,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     Object.getPrototypeOf(this).constructor;
 
   mcp: MCPClientManager = new MCPClientManager(this.#ParentClass.name, "0.0.1");
+
+  /**
+   * List of event plugins to be executed
+   */
+  eventPlugins: EventPlugin<State>[] = [];
 
   /**
    * Initial state for the Agent
