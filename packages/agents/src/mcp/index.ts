@@ -468,6 +468,7 @@ export abstract class McpAgent<
       this.#transport?.onmessage?.(parsedMessage);
       return null;
     } catch (error) {
+      console.error("Error forwarding message to SSE:", error);
       this.#transport?.onerror?.(error as Error);
       return error as Error;
     }
