@@ -12,6 +12,7 @@ import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { EventEmitter } from "node:events";
 import { MCPClientManager } from "./mcp/client";
 
 export type { Connection, WSMessage, ConnectionContext } from "partyserver";
@@ -194,86 +195,280 @@ export function getCurrentAgent<
   return store;
 }
 
-type EventPlugin<S = unknown> = {
-  onStateUpdate?: (data: {
-    namespace: string;
-    instance: string;
-    state: S;
-    // Source is either the string "server" or the connection id
-    source: "server" | string;
-  }) => void;
+export type BaseEventData = {
+  stub?: string;
+  className: string;
+  instance: string;
+  // The hex string id of the connection
+  id: string;
+  timestamp: number;
+};
 
-  onStart?: (data: { namespace: string; instance: string }) => void;
+type StateUpdateEvent<State = unknown> = BaseEventData & {
+  type: "state_update";
+  payload: {
+    state: State;
+  };
+};
 
-  onBroadcast?: (data: {
-    namespace: string;
-    instance: string;
+type StartEvent = BaseEventData & {
+  type: "start";
+};
+
+type BroadcastEvent = BaseEventData & {
+  type: "broadcast";
+  payload: {
+    // Either the message/payload as a strong or an object indicating a binary message
     message: string | { type: "binary"; size: number };
-    without: string[] | undefined;
-  }) => void;
+    without?: string[];
+  };
+};
 
-  onMessage?: (data: {
-    namespace: string;
-    instance: string;
+type MessageEvent = BaseEventData & {
+  type: "message";
+  payload: {
+    // Either the message/payload as a strong or an object indicating a binary message
     message: string | { type: "binary"; size: number };
     connectionId: string;
-  }) => void;
+  };
+};
 
-  onSend?: (data: {
-    namespace: string;
-    instance: string;
+type SendEvent = BaseEventData & {
+  type: "send";
+  payload: {
+    // Either the message/payload as a strong or an object indicating a binary message
     message: string | { type: "binary"; size: number };
     connectionId: string;
-  }) => void;
-
-  onConnect?: (data: {
-    namespace: string;
-    instance: string;
+  };
+};
+type ConnectEvent = BaseEventData & {
+  type: "connect";
+  payload: {
     connectionId: string;
-  }) => void;
-
-  onClose?: (data: {
-    namespace: string;
-    instance: string;
+  };
+};
+type CloseEvent = BaseEventData & {
+  type: "close";
+  payload: {
     connectionId: string;
     code: number;
     reason: string;
     wasClean: boolean;
-  }) => void;
-
-  onRequest?: (data: {
-    namespace: string;
-    instance: string;
-    request: Request;
-  }) => void;
-
-  // The return value of `onRequest` is an onResponse event
-  onResponse?: (data: {
-    namespace: string;
-    instance: string;
-    request: Request;
-    response: Response;
-  }) => void;
-
-  onError?: (data: {
-    namespace: string;
-    instance: string;
+  };
+};
+type RequestEvent = BaseEventData & {
+  type: "request";
+  payload: {
+    request: {
+      method: string;
+      url: string;
+      headers: Record<string, string>;
+      body: string | undefined;
+    };
+  };
+};
+type ResponseEvent = BaseEventData & {
+  type: "response";
+  payload: {
+    request: {
+      method: string;
+      url: string;
+      headers: Record<string, string>;
+      body: string | undefined;
+    };
+    response: {
+      status: number;
+      statusText: string;
+      headers: Record<string, string>;
+      body: string | undefined;
+    };
+  };
+};
+type ErrorEvent = BaseEventData & {
+  type: "error";
+  payload: {
     connection: string;
     error: {
       message: string;
       stack?: string;
     };
-  }) => void;
+  };
+};
+// type EmailEvent = BaseEventData & {
+//   type: "email";
+//   payload: {
+//     email: ForwardableEmailMessage;
+//   };
+// };
+// type AlarmEvent = BaseEventData & {
+//   type: "alarm";
+//   payload: {
+//     alarm: {
+//       id: string;
+//       callback: string;
+//       payload: string;
+//       type: "scheduled" | "delayed" | "cron";
+//       time: number;
+//       delayInSeconds?: number;
+//       cron?: string;
+//     };
+//   };
+// };
+export type AgentEvent<State = unknown> =
+  | StateUpdateEvent<State>
+  | StartEvent
+  | BroadcastEvent
+  | MessageEvent
+  | SendEvent
+  | ConnectEvent
+  | CloseEvent
+  | RequestEvent
+  | ResponseEvent
+  | ErrorEvent;
 
-  // TODO: Add support for email events
-  // onEmail?: (data: {
-  //   //
-  // }) => void;
+// | EmailEvent
+// | AlarmEvent;
+// export type AgentEvents<S = unknown> = {
 
-  // TODO: add support for alarm events
-  // onAlarm?: (data: {
-  //   //
-  // }) => void;
+// export type EventPlugin<S = unknown> = {
+//   onStateUpdate?: (
+//     data: BaseEventData & {
+//       state: S;
+//       // Source is either the string "server" or the connection id
+//       source: "server" | string;
+//     }
+//   ) => void;
+
+//   onStart?: (data: BaseEventData) => void;
+
+//   onBroadcast?: (
+//     data: BaseEventData & {
+//       message: string | { type: "binary"; size: number };
+//       without: string[] | undefined;
+//     }
+//   ) => void;
+
+//   onMessage?: (
+//     data: BaseEventData & {
+//       message: string | { type: "binary"; size: number };
+//       connectionId: string;
+//     }
+//   ) => void;
+
+//   onSend?: (
+//     data: BaseEventData & {
+//       message: string | { type: "binary"; size: number };
+//       connectionId: string;
+//     }
+//   ) => void;
+
+//   onConnect?: (
+//     data: BaseEventData & {
+//       connectionId: string;
+//     }
+//   ) => void;
+
+//   onClose?: (
+//     data: BaseEventData & {
+//       connectionId: string;
+//       code: number;
+//       reason: string;
+//       wasClean: boolean;
+//     }
+//   ) => void;
+
+//   onRequest?: (
+//     data: BaseEventData & {
+//       request: Request;
+//     }
+//   ) => void;
+
+//   // The return value of `onRequest` is an onResponse event
+//   onResponse?: (
+//     data: BaseEventData & {
+//       request: Request;
+//       response: Response;
+//     }
+//   ) => void;
+
+//   onError?: (
+//     data: BaseEventData & {
+//       connection: string;
+//       error: {
+//         message: string;
+//         stack?: string;
+//       };
+//     }
+//   ) => void;
+
+//   // TODO: Add support for email events
+//   // onEmail?: (data: {
+//   //   //
+//   // }) => void;
+
+//   // TODO: add support for alarm events
+//   // onAlarm?: (data: {
+//   //   //
+//   // }) => void;
+// };
+
+class TypedEventEmitter<T extends Record<string, any>> extends EventEmitter {
+  override on(
+    eventName: string | symbol,
+    listener: (...args: any[]) => void
+  ): this;
+  on<K extends keyof T>(
+    event: K,
+    listener: (...args: T[K] extends any[] ? T[K] : [T[K]]) => void
+  ): this {
+    return super.on(event as string, listener);
+  }
+
+  override once(
+    eventName: string | symbol,
+    listener: (...args: any[]) => void
+  ): this;
+  once<K extends keyof T>(
+    event: K,
+    listener: (...args: T[K] extends any[] ? T[K] : [T[K]]) => void
+  ): this {
+    return super.once(event as string, listener);
+  }
+
+  override emit(eventName: string | symbol, ...args: any[]): boolean;
+  emit<K extends keyof T>(
+    event: K,
+    ...args: T[K] extends any[] ? T[K] : [T[K]]
+  ): boolean {
+    // Cast args to any[] to resolve the iterator issue
+    return super.emit(event as string, ...(args as any[]));
+  }
+
+  override off(
+    eventName: string | symbol,
+    listener: (...args: any[]) => void
+  ): this;
+  off<K extends keyof T>(
+    event: K,
+    listener: (...args: T[K] extends any[] ? T[K] : [T[K]]) => void
+  ): this {
+    return super.off(event as string, listener);
+  }
+
+  override removeListener(
+    eventName: string | symbol,
+    listener: (...args: any[]) => void
+  ): this;
+  removeListener<K extends keyof T>(
+    event: K,
+    listener: (...args: T[K] extends any[] ? T[K] : [T[K]]) => void
+  ): this {
+    return super.removeListener(event as string, listener);
+  }
+}
+
+export type EventObservers<State = unknown> = {
+  handler: (event: AgentEvent<State>) => void;
 };
 
 /**
@@ -289,10 +484,20 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
   mcp: MCPClientManager = new MCPClientManager(this.#ParentClass.name, "0.0.1");
 
-  /**
-   * List of event plugins to be executed
-   */
-  eventPlugins: EventPlugin<State>[] = [];
+  eventObservers: Array<EventObservers<State>> = [];
+  #secret: string;
+  #eventBus: TypedEventEmitter<{
+    event: AgentEvent<State>;
+  }> = new TypedEventEmitter();
+
+  getSecret(): string {
+    return this.#secret;
+  }
+
+  // /**
+  //  * List of event plugins to be executed
+  //  */
+  // eventPlugins: EventPlugin<State>[] = [];
 
   /**
    * Initial state for the Agent
@@ -380,6 +585,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    this.#secret = crypto.randomUUID();
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
@@ -408,10 +614,55 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       });
     });
 
+    const _onStart = this.onStart.bind(this);
+    this.onStart = async () => {
+      return agentContext.run(
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request: undefined,
+        },
+        async () => {
+          return this.#tryCatch(() => {
+            this.emitEvent({
+              type: "start",
+              instance: this.name,
+              className: this.#ParentClass.name,
+              id: this.ctx.id.name || this.ctx.id.toString(),
+              timestamp: Date.now(),
+            });
+            // )
+            // for (const plugin of this.eventPlugins) {
+            //   if (plugin.onStart) {
+            //     plugin.onStart({
+            //       // TODO: add stub name
+            //       // the value of stub is something that sometimes is specified in the
+            //       // x-partykit-namespace header
+            //       instance: this.name,
+            //       className: this.#ParentClass.name,
+            //       id: this.ctx.id.name || this.ctx.id.toString(),
+            //     });
+            //   }
+            // }
+
+            return _onStart();
+          });
+        }
+      );
+    };
+
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       return agentContext.run(
-        { agent: this, connection, request: undefined },
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection,
+          request: undefined,
+        },
         async () => {
           if (typeof message !== "string") {
             return this.#tryCatch(() => _onMessage(connection, message));
@@ -489,7 +740,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
       return agentContext.run(
-        { agent: this, connection, request: ctx.request },
+        // Need to cast "this" to Agent<unknown> to avoid type errors
+        // because the agentContext is as strictly typed as the Agent class
+        { agent: this as Agent<unknown>, connection, request: ctx.request },
         async () => {
           setTimeout(() => {
             if (this.state) {
@@ -503,6 +756,118 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             return this.#tryCatch(() => _onConnect(connection, ctx));
           }, 20);
         }
+      );
+    };
+
+    const _onRequest = this.onRequest.bind(this);
+    this.onRequest = async (request: Request) => {
+      return agentContext.run(
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request,
+        },
+        async () =>
+          this.#tryCatch(async () => {
+            if (
+              request.method === "GET" &&
+              request.url ===
+                `http://dummy-example.cloudflare.com/${this.#secret}/events`
+            ) {
+              const stream = new TransformStream();
+              const writer = stream.writable.getWriter();
+
+              // Send headers for SSE
+              const headers = {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+              };
+
+              // Create event handler that writes events to the stream
+              const eventHandler = (event: AgentEvent<State>) => {
+                const { type, ...rest } = event;
+                writer.write(
+                  new TextEncoder().encode(
+                    `event: ${type}\ndata: ${JSON.stringify(rest)}\n\n`
+                  )
+                );
+              };
+
+              // Register the handler
+              this.#eventBus.on("event", eventHandler);
+
+              const interval = setInterval(() => {
+                writer.write(
+                  new TextEncoder().encode(
+                    `event: heartbeat\ndata: ${JSON.stringify({
+                      type: "heartbeat",
+                    })}\n\n`
+                  )
+                );
+              }, 1000);
+
+              // Handle client disconnect
+              request.signal.addEventListener("abort", () => {
+                this.#eventBus.off("event", eventHandler);
+                clearInterval(interval);
+                writer.close().catch(console.error);
+              });
+
+              return new Response(stream.readable, { headers });
+            }
+            // for (const plugin of this.eventPlugins) {
+            //   if (plugin.onRequest) {
+            //     plugin.onRequest({
+            //       instance: this.name,
+            //       className: this.#ParentClass.name,
+            //       id: this.ctx.id.name || this.ctx.id.toString(),
+            //       request,
+            //     });
+            //   }
+            // }
+            const requestPayload = await createRequestPayload(
+              request.clone() as typeof request
+            );
+            this.emitEvent({
+              type: "request",
+              instance: this.name,
+              className: this.#ParentClass.name,
+              id: this.ctx.id.name || this.ctx.id.toString(),
+              timestamp: Date.now(),
+              payload: {
+                request: requestPayload,
+              },
+            });
+            const response = await _onRequest(request);
+            this.emitEvent({
+              type: "response",
+              instance: this.name,
+              className: this.#ParentClass.name,
+              id: this.ctx.id.name || this.ctx.id.toString(),
+              timestamp: Date.now(),
+              payload: {
+                request: requestPayload,
+                response: await createResponsePayload(
+                  response.clone() as typeof response
+                ),
+              },
+            });
+            // for (const plugin of this.eventPlugins) {
+            //   if (plugin.onResponse) {
+            //     plugin.onResponse({
+            //       instance: this.name,
+            //       className: this.#ParentClass.name,
+            //       id: this.ctx.id.name || this.ctx.id.toString(),
+            //       request,
+            //       response,
+            //     });
+            //   }
+            // }
+            return response;
+          })
       );
     };
   }
@@ -533,6 +898,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         }
       );
     });
+  }
+
+  private emitEvent(event: AgentEvent<State>) {
+    this.#eventBus.emit("event", event);
+    for (const observer of this.eventObservers) {
+      observer.handler(event);
+    }
   }
 
   /**
@@ -808,7 +1180,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         continue;
       }
       await agentContext.run(
-        { agent: this, connection: undefined, request: undefined },
+        // Need to cast "this" to Agent<unknown> to avoid type errors
+        // because the agentContext is as strictly typed as the Agent class
+        {
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request: undefined,
+        },
         async () => {
           try {
             await (
@@ -1026,4 +1404,96 @@ export class StreamingResponse {
     };
     this.#connection.send(JSON.stringify(response));
   }
+}
+
+async function createResponsePayload(response: Response) {
+  let body: string | undefined;
+
+  // Check if the response has a body and read it
+  if (response.body) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    body = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      // Decode the value and append it to the body
+      // Use the decoder to convert the Uint8Array to a string
+      // and append it to the body
+      body += decoder.decode(value, { stream: true });
+    }
+  }
+
+  // Create the payload object
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers: headersToObject(response.headers),
+    body,
+  };
+}
+
+async function createRequestPayload(
+  request: Request<unknown, CfProperties<unknown>>
+) {
+  let body: string | undefined;
+
+  // Check if the response has a body and read it
+  if (request.body) {
+    const reader = request.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    body = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      // Decode the value and append it to the body
+      // Use the decoder to convert the Uint8Array to a string
+      // and append it to the body
+      body += decoder.decode(value, { stream: true });
+    }
+  }
+
+  // Create the payload object
+  return {
+    method: request.method,
+    url: request.url,
+    headers: headersToObject(request.headers),
+    body,
+  };
+}
+
+function headersToObject(headers: Headers) {
+  const result: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    result[key] = value;
+  });
+
+  return result;
+}
+
+/**
+ * For debugging purposes, get the event stream from an Agent
+ *
+ * @param agent Agent instance
+ * @returns A response object of which the body points to a readable stream of events
+ */
+export async function getAgentEventStream<T extends Agent<unknown, unknown>>(
+  agent: DurableObjectStub<T>
+) {
+  const secret = await agent.getSecret();
+  const url = `http://dummy-example.cloudflare.com/${secret}/events`;
+  return await agent.fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "text/event-stream",
+    },
+  });
 }
