@@ -468,6 +468,7 @@ export abstract class McpAgent<
       this.#transport?.onmessage?.(parsedMessage);
       return null;
     } catch (error) {
+      console.error("Error forwarding message to SSE:", error);
       this.#transport?.onerror?.(error as Error);
       return error as Error;
     }
@@ -542,6 +543,7 @@ export abstract class McpAgent<
 
     return {
       async fetch<Env>(
+        this: void,
         request: Request,
         env: Env,
         ctx: ExecutionContext
@@ -767,6 +769,7 @@ export abstract class McpAgent<
 
     return {
       async fetch<Env>(
+        this: void,
         request: Request,
         env: Env,
         ctx: ExecutionContext
