@@ -542,6 +542,7 @@ export abstract class McpAgent<
 
     return {
       async fetch<Env>(
+        this: void,
         request: Request,
         env: Env,
         ctx: ExecutionContext
@@ -767,6 +768,7 @@ export abstract class McpAgent<
 
     return {
       async fetch<Env>(
+        this: void,
         request: Request,
         env: Env,
         ctx: ExecutionContext
