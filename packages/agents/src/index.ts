@@ -524,7 +524,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               type: "start",
               instance: this.name,
               className: this.#ParentClass.name,
-              id: this.ctx.id.name || this.ctx.id.toString(),
+              id: nanoid(),
               timestamp: Date.now(),
             });
 
@@ -540,7 +540,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         type: "message",
         instance: this.name,
         className: this.#ParentClass.name,
-        id: connection.id,
+        id: nanoid(),
         timestamp: Date.now(),
         payload: {
           message:
@@ -647,7 +647,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               type: "connect",
               instance: this.name,
               className: this.#ParentClass.name,
-              id: connection.id,
+              id: nanoid(),
               timestamp: Date.now(),
               payload: {
                 connectionId: connection.id,
@@ -760,7 +760,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               type: "request",
               instance: this.name,
               className: this.#ParentClass.name,
-              id: this.ctx.id.name || this.ctx.id.toString(),
+              id: nanoid(),
               timestamp: Date.now(),
               payload: {
                 request: requestPayload,
@@ -771,7 +771,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               type: "response",
               instance: this.name,
               className: this.#ParentClass.name,
-              id: this.ctx.id.name || this.ctx.id.toString(),
+              id: nanoid(),
               timestamp: Date.now(),
               payload: {
                 request: requestPayload,
@@ -805,7 +805,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 type: "state_update",
                 instance: this.name,
                 className: this.#ParentClass.name,
-                id: typeof source === "string" ? source : source.id,
+                id: nanoid(),
                 timestamp: Date.now(),
                 payload: {
                   state,
@@ -828,7 +828,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         type: "broadcast",
         instance: this.name,
         className: this.#ParentClass.name,
-        id: this.ctx.id.name || this.ctx.id.toString(),
+        id: nanoid(),
         timestamp: Date.now(),
         payload: {
           message:
@@ -861,7 +861,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             type: "close",
             instance: this.name,
             className: this.#ParentClass.name,
-            id: connection.id,
+            id: nanoid(),
             timestamp: Date.now(),
             payload: {
               connectionId: connection.id,
@@ -903,7 +903,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               type: "error",
               instance: this.name,
               className: this.#ParentClass.name,
-              id: connectionId,
+              id: nanoid(),
               timestamp: Date.now(),
               payload: {
                 connection: connectionId,
