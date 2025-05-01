@@ -3,6 +3,7 @@
   "name": "anthropic-agent-patterns",
   "main": "src/server.tsx",
   "compatibility_date": "2025-01-29",
+  "compatibility_flags": ["nodejs_compat"],
   "account_id": "85d0c02b57ed75faf9b18f92d5c01602",
 
   "assets": {
