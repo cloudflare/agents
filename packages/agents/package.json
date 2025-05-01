@@ -84,6 +84,7 @@
     "@modelcontextprotocol/sdk": "^1.10.2",
     "ai": "^4.3.10",
     "cron-schedule": "^5.0.4",
+    "mitt": "^3.0.1",
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.68",
     "partysocket": "1.1.3",
