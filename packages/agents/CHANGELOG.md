@@ -1,5 +1,15 @@
 # @cloudflare/agents
 
+## 0.0.76
+
+### Patch Changes
+
+- [#242](https://github.com/cloudflare/agents/pull/242) [`c8f53b8`](https://github.com/cloudflare/agents/commit/c8f53b860b40a27f5d2ccfe119b37945454e6576) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+- [#240](https://github.com/cloudflare/agents/pull/240) [`9ff62ed`](https://github.com/cloudflare/agents/commit/9ff62ed03a08837845056adb054b3cb3fda71405) Thanks [@threepointone](https://github.com/threepointone)! - mcp: Log when an error is caught inside onSSEMcpMessage
+
+- [#239](https://github.com/cloudflare/agents/pull/239) [`7bd597a`](https://github.com/cloudflare/agents/commit/7bd597ad453a704bca98204ca2de5dc610808fcf) Thanks [@sushichan044](https://github.com/sushichan044)! - fix(types): explicitly annotate this with void to avoid unbound method warning
+
 ## 0.0.75
 
 ### Patch Changes
