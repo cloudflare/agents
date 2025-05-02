@@ -949,6 +949,7 @@ export abstract class McpAgent<
           const isInitialized = await doStub.isInitialized();
 
           if (isInitializationRequest) {
+            await doStub._init(ctx.props);
             await doStub.setInitialized();
           } else if (!isInitialized) {
             // if we have gotten here, then a session id that was never initialized
