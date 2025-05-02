@@ -7,7 +7,13 @@ export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
 };
 
-export class TestMcpAgent extends McpAgent {
+type State = unknown;
+
+type Props = {
+  testValue: string;
+};
+
+export class TestMcpAgent extends McpAgent<Env, State, Props> {
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
     { capabilities: { logging: {} } }
@@ -22,12 +28,27 @@ export class TestMcpAgent extends McpAgent {
         return { content: [{ type: "text", text: `Hello, ${name}!` }] };
       }
     );
+
+    this.server.tool(
+      "getPropsTestValue",
+      {},
+      async (): Promise<CallToolResult> => {
+        return {
+          content: [{ type: "text", text: this.props.testValue }],
+        };
+      }
+    );
   }
 }
 
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+
+    // set some props that should be passed init
+    ctx.props = {
+      testValue: "123",
+    };
 
     if (url.pathname === "/sse" || url.pathname === "/sse/message") {
       return TestMcpAgent.serveSSE("/sse").fetch(request, env, ctx);

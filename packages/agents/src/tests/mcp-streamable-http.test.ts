@@ -477,4 +477,46 @@ describe("McpAgent Streamable HTTP Transport", () => {
     expect(text2).toContain('"id":"req-2"');
     expect(text2).toContain("Hello, Connection2"); // tools/call result
   });
+
+  it("should pass props to the agent", async () => {
+    const ctx = createExecutionContext();
+    const sessionId = await initializeServer(ctx);
+
+    const toolCallMessage: JSONRPCMessage = {
+      jsonrpc: "2.0",
+      method: "tools/call",
+      params: {
+        name: "getPropsTestValue",
+        arguments: {},
+      },
+      id: "call-1",
+    };
+
+    const response = await sendPostRequest(
+      ctx,
+      baseUrl,
+      toolCallMessage,
+      sessionId
+    );
+    expect(response.status).toBe(200);
+
+    const text = await readSSEEvent(response);
+    const eventLines = text.split("\n");
+    const dataLine = eventLines.find((line) => line.startsWith("data:"));
+    expect(dataLine).toBeDefined();
+
+    const eventData = JSON.parse(dataLine!.substring(5));
+    expect(eventData).toMatchObject({
+      jsonrpc: "2.0",
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "123",
+          },
+        ],
+      },
+      id: "call-1",
+    });
+  });
 });
