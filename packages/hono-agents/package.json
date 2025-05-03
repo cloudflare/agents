@@ -2,6 +2,7 @@
   "name": "hono-agents",
   "version": "0.0.66",
   "main": "src/index.ts",
+  "types": "dist/index.d.ts",
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
