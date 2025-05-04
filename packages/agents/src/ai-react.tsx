@@ -155,6 +155,8 @@ export function useAgentChat<State = unknown>(
       // }))
 
       abortController.abort();
+      // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
+      controller.close();
     });
 
     agent.addEventListener(
