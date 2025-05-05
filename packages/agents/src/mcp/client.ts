@@ -1,7 +1,6 @@
 import { MCPClientConnection } from "./client-connection";
 
 import type {
-  ClientCapabilities,
   CallToolRequest,
   CallToolResultSchema,
   CompatibilityCallToolResultSchema,
@@ -47,7 +46,6 @@ export class MCPClientManager {
     url: string,
     options: {
       // Allows you to reconnect to a server (in the case of a auth reconnect)
-      // Doesn't handle session reconnection
       reconnect?: {
         id: string;
         oauthClientId?: string;
@@ -58,9 +56,12 @@ export class MCPClientManager {
         authProvider?: AgentsOAuthProvider;
       };
       client?: ConstructorParameters<typeof Client>[1];
-      capabilities?: ClientCapabilities;
     } = {}
-  ): Promise<{ id: string; authUrl: string | undefined }> {
+  ): Promise<{
+    id: string;
+    authUrl?: string;
+    clientId?: string;
+  }> {
     const id = options.reconnect?.id ?? nanoid(8);
 
     if (!options.transport?.authProvider) {
@@ -68,7 +69,12 @@ export class MCPClientManager {
         "No authProvider provided in the transport options. This client will only support unauthenticated remote MCP Servers"
       );
     } else {
+      // reconnect with auth
       options.transport.authProvider.serverId = id;
+      if (options.reconnect?.oauthClientId) {
+        options.transport.authProvider.clientId =
+          options.reconnect?.oauthClientId;
+      }
     }
 
     this.mcpConnections[id] = new MCPClientConnection(
@@ -80,25 +86,25 @@ export class MCPClientManager {
       {
         transport: options.transport ?? {},
         client: options.client ?? {},
-        capabilities: options.client ?? {},
       }
     );
 
-    await this.mcpConnections[id].init(
-      options.reconnect?.oauthCode,
-      options.reconnect?.oauthClientId
-    );
+    await this.mcpConnections[id].init(options.reconnect?.oauthCode);
 
     const authUrl = options.transport?.authProvider?.authUrl;
     if (authUrl && options.transport?.authProvider?.redirectUrl) {
       this.callbackUrls.push(
         options.transport.authProvider.redirectUrl.toString()
       );
+      return {
+        id,
+        authUrl,
+        clientId: options.transport?.authProvider?.clientId,
+      };
     }
 
     return {
       id,
-      authUrl,
     };
   }
 

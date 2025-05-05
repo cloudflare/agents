@@ -30,6 +30,11 @@ body {
   font-size: 16px;
 }
 
+.mcp-input.name {
+  flex: 0;
+  width: 150px;
+}
+
 .mcp-input:focus {
   outline: none;
   border-color: #0066ff;
@@ -104,4 +109,9 @@ button:hover {
 
 .mcp-servers {
   margin-top: 8px;
+}
+
+b {
+  margin-bottom: 4px;
+  display: inline-block;
 }
