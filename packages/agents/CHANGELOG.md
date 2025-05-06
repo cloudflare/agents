@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.78
+
+### Patch Changes
+
+- [#258](https://github.com/cloudflare/agents/pull/258) [`eede2bd`](https://github.com/cloudflare/agents/commit/eede2bd61532abeb403417dbbfe1f8e6424b39dc) Thanks [@threepointone](https://github.com/threepointone)! - wrap onRequest so getCurrentAgent works
+
+  Fixes https://github.com/cloudflare/agents/issues/256
+
 ## 0.0.77
 
 ### Patch Changes
