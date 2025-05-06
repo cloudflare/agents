@@ -321,6 +321,16 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       });
     });
 
+    const _onRequest = this.onRequest.bind(this);
+    this.onRequest = (request: Request) => {
+      return agentContext.run(
+        { agent: this, connection: undefined, request },
+        async () => {
+          return this.#tryCatch(() => _onRequest(request));
+        }
+      );
+    };
+
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       return agentContext.run(
