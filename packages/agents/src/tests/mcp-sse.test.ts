@@ -76,7 +76,7 @@ describe("test", () => {
     expect(jsonResponse.jsonrpc).toBe("2.0");
     expect(jsonResponse.id).toBe("1");
     expect(jsonResponse.result.tools).toBeDefined();
-    expect(jsonResponse.result.tools.length).toBe(2);
+    expect(jsonResponse.result.tools.length).toBe(3);
     expect(jsonResponse.result.tools[0]).toEqual({
       name: "greet",
       description: "A simple greeting tool",

@@ -1,18 +1,20 @@
-import { DurableObject } from "cloudflare:workers";
-import type { Connection, WSMessage } from "../";
-import { Agent } from "../";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type {
+  JSONRPCMessage
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   InitializeRequestSchema,
   isJSONRPCError,
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResponse,
-  JSONRPCMessageSchema,
+  JSONRPCMessageSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { DurableObject } from "cloudflare:workers";
+import type { Connection, WSMessage } from "../";
+import { Agent } from "../";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
@@ -346,7 +348,7 @@ export abstract class McpAgent<
           return new Response("Websocket already connected", { status: 400 });
         }
 
-        // This session must always use the SSE transporo
+        // This session must always use the SSE transport
         await this.ctx.storage.put("transportType", "sse");
         this.#transportType = "sse";
 
@@ -752,8 +754,9 @@ export abstract class McpAgent<
     path: string,
     {
       binding = "MCP_OBJECT",
+      agentName,
       corsOptions,
-    }: { binding?: string; corsOptions?: CORSOptions } = {}
+    }: { binding?: string; agentName?: string; corsOptions?: CORSOptions } = {}
   ) {
     let pathname = path;
     if (path === "/") {
@@ -941,7 +944,7 @@ export abstract class McpAgent<
           sessionId = sessionId ?? namespace.newUniqueId().toString();
 
           // fetch the agent DO
-          const id = namespace.idFromName(`streamable-http:${sessionId}`);
+          const id = namespace.idFromName(agentName ?? `streamable-http:${sessionId}`);
           const doStub = namespace.get(id);
           const isInitialized = await doStub.isInitialized();
 

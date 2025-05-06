@@ -1,6 +1,6 @@
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
 import worker, { type Env } from "./worker";
 
@@ -29,6 +29,16 @@ const TEST_MESSAGES = {
     method: "tools/list",
     params: {},
     id: "tools-1",
+  } as JSONRPCMessage,
+  
+  incrementCounter: {
+    jsonrpc: "2.0",
+    method: "tools/call",
+    params: {
+      name: "incrementCounter",
+      arguments: {},
+    },
+    id: "counter-1",
   } as JSONRPCMessage,
 };
 
@@ -86,11 +96,25 @@ function expectErrorResponse(
 
 describe("McpAgent Streamable HTTP Transport", () => {
   const baseUrl = "http://example.com/mcp";
+  const namedBaseUrl = "http://example.com/mcp-named";
 
   async function initializeServer(ctx: ExecutionContext): Promise<string> {
     const response = await sendPostRequest(
       ctx,
       baseUrl,
+      TEST_MESSAGES.initialize
+    );
+
+    expect(response.status).toBe(200);
+    const newSessionId = response.headers.get("mcp-session-id");
+    expect(newSessionId).toBeDefined();
+    return newSessionId as string;
+  }
+  
+  async function initializeNamedServer(ctx: ExecutionContext): Promise<string> {
+    const response = await sendPostRequest(
+      ctx,
+      namedBaseUrl,
       TEST_MESSAGES.initialize
     );
 
@@ -171,7 +195,7 @@ describe("McpAgent Streamable HTTP Transport", () => {
     );
   });
 
-  it("should pandle post requests via sse response correctly", async () => {
+  it("should handle post requests via sse response correctly", async () => {
     const ctx = createExecutionContext();
     const sessionId = await initializeServer(ctx);
 
@@ -517,6 +541,80 @@ describe("McpAgent Streamable HTTP Transport", () => {
         ],
       },
       id: "call-1",
+    });
+  });
+  
+  it("should maintain state across connections when using agentName", async () => {
+    const ctx = createExecutionContext();
+    
+    // Initialize a first session with the named agent
+    const session1Id = await initializeNamedServer(ctx);
+    expect(session1Id).toBeDefined();
+    
+    // Increment the counter
+    const incrementResponse1 = await sendPostRequest(
+      ctx,
+      namedBaseUrl,
+      TEST_MESSAGES.incrementCounter,
+      session1Id
+    );
+    expect(incrementResponse1.status).toBe(200);
+    
+    // Get the counter value from the first increment
+    const text1 = await readSSEEvent(incrementResponse1);
+    const eventLines1 = text1.split("\n");
+    const dataLine1 = eventLines1.find(line => line.startsWith("data:"));
+    expect(dataLine1).toBeDefined();
+    
+    const eventData1 = JSON.parse(dataLine1!.substring(5));
+    expect(eventData1).toMatchObject({
+      jsonrpc: "2.0",
+      id: "counter-1",
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "1",
+          },
+        ],
+      },
+    });
+    
+    // Initialize a second session with the same named agent
+    const session2Id = await initializeNamedServer(ctx);
+    expect(session2Id).toBeDefined();
+    expect(session2Id).not.toEqual(session1Id);
+    
+    // Increment the counter again - should continue from previous state
+    const incrementResponse2 = await sendPostRequest(
+      ctx,
+      namedBaseUrl,
+      {
+        ...TEST_MESSAGES.incrementCounter,
+        id: "counter-2",
+      },
+      session2Id
+    );
+    expect(incrementResponse2.status).toBe(200);
+    
+    // Get the counter value - should be 2 if state was maintained
+    const text2 = await readSSEEvent(incrementResponse2);
+    const eventLines2 = text2.split("\n");
+    const dataLine2 = eventLines2.find(line => line.startsWith("data:"));
+    expect(dataLine2).toBeDefined();
+    
+    const eventData2 = JSON.parse(dataLine2!.substring(5));
+    expect(eventData2).toMatchObject({
+      jsonrpc: "2.0",
+      id: "counter-2",
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "2",
+          },
+        ],
+      },
     });
   });
 });
