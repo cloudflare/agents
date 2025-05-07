@@ -713,10 +713,14 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   /**
-   * Method called when an alarm fires
-   * Executes any scheduled tasks that are due
+   * Method called when an alarm fires.
+   * Executes any scheduled tasks that are due.
+   *
+   * @remarks
+   * To schedule a task, please use the `this.schedule` method instead.
+   * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
-  async alarm() {
+  public readonly alarm = async () => {
     const now = Math.floor(Date.now() / 1000);
 
     // Get all schedules that should be executed now
