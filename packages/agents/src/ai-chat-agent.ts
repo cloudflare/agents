@@ -73,6 +73,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           // dispatcher,
           // duplex
         } = data.init;
+
         const { messages } = JSON.parse(body as string);
         this.#broadcastChatMessage(
           {
@@ -81,7 +82,22 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           },
           [connection.id]
         );
+
+        const incomingMessages = this.#messagesNotAlreadyInAgent(messages);
         await this.persistMessages(messages, [connection.id]);
+
+        this.observability?.emit(
+          {
+            type: "message:request",
+            id: data.id,
+            displayMessage: `Incoming chat message:\n${incomingMessages.map((m) => `${m.role}: ${m.content}`).join("\n")}`,
+            timestamp: Date.now(),
+            payload: {
+              message: incomingMessages,
+            },
+          },
+          this.ctx
+        );
 
         const chatMessageId = data.id;
         const abortSignal = this.#getAbortSignal(chatMessageId);
@@ -94,8 +110,23 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 responseMessages: response.messages,
               });
 
+              const outgoingMessages =
+                this.#messagesNotAlreadyInAgent(finalMessages);
               await this.persistMessages(finalMessages, [connection.id]);
               this.#removeAbortController(chatMessageId);
+
+              this.observability?.emit(
+                {
+                  type: "message:response",
+                  id: data.id,
+                  displayMessage: `Outgoing chat message:\n${outgoingMessages.map((m) => `${m.role}: ${m.content}`).join("\n")}`,
+                  timestamp: Date.now(),
+                  payload: {
+                    message: outgoingMessages,
+                  },
+                },
+                this.ctx
+              );
             },
             abortSignal ? { abortSignal } : undefined
           );
@@ -205,6 +236,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       },
       excludeBroadcastIds
     );
+  }
+
+  #messagesNotAlreadyInAgent(messages: ChatMessage[]) {
+    const existingIds = new Set(this.messages.map((message) => message.id));
+    return messages.filter((message) => !existingIds.has(message.id));
   }
 
   async #reply(id: string, response: Response) {

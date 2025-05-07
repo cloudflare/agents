@@ -13,8 +13,11 @@ import { nanoid } from "nanoid";
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MCPClientManager } from "./mcp/client";
+import { genericObservability, type Observability } from "./observability";
 
 export type { Connection, WSMessage, ConnectionContext } from "partyserver";
+
+export type { ObservabilityEvent, Observability } from "./observability";
 
 /**
  * RPC request message from client
@@ -265,6 +268,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   };
 
   /**
+   * The observability implementation to use for the Agent
+   */
+  observability?: Observability = genericObservability;
+
+  /**
    * Execute SQL queries against the Agent's database
    * @template T Type of the returned rows
    * @param strings SQL query template strings
@@ -379,6 +387,35 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
               // For regular methods, execute and send response
               const result = await methodFn.apply(this, args);
+
+              const displayArgs = args.map((a) => {
+                if (typeof a === "object") {
+                  if (Array.isArray(a)) {
+                    return "[...]";
+                  }
+
+                  return "{...}";
+                }
+
+                return String(a);
+              });
+
+              this.observability?.emit(
+                {
+                  id: nanoid(),
+                  type: "rpc",
+                  displayMessage: `RPC call to ${method} args: ${displayArgs.join(", ")}`,
+                  timestamp: Date.now(),
+                  payload: {
+                    method,
+                    args,
+                    success: true,
+                    streaming: metadata?.streaming,
+                  },
+                },
+                this.ctx
+              );
+
               const response: RPCResponse = {
                 type: "rpc",
                 id,
@@ -423,6 +460,19 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 })
               );
             }
+
+            this.observability?.emit(
+              {
+                id: nanoid(),
+                type: "connect",
+                displayMessage: `Connection ${connection.id} established`,
+                timestamp: Date.now(),
+                payload: {
+                  connectionId: connection.id,
+                },
+              },
+              this.ctx
+            );
             return this.#tryCatch(() => _onConnect(connection, ctx));
           }, 20);
         }
@@ -431,6 +481,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   #setStateInternal(state: State, source: Connection | "server" = "server") {
+    const previousState = this.#state;
     this.#state = state;
     this.sql`
     INSERT OR REPLACE INTO cf_agents_state (id, state)
@@ -452,6 +503,19 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       return agentContext.run(
         { agent: this, connection, request },
         async () => {
+          this.observability?.emit(
+            {
+              id: nanoid(),
+              type: "state:update",
+              displayMessage: "State updated",
+              timestamp: Date.now(),
+              payload: {
+                state,
+                previousState,
+              },
+            },
+            this.ctx
+          );
           return this.onStateUpdate(state, source);
         }
       );
@@ -545,6 +609,18 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   ): Promise<Schedule<T>> {
     const id = nanoid(9);
 
+    const emitScheduleCreate = (schedule: Schedule<T>) =>
+      this.observability?.emit(
+        {
+          id: nanoid(),
+          type: "schedule:create",
+          displayMessage: `Schedule ${schedule.id} created`,
+          timestamp: Date.now(),
+          payload: schedule,
+        },
+        this.ctx
+      );
+
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
     }
@@ -564,13 +640,17 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
       await this.#scheduleNextAlarm();
 
-      return {
+      const schedule: Schedule<T> = {
         id,
         callback: callback,
         payload: payload as T,
         time: timestamp,
         type: "scheduled",
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     if (typeof when === "number") {
       const time = new Date(Date.now() + when * 1000);
@@ -585,7 +665,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
       await this.#scheduleNextAlarm();
 
-      return {
+      const schedule: Schedule<T> = {
         id,
         callback: callback,
         payload: payload as T,
@@ -593,6 +673,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         time: timestamp,
         type: "delayed",
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     if (typeof when === "string") {
       const nextExecutionTime = getNextCronTime(when);
@@ -607,7 +691,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
       await this.#scheduleNextAlarm();
 
-      return {
+      const schedule: Schedule<T> = {
         id,
         callback: callback,
         payload: payload as T,
@@ -615,6 +699,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         time: timestamp,
         type: "cron",
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     throw new Error("Invalid schedule type");
   }
@@ -690,6 +778,19 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @returns true if the task was cancelled, false otherwise
    */
   async cancelSchedule(id: string): Promise<boolean> {
+    const schedule = await this.getSchedule(id);
+    if (schedule) {
+      this.observability?.emit(
+        {
+          id: nanoid(),
+          type: "schedule:delete",
+          displayMessage: `Schedule ${id} deleted`,
+          timestamp: Date.now(),
+          payload: schedule,
+        },
+        this.ctx
+      );
+    }
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
     await this.#scheduleNextAlarm();
@@ -734,6 +835,17 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         { agent: this, connection: undefined, request: undefined },
         async () => {
           try {
+            this.observability?.emit(
+              {
+                id: nanoid(),
+                type: "schedule:execute",
+                displayMessage: `Schedule ${row.id} executed`,
+                timestamp: Date.now(),
+                payload: row,
+              },
+              this.ctx
+            );
+
             await (
               callback as (
                 payload: unknown,
@@ -776,6 +888,17 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+
+    this.observability?.emit(
+      {
+        id: nanoid(),
+        type: "destroy",
+        displayMessage: "Agent destroyed",
+        timestamp: Date.now(),
+        payload: {},
+      },
+      this.ctx
+    );
   }
 
   /**

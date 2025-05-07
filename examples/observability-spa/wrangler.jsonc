@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "observability-spa",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-02-19",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env",
+  ],
+  "assets": {
+    "binding": "ASSETS",
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TestingAgent",
+        "class_name": "TestingAgent",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TestingAgent"],
+    },
+  ],
+}
