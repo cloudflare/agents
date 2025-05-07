@@ -1,5 +1,17 @@
 # @cloudflare/agents
 
+## 0.0.79
+
+### Patch Changes
+
+- [#261](https://github.com/cloudflare/agents/pull/261) [`881f11e`](https://github.com/cloudflare/agents/commit/881f11ec71d539c0bc53fd754662a40c9b9dc090) Thanks [@geelen](https://github.com/geelen)! - update dependencies
+
+- [#253](https://github.com/cloudflare/agents/pull/253) [`8ebc079`](https://github.com/cloudflare/agents/commit/8ebc07945d9c282bc0b6bfd5c41f69380a82f7e6) Thanks [@adesege](https://github.com/adesege)! - fix: allow overriding fetch and request headers in SSEEdgeClientTransport
+
+- [#260](https://github.com/cloudflare/agents/pull/260) [`ca44ae8`](https://github.com/cloudflare/agents/commit/ca44ae8257eac71170540221ddd7bf88ff8756a1) Thanks [@nickfujita](https://github.com/nickfujita)! - Update Agent.alarm to readonly, linking to schedule-task docs
+
+- [#261](https://github.com/cloudflare/agents/pull/261) [`881f11e`](https://github.com/cloudflare/agents/commit/881f11ec71d539c0bc53fd754662a40c9b9dc090) Thanks [@geelen](https://github.com/geelen)! - Adding `mcp-session-id` to McpAgents' CORS headers to permit web-based MCP clients
+
 ## 0.0.78
 
 ### Patch Changes
