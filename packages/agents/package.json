@@ -94,6 +94,8 @@
     "react": "*"
   },
   "devDependencies": {
-    "react": "*"
+    "@cloudflare/vitest-pool-workers": "^0.8.25",
+    "react": "*",
+    "vitest-browser-react": "^0.1.1"
   }
 }
