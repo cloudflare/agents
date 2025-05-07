@@ -1,48 +1,41 @@
 import { DurableObject } from "cloudflare:workers";
+import type { Connection, WSMessage } from "../";
 import { Agent } from "../";
-import type { WSMessage } from "../";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Connection } from "../";
-import type {
-  JSONRPCError,
-  JSONRPCMessage,
-  JSONRPCNotification,
-  JSONRPCRequest,
-  JSONRPCResponse,
-} from "@modelcontextprotocol/sdk/types.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import {
   InitializeRequestSchema,
   isJSONRPCError,
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResponse,
-  JSONRPCErrorSchema,
   JSONRPCMessageSchema,
-  JSONRPCNotificationSchema,
-  JSONRPCRequestSchema,
-  JSONRPCResponseSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
-// CORS helper function
+// CORS helper functions
+function corsHeaders(request: Request, corsOptions: CORSOptions = {}) {
+  const origin = "*";
+  return {
+    "Access-Control-Allow-Origin": corsOptions.origin || origin,
+    "Access-Control-Allow-Methods": corsOptions.methods || "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers":
+      corsOptions.headers || "Content-Type, mcp-session-id",
+    "Access-Control-Max-Age": (corsOptions.maxAge || 86400).toString(),
+    "Access-Control-Expose-Headers":
+      corsOptions.exposeHeaders || "mcp-session-id",
+  };
+}
+
 function handleCORS(
   request: Request,
   corsOptions?: CORSOptions
 ): Response | null {
-  const origin = request.headers.get("Origin") || "*";
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": corsOptions?.origin || origin,
-    "Access-Control-Allow-Methods":
-      corsOptions?.methods || "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": corsOptions?.headers || "Content-Type",
-    "Access-Control-Max-Age": (corsOptions?.maxAge || 86400).toString(),
-  };
-
   if (request.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { headers: corsHeaders(request, corsOptions) });
   }
 
   return null;
@@ -53,6 +46,7 @@ interface CORSOptions {
   methods?: string;
   headers?: string;
   maxAge?: number;
+  exposeHeaders?: string;
 }
 
 class McpSSETransport implements Transport {
@@ -681,7 +675,7 @@ export abstract class McpAgent<
               "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
-              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+              ...corsHeaders(request, corsOptions),
             },
           });
         }
@@ -733,7 +727,7 @@ export abstract class McpAgent<
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 Connection: "keep-alive",
-                "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+                ...corsHeaders(request, corsOptions),
               },
             });
           }
@@ -744,7 +738,7 @@ export abstract class McpAgent<
               "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
-              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+              ...corsHeaders(request, corsOptions),
             },
           });
         }
@@ -1094,7 +1088,10 @@ export abstract class McpAgent<
             // closing the websocket will also close the SSE connection
             ws.close();
 
-            return new Response(null, { status: 202 });
+            return new Response(null, {
+              status: 202,
+              headers: corsHeaders(request, corsOptions),
+            });
           }
 
           for (const message of messages) {
@@ -1115,7 +1112,7 @@ export abstract class McpAgent<
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
               "mcp-session-id": sessionId,
-              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+              ...corsHeaders(request, corsOptions),
             },
             status: 200,
           });
