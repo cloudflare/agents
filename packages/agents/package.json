@@ -83,12 +83,12 @@
   "description": "A home for your AI agents",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.11.0",
-    "ai": "^4.3.12",
+    "ai": "^4.3.14",
     "cron-schedule": "^5.0.4",
     "nanoid": "^5.1.5",
-    "partyserver": "^0.0.68",
+    "partyserver": "^0.0.70",
     "partysocket": "1.1.3",
-    "zod": "^3.24.3"
+    "zod": "^3.24.4"
   },
   "peerDependencies": {
     "react": "*"
