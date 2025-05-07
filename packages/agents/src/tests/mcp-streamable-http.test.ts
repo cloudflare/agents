@@ -30,7 +30,7 @@ const TEST_MESSAGES = {
     params: {},
     id: "tools-1",
   } as JSONRPCMessage,
-  
+
   incrementCounter: {
     jsonrpc: "2.0",
     method: "tools/call",
@@ -110,7 +110,7 @@ describe("McpAgent Streamable HTTP Transport", () => {
     expect(newSessionId).toBeDefined();
     return newSessionId as string;
   }
-  
+
   async function initializeNamedServer(ctx: ExecutionContext): Promise<string> {
     const response = await sendPostRequest(
       ctx,
@@ -543,14 +543,14 @@ describe("McpAgent Streamable HTTP Transport", () => {
       id: "call-1",
     });
   });
-  
+
   it("should maintain state across connections when using agentName", async () => {
     const ctx = createExecutionContext();
-    
+
     // Initialize a first session with the named agent
     const session1Id = await initializeNamedServer(ctx);
     expect(session1Id).toBeDefined();
-    
+
     // Increment the counter
     const incrementResponse1 = await sendPostRequest(
       ctx,
@@ -559,13 +559,13 @@ describe("McpAgent Streamable HTTP Transport", () => {
       session1Id
     );
     expect(incrementResponse1.status).toBe(200);
-    
+
     // Get the counter value from the first increment
     const text1 = await readSSEEvent(incrementResponse1);
     const eventLines1 = text1.split("\n");
-    const dataLine1 = eventLines1.find(line => line.startsWith("data:"));
+    const dataLine1 = eventLines1.find((line) => line.startsWith("data:"));
     expect(dataLine1).toBeDefined();
-    
+
     const eventData1 = JSON.parse(dataLine1!.substring(5));
     expect(eventData1).toMatchObject({
       jsonrpc: "2.0",
@@ -579,12 +579,12 @@ describe("McpAgent Streamable HTTP Transport", () => {
         ],
       },
     });
-    
+
     // Initialize a second session with the same named agent
     const session2Id = await initializeNamedServer(ctx);
     expect(session2Id).toBeDefined();
     expect(session2Id).not.toEqual(session1Id);
-    
+
     // Increment the counter again - should continue from previous state
     const incrementResponse2 = await sendPostRequest(
       ctx,
@@ -596,13 +596,13 @@ describe("McpAgent Streamable HTTP Transport", () => {
       session2Id
     );
     expect(incrementResponse2.status).toBe(200);
-    
+
     // Get the counter value - should be 2 if state was maintained
     const text2 = await readSSEEvent(incrementResponse2);
     const eventLines2 = text2.split("\n");
-    const dataLine2 = eventLines2.find(line => line.startsWith("data:"));
+    const dataLine2 = eventLines2.find((line) => line.startsWith("data:"));
     expect(dataLine2).toBeDefined();
-    
+
     const eventData2 = JSON.parse(dataLine2!.substring(5));
     expect(eventData2).toMatchObject({
       jsonrpc: "2.0",

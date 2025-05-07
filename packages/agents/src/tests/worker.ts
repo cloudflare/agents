@@ -17,7 +17,7 @@ type Props = {
 
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
   initialState: State = { counterValue: 0 };
-  
+
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
     { capabilities: { logging: {} } }
@@ -42,7 +42,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
         };
       }
     );
-    
+
     this.server.tool(
       "incrementCounter",
       "Increment a persistent counter",
@@ -50,12 +50,12 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       async (): Promise<CallToolResult> => {
         const currentValue = this.state.counterValue || 0;
         const newValue = currentValue + 1;
-        
-        this.setState({ 
+
+        this.setState({
           ...this.state,
-          counterValue: newValue 
+          counterValue: newValue,
         });
-        
+
         return {
           content: [{ type: "text", text: newValue.toString() }],
         };
@@ -80,9 +80,11 @@ export default {
     if (url.pathname === "/mcp") {
       return TestMcpAgent.serve("/mcp").fetch(request, env, ctx);
     }
-    
+
     if (url.pathname === "/mcp-named") {
-      return TestMcpAgent.serve("/mcp-named", { agentName: "test-named-agent" }).fetch(request, env, ctx);
+      return TestMcpAgent.serve("/mcp-named", {
+        agentName: "test-named-agent",
+      }).fetch(request, env, ctx);
     }
 
     return new Response("Not found", { status: 404 });

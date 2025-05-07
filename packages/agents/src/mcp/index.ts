@@ -1,16 +1,14 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type {
-  JSONRPCMessage
-} from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import {
   InitializeRequestSchema,
   isJSONRPCError,
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResponse,
-  JSONRPCMessageSchema
+  JSONRPCMessageSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { DurableObject } from "cloudflare:workers";
 import type { Connection, WSMessage } from "../";
@@ -944,7 +942,9 @@ export abstract class McpAgent<
           sessionId = sessionId ?? namespace.newUniqueId().toString();
 
           // fetch the agent DO
-          const id = namespace.idFromName(agentName ?? `streamable-http:${sessionId}`);
+          const id = namespace.idFromName(
+            agentName ?? `streamable-http:${sessionId}`
+          );
           const doStub = namespace.get(id);
           const isInitialized = await doStub.isInitialized();
 
