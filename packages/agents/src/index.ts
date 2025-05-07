@@ -767,7 +767,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     // Schedule the next alarm
     await this.#scheduleNextAlarm();
-  }
+  };
 
   /**
    * Destroy the Agent, removing all state and scheduled tasks
