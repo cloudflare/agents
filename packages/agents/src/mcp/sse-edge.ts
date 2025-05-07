@@ -31,12 +31,11 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
 
       // Call the original fetch with fixed options
       return (
-        options.eventSourceInit?.fetch?.(
+        (options.eventSourceInit?.fetch?.(
           fetchUrl as URL | string,
           // @ts-expect-error Expects FetchLikeInit from EventSource but is compatible with RequestInit
           workerOptions
-        ) as Promise<Response> ||
-        fetch(fetchUrl, workerOptions)
+        ) as Promise<Response>) || fetch(fetchUrl, workerOptions)
       );
     };
 
