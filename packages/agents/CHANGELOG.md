@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.80
+
+### Patch Changes
+
+- [#254](https://github.com/cloudflare/agents/pull/254) [`25aeaf2`](https://github.com/cloudflare/agents/commit/25aeaf24692bb82601c5df9fdce215cf2c509711) Thanks [@cmsparks](https://github.com/cmsparks)! - Move MCP lifecycle+auth handling into the Agents class
+
 ## 0.0.79
 
 ### Patch Changes
