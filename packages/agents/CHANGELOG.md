@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.81
+
+### Patch Changes
+
+- [#265](https://github.com/cloudflare/agents/pull/265) [`ac0e999`](https://github.com/cloudflare/agents/commit/ac0e999652919600f087f0314ce61c98d3eaf069) Thanks [@threepointone](https://github.com/threepointone)! - refactor #method/#property to private method/private property
+
+- [#267](https://github.com/cloudflare/agents/pull/267) [`385f0b2`](https://github.com/cloudflare/agents/commit/385f0b29c716f8fa1c9719b0c68e5c830767953e) Thanks [@threepointone](https://github.com/threepointone)! - prefix private methods/properties with \_
+
 ## 0.0.80
 
 ### Patch Changes
