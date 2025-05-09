@@ -14,6 +14,7 @@ import {
   type ServerCapabilities,
   type ResourceTemplate,
   type ListResourceTemplatesResult,
+  type Notification,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -42,11 +43,9 @@ export class MCPClientConnection {
         authProvider?: AgentsOAuthProvider;
       };
       client: ConstructorParameters<typeof Client>[1];
-      capabilities: ClientCapabilities;
-    } = { transport: {}, client: {}, capabilities: {} }
+    } = { transport: {}, client: {} }
   ) {
     this.client = new Client(info, options.client);
-    this.client.registerCapabilities(options.capabilities);
   }
 
   /**
@@ -55,12 +54,13 @@ export class MCPClientConnection {
    * @param code Optional OAuth code to initialize the connection with if auth hasn't been initialized
    * @returns
    */
-  async init(code?: string, clientId?: string) {
+  async init(code?: string) {
     try {
       const transport = new SSEEdgeClientTransport(
         this.url,
         this.options.transport
       );
+
       if (code) {
         await transport.finishAuth(code);
       }

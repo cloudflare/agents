@@ -50,7 +50,7 @@ export type AgentClientFetchOptions = Omit<
  * @param str The string to convert
  * @returns The kebab-case string
  */
-function camelCaseToKebabCase(str: string): string {
+export function camelCaseToKebabCase(str: string): string {
   // If string is all uppercase, convert to lowercase
   if (str === str.toUpperCase() && str !== str.toLowerCase()) {
     return str.toLowerCase().replace(/_/g, "-");

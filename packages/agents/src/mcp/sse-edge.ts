@@ -19,6 +19,7 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
       const workerOptions = {
         ...fetchInit,
         headers: {
+          ...options.requestInit?.headers,
           ...fetchInit?.headers,
           ...headers,
         },
@@ -29,12 +30,19 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
       delete workerOptions.mode;
 
       // Call the original fetch with fixed options
-      return fetch(fetchUrl, workerOptions);
+      return (
+        (options.eventSourceInit?.fetch?.(
+          fetchUrl as URL | string,
+          // @ts-expect-error Expects FetchLikeInit from EventSource but is compatible with RequestInit
+          workerOptions
+        ) as Promise<Response>) || fetch(fetchUrl, workerOptions)
+      );
     };
 
     super(url, {
       ...options,
       eventSourceInit: {
+        ...options.eventSourceInit,
         fetch: fetchOverride,
       },
     });

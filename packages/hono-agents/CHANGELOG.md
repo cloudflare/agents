@@ -1,5 +1,35 @@
 # hono-agents
 
+## 0.0.70
+
+### Patch Changes
+
+- Updated dependencies [[`25aeaf2`](https://github.com/cloudflare/agents/commit/25aeaf24692bb82601c5df9fdce215cf2c509711)]:
+  - agents@0.0.80
+
+## 0.0.69
+
+### Patch Changes
+
+- Updated dependencies [[`881f11e`](https://github.com/cloudflare/agents/commit/881f11ec71d539c0bc53fd754662a40c9b9dc090), [`8ebc079`](https://github.com/cloudflare/agents/commit/8ebc07945d9c282bc0b6bfd5c41f69380a82f7e6), [`ca44ae8`](https://github.com/cloudflare/agents/commit/ca44ae8257eac71170540221ddd7bf88ff8756a1), [`881f11e`](https://github.com/cloudflare/agents/commit/881f11ec71d539c0bc53fd754662a40c9b9dc090)]:
+  - agents@0.0.79
+
+## 0.0.68
+
+### Patch Changes
+
+- Updated dependencies [[`eede2bd`](https://github.com/cloudflare/agents/commit/eede2bd61532abeb403417dbbfe1f8e6424b39dc)]:
+  - agents@0.0.78
+
+## 0.0.67
+
+### Patch Changes
+
+- [#249](https://github.com/cloudflare/agents/pull/249) [`c18c28a`](https://github.com/cloudflare/agents/commit/c18c28a253be85e582a71172e074eb97884894e9) Thanks [@dexxiez](https://github.com/dexxiez)! - chore: add top level default types to package.json
+
+- Updated dependencies [[`c18c28a`](https://github.com/cloudflare/agents/commit/c18c28a253be85e582a71172e074eb97884894e9), [`c4d53d7`](https://github.com/cloudflare/agents/commit/c4d53d786da3adf67a658b8a343909ce0f3fb70d), [`96a8138`](https://github.com/cloudflare/agents/commit/96a81383f6b48be0cc854b8cc72f33317824721c)]:
+  - agents@0.0.77
+
 ## 0.0.66
 
 ### Patch Changes
