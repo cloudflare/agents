@@ -55,26 +55,26 @@ class McpSSETransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void;
   sessionId?: string;
 
-  private getWebSocket: () => WebSocket | null;
-  private started = false;
+  private _getWebSocket: () => WebSocket | null;
+  private _started = false;
   constructor(getWebSocket: () => WebSocket | null) {
-    this.getWebSocket = getWebSocket;
+    this._getWebSocket = getWebSocket;
   }
 
   async start() {
     // The transport does not manage the WebSocket connection since it's terminated
     // by the Durable Object in order to allow hibernation. There's nothing to initialize.
-    if (this.started) {
+    if (this._started) {
       throw new Error("Transport already started");
     }
-    this.started = true;
+    this._started = true;
   }
 
   async send(message: JSONRPCMessage) {
-    if (!this.started) {
+    if (!this._started) {
       throw new Error("Transport not started");
     }
-    const websocket = this.getWebSocket();
+    const websocket = this._getWebSocket();
     if (!websocket) {
       throw new Error("WebSocket not connected");
     }
@@ -102,45 +102,45 @@ class McpStreamableHttpTransport implements Transport {
 
   // TODO: If there is an open connection to send server-initiated messages
   // back, we should use that connection
-  private getWebSocketForGetRequest: () => WebSocket | null;
+  private _getWebSocketForGetRequest: () => WebSocket | null;
 
   // Get the appropriate websocket connection for a given message id
-  private getWebSocketForMessageID: (id: string) => WebSocket | null;
+  private _getWebSocketForMessageID: (id: string) => WebSocket | null;
 
   // Notify the server that a response has been sent for a given message id
   // so that it may clean up it's mapping of message ids to connections
   // once they are no longer needed
-  private notifyResponseIdSent: (id: string) => void;
+  private _notifyResponseIdSent: (id: string) => void;
 
-  private started = false;
+  private _started = false;
   constructor(
     getWebSocketForMessageID: (id: string) => WebSocket | null,
     notifyResponseIdSent: (id: string | number) => void
   ) {
-    this.getWebSocketForMessageID = getWebSocketForMessageID;
-    this.notifyResponseIdSent = notifyResponseIdSent;
+    this._getWebSocketForMessageID = getWebSocketForMessageID;
+    this._notifyResponseIdSent = notifyResponseIdSent;
     // TODO
-    this.getWebSocketForGetRequest = () => null;
+    this._getWebSocketForGetRequest = () => null;
   }
 
   async start() {
     // The transport does not manage the WebSocket connection since it's terminated
     // by the Durable Object in order to allow hibernation. There's nothing to initialize.
-    if (this.started) {
+    if (this._started) {
       throw new Error("Transport already started");
     }
-    this.started = true;
+    this._started = true;
   }
 
   async send(message: JSONRPCMessage) {
-    if (!this.started) {
+    if (!this._started) {
       throw new Error("Transport not started");
     }
 
     let websocket: WebSocket | null = null;
 
     if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
-      websocket = this.getWebSocketForMessageID(message.id.toString());
+      websocket = this._getWebSocketForMessageID(message.id.toString());
       if (!websocket) {
         throw new Error(
           `Could not find WebSocket for message id: ${message.id}`
@@ -149,7 +149,7 @@ class McpStreamableHttpTransport implements Transport {
     } else if (isJSONRPCRequest(message)) {
       // requests originating from the server must be sent over the
       // the connection created by a GET request
-      websocket = this.getWebSocketForGetRequest();
+      websocket = this._getWebSocketForGetRequest();
     } else if (isJSONRPCNotification(message)) {
       // notifications do not have an id
       // but do have a relatedRequestId field
@@ -160,7 +160,7 @@ class McpStreamableHttpTransport implements Transport {
     try {
       websocket?.send(JSON.stringify(message));
       if (isJSONRPCResponse(message)) {
-        this.notifyResponseIdSent(message.id.toString());
+        this._notifyResponseIdSent(message.id.toString());
       }
     } catch (error) {
       this.onerror?.(error as Error);
@@ -181,26 +181,26 @@ export abstract class McpAgent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>,
 > extends DurableObject<Env> {
-  private status: "zero" | "starting" | "started" = "zero";
-  private transport?: Transport;
-  private transportType: TransportType = "unset";
-  private requestIdToConnectionId: Map<string | number, string> = new Map();
+  private _status: "zero" | "starting" | "started" = "zero";
+  private _transport?: Transport;
+  private _transportType: TransportType = "unset";
+  private _requestIdToConnectionId: Map<string | number, string> = new Map();
 
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
    */
-  private agent: Agent<Env, State>;
+  private _agent: Agent<Env, State>;
 
   get mcp() {
-    return this.agent.mcp;
+    return this._agent.mcp;
   }
 
   protected constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const self = this;
 
-    this.agent = new (class extends Agent<Env, State> {
+    this._agent = new (class extends Agent<Env, State> {
       static options = {
         hibernate: true,
       };
@@ -223,17 +223,17 @@ export abstract class McpAgent<
    */
   initialState!: State;
   get state() {
-    return this.agent.state;
+    return this._agent.state;
   }
   sql<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
     ...values: (string | number | boolean | null)[]
   ) {
-    return this.agent.sql<T>(strings, ...values);
+    return this._agent.sql<T>(strings, ...values);
   }
 
   setState(state: State) {
-    return this.agent.setState(state);
+    return this._agent.setState(state);
   }
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
@@ -241,7 +241,7 @@ export abstract class McpAgent<
   async onStart() {
     const self = this;
 
-    this.agent = new (class extends Agent<Env, State> {
+    this._agent = new (class extends Agent<Env, State> {
       initialState: State = self.initialState;
       static options = {
         hibernate: true,
@@ -257,7 +257,7 @@ export abstract class McpAgent<
     })(this.ctx, this.env);
 
     this.props = (await this.ctx.storage.get("props")) as Props;
-    this.transportType = (await this.ctx.storage.get(
+    this._transportType = (await this.ctx.storage.get(
       "transportType"
     )) as TransportType;
     await this._init(this.props);
@@ -265,15 +265,15 @@ export abstract class McpAgent<
     const server = await this.server;
 
     // Connect to the MCP server
-    if (this.transportType === "sse") {
-      this.transport = new McpSSETransport(() => this.getWebSocket());
-      await server.connect(this.transport);
-    } else if (this.transportType === "streamable-http") {
-      this.transport = new McpStreamableHttpTransport(
+    if (this._transportType === "sse") {
+      this._transport = new McpSSETransport(() => this.getWebSocket());
+      await server.connect(this._transport);
+    } else if (this._transportType === "streamable-http") {
+      this._transport = new McpStreamableHttpTransport(
         (id) => this.getWebSocketForResponseID(id),
-        (id) => this.requestIdToConnectionId.delete(id)
+        (id) => this._requestIdToConnectionId.delete(id)
       );
-      await server.connect(this.transport);
+      await server.connect(this._transport);
     }
   }
 
@@ -306,20 +306,20 @@ export abstract class McpAgent<
     return (await this.ctx.storage.get("initialized")) === true;
   }
 
-  private async initialize(): Promise<void> {
+  private async _initialize(): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
-      this.status = "starting";
+      this._status = "starting";
       await this.onStart();
-      this.status = "started";
+      this._status = "started";
     });
   }
 
   // Allow the worker to fetch a websocket connection to the agent
   async fetch(request: Request): Promise<Response> {
-    if (this.status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.initialize();
+      await this._initialize();
     }
 
     // Only handle WebSocket upgrade requests
@@ -348,30 +348,30 @@ export abstract class McpAgent<
 
         // This session must always use the SSE transporo
         await this.ctx.storage.put("transportType", "sse");
-        this.transportType = "sse";
+        this._transportType = "sse";
 
-        if (!this.transport) {
-          this.transport = new McpSSETransport(() => this.getWebSocket());
-          await server.connect(this.transport);
+        if (!this._transport) {
+          this._transport = new McpSSETransport(() => this.getWebSocket());
+          await server.connect(this._transport);
         }
 
         // Defer to the Agent's fetch method to handle the WebSocket connection
-        return this.agent.fetch(request);
+        return this._agent.fetch(request);
       }
       case "/streamable-http": {
-        if (!this.transport) {
-          this.transport = new McpStreamableHttpTransport(
+        if (!this._transport) {
+          this._transport = new McpStreamableHttpTransport(
             (id) => this.getWebSocketForResponseID(id),
-            (id) => this.requestIdToConnectionId.delete(id)
+            (id) => this._requestIdToConnectionId.delete(id)
           );
-          await server.connect(this.transport);
+          await server.connect(this._transport);
         }
 
         // This session must always use the streamable-http transport
         await this.ctx.storage.put("transportType", "streamable-http");
-        this.transportType = "streamable-http";
+        this._transportType = "streamable-http";
 
-        return this.agent.fetch(request);
+        return this._agent.fetch(request);
       }
       default:
         return new Response(
@@ -392,22 +392,22 @@ export abstract class McpAgent<
   }
 
   getWebSocketForResponseID(id: string): WebSocket | null {
-    const connectionId = this.requestIdToConnectionId.get(id);
+    const connectionId = this._requestIdToConnectionId.get(id);
     if (connectionId === undefined) {
       return null;
     }
-    return this.agent.getConnection(connectionId) ?? null;
+    return this._agent.getConnection(connectionId) ?? null;
   }
 
   // All messages received here. This is currently never called
   async onMessage(connection: Connection, event: WSMessage) {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
-    if (this.transportType !== "streamable-http") {
+    if (this._transportType !== "streamable-http") {
       const err = new Error(
         "Internal Server Error: Expected streamable-http protocol"
       );
-      this.transport?.onerror?.(err);
+      this._transport?.onerror?.(err);
       return;
     }
 
@@ -418,17 +418,17 @@ export abstract class McpAgent<
         typeof event === "string" ? event : new TextDecoder().decode(event);
       message = JSONRPCMessageSchema.parse(JSON.parse(data));
     } catch (error) {
-      this.transport?.onerror?.(error as Error);
+      this._transport?.onerror?.(error as Error);
       return;
     }
 
     // We need to map every incoming message to the connection that it came in on
     // so that we can send relevant responses and notifications back on the same connection
     if (isJSONRPCRequest(message)) {
-      this.requestIdToConnectionId.set(message.id.toString(), connection.id);
+      this._requestIdToConnectionId.set(message.id.toString(), connection.id);
     }
 
-    this.transport?.onmessage?.(message);
+    this._transport?.onmessage?.(message);
   }
 
   // All messages received over SSE after the initial connection has been established
@@ -437,15 +437,15 @@ export abstract class McpAgent<
     sessionId: string,
     request: Request
   ): Promise<Error | null> {
-    if (this.status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.initialize();
+      await this._initialize();
     }
 
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
-    if (this.transportType !== "sse") {
+    if (this._transportType !== "sse") {
       return new Error("Internal Server Error: Expected SSE protocol");
     }
 
@@ -455,15 +455,15 @@ export abstract class McpAgent<
       try {
         parsedMessage = JSONRPCMessageSchema.parse(message);
       } catch (error) {
-        this.transport?.onerror?.(error as Error);
+        this._transport?.onerror?.(error as Error);
         throw error;
       }
 
-      this.transport?.onmessage?.(parsedMessage);
+      this._transport?.onmessage?.(parsedMessage);
       return null;
     } catch (error) {
       console.error("Error forwarding message to SSE:", error);
-      this.transport?.onerror?.(error as Error);
+      this._transport?.onerror?.(error as Error);
       return error as Error;
     }
   }
@@ -473,22 +473,22 @@ export abstract class McpAgent<
     ws: WebSocket,
     event: ArrayBuffer | string
   ): Promise<void> {
-    if (this.status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.initialize();
+      await this._initialize();
     }
-    return await this.agent.webSocketMessage(ws, event);
+    return await this._agent.webSocketMessage(ws, event);
   }
 
   // WebSocket event handlers for hibernation support
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
-    if (this.status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.initialize();
+      await this._initialize();
     }
-    return await this.agent.webSocketError(ws, error);
+    return await this._agent.webSocketError(ws, error);
   }
 
   async webSocketClose(
@@ -497,12 +497,12 @@ export abstract class McpAgent<
     reason: string,
     wasClean: boolean
   ): Promise<void> {
-    if (this.status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.initialize();
+      await this._initialize();
     }
-    return await this.agent.webSocketClose(ws, code, reason, wasClean);
+    return await this._agent.webSocketClose(ws, code, reason, wasClean);
   }
 
   static mount(

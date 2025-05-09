@@ -15,9 +15,9 @@ export interface AgentsOAuthProvider extends OAuthClientProvider {
 }
 
 export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
-  private authUrl_: string | undefined;
-  private serverId_: string | undefined;
-  private clientId_: string | undefined;
+  private _authUrl_: string | undefined;
+  private _serverId_: string | undefined;
+  private _clientId_: string | undefined;
 
   constructor(
     public storage: DurableObjectStorage,
@@ -41,25 +41,25 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   get clientId() {
-    if (!this.clientId_) {
+    if (!this._clientId_) {
       throw new Error("Trying to access clientId before it was set");
     }
-    return this.clientId_;
+    return this._clientId_;
   }
 
   set clientId(clientId_: string) {
-    this.clientId_ = clientId_;
+    this._clientId_ = clientId_;
   }
 
   get serverId() {
-    if (!this.serverId_) {
+    if (!this._serverId_) {
       throw new Error("Trying to access serverId before it was set");
     }
-    return this.serverId_;
+    return this._serverId_;
   }
 
   set serverId(serverId_: string) {
-    this.serverId_ = serverId_;
+    this._serverId_ = serverId_;
   }
 
   keyPrefix(clientId: string) {
@@ -71,7 +71,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   async clientInformation(): Promise<OAuthClientInformation | undefined> {
-    if (!this.clientId_) {
+    if (!this._clientId_) {
       return undefined;
     }
     return (
@@ -96,7 +96,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
-    if (!this.clientId_) {
+    if (!this._clientId_) {
       return undefined;
     }
     return (
@@ -110,7 +110,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   get authUrl() {
-    return this.authUrl_;
+    return this._authUrl_;
   }
 
   /**
@@ -124,7 +124,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     if (client_id) {
       authUrl.searchParams.append("state", client_id);
     }
-    this.authUrl_ = authUrl.toString();
+    this._authUrl_ = authUrl.toString();
   }
 
   codeVerifierKey(clientId: string) {

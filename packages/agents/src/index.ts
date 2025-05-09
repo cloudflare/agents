@@ -253,10 +253,10 @@ export function getCurrentAgent<
 export class Agent<Env, State = unknown> extends Server<Env> {
   private _state = DEFAULT_STATE as State;
 
-  private ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  mcp: MCPClientManager = new MCPClientManager(this.ParentClass.name, "0.0.1");
+  mcp: MCPClientManager = new MCPClientManager(this._ParentClass.name, "0.0.1");
 
   /**
    * Initial state for the Agent
@@ -352,7 +352,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     `;
 
     void this.ctx.blockConcurrencyWhile(async () => {
-      return this.tryCatch(async () => {
+      return this._tryCatch(async () => {
         // Create alarms table if it doesn't exist
         this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_schedules (
@@ -407,7 +407,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             });
           }
 
-          return this.tryCatch(() => _onRequest(request));
+          return this._tryCatch(() => _onRequest(request));
         }
       );
     };
@@ -418,7 +418,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         { agent: this, connection, request: undefined },
         async () => {
           if (typeof message !== "string") {
-            return this.tryCatch(() => _onMessage(connection, message));
+            return this._tryCatch(() => _onMessage(connection, message));
           }
 
           let parsed: unknown;
@@ -426,11 +426,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             parsed = JSON.parse(message);
           } catch (e) {
             // silently fail and let the onMessage handler handle it
-            return this.tryCatch(() => _onMessage(connection, message));
+            return this._tryCatch(() => _onMessage(connection, message));
           }
 
           if (isStateUpdateMessage(parsed)) {
-            this.setStateInternal(parsed.state as State, connection);
+            this._setStateInternal(parsed.state as State, connection);
             return;
           }
 
@@ -444,7 +444,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 throw new Error(`Method ${method} does not exist`);
               }
 
-              if (!this.isCallable(method)) {
+              if (!this._isCallable(method)) {
                 throw new Error(`Method ${method} is not callable`);
               }
 
@@ -483,7 +483,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             return;
           }
 
-          return this.tryCatch(() => _onMessage(connection, message));
+          return this._tryCatch(() => _onMessage(connection, message));
         }
       );
     };
@@ -512,7 +512,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               })
             );
 
-            return this.tryCatch(() => _onConnect(connection, ctx));
+            return this._tryCatch(() => _onConnect(connection, ctx));
           }, 20);
         }
       );
@@ -552,13 +552,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             })
           );
 
-          await this.tryCatch(() => _onStart());
+          await this._tryCatch(() => _onStart());
         }
       );
     };
   }
 
-  private setStateInternal(
+  private _setStateInternal(
     state: State,
     source: Connection | "server" = "server"
   ) {
@@ -578,7 +578,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       }),
       source !== "server" ? [source.id] : []
     );
-    return this.tryCatch(() => {
+    return this._tryCatch(() => {
       const { connection, request } = agentContext.getStore() || {};
       return agentContext.run(
         { agent: this, connection, request },
@@ -594,7 +594,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param state New state to set
    */
   setState(state: State) {
-    this.setStateInternal(state, "server");
+    this._setStateInternal(state, "server");
   }
 
   /**
@@ -619,7 +619,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     );
   }
 
-  private async tryCatch<T>(fn: () => T | Promise<T>) {
+  private async _tryCatch<T>(fn: () => T | Promise<T>) {
     try {
       return await fn();
     } catch (e) {
@@ -693,7 +693,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'scheduled', ${timestamp})
       `;
 
-      await this.scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
       return {
         id,
@@ -714,7 +714,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'delayed', ${when}, ${timestamp})
       `;
 
-      await this.scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
       return {
         id,
@@ -736,7 +736,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'cron', ${when}, ${timestamp})
       `;
 
-      await this.scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
       return {
         id,
@@ -823,11 +823,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   async cancelSchedule(id: string): Promise<boolean> {
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
-    await this.scheduleNextAlarm();
+    await this._scheduleNextAlarm();
     return true;
   }
 
-  private async scheduleNextAlarm() {
+  private async _scheduleNextAlarm() {
     // Find the next schedule that needs to be executed
     const result = this.sql`
       SELECT time FROM cf_agents_schedules 
@@ -897,7 +897,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
 
     // Schedule the next alarm
-    await this.scheduleNextAlarm();
+    await this._scheduleNextAlarm();
   };
 
   /**
@@ -914,7 +914,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     await this.ctx.storage.deleteAll();
   }
 
-  private isCallable(method: string): boolean {
+  private _isCallable(method: string): boolean {
     // biome-ignore lint/complexity/noBannedTypes: <explanation>
     return callableMetadata.has(this[method as keyof this] as Function);
   }
@@ -940,7 +940,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    const callbackUrl = `${callbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this.ParentClass.name)}/${this.name}/callback`;
+    const callbackUrl = `${callbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
     const result = await this.#connectToMcpServerInternal(
       serverName,
@@ -1195,13 +1195,13 @@ export async function getAgentByName<Env, T extends Agent<Env>>(
  * A wrapper for streaming responses in callable methods
  */
 export class StreamingResponse {
-  private connection: Connection;
-  private id: string;
-  private closed = false;
+  private _connection: Connection;
+  private _id: string;
+  private _closed = false;
 
   constructor(connection: Connection, id: string) {
-    this.connection = connection;
-    this.id = id;
+    this._connection = connection;
+    this._id = id;
   }
 
   /**
@@ -1209,17 +1209,17 @@ export class StreamingResponse {
    * @param chunk The data to send
    */
   send(chunk: unknown) {
-    if (this.closed) {
+    if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
     const response: RPCResponse = {
       type: "rpc",
-      id: this.id,
+      id: this._id,
       success: true,
       result: chunk,
       done: false,
     };
-    this.connection.send(JSON.stringify(response));
+    this._connection.send(JSON.stringify(response));
   }
 
   /**
@@ -1227,17 +1227,17 @@ export class StreamingResponse {
    * @param finalChunk Optional final chunk of data to send
    */
   end(finalChunk?: unknown) {
-    if (this.closed) {
+    if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
-    this.closed = true;
+    this._closed = true;
     const response: RPCResponse = {
       type: "rpc",
-      id: this.id,
+      id: this._id,
       success: true,
       result: finalChunk,
       done: true,
     };
-    this.connection.send(JSON.stringify(response));
+    this._connection.send(JSON.stringify(response));
   }
 }

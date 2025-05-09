@@ -81,7 +81,7 @@ export class AgentClient<State = unknown> extends PartySocket {
   agent: string;
   name: string;
   private options: AgentClientOptions<State>;
-  private pendingCalls = new Map<
+  private _pendingCalls = new Map<
     string,
     {
       resolve: (value: unknown) => void;
@@ -119,12 +119,12 @@ export class AgentClient<State = unknown> extends PartySocket {
         }
         if (parsedMessage.type === "rpc") {
           const response = parsedMessage as RPCResponse;
-          const pending = this.pendingCalls.get(response.id);
+          const pending = this._pendingCalls.get(response.id);
           if (!pending) return;
 
           if (!response.success) {
             pending.reject(new Error(response.error));
-            this.pendingCalls.delete(response.id);
+            this._pendingCalls.delete(response.id);
             pending.stream?.onError?.(response.error);
             return;
           }
@@ -133,7 +133,7 @@ export class AgentClient<State = unknown> extends PartySocket {
           if ("done" in response) {
             if (response.done) {
               pending.resolve(response.result);
-              this.pendingCalls.delete(response.id);
+              this._pendingCalls.delete(response.id);
               pending.stream?.onDone?.(response.result);
             } else {
               pending.stream?.onChunk?.(response.result);
@@ -141,7 +141,7 @@ export class AgentClient<State = unknown> extends PartySocket {
           } else {
             // Non-streaming response
             pending.resolve(response.result);
-            this.pendingCalls.delete(response.id);
+            this._pendingCalls.delete(response.id);
           }
         }
       }
@@ -167,7 +167,7 @@ export class AgentClient<State = unknown> extends PartySocket {
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = Math.random().toString(36).slice(2);
-      this.pendingCalls.set(id, {
+      this._pendingCalls.set(id, {
         resolve: (value: unknown) => resolve(value as T),
         reject,
         stream: streamOptions,

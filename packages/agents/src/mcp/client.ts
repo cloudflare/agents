@@ -23,16 +23,16 @@ import { nanoid } from "nanoid";
  */
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
-  private callbackUrls: string[] = [];
+  private _callbackUrls: string[] = [];
 
   /**
-   * @param name Name of the MCP client
-   * @param version Version of the MCP Client
+   * @param _name Name of the MCP client
+   * @param _version Version of the MCP Client
    * @param auth Auth paramters if being used to create a DurableObjectOAuthClientProvider
    */
   constructor(
-    private name: string,
-    private version: string
+    private _name: string,
+    private _version: string
   ) {}
 
   /**
@@ -80,8 +80,8 @@ export class MCPClientManager {
     this.mcpConnections[id] = new MCPClientConnection(
       new URL(url),
       {
-        name: this.name,
-        version: this.version,
+        name: this._name,
+        version: this._version,
       },
       {
         transport: options.transport ?? {},
@@ -93,7 +93,7 @@ export class MCPClientManager {
 
     const authUrl = options.transport?.authProvider?.authUrl;
     if (authUrl && options.transport?.authProvider?.redirectUrl) {
-      this.callbackUrls.push(
+      this._callbackUrls.push(
         options.transport.authProvider.redirectUrl.toString()
       );
       return {
@@ -111,7 +111,7 @@ export class MCPClientManager {
   isCallbackRequest(req: Request): boolean {
     return (
       req.method === "GET" &&
-      !!this.callbackUrls.find((url) => {
+      !!this._callbackUrls.find((url) => {
         return req.url.startsWith(url);
       })
     );
@@ -119,7 +119,7 @@ export class MCPClientManager {
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
-    const urlMatch = this.callbackUrls.find((url) => {
+    const urlMatch = this._callbackUrls.find((url) => {
       return req.url.startsWith(url);
     });
     if (!urlMatch) {
