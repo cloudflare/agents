@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.82
+
+### Patch Changes
+
+- [`04d925e`](https://github.com/cloudflare/agents/commit/04d925ee6795b907de19bcd40940062fb9e99b1b) Thanks [@threepointone](https://github.com/threepointone)! - convert two missed #methods to a private \_methods
+
 ## 0.0.81
 
 ### Patch Changes
