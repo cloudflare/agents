@@ -80,8 +80,8 @@ export class AgentClient<State = unknown> extends PartySocket {
   }
   agent: string;
   name: string;
-  #options: AgentClientOptions<State>;
-  #pendingCalls = new Map<
+  private options: AgentClientOptions<State>;
+  private pendingCalls = new Map<
     string,
     {
       resolve: (value: unknown) => void;
@@ -101,7 +101,7 @@ export class AgentClient<State = unknown> extends PartySocket {
     });
     this.agent = agentNamespace;
     this.name = options.name || "default";
-    this.#options = options;
+    this.options = options;
 
     this.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
@@ -114,17 +114,17 @@ export class AgentClient<State = unknown> extends PartySocket {
           return;
         }
         if (parsedMessage.type === "cf_agent_state") {
-          this.#options.onStateUpdate?.(parsedMessage.state as State, "server");
+          this.options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
         if (parsedMessage.type === "rpc") {
           const response = parsedMessage as RPCResponse;
-          const pending = this.#pendingCalls.get(response.id);
+          const pending = this.pendingCalls.get(response.id);
           if (!pending) return;
 
           if (!response.success) {
             pending.reject(new Error(response.error));
-            this.#pendingCalls.delete(response.id);
+            this.pendingCalls.delete(response.id);
             pending.stream?.onError?.(response.error);
             return;
           }
@@ -133,7 +133,7 @@ export class AgentClient<State = unknown> extends PartySocket {
           if ("done" in response) {
             if (response.done) {
               pending.resolve(response.result);
-              this.#pendingCalls.delete(response.id);
+              this.pendingCalls.delete(response.id);
               pending.stream?.onDone?.(response.result);
             } else {
               pending.stream?.onChunk?.(response.result);
@@ -141,7 +141,7 @@ export class AgentClient<State = unknown> extends PartySocket {
           } else {
             // Non-streaming response
             pending.resolve(response.result);
-            this.#pendingCalls.delete(response.id);
+            this.pendingCalls.delete(response.id);
           }
         }
       }
@@ -150,7 +150,7 @@ export class AgentClient<State = unknown> extends PartySocket {
 
   setState(state: State) {
     this.send(JSON.stringify({ type: "cf_agent_state", state }));
-    this.#options.onStateUpdate?.(state, "client");
+    this.options.onStateUpdate?.(state, "client");
   }
 
   /**
@@ -167,7 +167,7 @@ export class AgentClient<State = unknown> extends PartySocket {
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = Math.random().toString(36).slice(2);
-      this.#pendingCalls.set(id, {
+      this.pendingCalls.set(id, {
         resolve: (value: unknown) => resolve(value as T),
         reject,
         stream: streamOptions,
