@@ -384,12 +384,12 @@ interface TypedEventEmitter<State> extends EventEmitter {
  * @template State State type to store within the Agent
  */
 export class Agent<Env, State = unknown> extends Server<Env> {
-  #state = DEFAULT_STATE as State;
+  private _state = DEFAULT_STATE as State;
 
-  #ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  mcp: MCPClientManager = new MCPClientManager(this.#ParentClass.name, "0.0.1");
+  mcp: MCPClientManager = new MCPClientManager(this._ParentClass.name, "0.0.1");
 
   eventObservers: Array<EventObservers<State>> = [] as Array<
     EventObservers<State>
@@ -464,9 +464,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Current state of the Agent
    */
   get state(): State {
-    if (this.#state !== DEFAULT_STATE) {
+    if (this._state !== DEFAULT_STATE) {
       // state was previously set, and populated internal state
-      return this.#state;
+      return this._state;
     }
     // looks like this is the first time the state is being accessed
     // check if the state was set in a previous life
@@ -486,8 +486,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     ) {
       const state = result[0]?.state as string; // could be null?
 
-      this.#state = JSON.parse(state);
-      return this.#state;
+      this._state = JSON.parse(state);
+      return this._state;
     }
 
     // ok, this is the first time the state is being accessed
@@ -549,7 +549,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     `;
 
     void this.ctx.blockConcurrencyWhile(async () => {
-      return this.#tryCatch(async () => {
+      return this._tryCatch(async () => {
         // Create alarms table if it doesn't exist
         this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_schedules (
@@ -599,7 +599,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             this.broadcast(
               JSON.stringify({
                 type: "cf_agent_mcp_servers",
-                mcp: this.#getMcpServerStateInternal(),
+                mcp: this._getMcpServerStateInternal(),
               })
             );
 
@@ -610,7 +610,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             });
           }
 
-          return this.#tryCatch(async () => {
+          return this._tryCatch(async () => {
             if (
               request.method === "GET" &&
               request.url ===
@@ -688,10 +688,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             const requestPayload = await createRequestPayload(
               request.clone() as typeof request
             );
-            this.#emitEvent({
+            this._emitEvent({
               type: "request",
               instance: this.name,
-              className: this.#ParentClass.name,
+              className: this._ParentClass.name,
               id: nanoid(),
               timestamp: Date.now(),
               payload: {
@@ -699,10 +699,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               },
             });
             const response = await _onRequest(request);
-            this.#emitEvent({
+            this._emitEvent({
               type: "response",
               instance: this.name,
-              className: this.#ParentClass.name,
+              className: this._ParentClass.name,
               id: nanoid(),
               timestamp: Date.now(),
               payload: {
@@ -720,10 +720,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     const _originalMessage = this.onMessage.bind(this);
     const _onMessage = async (connection: Connection, message: WSMessage) => {
-      this.#emitEvent({
+      this._emitEvent({
         type: "message",
         instance: this.name,
-        className: this.#ParentClass.name,
+        className: this._ParentClass.name,
         id: nanoid(),
         timestamp: Date.now(),
         payload: {
@@ -747,7 +747,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         },
         async () => {
           if (typeof message !== "string") {
-            return this.#tryCatch(() => _onMessage(connection, message));
+            return this._tryCatch(() => _onMessage(connection, message));
           }
 
           let parsed: unknown;
@@ -755,11 +755,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             parsed = JSON.parse(message);
           } catch (e) {
             // silently fail and let the onMessage handler handle it
-            return this.#tryCatch(() => _onMessage(connection, message));
+            return this._tryCatch(() => _onMessage(connection, message));
           }
 
           if (isStateUpdateMessage(parsed)) {
-            this.#setStateInternal(parsed.state as State, connection);
+            this._setStateInternal(parsed.state as State, connection);
             return;
           }
 
@@ -773,7 +773,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 throw new Error(`Method ${method} does not exist`);
               }
 
-              if (!this.#isCallable(method)) {
+              if (!this._isCallable(method)) {
                 throw new Error(`Method ${method} is not callable`);
               }
 
@@ -812,7 +812,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             return;
           }
 
-          return this.#tryCatch(() => _onMessage(connection, message));
+          return this._tryCatch(() => _onMessage(connection, message));
         }
       );
     };
@@ -827,10 +827,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         { agent: this as Agent<unknown>, connection, request: ctx.request },
         async () => {
           setTimeout(() => {
-            this.#emitEvent({
+            this._emitEvent({
               type: "connect",
               instance: this.name,
-              className: this.#ParentClass.name,
+              className: this._ParentClass.name,
               id: nanoid(),
               timestamp: Date.now(),
               payload: {
@@ -849,12 +849,12 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             connection.send(
               JSON.stringify({
                 type: "cf_agent_mcp_servers",
-                mcp: this.#getMcpServerStateInternal(),
+                mcp: this._getMcpServerStateInternal(),
               })
             );
 
             const proxiedConnection = this.#createWebSocketProxy(connection);
-            return this.#tryCatch(() => _onConnect(proxiedConnection, ctx));
+            return this._tryCatch(() => _onConnect(proxiedConnection, ctx));
           }, 20);
         }
       );
@@ -874,15 +874,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           request: undefined,
         },
         async () => {
-          return this.#tryCatch(() => {
+          return this._tryCatch(() => {
             const proxiedSource =
               source === "server" ? source : this.#createWebSocketProxy(source);
 
             if (state) {
-              this.#emitEvent({
+              this._emitEvent({
                 type: "state_update",
                 instance: this.name,
-                className: this.#ParentClass.name,
+                className: this._ParentClass.name,
                 id: nanoid(),
                 timestamp: Date.now(),
                 payload: {
@@ -902,10 +902,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       message: WSMessage,
       without?: string[]
     ): Promise<void> => {
-      this.#emitEvent({
+      this._emitEvent({
         type: "broadcast",
         instance: this.name,
-        className: this.#ParentClass.name,
+        className: this._ParentClass.name,
         id: nanoid(),
         timestamp: Date.now(),
         payload: {
@@ -935,10 +935,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           request: undefined,
         },
         async () => {
-          this.#emitEvent({
+          this._emitEvent({
             type: "close",
             instance: this.name,
-            className: this.#ParentClass.name,
+            className: this._ParentClass.name,
             id: nanoid(),
             timestamp: Date.now(),
             payload: {
@@ -949,6 +949,50 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             },
           });
           return _onClose(connection, code, reason, wasClean);
+        }
+      );
+    };
+    const _onStart = this.onStart.bind(this);
+    this.onStart = async () => {
+      return agentContext.run(
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request: undefined,
+        },
+        async () => {
+          const servers = this.sql<MCPServerRow>`
+            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
+          `;
+
+          // from DO storage, reconnect to all servers using our saved auth information
+          await Promise.allSettled(
+            servers.map((server) => {
+              return this._connectToMcpServerInternal(
+                server.name,
+                server.server_url,
+                server.callback_url,
+                server.server_options
+                  ? JSON.parse(server.server_options)
+                  : undefined,
+                {
+                  id: server.id,
+                  oauthClientId: server.client_id ?? undefined,
+                }
+              );
+            })
+          );
+
+          this.broadcast(
+            JSON.stringify({
+              type: "cf_agent_mcp_servers",
+              mcp: this._getMcpServerStateInternal(),
+            })
+          );
+
+          await this._tryCatch(() => _onStart());
         }
       );
     };
@@ -967,7 +1011,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           request: undefined,
         },
         async () => {
-          return this.#tryCatch(() => {
+          return this._tryCatch(() => {
             const connectionId =
               error &&
               connectionOrError !== null &&
@@ -977,10 +1021,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 ? connectionOrError.id
                 : "server";
 
-            this.#emitEvent({
+            this._emitEvent({
               type: "error",
               instance: this.name,
-              className: this.#ParentClass.name,
+              className: this._ParentClass.name,
               id: nanoid(),
               timestamp: Date.now(),
               payload: {
@@ -1015,10 +1059,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             this: Connection,
             message: string | ArrayBuffer | ArrayBufferView
           ) {
-            self.#emitEvent({
+            self._emitEvent({
               type: "send",
               instance: self.name,
-              className: self.#ParentClass.name,
+              className: self._ParentClass.name,
               id: target.id,
               timestamp: Date.now(),
               payload: {
@@ -1041,8 +1085,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     });
   }
 
-  #setStateInternal(state: State, source: Connection | "server" = "server") {
-    this.#state = state;
+  private _setStateInternal(
+    state: State,
+    source: Connection | "server" = "server"
+  ) {
+    this._state = state;
     this.sql`
     INSERT OR REPLACE INTO cf_agents_state (id, state)
     VALUES (${STATE_ROW_ID}, ${JSON.stringify(state)})
@@ -1058,7 +1105,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       }),
       source !== "server" ? [source.id] : []
     );
-    return this.#tryCatch(() => {
+    return this._tryCatch(() => {
       const { connection, request } = agentContext.getStore() || {};
       return agentContext.run(
         { agent: this, connection, request },
@@ -1069,7 +1116,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     });
   }
 
-  #emitEvent(event: AgentEvent<State>) {
+  _emitEvent(event: AgentEvent<State>) {
     this.#eventBus.emit("event", event);
     for (const observer of this.eventObservers) {
       observer.handler(event);
@@ -1081,7 +1128,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param state New state to set
    */
   setState(state: State) {
-    this.#setStateInternal(state, "server");
+    this._setStateInternal(state, "server");
   }
 
   /**
@@ -1106,7 +1153,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     );
   }
 
-  async #tryCatch<T>(fn: () => T | Promise<T>) {
+  private async _tryCatch<T>(fn: () => T | Promise<T>) {
     try {
       return await fn();
     } catch (e) {
@@ -1180,7 +1227,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'scheduled', ${timestamp})
       `;
 
-      await this.#scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
       return {
         id,
@@ -1201,7 +1248,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'delayed', ${when}, ${timestamp})
       `;
 
-      await this.#scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
       return {
         id,
@@ -1223,7 +1270,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'cron', ${when}, ${timestamp})
       `;
 
-      await this.#scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
       return {
         id,
@@ -1310,11 +1357,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   async cancelSchedule(id: string): Promise<boolean> {
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
-    await this.#scheduleNextAlarm();
+    await this._scheduleNextAlarm();
     return true;
   }
 
-  async #scheduleNextAlarm() {
+  private async _scheduleNextAlarm() {
     // Find the next schedule that needs to be executed
     const result = this.sql`
       SELECT time FROM cf_agents_schedules 
@@ -1390,7 +1437,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
 
     // Schedule the next alarm
-    await this.#scheduleNextAlarm();
+    await this._scheduleNextAlarm();
   };
 
   /**
@@ -1407,11 +1454,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     await this.ctx.storage.deleteAll();
   }
 
-  /**
-   * Get all methods marked as callable on this Agent
-   * @returns A map of method names to their metadata
-   */
-  #isCallable(method: string): boolean {
+  private _isCallable(method: string): boolean {
     // biome-ignore lint/complexity/noBannedTypes: <explanation>
     return callableMetadata.has(this[method as keyof this] as Function);
   }
@@ -1437,9 +1480,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    const callbackUrl = `${callbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this.#ParentClass.name)}/${this.name}/callback`;
+    const callbackUrl = `${callbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
-    const result = await this.#connectToMcpServerInternal(
+    const result = await this._connectToMcpServerInternal(
       serverName,
       url,
       callbackUrl,
@@ -1449,14 +1492,14 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_mcp_servers",
-        mcp: this.#getMcpServerStateInternal(),
+        mcp: this._getMcpServerStateInternal(),
       })
     );
 
     return result;
   }
 
-  async #connectToMcpServerInternal(
+  async _connectToMcpServerInternal(
     serverName: string,
     url: string,
     callbackUrl: string,
@@ -1546,12 +1589,12 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_mcp_servers",
-        mcp: this.#getMcpServerStateInternal(),
+        mcp: this._getMcpServerStateInternal(),
       })
     );
   }
 
-  #getMcpServerStateInternal(): MCPServersState {
+  private _getMcpServerStateInternal(): MCPServersState {
     const mcpState: MCPServersState = {
       servers: {},
       tools: this.mcp.listTools(),
@@ -1692,13 +1735,13 @@ export async function getAgentByName<Env, T extends Agent<Env>>(
  * A wrapper for streaming responses in callable methods
  */
 export class StreamingResponse {
-  #connection: Connection;
-  #id: string;
-  #closed = false;
+  private _connection: Connection;
+  private _id: string;
+  private _closed = false;
 
   constructor(connection: Connection, id: string) {
-    this.#connection = connection;
-    this.#id = id;
+    this._connection = connection;
+    this._id = id;
   }
 
   /**
@@ -1706,17 +1749,17 @@ export class StreamingResponse {
    * @param chunk The data to send
    */
   send(chunk: unknown) {
-    if (this.#closed) {
+    if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
     const response: RPCResponse = {
       type: "rpc",
-      id: this.#id,
+      id: this._id,
       success: true,
       result: chunk,
       done: false,
     };
-    this.#connection.send(JSON.stringify(response));
+    this._connection.send(JSON.stringify(response));
   }
 
   /**
@@ -1724,18 +1767,18 @@ export class StreamingResponse {
    * @param finalChunk Optional final chunk of data to send
    */
   end(finalChunk?: unknown) {
-    if (this.#closed) {
+    if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
-    this.#closed = true;
+    this._closed = true;
     const response: RPCResponse = {
       type: "rpc",
-      id: this.#id,
+      id: this._id,
       success: true,
       result: finalChunk,
       done: true,
     };
-    this.#connection.send(JSON.stringify(response));
+    this._connection.send(JSON.stringify(response));
   }
 }
 
