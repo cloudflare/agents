@@ -6,7 +6,7 @@ type Env = {
   HOST: string;
 };
 
-export class MyAgent extends Agent<Env, never> {
+export class MyAgent extends Agent<Env, unknown> {
   mcp = new MCPClientManager("my-agent", "1.0.0");
 
   async onRequest(request: Request): Promise<Response> {

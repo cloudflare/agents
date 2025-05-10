@@ -360,7 +360,7 @@ export type AgentEvent<State = unknown> =
   | ResponseEvent
   | ErrorEvent;
 
-export type EventObservers<State = unknown> = {
+export type EventObservers<State> = {
   handler: (event: AgentEvent<State>) => void;
 };
 
@@ -391,7 +391,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
   mcp: MCPClientManager = new MCPClientManager(this.#ParentClass.name, "0.0.1");
 
-  eventObservers: Array<EventObservers<State>> = [];
+  eventObservers: Array<EventObservers<State>> = [] as Array<
+    EventObservers<State>
+  >;
   #secret: string;
   #eventBus: TypedEventEmitter<State> = new EventEmitter();
 
