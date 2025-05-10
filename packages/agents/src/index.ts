@@ -15,7 +15,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { MCPClientManager } from "./mcp/client";
 import { createRequestPayload, createResponsePayload } from "./utils";
 
-import mitt from "mitt";
+import { EventEmitter } from "node:events";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type {
   Tool,
@@ -365,6 +365,20 @@ export type EventObservers<State = unknown> = {
 };
 
 /**
+ * Typed EventEmitter for strongly-typed events
+ */
+interface TypedEventEmitter<State> extends EventEmitter {
+  on(event: "event", listener: (eventData: AgentEvent<State>) => void): this;
+  once(event: "event", listener: (eventData: AgentEvent<State>) => void): this;
+  emit(event: "event", eventData: AgentEvent<State>): boolean;
+  off(event: "event", listener: (eventData: AgentEvent<State>) => void): this;
+  removeListener(
+    event: "event",
+    listener: (eventData: AgentEvent<State>) => void
+  ): this;
+}
+
+/**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
@@ -379,9 +393,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
   eventObservers: Array<EventObservers<State>> = [];
   #secret: string;
-  #eventBus = mitt<{
-    event: AgentEvent<State>;
-  }>();
+  #eventBus: TypedEventEmitter<State> = new EventEmitter();
 
   get secret(): string {
     return this.#secret;
