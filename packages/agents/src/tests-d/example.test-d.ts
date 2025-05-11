@@ -1,0 +1,41 @@
+import { Agent } from '../../dist';
+import { env } from "cloudflare:workers";
+import { unstable_callable as callable } from '../index.ts';
+import { useAgent } from '../react.tsx';
+
+class MyAgent extends Agent<typeof env, {}> {
+  @callable()
+  sayHello(name?: string): string {
+    return `Hello, ${name ?? 'World'}!`;
+  }
+  
+  @callable()
+  async perform(task: string, p1?: number): Promise<void> {
+    // do something
+  }
+
+  // not decorated with @callable()
+  nonRpc(): void {
+  }
+}
+
+const agent = useAgent<{}, MyAgent>({ agent: 'my-agent' });
+// return type is promisified
+agent.call('sayHello') satisfies Promise<string>;
+
+// @ts-expect-error first argument is not a string
+await agent.call('sayHello', [1]);
+
+await agent.call('perform', ['some task', 1]);
+await agent.call('perform', ['another task']);
+// @ts-expect-error requires parameters
+await agent.call('perform');
+
+// we cannot exclude it because typescript doesn't have a way
+// to exclude based on decorators
+await agent.call('nonRpc');
+
+const agent2 = useAgent<{}, Omit<MyAgent, 'nonRpc'>>({ agent: 'my-agent' });
+agent2.call('sayHello');
+// @ts-expect-error nonRpc excluded from useAgent
+agent2.call('nonRpc');
