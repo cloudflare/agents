@@ -1,4 +1,4 @@
-main = "/worker.ts"
+main = "worker.ts"
 compatibility_date = "2025-04-17"
 compatibility_flags = ["nodejs_compat"]
 
