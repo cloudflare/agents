@@ -88,6 +88,18 @@ type AgentPromiseReturnType<T extends AgentMethods<any>, K extends keyof T> =
  * @param options Connection options
  * @returns WebSocket connection with setState and call methods
  */
+export function useAgent<State = unknown>(
+  options: UseAgentOptions<State>
+): PartySocket & {
+  agent: string;
+  name: string;
+  setState: (state: State) => void;
+  call: <T = unknown>(
+    method: string,
+    args?: unknown[],
+    streamOptions?: StreamOptions
+  ) => Promise<T>;
+};
 export function useAgent<
   AgentT extends {
     get state(): State;
@@ -109,18 +121,6 @@ export function useAgent<
       args: Parameters<RequiredAgentMethods<AgentT>[T]>,
       streamOptions?: StreamOptions
     ) => AgentPromiseReturnType<AgentT, T>);
-};
-export function useAgent<State = unknown>(
-  options: UseAgentOptions<State>
-): PartySocket & {
-  agent: string;
-  name: string;
-  setState: (state: State) => void;
-  call: <T = unknown>(
-    method: string,
-    args?: unknown[],
-    streamOptions?: StreamOptions
-  ) => Promise<T>;
 };
 export function useAgent<State>(
   options: UseAgentOptions<unknown>
