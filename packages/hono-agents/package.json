@@ -41,6 +41,6 @@
   },
   "devDependencies": {
     "agents": "^0.0.82",
-    "hono": "^4.7.8"
+    "hono": "^4.7.9"
   }
 }
