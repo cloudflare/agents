@@ -52,7 +52,7 @@ type OptionalParametersMethod<T> = T extends (
   arg?: infer R,
   // biome-ignore lint: suppressions/parse
   ...rest: any
-// biome-ignore lint: suppressions/parse
+  // biome-ignore lint: suppressions/parse
 ) => any
   ? R extends undefined
     ? never
