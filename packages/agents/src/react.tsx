@@ -44,12 +44,15 @@ export type UseAgentOptions<State = unknown> = Omit<
 };
 
 type Methods<T> = {
+  // biome-ignore lint: suppressions/parse
   [K in keyof T as T[K] extends (...args: any) => any ? K : never]: T[K];
 };
 
 type OptionalParametersMethod<T> = T extends (
   arg?: infer R,
+  // biome-ignore lint: suppressions/parse
   ...rest: any
+// biome-ignore lint: suppressions/parse
 ) => any
   ? R extends undefined
     ? never
@@ -57,6 +60,7 @@ type OptionalParametersMethod<T> = T extends (
   : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
+// biome-ignore lint: suppressions/parse
 type AgentMethods<T> = Omit<Methods<T>, keyof Agent<any, any>>;
 
 type OptionalAgentMethods<T> = {
@@ -70,7 +74,9 @@ type RequiredAgentMethods<T> = Omit<
   keyof OptionalAgentMethods<T>
 >;
 
+// biome-ignore lint: suppressions/parse
 type AgentPromiseReturnType<T extends AgentMethods<any>, K extends keyof T> =
+  // biome-ignore lint: suppressions/parse
   ReturnType<T[K]> extends Promise<any>
     ? ReturnType<T[K]>
     : Promise<ReturnType<T[K]>>;
