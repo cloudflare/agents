@@ -81,6 +81,15 @@ type AgentPromiseReturnType<T extends AgentMethods<any>, K extends keyof T> =
     ? ReturnType<T[K]>
     : Promise<ReturnType<T[K]>>;
 
+// biome-ignore lint: suppressions/parse
+type AgentStub<T extends AgentMethods<any> | unknown> = {
+  // biome-ignore lint: suppressions/parse
+  [K in keyof T]: T extends AgentMethods<any>
+    ? (...args: Parameters<T[K]>) => AgentPromiseReturnType<T, K>
+    : // biome-ignore lint: suppressions/parse
+      any;
+};
+
 /**
  * React hook for connecting to an Agent
  * @template State Type of the Agent's state
@@ -121,6 +130,7 @@ export function useAgent<
       args: Parameters<RequiredAgentMethods<AgentT>[T]>,
       streamOptions?: StreamOptions
     ) => AgentPromiseReturnType<AgentT, T>);
+  stub: AgentStub<AgentT>;
 };
 export function useAgent<State>(
   options: UseAgentOptions<unknown>
@@ -133,6 +143,7 @@ export function useAgent<State>(
     args?: unknown[],
     streamOptions?: StreamOptions
   ) => Promise<T>;
+  stub: AgentStub<unknown>;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
   // Keep track of pending RPC calls
@@ -213,6 +224,7 @@ export function useAgent<State>(
       args?: unknown[],
       streamOptions?: StreamOptions
     ) => Promise<T>;
+    stub: AgentStub<unknown>;
   };
   // Create the call method
   const call = useCallback(
@@ -250,6 +262,17 @@ export function useAgent<State>(
   agent.call = call;
   agent.agent = agentNamespace;
   agent.name = options.name || "default";
+  // biome-ignore lint: suppressions/parse
+  agent.stub = new Proxy<any>(
+    {},
+    {
+      get: (target, method) => {
+        return (...args: unknown[]) => {
+          return call(method as string, args);
+        };
+      },
+    }
+  ) as AgentStub<unknown>;
 
   // warn if agent isn't in lowercase
   if (agent.agent !== agent.agent.toLowerCase()) {
