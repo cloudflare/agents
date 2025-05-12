@@ -18,7 +18,7 @@ class MyAgent extends Agent<typeof env, {}> {
   }
 }
 
-const agent = useAgent<{}, MyAgent>({ agent: 'my-agent' });
+const agent = useAgent<MyAgent, {}>({ agent: 'my-agent' });
 // return type is promisified
 agent.call('sayHello') satisfies Promise<string>;
 
@@ -34,7 +34,7 @@ await agent.call('perform');
 // to exclude based on decorators
 await agent.call('nonRpc');
 
-const agent2 = useAgent<{}, Omit<MyAgent, 'nonRpc'>>({ agent: 'my-agent' });
+const agent2 = useAgent<Omit<MyAgent, 'nonRpc'>, {}>({ agent: 'my-agent' });
 agent2.call('sayHello');
 // @ts-expect-error nonRpc excluded from useAgent
 agent2.call('nonRpc');

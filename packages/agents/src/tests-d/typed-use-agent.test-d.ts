@@ -13,11 +13,11 @@ declare class A extends Agent<typeof env, {}> {
 }
 
 // @ts-expect-error state doesn't match type A state
-const a2 = useAgent<{ foo: 'bar' }, A>({
+const a2 = useAgent<A, { foo: 'bar' }>({
   agent: 'test',
 });
 
-const a1 = useAgent<{}, A>({
+const a1 = useAgent<A, {}>({
   agent: 'test',
 });
 

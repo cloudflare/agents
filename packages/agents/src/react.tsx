@@ -77,9 +77,9 @@ type AgentPromiseReturnType<T extends AgentMethods<any>, K extends keyof T> =
  * @param options Connection options
  * @returns WebSocket connection with setState and call methods
  */
-export function useAgent<State, AgentT extends {
+export function useAgent<AgentT extends {
   get state(): State;
-}>(
+}, State>(
   options: UseAgentOptions<State>
 ): PartySocket & {
   agent: string;
