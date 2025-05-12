@@ -1,9 +1,8 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef } from "react";
-import type { MCPServersState, RPCRequest, RPCResponse } from "./";
+import type { MCPServersState, RPCRequest, RPCResponse, Agent } from "./";
 import type { StreamOptions } from "./client";
-import type { Agent } from "../dist";
 
 /**
  * Convert a camelCase string to a kebab-case string
