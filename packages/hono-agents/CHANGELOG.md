@@ -1,5 +1,12 @@
 # hono-agents
 
+## 0.0.74
+
+### Patch Changes
+
+- Updated dependencies [[`0ac89c6`](https://github.com/cloudflare/agents/commit/0ac89c62b8e829e28034a9eae91d08fc280b93b9)]:
+  - agents@0.0.84
+
 ## 0.0.73
 
 ### Patch Changes

@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.84
+
+### Patch Changes
+
+- [#269](https://github.com/cloudflare/agents/pull/269) [`0ac89c6`](https://github.com/cloudflare/agents/commit/0ac89c62b8e829e28034a9eae91d08fc280b93b9) Thanks [@ruifigueira](https://github.com/ruifigueira)! - Add type support to react useAgent().call
+
 ## 0.0.83
 
 ### Patch Changes
