@@ -1,6 +1,6 @@
 {
   "name": "hono-agents",
-  "version": "0.0.72",
+  "version": "0.0.73",
   "main": "src/index.ts",
   "types": "dist/index.d.ts",
   "type": "module",
@@ -36,11 +36,11 @@
   "license": "MIT",
   "description": "Add Cloudflare Agents to your Hono app",
   "peerDependencies": {
-    "agents": "^0.0.82",
+    "agents": "^0.0.83",
     "hono": "^4.6.17"
   },
   "devDependencies": {
-    "agents": "^0.0.82",
+    "agents": "^0.0.83",
     "hono": "^4.7.9"
   }
 }
