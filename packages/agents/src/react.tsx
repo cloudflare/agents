@@ -43,20 +43,23 @@ export type UseAgentOptions<State = unknown> = Omit<
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
 };
 
+type AllOptional<T> = T extends [infer A, ...infer R]
+  ? undefined extends A
+    ? AllOptional<R>
+    : false
+  : true; // no params means optional by default
+
+// biome-ignore lint: suppressions/parse
+type Method = (...args: any) => any;
+
 type Methods<T> = {
-  // biome-ignore lint: suppressions/parse
-  [K in keyof T as T[K] extends (...args: any) => any ? K : never]: T[K];
+  [K in keyof T as T[K] extends Method ? K : never]: T[K];
 };
 
-type OptionalParametersMethod<T> = T extends (
-  arg?: infer R,
-  // biome-ignore lint: suppressions/parse
-  ...rest: any
-  // biome-ignore lint: suppressions/parse
-) => any
-  ? R extends undefined
-    ? never
-    : T
+type OptionalParametersMethod<T> = T extends Method
+  ? AllOptional<Parameters<T>> extends true
+    ? T
+    : never
   : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
