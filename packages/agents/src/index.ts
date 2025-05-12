@@ -21,6 +21,7 @@ import type {
   Tool,
   Resource,
   Prompt,
+  ServerCapabilities,
 } from "@modelcontextprotocol/sdk/types.js";
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -195,6 +196,8 @@ export type MCPServer = {
   server_url: string;
   auth_url: string | null;
   state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
+  instructions: string | null;
+  capabilities: ServerCapabilities | null;
 };
 
 /**
@@ -396,7 +399,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             this.broadcast(
               JSON.stringify({
                 type: "cf_agent_mcp_servers",
-                mcp: this._getMcpServerStateInternal(),
+                mcp: this.getMcpServerState(),
               })
             );
 
@@ -508,7 +511,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             connection.send(
               JSON.stringify({
                 type: "cf_agent_mcp_servers",
-                mcp: this._getMcpServerStateInternal(),
+                mcp: this.getMcpServerState(),
               })
             );
 
@@ -548,7 +551,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           this.broadcast(
             JSON.stringify({
               type: "cf_agent_mcp_servers",
-              mcp: this._getMcpServerStateInternal(),
+              mcp: this.getMcpServerState(),
             })
           );
 
@@ -952,7 +955,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_mcp_servers",
-        mcp: this._getMcpServerStateInternal(),
+        mcp: this.getMcpServerState(),
       })
     );
 
@@ -1049,12 +1052,12 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_mcp_servers",
-        mcp: this._getMcpServerStateInternal(),
+        mcp: this.getMcpServerState(),
       })
     );
   }
 
-  private _getMcpServerStateInternal(): MCPServersState {
+  getMcpServerState(): MCPServersState {
     const mcpState: MCPServersState = {
       servers: {},
       tools: this.mcp.listTools(),
@@ -1072,6 +1075,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         server_url: server.server_url,
         auth_url: server.auth_url,
         state: this.mcp.mcpConnections[server.id].connectionState,
+        instructions: this.mcp.mcpConnections[server.id].instructions ?? null,
+        capabilities:
+          this.mcp.mcpConnections[server.id].serverCapabilities ?? null,
       };
     }
 

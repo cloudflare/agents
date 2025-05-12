@@ -71,6 +71,8 @@ function App() {
           server_url: serverUrl,
           state: "connecting",
           auth_url: null,
+          instructions: null,
+          capabilities: null,
         },
       },
     });
