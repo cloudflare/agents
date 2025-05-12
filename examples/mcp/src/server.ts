@@ -8,7 +8,6 @@ type Env = {
 
 type State = { counter: number };
 
-// biome-ignore lint/complexity/noBannedTypes: <explanation>
 export class MyMCP extends McpAgent<Env, State, {}> {
   server = new McpServer({
     name: "Demo",

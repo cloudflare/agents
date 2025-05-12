@@ -14,7 +14,6 @@ type Env = {
 };
 
 export class HumanInTheLoop extends AIChatAgent<Env> {
-  // biome-ignore lint/complexity/noBannedTypes: vibes
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
     const dataStreamResponse = createDataStreamResponse({
       execute: async (dataStream) => {

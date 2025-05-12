@@ -47,7 +47,10 @@ type Methods<T> = {
   [K in keyof T as T[K] extends (...args: any) => any ? K : never]: T[K];
 };
 
-type OptionalParametersMethod<T> = T extends (arg?: infer R, ...rest: any) => any
+type OptionalParametersMethod<T> = T extends (
+  arg?: infer R,
+  ...rest: any
+) => any
   ? R extends undefined
     ? never
     : T
@@ -59,11 +62,13 @@ type AgentMethods<T> = Omit<Methods<T>, keyof Agent<any, any>>;
 type OptionalAgentMethods<T> = {
   [K in keyof AgentMethods<T> as T[K] extends OptionalParametersMethod<T[K]>
     ? K
-    : never
-  ]: OptionalParametersMethod<T[K]>;
+    : never]: OptionalParametersMethod<T[K]>;
 };
 
-type RequiredAgentMethods<T> = Omit<AgentMethods<T>, keyof OptionalAgentMethods<T>>;
+type RequiredAgentMethods<T> = Omit<
+  AgentMethods<T>,
+  keyof OptionalAgentMethods<T>
+>;
 
 type AgentPromiseReturnType<T extends AgentMethods<any>, K extends keyof T> =
   ReturnType<T[K]> extends Promise<any>
@@ -77,25 +82,27 @@ type AgentPromiseReturnType<T extends AgentMethods<any>, K extends keyof T> =
  * @param options Connection options
  * @returns WebSocket connection with setState and call methods
  */
-export function useAgent<AgentT extends {
-  get state(): State;
-}, State>(
+export function useAgent<
+  AgentT extends {
+    get state(): State;
+  },
+  State,
+>(
   options: UseAgentOptions<State>
 ): PartySocket & {
   agent: string;
   name: string;
   setState: (state: State) => void;
-  call: 
-    & (<T extends keyof OptionalAgentMethods<AgentT>>(
-        method: T,
-        args?: Parameters<OptionalAgentMethods<AgentT>[T]>,
-        streamOptions?: StreamOptions
-      ) => AgentPromiseReturnType<AgentT, T>)
-    & (<T extends keyof RequiredAgentMethods<AgentT>>(
-        method: T,
-        args: Parameters<RequiredAgentMethods<AgentT>[T]>,
-        streamOptions?: StreamOptions
-      ) => AgentPromiseReturnType<AgentT, T>);
+  call: (<T extends keyof OptionalAgentMethods<AgentT>>(
+    method: T,
+    args?: Parameters<OptionalAgentMethods<AgentT>[T]>,
+    streamOptions?: StreamOptions
+  ) => AgentPromiseReturnType<AgentT, T>) &
+    (<T extends keyof RequiredAgentMethods<AgentT>>(
+      method: T,
+      args: Parameters<RequiredAgentMethods<AgentT>[T]>,
+      streamOptions?: StreamOptions
+    ) => AgentPromiseReturnType<AgentT, T>);
 };
 export function useAgent<State = unknown>(
   options: UseAgentOptions<State>

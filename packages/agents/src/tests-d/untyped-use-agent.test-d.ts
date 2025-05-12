@@ -1,5 +1,5 @@
 import type { Agent } from "../../dist";
-import { env } from "cloudflare:workers";
+import type { env } from "cloudflare:workers";
 import { useAgent } from "../react";
 
 declare class A extends Agent<typeof env, {}> {
@@ -8,10 +8,10 @@ declare class A extends Agent<typeof env, {}> {
 }
 
 const a1 = useAgent<{}>({
-  agent: 'test',
+  agent: "test",
 });
 
 // ensure retro-compatibility with useAgent<State> API
-a1.call('fn');
-a1.call('fn', [1]);
-a1.call('fn', [1], { onDone: () => {} });
+a1.call("fn");
+a1.call("fn", [1]);
+a1.call("fn", [1], { onDone: () => {} });

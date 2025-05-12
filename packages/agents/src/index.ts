@@ -112,7 +112,6 @@ export type CallableMetadata = {
   streaming?: boolean;
 };
 
-// biome-ignore lint/complexity/noBannedTypes: <explanation>
 const callableMetadata = new Map<Function, CallableMetadata>();
 
 /**
@@ -448,7 +447,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 throw new Error(`Method ${method} is not callable`);
               }
 
-              // biome-ignore lint/complexity/noBannedTypes: <explanation>
               const metadata = callableMetadata.get(methodFn as Function);
 
               // For streaming methods, pass a StreamingResponse object
@@ -914,8 +912,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     await this.ctx.storage.deleteAll();
   }
 
+  /**
+   * Get all methods marked as callable on this Agent
+   * @returns A map of method names to their metadata
+   */
   private _isCallable(method: string): boolean {
-    // biome-ignore lint/complexity/noBannedTypes: <explanation>
     return callableMetadata.has(this[method as keyof this] as Function);
   }
 

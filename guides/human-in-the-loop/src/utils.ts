@@ -33,7 +33,6 @@ function isValidToolName<K extends PropertyKey, T extends object>(
 export async function processToolCalls<
   Tools extends ToolSet,
   ExecutableTools extends {
-    // biome-ignore lint/complexity/noBannedTypes: <explanation>
     [Tool in keyof Tools as Tools[Tool] extends { execute: Function }
       ? never
       : Tool]: Tools[Tool];

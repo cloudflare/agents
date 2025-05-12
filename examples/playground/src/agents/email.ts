@@ -101,7 +101,7 @@ export class EmailAgent extends AIChatAgent<Env> {
   async onEmail(email: ForwardableEmailMessage) {
     //
   }
-  // biome-ignore lint/complexity/noBannedTypes: vibes
+
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
     const dataStreamResponse = createDataStreamResponse({
       execute: async (dataStream) => {
