@@ -121,7 +121,7 @@ export class AgentClient<State = unknown> extends PartySocket {
           this.options.onStateUpdate?.(
             parsedMessage.state as State,
             "server",
-            (parsedMessage.prevState || {}) as State
+            parsedMessage.prevState as State
           );
           return;
         }
