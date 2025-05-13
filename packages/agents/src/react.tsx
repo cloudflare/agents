@@ -77,20 +77,16 @@ type RequiredAgentMethods<T> = Omit<
   keyof OptionalAgentMethods<T>
 >;
 
-// biome-ignore lint: suppressions/parse
-type AgentPromiseReturnType<T extends AgentMethods<any>, K extends keyof T> =
+type AgentPromiseReturnType<T extends AgentMethods<T>, K extends keyof T> =
   // biome-ignore lint: suppressions/parse
   ReturnType<T[K]> extends Promise<any>
     ? ReturnType<T[K]>
     : Promise<ReturnType<T[K]>>;
 
-// biome-ignore lint: suppressions/parse
-type AgentStub<T extends AgentMethods<any> | unknown> = {
-  // biome-ignore lint: suppressions/parse
-  [K in keyof T]: T extends AgentMethods<any>
-    ? (...args: Parameters<T[K]>) => AgentPromiseReturnType<T, K>
-    : // biome-ignore lint: suppressions/parse
-      any;
+type AgentStub<T extends AgentMethods<T>> = {
+  [K in keyof AgentMethods<T>]: (
+    ...args: Parameters<T[K]>
+  ) => AgentPromiseReturnType<AgentMethods<T>, K>;
 };
 
 /**
@@ -111,6 +107,7 @@ export function useAgent<State = unknown>(
     args?: unknown[],
     streamOptions?: StreamOptions
   ) => Promise<T>;
+  stub: Record<string, Method>;
 };
 export function useAgent<
   AgentT extends {
@@ -146,7 +143,7 @@ export function useAgent<State>(
     args?: unknown[],
     streamOptions?: StreamOptions
   ) => Promise<T>;
-  stub: AgentStub<unknown>;
+  stub: Record<string, Method>;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
   // Keep track of pending RPC calls
@@ -227,7 +224,7 @@ export function useAgent<State>(
       args?: unknown[],
       streamOptions?: StreamOptions
     ) => Promise<T>;
-    stub: AgentStub<unknown>;
+    stub: Record<string, Method>;
   };
   // Create the call method
   const call = useCallback(
@@ -275,7 +272,7 @@ export function useAgent<State>(
         };
       },
     }
-  ) as AgentStub<unknown>;
+  );
 
   // warn if agent isn't in lowercase
   if (agent.agent !== agent.agent.toLowerCase()) {

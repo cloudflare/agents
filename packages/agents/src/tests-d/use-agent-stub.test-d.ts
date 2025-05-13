@@ -41,3 +41,6 @@ stub.f5() satisfies Promise<void>;
 stub.f5(undefined) satisfies Promise<void>;
 
 stub.f6() satisfies Promise<void>;
+
+// @ts-expect-error should not have base Agent methods
+stub.setState({ prop: "test" });
