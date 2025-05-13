@@ -41,7 +41,7 @@ export type UseAgentOptions<State = unknown> = Omit<
   onStateUpdate?: (
     state: State,
     source: "server" | "client",
-    prevState: State
+    prevState?: State
   ) => void;
   /** Called when MCP server state is updated */
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
@@ -265,9 +265,9 @@ export function useAgent<State>(
     [agent]
   );
 
-  agent.setState = (state: State, prevState?: State) => {
+  agent.setState = (state: State) => {
     agent.send(JSON.stringify({ type: "cf_agent_state", state }));
-    options.onStateUpdate?.(state, "client", prevState);
+    options.onStateUpdate?.(state, "client");
   };
 
   agent.call = call;
