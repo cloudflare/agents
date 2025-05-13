@@ -1,6 +1,6 @@
 {
   "name": "agents",
-  "version": "0.0.84",
+  "version": "0.0.85",
   "main": "src/index.ts",
   "types": "dist/index.d.ts",
   "type": "module",
