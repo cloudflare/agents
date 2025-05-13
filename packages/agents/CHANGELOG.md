@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.86
+
+### Patch Changes
+
+- [#274](https://github.com/cloudflare/agents/pull/274) [`93ccdbd`](https://github.com/cloudflare/agents/commit/93ccdbd254c083dad9f24f34b524006ce02572ed) Thanks [@ruifigueira](https://github.com/ruifigueira)! - Stub for Agent RPC
+
 ## 0.0.85
 
 ### Patch Changes
