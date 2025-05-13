@@ -208,7 +208,7 @@ export abstract class McpAgent<
       onStateUpdate(
         state: State | undefined,
         source: Connection | "server",
-        prevState?: State
+        prevState: State
       ) {
         return self.onStateUpdate(state, source, prevState);
       }
@@ -242,7 +242,7 @@ export abstract class McpAgent<
   onStateUpdate(
     state: State | undefined,
     source: Connection | "server",
-    prevState?: State
+    prevState: State
   ) {
     // override this to handle state updates
   }
@@ -258,7 +258,7 @@ export abstract class McpAgent<
       onStateUpdate(
         state: State | undefined,
         source: Connection | "server",
-        prevState?: State
+        prevState: State
       ) {
         return self.onStateUpdate(state, source, prevState);
       }

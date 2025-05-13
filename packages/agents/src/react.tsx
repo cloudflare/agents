@@ -187,7 +187,7 @@ export function useAgent<State>(
           options.onStateUpdate?.(
             parsedMessage.state as State,
             "server",
-            (parsedMessage.prevState || {}) as State
+            parsedMessage.prevState as State
           );
           return;
         }

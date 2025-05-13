@@ -26,7 +26,7 @@ export function Stateful({ addToast }: StateProps) {
     onStateUpdate: (
       state: State,
       source: "server" | "client",
-      prevState: State
+      prevState?: State
     ) => {
       setSyncedState(state);
     },
