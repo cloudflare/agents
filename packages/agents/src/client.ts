@@ -17,7 +17,11 @@ export type AgentClientOptions<State = unknown> = Omit<
   /** Name of the specific Agent instance */
   name?: string;
   /** Called when the Agent's state is updated */
-  onStateUpdate?: (state: State, source: "server" | "client") => void;
+  onStateUpdate?: (
+    state: State,
+    source: "server" | "client",
+    prevState?: State
+  ) => void;
 };
 
 /**
@@ -114,7 +118,11 @@ export class AgentClient<State = unknown> extends PartySocket {
           return;
         }
         if (parsedMessage.type === "cf_agent_state") {
-          this.options.onStateUpdate?.(parsedMessage.state as State, "server");
+          this.options.onStateUpdate?.(
+            parsedMessage.state as State,
+            "server",
+            (parsedMessage.prevState || {}) as State
+          );
           return;
         }
         if (parsedMessage.type === "rpc") {

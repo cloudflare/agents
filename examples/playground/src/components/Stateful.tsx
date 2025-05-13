@@ -23,7 +23,11 @@ export function Stateful({ addToast }: StateProps) {
 
   const agent = useAgent<State>({
     agent: "stateful",
-    onStateUpdate: (state, source: "server" | "client") => {
+    onStateUpdate: (
+      state: State,
+      source: "server" | "client",
+      prevState: State
+    ) => {
       setSyncedState(state);
     },
   });

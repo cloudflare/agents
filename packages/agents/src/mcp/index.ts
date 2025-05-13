@@ -205,8 +205,12 @@ export abstract class McpAgent<
         hibernate: true,
       };
 
-      onStateUpdate(state: State | undefined, source: Connection | "server") {
-        return self.onStateUpdate(state, source);
+      onStateUpdate(
+        state: State | undefined,
+        source: Connection | "server",
+        prevState?: State
+      ) {
+        return self.onStateUpdate(state, source, prevState);
       }
 
       async onMessage(
@@ -235,7 +239,11 @@ export abstract class McpAgent<
   setState(state: State) {
     return this._agent.setState(state);
   }
-  onStateUpdate(state: State | undefined, source: Connection | "server") {
+  onStateUpdate(
+    state: State | undefined,
+    source: Connection | "server",
+    prevState?: State
+  ) {
     // override this to handle state updates
   }
   async onStart() {
@@ -247,8 +255,12 @@ export abstract class McpAgent<
         hibernate: true,
       };
 
-      onStateUpdate(state: State | undefined, source: Connection | "server") {
-        return self.onStateUpdate(state, source);
+      onStateUpdate(
+        state: State | undefined,
+        source: Connection | "server",
+        prevState?: State
+      ) {
+        return self.onStateUpdate(state, source, prevState);
       }
 
       async onMessage(connection: Connection, event: WSMessage) {

@@ -38,7 +38,11 @@ export type UseAgentOptions<State = unknown> = Omit<
   /** Name of the specific Agent instance */
   name?: string;
   /** Called when the Agent's state is updated */
-  onStateUpdate?: (state: State, source: "server" | "client") => void;
+  onStateUpdate?: (
+    state: State,
+    source: "server" | "client",
+    prevState: State
+  ) => void;
   /** Called when MCP server state is updated */
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
 };
@@ -180,7 +184,11 @@ export function useAgent<State>(
           return options.onMessage?.(message);
         }
         if (parsedMessage.type === "cf_agent_state") {
-          options.onStateUpdate?.(parsedMessage.state as State, "server");
+          options.onStateUpdate?.(
+            parsedMessage.state as State,
+            "server",
+            (parsedMessage.prevState || {}) as State
+          );
           return;
         }
         if (parsedMessage.type === "cf_agent_mcp_servers") {
@@ -257,9 +265,9 @@ export function useAgent<State>(
     [agent]
   );
 
-  agent.setState = (state: State) => {
+  agent.setState = (state: State, prevState?: State) => {
     agent.send(JSON.stringify({ type: "cf_agent_state", state }));
-    options.onStateUpdate?.(state, "client");
+    options.onStateUpdate?.(state, "client", prevState);
   };
 
   agent.call = call;
