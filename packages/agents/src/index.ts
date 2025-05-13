@@ -398,7 +398,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             this.broadcast(
               JSON.stringify({
                 type: "cf_agent_mcp_servers",
-                mcp: this.getMcpServerState(),
+                mcp: this.getMcpServers(),
               })
             );
 
@@ -509,7 +509,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             connection.send(
               JSON.stringify({
                 type: "cf_agent_mcp_servers",
-                mcp: this.getMcpServerState(),
+                mcp: this.getMcpServers(),
               })
             );
 
@@ -549,7 +549,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           this.broadcast(
             JSON.stringify({
               type: "cf_agent_mcp_servers",
-              mcp: this.getMcpServerState(),
+              mcp: this.getMcpServers(),
             })
           );
 
@@ -956,7 +956,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_mcp_servers",
-        mcp: this.getMcpServerState(),
+        mcp: this.getMcpServers(),
       })
     );
 
@@ -1053,12 +1053,12 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         type: "cf_agent_mcp_servers",
-        mcp: this.getMcpServerState(),
+        mcp: this.getMcpServers(),
       })
     );
   }
 
-  getMcpServerState(): MCPServersState {
+  getMcpServers(): MCPServersState {
     const mcpState: MCPServersState = {
       servers: {},
       tools: this.mcp.listTools(),
