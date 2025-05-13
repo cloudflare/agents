@@ -239,11 +239,10 @@ export class ThinkingAgent extends Agent {
     });
   }
 
-  onStateUpdate(state, source, prevState) {
+  onStateUpdate(state, source) {
     console.log("Understanding deepened:", {
       newState: state,
       origin: source,
-      prevState,
     });
   }
 }
