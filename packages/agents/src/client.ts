@@ -4,6 +4,10 @@ import {
   type PartyFetchOptions,
 } from "partysocket";
 import type { RPCRequest, RPCResponse } from "./";
+import type {
+  SerializableReturnValue,
+  SerializableValue,
+} from "./serializable";
 
 /**
  * Options for creating an AgentClient
@@ -160,7 +164,17 @@ export class AgentClient<State = unknown> extends PartySocket {
    * @param streamOptions Options for handling streaming responses
    * @returns Promise that resolves with the method's return value
    */
-  async call<T = unknown>(
+  call<T extends SerializableReturnValue>(
+    method: string,
+    args?: SerializableValue[],
+    streamOptions?: StreamOptions
+  ): Promise<T>;
+  call<T = unknown>(
+    method: string,
+    args?: unknown[],
+    streamOptions?: StreamOptions
+  ): Promise<T>;
+  async call<T>(
     method: string,
     args: unknown[] = [],
     streamOptions?: StreamOptions

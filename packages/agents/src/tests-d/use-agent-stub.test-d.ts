@@ -10,6 +10,8 @@ declare class A extends Agent<typeof env, {}> {
   f4: (a?: string) => void;
   f5: (a: string | undefined) => void;
   f6: () => Promise<void>;
+  nonSerializableParams: (a: string, b: { c: Date }) => void;
+  nonSerializableReturn: (a: string) => Date;
 }
 
 const { stub } = useAgent<A, {}>({
@@ -44,3 +46,8 @@ stub.f6() satisfies Promise<void>;
 
 // @ts-expect-error should not have base Agent methods
 stub.setState({ prop: "test" });
+
+// @ts-expect-error Date parameter not serializable
+stub.nonSerializableParams("test", { c: new Date() });
+// @ts-expect-error Date return not serializable
+stub.nonSerializableReturn("test");

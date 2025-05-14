@@ -12,6 +12,8 @@ declare class A extends Agent<typeof env, {}> {
   f6: () => Promise<void>;
   f7: (a: string | undefined, b: number) => Promise<void>;
   f8: (a: string | undefined, b?: number) => Promise<void>;
+  nonSerializableParams: (a: string, b: { c: Date }) => void;
+  nonSerializableReturn: (a: string) => Date;
 }
 
 // @ts-expect-error state doesn't match type A state
@@ -56,3 +58,8 @@ a1.call("f7", [undefined, 1]) satisfies Promise<void>;
 
 a1.call("f8") satisfies Promise<void>;
 a1.call("f8", [undefined, undefined]) satisfies Promise<void>;
+
+// @ts-expect-error Date parameter not serializable
+a1.call("nonSerializableParams", ["test", { c: new Date() }]);
+// @ts-expect-error Date return not serializable
+a1.call("nonSerializableReturn", ["test"]);

@@ -5,6 +5,8 @@ import { useAgent } from "../react";
 declare class A extends Agent<typeof env, {}> {
   prop: string;
   fn: () => number;
+  nonSerializableParams: (a: string, b: { c: Date }) => void;
+  nonSerializableReturn: (a: string) => Date;
 }
 
 const { stub } = useAgent<{}>({
@@ -14,7 +16,6 @@ const { stub } = useAgent<{}>({
 // ensure retro-compatibility with useAgent<State> API
 stub.fn();
 stub.fn(1);
-stub.fn(1);
-
-// no type checking on the stub
 stub.foo(1, "bar");
+stub.nonSerializableParams("test", { c: new Date(), unexistent: "property" });
+stub.nonSerializableReturn("test");

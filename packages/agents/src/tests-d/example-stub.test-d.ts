@@ -14,7 +14,16 @@ class MyAgent extends Agent<typeof env, {}> {
   }
 
   // not decorated with @callable()
-  nonRpc(): void {}
+  nonRpc(): void {
+    // do something
+  }
+
+  // @ts-expect-error Date is not serializable, therefore nonSerializable
+  // cannot be decorated with @callable()
+  @callable()
+  nonSerializable(c: string, d: Date): void {
+    // do something
+  }
 }
 
 const { stub } = useAgent<MyAgent, {}>({ agent: "my-agent" });
@@ -32,6 +41,9 @@ await stub.perform();
 // we cannot exclude it because typescript doesn't have a way
 // to exclude based on decorators
 await stub.nonRpc();
+
+// @ts-expect-error nonSerializable is not serializable
+await stub.nonSerializable("hello", new Date());
 
 const { stub: stub2 } = useAgent<Omit<MyAgent, "nonRpc">, {}>({
   agent: "my-agent",

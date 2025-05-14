@@ -28,6 +28,10 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import { camelCaseToKebabCase } from "./client";
+import type {
+  SerializableReturnValue,
+  SerializableValue,
+} from "./serializable";
 
 export type { Connection, WSMessage, ConnectionContext } from "partyserver";
 
@@ -120,7 +124,11 @@ const callableMetadata = new Map<Function, CallableMetadata>();
  * @param metadata Optional metadata about the callable method
  */
 export function unstable_callable(metadata: CallableMetadata = {}) {
-  return function callableDecorator<This, Args extends unknown[], Return>(
+  return function callableDecorator<
+    This,
+    Args extends SerializableValue[],
+    Return extends SerializableReturnValue,
+  >(
     target: (this: This, ...args: Args) => Return,
     context: ClassMethodDecoratorContext
   ) {

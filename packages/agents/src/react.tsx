@@ -3,6 +3,7 @@ import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef } from "react";
 import type { MCPServersState, RPCRequest, RPCResponse, Agent } from "./";
 import type { StreamOptions } from "./client";
+import type { Method, RPCMethod } from "./serializable";
 
 /**
  * Convert a camelCase string to a kebab-case string
@@ -49,21 +50,16 @@ type AllOptional<T> = T extends [infer A, ...infer R]
     : false
   : true; // no params means optional by default
 
-// biome-ignore lint: suppressions/parse
-type Method = (...args: any) => any;
-
-type Methods<T> = {
-  [K in keyof T as T[K] extends Method ? K : never]: T[K] extends Method
-    ? T[K]
-    : never;
+type RPCMethods<T> = {
+  [K in keyof T as T[K] extends RPCMethod<T[K]> ? K : never]: RPCMethod<T[K]>;
 };
 
-type OptionalParametersMethod<T extends Method> =
+type OptionalParametersMethod<T extends RPCMethod> =
   AllOptional<Parameters<T>> extends true ? T : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
 // biome-ignore lint: suppressions/parse
-type AgentMethods<T> = Omit<Methods<T>, keyof Agent<any, any>>;
+type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
 
 type OptionalAgentMethods<T> = {
   [K in keyof AgentMethods<T> as AgentMethods<T>[K] extends OptionalParametersMethod<
@@ -84,11 +80,39 @@ type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
     ? ReturnType<AgentMethods<T>[K]>
     : Promise<ReturnType<AgentMethods<T>[K]>>;
 
+type OptionalArgsAgentMethodCall<AgentT> = <
+  K extends keyof OptionalAgentMethods<AgentT>,
+>(
+  method: K,
+  args?: Parameters<OptionalAgentMethods<AgentT>[K]>,
+  streamOptions?: StreamOptions
+) => AgentPromiseReturnType<AgentT, K>;
+
+type RequiredArgsAgentMethodCall<AgentT> = <
+  K extends keyof RequiredAgentMethods<AgentT>,
+>(
+  method: K,
+  args: Parameters<RequiredAgentMethods<AgentT>[K]>,
+  streamOptions?: StreamOptions
+) => AgentPromiseReturnType<AgentT, K>;
+
+type AgentMethodCall<AgentT> = OptionalArgsAgentMethodCall<AgentT> &
+  RequiredArgsAgentMethodCall<AgentT>;
+
+type UntypedAgentMethodCall = <T = unknown>(
+  method: string,
+  args?: unknown[],
+  streamOptions?: StreamOptions
+) => Promise<T>;
+
 type AgentStub<T> = {
   [K in keyof AgentMethods<T>]: (
     ...args: Parameters<AgentMethods<T>[K]>
   ) => AgentPromiseReturnType<AgentMethods<T>, K>;
 };
+
+// we neet to use Method instead of RPCMethod here for retro-compatibility
+type UntypedAgentStub = Record<string, Method>;
 
 /**
  * React hook for connecting to an Agent
@@ -103,12 +127,8 @@ export function useAgent<State = unknown>(
   agent: string;
   name: string;
   setState: (state: State) => void;
-  call: <T = unknown>(
-    method: string,
-    args?: unknown[],
-    streamOptions?: StreamOptions
-  ) => Promise<T>;
-  stub: Record<string, Method>;
+  call: UntypedAgentMethodCall;
+  stub: UntypedAgentStub;
 };
 export function useAgent<
   AgentT extends {
@@ -121,16 +141,7 @@ export function useAgent<
   agent: string;
   name: string;
   setState: (state: State) => void;
-  call: (<T extends keyof OptionalAgentMethods<AgentT>>(
-    method: T,
-    args?: Parameters<OptionalAgentMethods<AgentT>[T]>,
-    streamOptions?: StreamOptions
-  ) => AgentPromiseReturnType<AgentT, T>) &
-    (<T extends keyof RequiredAgentMethods<AgentT>>(
-      method: T,
-      args: Parameters<RequiredAgentMethods<AgentT>[T]>,
-      streamOptions?: StreamOptions
-    ) => AgentPromiseReturnType<AgentT, T>);
+  call: AgentMethodCall<AgentT>;
   stub: AgentStub<AgentT>;
 };
 export function useAgent<State>(
@@ -139,12 +150,8 @@ export function useAgent<State>(
   agent: string;
   name: string;
   setState: (state: State) => void;
-  call: <T = unknown>(
-    method: string,
-    args?: unknown[],
-    streamOptions?: StreamOptions
-  ) => Promise<T>;
-  stub: Record<string, Method>;
+  call: UntypedAgentMethodCall | AgentMethodCall<unknown>;
+  stub: UntypedAgentStub;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
   // Keep track of pending RPC calls
@@ -220,12 +227,8 @@ export function useAgent<State>(
     agent: string;
     name: string;
     setState: (state: State) => void;
-    call: <T = unknown>(
-      method: string,
-      args?: unknown[],
-      streamOptions?: StreamOptions
-    ) => Promise<T>;
-    stub: Record<string, Method>;
+    call: UntypedAgentMethodCall;
+    stub: UntypedAgentStub;
   };
   // Create the call method
   const call = useCallback(
