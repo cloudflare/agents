@@ -1,5 +1,5 @@
 import type { env } from "cloudflare:workers";
-import { unstable_callable as callable, Agent } from "../index.ts";
+import { unstable_callable as callable, Agent } from "..";
 import { useAgent } from "../react.tsx";
 
 class MyAgent extends Agent<typeof env, {}> {

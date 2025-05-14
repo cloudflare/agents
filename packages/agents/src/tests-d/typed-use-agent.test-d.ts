@@ -1,4 +1,4 @@
-import type { Agent } from "../..";
+import { Agent } from "..";
 import type { env } from "cloudflare:workers";
 import { useAgent } from "../react";
 
