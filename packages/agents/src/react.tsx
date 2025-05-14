@@ -53,23 +53,24 @@ type AllOptional<T> = T extends [infer A, ...infer R]
 type Method = (...args: any) => any;
 
 type Methods<T> = {
-  [K in keyof T as T[K] extends Method ? K : never]: T[K];
+  [K in keyof T as T[K] extends Method ? K : never]: T[K] extends Method
+    ? T[K]
+    : never;
 };
 
-type OptionalParametersMethod<T> = T extends Method
-  ? AllOptional<Parameters<T>> extends true
-    ? T
-    : never
-  : never;
+type OptionalParametersMethod<T extends Method> =
+  AllOptional<Parameters<T>> extends true ? T : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
 // biome-ignore lint: suppressions/parse
 type AgentMethods<T> = Omit<Methods<T>, keyof Agent<any, any>>;
 
 type OptionalAgentMethods<T> = {
-  [K in keyof AgentMethods<T> as T[K] extends OptionalParametersMethod<T[K]>
+  [K in keyof AgentMethods<T> as AgentMethods<T>[K] extends OptionalParametersMethod<
+    AgentMethods<T>[K]
+  >
     ? K
-    : never]: OptionalParametersMethod<T[K]>;
+    : never]: OptionalParametersMethod<AgentMethods<T>[K]>;
 };
 
 type RequiredAgentMethods<T> = Omit<
@@ -77,15 +78,15 @@ type RequiredAgentMethods<T> = Omit<
   keyof OptionalAgentMethods<T>
 >;
 
-type AgentPromiseReturnType<T extends AgentMethods<T>, K extends keyof T> =
+type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
   // biome-ignore lint: suppressions/parse
-  ReturnType<T[K]> extends Promise<any>
-    ? ReturnType<T[K]>
-    : Promise<ReturnType<T[K]>>;
+  ReturnType<AgentMethods<T>[K]> extends Promise<any>
+    ? ReturnType<AgentMethods<T>[K]>
+    : Promise<ReturnType<AgentMethods<T>[K]>>;
 
-type AgentStub<T extends AgentMethods<T>> = {
+type AgentStub<T> = {
   [K in keyof AgentMethods<T>]: (
-    ...args: Parameters<T[K]>
+    ...args: Parameters<AgentMethods<T>[K]>
   ) => AgentPromiseReturnType<AgentMethods<T>, K>;
 };
 
