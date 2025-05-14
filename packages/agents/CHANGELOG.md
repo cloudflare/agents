@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.87
+
+### Patch Changes
+
+- [#283](https://github.com/cloudflare/agents/pull/283) [`041b40f`](https://github.com/cloudflare/agents/commit/041b40f7022af097288cc3a29c1b421cde434bb9) Thanks [@ruifigueira](https://github.com/ruifigueira)! - Improve Agent stub
+
 ## 0.0.86
 
 ### Patch Changes
