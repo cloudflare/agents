@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.88
+
+### Patch Changes
+
+- [#289](https://github.com/cloudflare/agents/pull/289) [`86cae6f`](https://github.com/cloudflare/agents/commit/86cae6f7d2190c6b2442bdc2682f75a504f39ae8) Thanks [@ruifigueira](https://github.com/ruifigueira)! - Type-safe serializable RPC methods
+
+- [#287](https://github.com/cloudflare/agents/pull/287) [`94d9a2e`](https://github.com/cloudflare/agents/commit/94d9a2e362fe10764c85327d700ee4c90a0f957e) Thanks [@ruifigueira](https://github.com/ruifigueira)! - Improve agent types
+
 ## 0.0.87
 
 ### Patch Changes
