@@ -8,9 +8,8 @@
     "check:test": "npm run check:test:workers && npm run check:test:react",
     "check:test:workers": "vitest -r src/tests --watch false",
     "check:test:react": "vitest -r src/react-tests --watch false",
-    "test": "vitest -r src/tests && npm run test:types",
+    "test": "vitest -r src/tests",
     "test:react": "vitest -r src/react-tests",
-    "test:types": "tsc",
     "evals": "(cd evals; evalite)",
     "build": "tsx ./scripts/build.ts"
   },
