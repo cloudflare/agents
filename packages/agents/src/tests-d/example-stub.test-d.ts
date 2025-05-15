@@ -17,13 +17,6 @@ class MyAgent extends Agent<typeof env, {}> {
   nonRpc(): void {
     // do something
   }
-
-  // @ts-expect-error Date is not serializable, therefore nonSerializable
-  // cannot be decorated with @callable()
-  @callable()
-  nonSerializable(c: string, d: Date): void {
-    // do something
-  }
 }
 
 const { stub } = useAgent<MyAgent, {}>({ agent: "my-agent" });
