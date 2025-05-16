@@ -67,6 +67,11 @@
       "types": "./dist/mcp/do-oauth-client-provider.d.ts",
       "require": "./dist/mcp/do-oauth-client-provider.js",
       "import": "./dist/mcp/do-oauth-client-provider.js"
+    },
+    "./mcp/context-router": {
+      "types": "./dist/mcp/context-router.d.ts",
+      "require": "./dist/mcp/context-router.js",
+      "import": "./dist/mcp/context-router.js"
     }
   },
   "keywords": [],

@@ -9,6 +9,7 @@ async function main() {
       "src/mcp/index.ts",
       "src/mcp/client.ts",
       "src/mcp/do-oauth-client-provider.ts",
+      "src/mcp/context-router.ts",
     ],
     splitting: true,
     sourcemap: true,
