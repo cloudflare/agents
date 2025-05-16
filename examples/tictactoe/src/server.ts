@@ -11,7 +11,7 @@ import { z } from "zod";
 
 type Env = {
   OPENAI_API_KEY: string;
-  TicTacToe: AgentNamespace<TicTacToe>;
+  TicTacToe: DurableObjectNamespace<TicTacToe>;
 };
 
 type Player = "X" | "O";

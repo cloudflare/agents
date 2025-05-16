@@ -13,10 +13,10 @@ import { nanoid } from "nanoid";
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MCPClientManager } from "./mcp/client";
-import {
-  DurableObjectOAuthClientProvider,
-  type AgentsOAuthProvider,
-} from "./mcp/do-oauth-client-provider";
+import { createRequestPayload, createResponsePayload } from "./utils";
+
+import { EventEmitter } from "node:events";
+import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type {
   Tool,
   Resource,
@@ -247,6 +247,139 @@ export function getCurrentAgent<
   return store;
 }
 
+export type BaseEventData = {
+  stub?: string;
+  className: string;
+  instance: string;
+  // The hex string id of the connection
+  id: string;
+  timestamp: number;
+};
+
+type StateUpdateEvent<State = unknown> = BaseEventData & {
+  type: "state_update";
+  payload: {
+    state: State;
+  };
+};
+
+type StartEvent = BaseEventData & {
+  type: "start";
+};
+
+type BroadcastEvent = BaseEventData & {
+  type: "broadcast";
+  payload: {
+    // Either the message/payload as a strong or an object indicating a binary message
+    message: string | { type: "binary"; size: number };
+    without?: string[];
+  };
+};
+
+type MessageEvent = BaseEventData & {
+  type: "message";
+  payload: {
+    // Either the message/payload as a strong or an object indicating a binary message
+    message: string | { type: "binary"; size: number };
+    connectionId: string;
+  };
+};
+
+type SendEvent = BaseEventData & {
+  type: "send";
+  payload: {
+    // Either the message/payload as a strong or an object indicating a binary message
+    message: string | { type: "binary"; size: number };
+    connectionId: string;
+  };
+};
+type ConnectEvent = BaseEventData & {
+  type: "connect";
+  payload: {
+    connectionId: string;
+  };
+};
+type CloseEvent = BaseEventData & {
+  type: "close";
+  payload: {
+    connectionId: string;
+    code: number;
+    reason: string;
+    wasClean: boolean;
+  };
+};
+type RequestEvent = BaseEventData & {
+  type: "request";
+  payload: {
+    request: {
+      method: string;
+      url: string;
+      headers: Record<string, string>;
+      body: string | undefined;
+    };
+  };
+};
+type ResponseEvent = BaseEventData & {
+  type: "response";
+  payload: {
+    request: {
+      method: string;
+      url: string;
+      headers: Record<string, string>;
+      body: string | undefined;
+    };
+    response: {
+      status: number;
+      statusText: string;
+      headers: Record<string, string>;
+      body: string | undefined;
+    };
+  };
+};
+type ErrorEvent = BaseEventData & {
+  type: "error";
+  payload: {
+    connection: string;
+    error: {
+      message: string;
+      stack?: string;
+    };
+  };
+};
+
+// TODO: add email event
+// TODO: add schedule related events
+
+export type AgentEvent<State = unknown> =
+  | StateUpdateEvent<State>
+  | StartEvent
+  | BroadcastEvent
+  | MessageEvent
+  | SendEvent
+  | ConnectEvent
+  | CloseEvent
+  | RequestEvent
+  | ResponseEvent
+  | ErrorEvent;
+
+export type EventObservers<State> = {
+  handler: (event: AgentEvent<State>) => void;
+};
+
+/**
+ * Typed EventEmitter for strongly-typed events
+ */
+interface TypedEventEmitter<State> extends EventEmitter {
+  on(event: "event", listener: (eventData: AgentEvent<State>) => void): this;
+  once(event: "event", listener: (eventData: AgentEvent<State>) => void): this;
+  emit(event: "event", eventData: AgentEvent<State>): boolean;
+  off(event: "event", listener: (eventData: AgentEvent<State>) => void): this;
+  removeListener(
+    event: "event",
+    listener: (eventData: AgentEvent<State>) => void
+  ): this;
+}
+
 /**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
@@ -259,6 +392,69 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     Object.getPrototypeOf(this).constructor;
 
   mcp: MCPClientManager = new MCPClientManager(this._ParentClass.name, "0.0.1");
+
+  eventObservers: Array<EventObservers<State>> = [] as Array<
+    EventObservers<State>
+  >;
+  #secret: string;
+  #eventBus: TypedEventEmitter<State> = new EventEmitter();
+
+  get secret(): string {
+    return this.#secret;
+  }
+
+  listMcpConnections(): Array<{
+    serverId: string;
+    url: string;
+    connectionState: string;
+    instructions?: string;
+    tools: Array<{
+      name: string;
+      description: string | undefined;
+      inputSchema: object;
+    }>;
+    resources: Array<Resource>;
+    prompts: {
+      [x: string]: unknown;
+      name: string;
+      description?: string;
+      arguments?: {
+        [x: string]: unknown;
+        name: string;
+        description?: string;
+        required?: boolean;
+      }[];
+    }[];
+    serverCapabilities?: {
+      resources?: object;
+      tools?: object;
+      [key: string]: unknown;
+    };
+  }> {
+    const mcpConnections = new Map(Object.entries(this.mcp.mcpConnections));
+
+    if (mcpConnections && mcpConnections.size > 0) {
+      const connections = Array.from(mcpConnections).map(([serverId, conn]) => {
+        return {
+          serverId,
+          url: conn.url.toString(),
+          connectionState: conn.connectionState,
+          instructions: conn.instructions,
+          tools: conn.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+          })),
+          resources: conn.resources,
+          prompts: conn.prompts,
+          serverCapabilities: conn.serverCapabilities,
+        };
+      });
+      return connections;
+    }
+
+    return [];
+  }
 
   /**
    * Initial state for the Agent
@@ -346,6 +542,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    this.#secret = crypto.randomUUID();
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
@@ -389,7 +586,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
       return agentContext.run(
-        { agent: this, connection: undefined, request },
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request,
+        },
         async () => {
           if (this.mcp.isCallbackRequest(request)) {
             await this.mcp.handleCallbackRequest(request);
@@ -409,15 +612,141 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             });
           }
 
-          return this._tryCatch(() => _onRequest(request));
+          return this._tryCatch(async () => {
+            if (
+              request.method === "GET" &&
+              request.url ===
+                `http://dummy-example.cloudflare.com/${this.#secret}/events`
+            ) {
+              const stream = new TransformStream();
+              const writer = stream.writable.getWriter();
+
+              // Send headers for SSE
+              const headers = {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache, no-transform",
+                Connection: "keep-alive",
+                "X-Accel-Buffering": "no", // Helps with proxies like Nginx
+              };
+
+              // Initialize SSE connection with retry parameter
+              writer.write(new TextEncoder().encode("retry: 3000\n\n"));
+
+              let lastEventId = 0;
+
+              // Helper function to properly format SSE messages
+              const formatSSE = (event: string, data: unknown, id?: number) => {
+                const encoder = new TextEncoder();
+                let message = "";
+
+                if (id !== undefined) {
+                  message += `id: ${id}\n`;
+                }
+
+                if (event) {
+                  message += `event: ${event}\n`;
+                }
+
+                // Handle multiline data properly
+                const dataStr =
+                  typeof data === "string" ? data : JSON.stringify(data);
+                const dataLines = dataStr.split("\n");
+                for (const line of dataLines) {
+                  message += `data: ${line}\n`;
+                }
+
+                message += "\n";
+                return encoder.encode(message);
+              };
+
+              // Create event handler that writes events to the stream
+              const eventHandler = (event: AgentEvent<State>) => {
+                const { type, ...rest } = event;
+
+                // Increment event ID for each event
+                lastEventId++;
+
+                writer.write(formatSSE(type, rest, lastEventId));
+              };
+
+              // Register the handler
+              this.#eventBus.on("event", eventHandler);
+
+              // Send heartbeat as comment to keep connection alive
+              const interval = setInterval(() => {
+                writer.write(new TextEncoder().encode(": heartbeat\n\n"));
+              }, 15000); // Every 15 seconds is more standard
+
+              // Handle client disconnect
+              request.signal.addEventListener("abort", () => {
+                this.#eventBus.off("event", eventHandler);
+                clearInterval(interval);
+                writer.close().catch(console.error);
+              });
+
+              return new Response(stream.readable, { headers });
+            }
+
+            const requestPayload = await createRequestPayload(
+              request.clone() as typeof request
+            );
+            this._emitEvent({
+              type: "request",
+              instance: this.name,
+              className: this._ParentClass.name,
+              id: nanoid(),
+              timestamp: Date.now(),
+              payload: {
+                request: requestPayload,
+              },
+            });
+            const response = await _onRequest(request);
+            this._emitEvent({
+              type: "response",
+              instance: this.name,
+              className: this._ParentClass.name,
+              id: nanoid(),
+              timestamp: Date.now(),
+              payload: {
+                request: requestPayload,
+                response: await createResponsePayload(
+                  response.clone() as typeof response
+                ),
+              },
+            });
+            return response;
+          });
         }
       );
     };
 
-    const _onMessage = this.onMessage.bind(this);
+    const _originalMessage = this.onMessage.bind(this);
+    const _onMessage = async (connection: Connection, message: WSMessage) => {
+      this._emitEvent({
+        type: "message",
+        instance: this.name,
+        className: this._ParentClass.name,
+        id: nanoid(),
+        timestamp: Date.now(),
+        payload: {
+          message:
+            typeof message === "string"
+              ? message
+              : { type: "binary", size: message.byteLength },
+          connectionId: connection.id,
+        },
+      });
+      return _originalMessage(connection, message);
+    };
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       return agentContext.run(
-        { agent: this, connection, request: undefined },
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection,
+          request: undefined,
+        },
         async () => {
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
@@ -494,9 +823,21 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
       return agentContext.run(
-        { agent: this, connection, request: ctx.request },
+        // Need to cast "this" to Agent<unknown> to avoid type errors
+        // because the agentContext is as strictly typed as the Agent class
+        { agent: this as Agent<unknown>, connection, request: ctx.request },
         async () => {
           setTimeout(() => {
+            this._emitEvent({
+              type: "connect",
+              instance: this.name,
+              className: this._ParentClass.name,
+              id: nanoid(),
+              timestamp: Date.now(),
+              payload: {
+                connectionId: connection.id,
+              },
+            });
             if (this.state) {
               connection.send(
                 JSON.stringify({
@@ -513,16 +854,115 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               })
             );
 
-            return this._tryCatch(() => _onConnect(connection, ctx));
+            const proxiedConnection = this.#createWebSocketProxy(connection);
+            return this._tryCatch(() => _onConnect(proxiedConnection, ctx));
           }, 20);
         }
       );
     };
 
+    const _onStateUpdate = this.onStateUpdate.bind(this);
+    this.onStateUpdate = async (
+      state: State | undefined,
+      source: Connection | "server"
+    ) => {
+      return agentContext.run(
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request: undefined,
+        },
+        async () => {
+          return this._tryCatch(() => {
+            const proxiedSource =
+              source === "server" ? source : this.#createWebSocketProxy(source);
+
+            if (state) {
+              this._emitEvent({
+                type: "state_update",
+                instance: this.name,
+                className: this._ParentClass.name,
+                id: nanoid(),
+                timestamp: Date.now(),
+                payload: {
+                  state,
+                },
+              });
+            }
+
+            return _onStateUpdate(state, proxiedSource);
+          });
+        }
+      );
+    };
+
+    const _broadcast = this.broadcast.bind(this);
+    this.broadcast = async (
+      message: WSMessage,
+      without?: string[]
+    ): Promise<void> => {
+      this._emitEvent({
+        type: "broadcast",
+        instance: this.name,
+        className: this._ParentClass.name,
+        id: nanoid(),
+        timestamp: Date.now(),
+        payload: {
+          message:
+            typeof message === "string"
+              ? message
+              : { type: "binary", size: message.byteLength },
+          without,
+        },
+      });
+      return _broadcast(message, without);
+    };
+
+    const _onClose = this.onClose.bind(this);
+    this.onClose = async (
+      connection: Connection,
+      code: number,
+      reason: string,
+      wasClean: boolean
+    ) => {
+      return agentContext.run(
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection,
+          request: undefined,
+        },
+        async () => {
+          this._emitEvent({
+            type: "close",
+            instance: this.name,
+            className: this._ParentClass.name,
+            id: nanoid(),
+            timestamp: Date.now(),
+            payload: {
+              connectionId: connection.id,
+              code,
+              reason,
+              wasClean,
+            },
+          });
+          return _onClose(connection, code, reason, wasClean);
+        }
+      );
+    };
     const _onStart = this.onStart.bind(this);
     this.onStart = async () => {
       return agentContext.run(
-        { agent: this, connection: undefined, request: undefined },
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request: undefined,
+        },
         async () => {
           const servers = this.sql<MCPServerRow>`
             SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
@@ -557,6 +997,93 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         }
       );
     };
+
+    const _onError = this.onError.bind(this);
+    this.onError = async (
+      connectionOrError: Connection | unknown,
+      error?: unknown
+    ): Promise<void> => {
+      return agentContext.run(
+        {
+          // Need to cast "this" to Agent<unknown> to avoid type errors
+          // because the agentContext is as strictly typed as the Agent class
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request: undefined,
+        },
+        async () => {
+          return this._tryCatch(() => {
+            const connectionId =
+              error &&
+              connectionOrError !== null &&
+              typeof connectionOrError === "object" &&
+              "id" in connectionOrError &&
+              typeof connectionOrError.id === "string"
+                ? connectionOrError.id
+                : "server";
+
+            this._emitEvent({
+              type: "error",
+              instance: this.name,
+              className: this._ParentClass.name,
+              id: nanoid(),
+              timestamp: Date.now(),
+              payload: {
+                connection: connectionId,
+                error: {
+                  message:
+                    error instanceof Error ? error.message : "Unknown error",
+                  stack: error instanceof Error ? error.stack : undefined,
+                },
+              },
+            });
+
+            // Needed to silence the typescript compiler
+            if (error) {
+              return _onError(connectionOrError as Connection, error);
+            }
+
+            return _onError(connectionOrError);
+          });
+        }
+      );
+    };
+  }
+
+  #createWebSocketProxy(connection: Connection): Connection {
+    const self = this;
+    return new Proxy(connection, {
+      get(target, prop, receiver) {
+        // Intercept the 'send' method
+        if (prop === "send") {
+          return function (
+            this: Connection,
+            message: string | ArrayBuffer | ArrayBufferView
+          ) {
+            self._emitEvent({
+              type: "send",
+              instance: self.name,
+              className: self._ParentClass.name,
+              id: target.id,
+              timestamp: Date.now(),
+              payload: {
+                message:
+                  typeof message === "string"
+                    ? message
+                    : { type: "binary", size: message.byteLength },
+                connectionId: target.id,
+              },
+            });
+
+            // Call the original send method
+            return Reflect.get(target, prop, receiver).call(target, message);
+          };
+        }
+
+        // Return other properties/methods unchanged
+        return Reflect.get(target, prop, receiver);
+      },
+    });
   }
 
   private _setStateInternal(
@@ -588,6 +1115,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         }
       );
     });
+  }
+
+  _emitEvent(event: AgentEvent<State>) {
+    this.#eventBus.emit("event", event);
+    for (const observer of this.eventObservers) {
+      observer.handler(event);
+    }
   }
 
   /**
@@ -867,7 +1401,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         continue;
       }
       await agentContext.run(
-        { agent: this, connection: undefined, request: undefined },
+        // Need to cast "this" to Agent<unknown> to avoid type errors
+        // because the agentContext is as strictly typed as the Agent class
+        {
+          agent: this as Agent<unknown>,
+          connection: undefined,
+          request: undefined,
+        },
         async () => {
           try {
             await (
@@ -1247,4 +1787,23 @@ export class StreamingResponse {
     };
     this._connection.send(JSON.stringify(response));
   }
+}
+
+/**
+ * For debugging purposes, get the event stream from an Agent
+ *
+ * @param agent Agent instance
+ * @returns A response object of which the body points to a readable stream of events
+ */
+export async function getAgentEventStream<T extends Agent<unknown, unknown>>(
+  agent: DurableObjectStub<T>
+) {
+  const secret = await agent.secret;
+  const url = `http://dummy-example.cloudflare.com/${secret}/events`;
+  return await agent.fetch(url, {
+    method: "GET",
+    headers: {
+      Accept: "text/event-stream",
+    },
+  });
 }
