@@ -563,6 +563,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     state: State,
     source: Connection | "server" = "server"
   ) {
+    const prevState = this._state;
     this._state = state;
     this.sql`
     INSERT OR REPLACE INTO cf_agents_state (id, state)
@@ -576,6 +577,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       JSON.stringify({
         type: "cf_agent_state",
         state: state,
+        prevState,
       }),
       source !== "server" ? [source.id] : []
     );
@@ -584,7 +586,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       return agentContext.run(
         { agent: this, connection, request },
         async () => {
-          return this.onStateUpdate(state, source);
+          return this.onStateUpdate(state, source, prevState);
         }
       );
     });
@@ -602,8 +604,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Called when the Agent's state is updated
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
+   * @param prevState Previous state
    */
-  onStateUpdate(state: State | undefined, source: Connection | "server") {
+  onStateUpdate(
+    state: State | undefined,
+    source: Connection | "server",
+    prevState?: State
+  ) {
     // override this to handle state updates
   }
 
