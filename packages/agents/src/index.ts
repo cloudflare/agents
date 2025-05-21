@@ -1,35 +1,32 @@
 import {
   Server,
-  routePartykitRequest,
-  type PartyServerOptions,
   getServerByName,
+  routePartykitRequest,
   type Connection,
   type ConnectionContext,
+  type PartyServerOptions,
   type WSMessage,
 } from "partyserver";
 
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 
+import type {
+  Prompt,
+  Resource,
+  ServerCapabilities,
+  Tool,
+} from "@modelcontextprotocol/sdk/types.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MCPClientManager } from "./mcp/client";
-import {
-  DurableObjectOAuthClientProvider,
-  type AgentsOAuthProvider,
-} from "./mcp/do-oauth-client-provider";
-import type {
-  Tool,
-  Resource,
-  Prompt,
-  ServerCapabilities,
-} from "@modelcontextprotocol/sdk/types.js";
+import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import { camelCaseToKebabCase } from "./client";
 
-export type { Connection, WSMessage, ConnectionContext } from "partyserver";
+export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
 /**
  * RPC request message from client
@@ -194,6 +191,9 @@ export type MCPServer = {
   name: string;
   server_url: string;
   auth_url: string | null;
+  // This state is specifically about the temporary process of getting a token (if needed).
+  // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
+  // to communicate a change to a non-ready state.
   state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
   instructions: string | null;
   capabilities: ServerCapabilities | null;
@@ -528,22 +528,24 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
           `;
 
-          // from DO storage, reconnect to all servers using our saved auth information
+          // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
           await Promise.allSettled(
-            servers.map((server) => {
-              return this._connectToMcpServerInternal(
-                server.name,
-                server.server_url,
-                server.callback_url,
-                server.server_options
-                  ? JSON.parse(server.server_options)
-                  : undefined,
-                {
-                  id: server.id,
-                  oauthClientId: server.client_id ?? undefined,
-                }
-              );
-            })
+            servers
+              .filter((server) => server.auth_url === null)
+              .map((server) => {
+                return this._connectToMcpServerInternal(
+                  server.name,
+                  server.server_url,
+                  server.callback_url,
+                  server.server_options
+                    ? JSON.parse(server.server_options)
+                    : undefined,
+                  {
+                    id: server.id,
+                    oauthClientId: server.client_id ?? undefined,
+                  }
+                );
+              })
           );
 
           this.broadcast(

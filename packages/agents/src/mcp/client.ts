@@ -1,22 +1,22 @@
 import { MCPClientConnection } from "./client-connection";
 
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
   CallToolResultSchema,
   CompatibilityCallToolResultSchema,
-  ReadResourceRequest,
   GetPromptRequest,
-  Tool,
-  Resource,
   Prompt,
+  ReadResourceRequest,
+  Resource,
   ResourceTemplate,
+  Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { jsonSchema, type ToolSet } from "ai";
 import { nanoid } from "nanoid";
+import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 
 /**
  * Utility class that aggregates multiple MCP clients into one
@@ -45,8 +45,9 @@ export class MCPClientManager {
   async connect(
     url: string,
     options: {
-      // Allows you to reconnect to a server (in the case of a auth reconnect)
+      // Allows you to reconnect to a server (in the case of an auth reconnect)
       reconnect?: {
+        // server id
         id: string;
         oauthClientId?: string;
         oauthCode?: string;
@@ -69,8 +70,8 @@ export class MCPClientManager {
         "No authProvider provided in the transport options. This client will only support unauthenticated remote MCP Servers"
       );
     } else {
-      // reconnect with auth
       options.transport.authProvider.serverId = id;
+      // reconnect with auth
       if (options.reconnect?.oauthClientId) {
         options.transport.authProvider.clientId =
           options.reconnect?.oauthClientId;
