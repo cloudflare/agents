@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.90
+
+### Patch Changes
+
+- [#295](https://github.com/cloudflare/agents/pull/295) [`cac66b8`](https://github.com/cloudflare/agents/commit/cac66b824c6dbfeb81623eed18c0e0d13db6d363) Thanks [@threepointone](https://github.com/threepointone)! - duck typing DurableObjectNamespace type
+
 ## 0.0.89
 
 ### Patch Changes
