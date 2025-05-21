@@ -30,6 +30,19 @@ function corsHeaders(request: Request, corsOptions: CORSOptions = {}) {
   };
 }
 
+function isDurableObjectNamespace(
+  namespace: unknown
+): namespace is DurableObjectNamespace<McpAgent> {
+  return (
+    typeof namespace === "object" &&
+    namespace !== null &&
+    "newUniqueId" in namespace &&
+    typeof namespace.newUniqueId === "function" &&
+    "idFromName" in namespace &&
+    typeof namespace.idFromName === "function"
+  );
+}
+
 function handleCORS(
   request: Request,
   corsOptions?: CORSOptions
@@ -557,12 +570,12 @@ export abstract class McpAgent<
           return new Response("Invalid binding", { status: 500 });
         }
 
-        // Ensure that the biding is to a DurableObject
-        if (bindingValue.toString() !== "[object DurableObjectNamespace]") {
+        // Ensure that the binding is to a DurableObject
+        if (!isDurableObjectNamespace(bindingValue)) {
           return new Response("Invalid binding", { status: 500 });
         }
 
-        const namespace = bindingValue as DurableObjectNamespace<McpAgent>;
+        const namespace = bindingValue satisfies DurableObjectNamespace<McpAgent>;
 
         // Handle initial SSE connection
         if (request.method === "GET" && basePattern.test(url)) {
@@ -785,12 +798,12 @@ export abstract class McpAgent<
           return new Response("Invalid binding", { status: 500 });
         }
 
-        // Ensure that the biding is to a DurableObject
-        if (bindingValue.toString() !== "[object DurableObjectNamespace]") {
+        // Ensure that the binding is to a DurableObject
+        if (!isDurableObjectNamespace(bindingValue)) {
           return new Response("Invalid binding", { status: 500 });
         }
 
-        const namespace = bindingValue as DurableObjectNamespace<McpAgent>;
+        const namespace = bindingValue satisfies DurableObjectNamespace<McpAgent>;
 
         if (request.method === "POST" && basePattern.test(url)) {
           // validate the Accept header
