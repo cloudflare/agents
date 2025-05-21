@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.91
+
+### Patch Changes
+
+- [`7972da4`](https://github.com/cloudflare/agents/commit/7972da40a639611f253c4b4e27d18d4ff3c5a5e2) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
 ## 0.0.90
 
 ### Patch Changes
