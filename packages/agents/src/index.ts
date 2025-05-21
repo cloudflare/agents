@@ -831,9 +831,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   private async _scheduleNextAlarm() {
     // Find the next schedule that needs to be executed
     const result = this.sql`
-      SELECT time FROM cf_agents_schedules 
+      SELECT time FROM cf_agents_schedules
       WHERE time > ${Math.floor(Date.now() / 1000)}
-      ORDER BY time ASC 
+      ORDER BY time ASC
       LIMIT 1
     `;
     if (!result) return;
@@ -986,11 +986,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       oauthClientId?: string;
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    const authProvider = new DurableObjectOAuthClientProvider(
-      this.ctx.storage,
-      this.name,
-      callbackUrl
-    );
+    const authProvider = this.createOAuthProvider(callbackUrl);
 
     if (reconnect) {
       authProvider.serverId = reconnect.id;
@@ -1083,6 +1079,14 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
 
     return mcpState;
+  }
+
+  createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+    return new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      callbackUrl
+    );
   }
 }
 
