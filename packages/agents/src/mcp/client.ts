@@ -232,6 +232,7 @@ export class MCPClientManager {
       throw new Error(`Connection with id "${id}" does not exist.`);
     }
     await this.mcpConnections[id].client.close();
+    delete this.mcpConnections[id];
   }
 
   /**
