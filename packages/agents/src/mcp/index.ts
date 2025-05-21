@@ -575,7 +575,8 @@ export abstract class McpAgent<
           return new Response("Invalid binding", { status: 500 });
         }
 
-        const namespace = bindingValue satisfies DurableObjectNamespace<McpAgent>;
+        const namespace =
+          bindingValue satisfies DurableObjectNamespace<McpAgent>;
 
         // Handle initial SSE connection
         if (request.method === "GET" && basePattern.test(url)) {
@@ -803,7 +804,8 @@ export abstract class McpAgent<
           return new Response("Invalid binding", { status: 500 });
         }
 
-        const namespace = bindingValue satisfies DurableObjectNamespace<McpAgent>;
+        const namespace =
+          bindingValue satisfies DurableObjectNamespace<McpAgent>;
 
         if (request.method === "POST" && basePattern.test(url)) {
           // validate the Accept header
