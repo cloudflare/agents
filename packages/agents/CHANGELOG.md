@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.92
+
+### Patch Changes
+
+- [#299](https://github.com/cloudflare/agents/pull/299) [`eeb70e2`](https://github.com/cloudflare/agents/commit/eeb70e256594d688bb291fd49d96faa6839e4d8a) Thanks [@courtney-sims](https://github.com/courtney-sims)! - Prevent auth url from being regenerated during oauth flow
+
 ## 0.0.91
 
 ### Patch Changes
