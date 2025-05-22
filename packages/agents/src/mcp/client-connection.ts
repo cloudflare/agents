@@ -2,7 +2,6 @@ import { SSEEdgeClientTransport } from "./sse-edge";
 
 import {
   ToolListChangedNotificationSchema,
-  type ClientCapabilities,
   type Resource,
   type Tool,
   type Prompt,
@@ -14,7 +13,7 @@ import {
   type ServerCapabilities,
   type ResourceTemplate,
   type ListResourceTemplatesResult,
-  type Notification,
+  type Implementation,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -34,6 +33,7 @@ export class MCPClientConnection {
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
   serverCapabilities: ServerCapabilities | undefined;
+  serverInfo: Implementation | undefined;
 
   constructor(
     public url: URL,
@@ -84,20 +84,28 @@ export class MCPClientConnection {
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
-    const [instructions, tools, resources, prompts, resourceTemplates] =
-      await Promise.all([
-        this.client.getInstructions(),
-        this.registerTools(),
-        this.registerResources(),
-        this.registerPrompts(),
-        this.registerResourceTemplates(),
-      ]);
+    const [
+      instructions,
+      serverInfo,
+      tools,
+      resources,
+      prompts,
+      resourceTemplates,
+    ] = await Promise.all([
+      this.client.getInstructions(),
+      this.client.getServerVersion(),
+      this.registerTools(),
+      this.registerResources(),
+      this.registerPrompts(),
+      this.registerResourceTemplates(),
+    ]);
 
     this.instructions = instructions;
     this.tools = tools;
     this.resources = resources;
     this.prompts = prompts;
     this.resourceTemplates = resourceTemplates;
+    this.serverInfo = serverInfo;
 
     this.connectionState = "ready";
   }
