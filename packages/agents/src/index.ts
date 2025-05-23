@@ -25,6 +25,7 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import { camelCaseToKebabCase } from "./client";
+import type { MCPClientConnection } from "./mcp/client-connection";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -1073,14 +1074,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     `;
 
     for (const server of servers) {
+      const serverConn = this.mcp.mcpConnections[server.id];
       mcpState.servers[server.id] = {
         name: server.name,
         server_url: server.server_url,
         auth_url: server.auth_url,
-        state: this.mcp.mcpConnections[server.id].connectionState,
-        instructions: this.mcp.mcpConnections[server.id].instructions ?? null,
-        capabilities:
-          this.mcp.mcpConnections[server.id].serverCapabilities ?? null,
+        // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
+        state: serverConn?.connectionState ?? "authenticating",
+        instructions: serverConn?.instructions ?? null,
+        capabilities: serverConn?.serverCapabilities ?? null,
       };
     }
 
