@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.93
+
+### Patch Changes
+
+- [#302](https://github.com/cloudflare/agents/pull/302) [`b57e1d9`](https://github.com/cloudflare/agents/commit/b57e1d918d02607dcb68e1ca55790b6362964090) Thanks [@cmsparks](https://github.com/cmsparks)! - Fix an error where MCP servers pending connection would trigger an error
+
 ## 0.0.92
 
 ### Patch Changes
