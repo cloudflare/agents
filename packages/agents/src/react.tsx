@@ -3,8 +3,12 @@ import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef, use, useMemo, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
-import type { Method, RPCMethod } from "./serializable";
 import { MessageType } from "./ai-types";
+import type {
+  AllSerializableValues,
+  SerializableReturnValue,
+  SerializableValue
+} from "./serializable";
 
 /**
  * Convert a camelCase string to a kebab-case string
@@ -130,17 +134,68 @@ export type UseAgentOptions<State = unknown> = Omit<
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
 };
 
+// biome-ignore lint: suppressions/parse
+type Method = (...args: any[]) => any;
+
+type NonStreamingRPCMethod<T extends Method> =
+  AllSerializableValues<Parameters<T>> extends true
+    ? ReturnType<T> extends SerializableReturnValue
+      ? T
+      : never
+    : never;
+
+interface StreamingResponse<
+  OnChunkT extends SerializableValue | unknown = unknown,
+  OnDoneT extends SerializableValue | unknown = unknown
+> {
+  send(chunk: OnChunkT): void;
+  end(finalChunk?: OnDoneT): void;
+}
+
+type StreamingRPCMethod<T extends Method> = T extends (
+  arg: infer A,
+  ...rest: infer R
+) => void | Promise<void>
+  ? A extends StreamingResponse<SerializableValue, SerializableValue>
+    ? AllSerializableValues<R> extends true
+      ? T
+      : never
+    : never
+  : never;
+
+type RPCMethod<T extends Method> =
+  T extends NonStreamingRPCMethod<T>
+    ? NonStreamingRPCMethod<T>
+    : T extends StreamingRPCMethod<T>
+      ? StreamingRPCMethod<T>
+      : never;
+
+type RPCMethods<T> = {
+  [K in keyof T as T[K] extends Method ? K : never]: T[K] extends Method
+    ? RPCMethod<T[K]>
+    : never;
+};
+
 type AllOptional<T> = T extends [infer A, ...infer R]
   ? undefined extends A
     ? AllOptional<R>
     : false
   : true; // no params means optional by default
 
-type RPCMethods<T> = {
-  [K in keyof T as T[K] extends RPCMethod<T[K]> ? K : never]: RPCMethod<T[K]>;
-};
+type StreamOptionsFrom<StreamingResponseT> =
+  StreamingResponseT extends StreamingResponse<
+    infer T extends SerializableValue,
+    infer U extends SerializableValue
+  >
+    ? StreamOptions<T, U>
+    : never;
 
-type OptionalParametersMethod<T extends RPCMethod> =
+type RestParameters<T extends Method> =
+  Parameters<StreamingRPCMethod<T>> extends [unknown, ...infer Rest]
+    ? Rest
+    : never;
+
+type OptionalParametersMethod<T extends Method> =
   AllOptional<Parameters<T>> extends true ? T : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
@@ -159,6 +214,14 @@ type RequiredAgentMethods<T> = Omit<
   AgentMethods<T>,
   keyof OptionalAgentMethods<T>
 >;
+
+type StreamingAgentMethods<T> = {
+  [K in keyof AgentMethods<T> as AgentMethods<T>[K] extends StreamingRPCMethod<
+    AgentMethods<T>[K]
+  >
+    ? K
+    : never]: StreamingRPCMethod<AgentMethods<T>[K]>;
+};
 
 type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
   // biome-ignore lint: suppressions/parse
@@ -182,7 +245,18 @@ type RequiredArgsAgentMethodCall<AgentT> = <
   streamOptions?: StreamOptions
 ) => AgentPromiseReturnType<AgentT, K>;
 
-type AgentMethodCall<AgentT> = OptionalArgsAgentMethodCall<AgentT> &
+type StreamingAgentMethodCall<AgentT> = <
+  K extends keyof StreamingAgentMethods<AgentT>
+>(
+  method: K,
+  args: RestParameters<StreamingAgentMethods<AgentT>[K]>,
+  streamOptions: StreamOptionsFrom<
+    Parameters<StreamingAgentMethods<AgentT>[K]>[0]
+  >
+) => void;
+
+type AgentMethodCall<AgentT> = StreamingAgentMethodCall<AgentT> &
+  OptionalArgsAgentMethodCall<AgentT> &
   RequiredArgsAgentMethodCall<AgentT>;
 
 type UntypedAgentMethodCall = <T = unknown>(
@@ -192,9 +266,16 @@ type UntypedAgentMethodCall = <T = unknown>(
 ) => Promise<T>;
 
 type AgentStub<T> = {
-  [K in keyof AgentMethods<T>]: (
-    ...args: Parameters<AgentMethods<T>[K]>
-  ) => AgentPromiseReturnType<AgentMethods<T>, K>;
+  [K in keyof AgentMethods<T>]: AgentMethods<T>[K] extends StreamingRPCMethod<
+    AgentMethods<T>[K]
+  >
+    ? (
+        options: StreamOptionsFrom<Parameters<AgentMethods<T>[K]>[0]>,
+        ...args: RestParameters<AgentMethods<T>[K]>
+      ) => void
+    : (
+        ...args: Parameters<AgentMethods<T>[K]>
+      ) => AgentPromiseReturnType<AgentMethods<T>, K>;
 };
 
 // we neet to use Method instead of RPCMethod here for retro-compatibility
@@ -232,7 +313,7 @@ export function useAgent<State>(
   agent: string;
   name: string;
   setState: (state: State) => void;
-  call: UntypedAgentMethodCall | AgentMethodCall<unknown>;
+  call: UntypedAgentMethodCall;
   stub: UntypedAgentStub;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
