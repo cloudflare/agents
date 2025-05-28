@@ -916,6 +916,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    this.ctx.abort("destroyed"); // enforce that the agent is evicted
   }
 
   /**
