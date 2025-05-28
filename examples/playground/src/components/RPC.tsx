@@ -40,10 +40,23 @@ export default function RPC({
     }
   };
 
+  const handleDestroy = async () => {
+    await call("destroyAgent");
+    addToast("Agent destroyed", "success");
+  };
+
   return (
     <div className="rpc-container">
       <div className="rpc-content">
         <div className="button-container">
+          <button
+            type="button"
+            onClick={handleDestroy}
+            disabled={loading}
+            className="rpc-button button-destroy"
+          >
+            Destroy Agent
+          </button>
           <button
             type="button"
             onClick={handleRegularCall}

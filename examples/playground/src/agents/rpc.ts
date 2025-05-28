@@ -19,4 +19,9 @@ export class Rpc extends Agent<Env> {
     }
     stream.end("Done");
   }
+
+  @callable()
+  async destroyAgent() {
+    await this.destroy();
+  }
 }
