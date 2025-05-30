@@ -25,7 +25,10 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import { camelCaseToKebabCase } from "./client";
-import type { MCPClientConnection } from "./mcp/client-connection";
+import type {
+  MCPClientConnection,
+  MCPConnectionState,
+} from "./mcp/client-connection";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -195,7 +198,7 @@ export type MCPServer = {
   // This state is specifically about the temporary process of getting a token (if needed).
   // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
   // to communicate a change to a non-ready state.
-  state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
+  state: MCPConnectionState;
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
@@ -525,37 +528,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       return agentContext.run(
         { agent: this, connection: undefined, request: undefined },
         async () => {
-          const servers = this.sql<MCPServerRow>`
-            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-          `;
-
-          // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-          await Promise.allSettled(
-            servers
-              .filter((server) => server.auth_url === null)
-              .map((server) => {
-                return this._connectToMcpServerInternal(
-                  server.name,
-                  server.server_url,
-                  server.callback_url,
-                  server.server_options
-                    ? JSON.parse(server.server_options)
-                    : undefined,
-                  {
-                    id: server.id,
-                    oauthClientId: server.client_id ?? undefined,
-                  }
-                );
-              })
-          );
-
-          this.broadcast(
-            JSON.stringify({
-              type: "cf_agent_mcp_servers",
-              mcp: this.getMcpServers(),
-            })
-          );
-
           await this._tryCatch(() => _onStart());
         }
       );
@@ -967,6 +939,45 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     return result;
   }
 
+  async connectMCPServers() {
+    const servers = this.sql<MCPServerRow>`
+            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
+          `;
+
+    // from DO storage, reconnect to all servers using our saved auth information
+    await Promise.allSettled(
+      servers.map((server) => {
+        return this._connectToMcpServerInternal(
+          server.name,
+          server.server_url,
+          server.callback_url,
+          server.server_options ? JSON.parse(server.server_options) : undefined,
+          {
+            id: server.id,
+            oauthClientId: server.client_id ?? undefined,
+          }
+        );
+      })
+    );
+
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_mcp_servers",
+        mcp: this.getMcpServers(),
+      })
+    );
+  }
+
+  async disconnectMCPServers() {
+    await this.mcp.closeAllConnections();
+    this.broadcast(
+      JSON.stringify({
+        type: "cf_agent_mcp_servers",
+        mcp: this.getMcpServers(),
+      })
+    );
+  }
+
   async _connectToMcpServerInternal(
     serverName: string,
     url: string,
@@ -1080,8 +1091,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         name: server.name,
         server_url: server.server_url,
         auth_url: server.auth_url,
-        // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
-        state: serverConn?.connectionState ?? "authenticating",
+        // server is stored in our DB but not in our connection manager, so it's inactive
+        state: serverConn?.connectionState ?? "disconnected",
         instructions: serverConn?.instructions ?? null,
         capabilities: serverConn?.serverCapabilities ?? null,
       };
