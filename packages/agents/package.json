@@ -8,7 +8,9 @@
     "check:test": "npm run check:test:workers && npm run check:test:react",
     "check:test:workers": "vitest -r src/tests --watch false",
     "check:test:react": "vitest -r src/react-tests --watch false",
-    "test": "vitest -r src/tests",
+    "test": "npm run test:client && npm run test:server",
+    "test:client": "vitest -r src/tests/client",
+    "test:server": "vitest -r src/tests/server",
     "test:react": "vitest -r src/react-tests",
     "evals": "(cd evals; evalite)",
     "build": "tsx ./scripts/build.ts"
@@ -95,6 +97,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.8.32",
+    "@cloudflare/workers-oauth-provider": "^0.0.5",
     "react": "*",
     "vitest-browser-react": "^0.2.0"
   }

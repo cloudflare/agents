@@ -12,12 +12,14 @@ export interface AgentsOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
   serverId: string | undefined;
+  codeChallenge: string | undefined;
 }
 
 export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
-  private _authUrl_: string | undefined;
-  private _serverId_: string | undefined;
-  private _clientId_: string | undefined;
+  private _authUrl: string | undefined;
+  private _serverId: string | undefined;
+  private _clientId: string | undefined;
+  private _codeChallenge: string | undefined;
 
   constructor(
     public storage: DurableObjectStorage,
@@ -41,25 +43,25 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   get clientId() {
-    if (!this._clientId_) {
+    if (!this._clientId) {
       throw new Error("Trying to access clientId before it was set");
     }
-    return this._clientId_;
+    return this._clientId;
   }
 
   set clientId(clientId_: string) {
-    this._clientId_ = clientId_;
+    this._clientId = clientId_;
   }
 
   get serverId() {
-    if (!this._serverId_) {
+    if (!this._serverId) {
       throw new Error("Trying to access serverId before it was set");
     }
-    return this._serverId_;
+    return this._serverId;
   }
 
   set serverId(serverId_: string) {
-    this._serverId_ = serverId_;
+    this._serverId = serverId_;
   }
 
   keyPrefix(clientId: string) {
@@ -71,7 +73,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   async clientInformation(): Promise<OAuthClientInformation | undefined> {
-    if (!this._clientId_) {
+    if (!this._clientId) {
       return undefined;
     }
     return (
@@ -96,7 +98,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
-    if (!this._clientId_) {
+    if (!this._clientId) {
       return undefined;
     }
     return (
@@ -110,7 +112,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   get authUrl() {
-    return this._authUrl_;
+    return this._authUrl;
   }
 
   /**
@@ -118,30 +120,73 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
    * and require user interact to initiate the redirect flow
    */
   async redirectToAuthorization(authUrl: URL): Promise<void> {
-    // We want to track the client ID in state here because the typescript SSE client sometimes does
-    // a dynamic client registration AFTER generating this redirect URL.
+    // We want to track the client ID & code challenge in state here because the typescript SSE client sometimes does
+    // a dynamic client registration AFTER generating this redirect URL. This prevents us from:
+    // 1) using the wrong client information
+    // 2) using the wrong PKCE code challenge
     const client_id = authUrl.searchParams.get("client_id");
-    if (client_id) {
-      authUrl.searchParams.append("state", client_id);
+    const code_challenge = authUrl.searchParams.get("code_challenge");
+    if (client_id && code_challenge) {
+      this.codeChallenge = code_challenge;
+      authUrl.searchParams.append("state", `${client_id}:${code_challenge}`);
     }
-    this._authUrl_ = authUrl.toString();
+    this._authUrl = authUrl.toString();
   }
 
-  codeVerifierKey(clientId: string) {
-    return `${this.keyPrefix(clientId)}/code_verifier`;
+  get codeChallenge() {
+    if (!this._codeChallenge) {
+      throw new Error("Trying to access codeChallenge before it was set");
+    }
+    return this._codeChallenge;
+  }
+
+  set codeChallenge(codeChallenge_: string) {
+    this._codeChallenge = codeChallenge_;
+  }
+
+  codeVerifierKey(clientId: string, codeChallenge: string) {
+    return `${this.keyPrefix(clientId)}/code_verifier/${codeChallenge}`;
   }
 
   async saveCodeVerifier(verifier: string): Promise<void> {
-    await this.storage.put(this.codeVerifierKey(this.clientId), verifier);
+    this.codeChallenge = await getCodeChallenge(verifier);
+    await this.storage.put(
+      this.codeVerifierKey(this.clientId, this.codeChallenge),
+      verifier
+    );
   }
 
   async codeVerifier(): Promise<string> {
     const codeVerifier = await this.storage.get<string>(
-      this.codeVerifierKey(this.clientId)
+      this.codeVerifierKey(this.clientId, this.codeChallenge)
     );
     if (!codeVerifier) {
       throw new Error("No code verifier found");
     }
     return codeVerifier;
   }
+}
+
+// OAuth utilities
+async function getCodeChallenge(codeVerifier: string) {
+  const buffer = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(codeVerifier)
+  );
+  const hash = new Uint8Array(buffer);
+  let binary = "";
+  const hashLength = hash.byteLength;
+  for (let i = 0; i < hashLength; i++) {
+    binary += String.fromCharCode(hash[i]);
+  }
+  const codeChallenge = base64urlEncode(binary);
+  return codeChallenge;
+}
+
+function base64urlEncode(value: string): string {
+  let base64 = btoa(value);
+  base64 = base64.replace(/\+/g, "-");
+  base64 = base64.replace(/\//g, "_");
+  base64 = base64.replace(/=/g, "");
+  return base64;
 }

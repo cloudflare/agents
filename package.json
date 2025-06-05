@@ -38,6 +38,7 @@
     "@vitejs/plugin-react": "^4.5.0",
     "@vitest/browser": "^3.1.4",
     "@vitest/runner": "^3.1.4",
+    "@vitest/utils": "^3.1.4",
     "ai": "^4.3.16",
     "autoevals": "^0.0.129",
     "concurrently": "^9.1.2",

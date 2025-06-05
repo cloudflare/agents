@@ -1,0 +1,11 @@
+main = "worker.ts"
+compatibility_date = "2025-04-17"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "McpClient"
+class_name = "McpClient"
+
+ [[migrations]]
+tag = "v1" # Should be unique for each entry
+new_sqlite_classes = ["McpClient"]

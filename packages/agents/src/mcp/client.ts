@@ -106,6 +106,8 @@ export class MCPClientManager {
 
     return {
       id,
+      // if we didn't refresh the auth flow, just reuse the old oauthClientId
+      clientId: options.reconnect?.oauthClientId,
     };
   }
 
@@ -129,14 +131,19 @@ export class MCPClientManager {
       );
     }
     const code = url.searchParams.get("code");
-    const clientId = url.searchParams.get("state");
+    const state = url.searchParams.get("state");
     const urlParams = urlMatch.split("/");
     const serverId = urlParams[urlParams.length - 1];
     if (!code) {
       throw new Error("Unauthorized: no code provided");
     }
-    if (!clientId) {
+    if (!state) {
       throw new Error("Unauthorized: no state provided");
+    }
+
+    const [clientId, codeChallenge] = state.split(":");
+    if (!clientId || !codeChallenge) {
+      throw new Error("Unauthorized: no client ID or code challenge provided");
     }
 
     if (this.mcpConnections[serverId] === undefined) {
@@ -151,6 +158,7 @@ export class MCPClientManager {
     }
 
     conn.options.transport.authProvider.clientId = clientId;
+    conn.options.transport.authProvider.codeChallenge = codeChallenge;
     conn.options.transport.authProvider.serverId = serverId;
 
     // reconnect to server with authorization
