@@ -1,4 +1,9 @@
-import { Agent, routeAgentRequest, type AgentNamespace } from "agents";
+import {
+  Agent,
+  routeAgentRequest,
+  type AgentNamespace,
+  unstable_callable,
+} from "agents";
 import { MCPClientManager } from "agents/mcp/client";
 
 type Env = {
@@ -9,15 +14,19 @@ type Env = {
 export class MyAgent extends Agent<Env, never> {
   mcp = new MCPClientManager("my-agent", "1.0.0");
 
-  async onRequest(request: Request): Promise<Response> {
-    const reqUrl = new URL(request.url);
-    if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {
-      const mcpServer = (await request.json()) as { url: string; name: string };
-      await this.addMcpServer(mcpServer.name, mcpServer.url, this.env.HOST);
-      return new Response("Ok", { status: 200 });
-    }
+  @unstable_callable()
+  async disconnectServers() {
+    await this.disconnectMCPServers();
+  }
 
-    return new Response("Not found", { status: 404 });
+  @unstable_callable()
+  async connectServers() {
+    await this.connectMCPServers();
+  }
+
+  @unstable_callable()
+  async addUserMcpServer(name: string, url: string) {
+    await this.addMcpServer(name, url, this.env.HOST);
   }
 }
 

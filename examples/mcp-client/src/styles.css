@@ -115,3 +115,9 @@ b {
   margin-bottom: 4px;
   display: inline-block;
 }
+
+.connect-disconnect {
+  display: flex;
+  flex-direction: row-reverse;
+  gap: 8px;
+}

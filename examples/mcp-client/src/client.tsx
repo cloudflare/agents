@@ -2,9 +2,9 @@ import { useAgent } from "agents/react";
 import { createRoot } from "react-dom/client";
 import { useRef, useState } from "react";
 import "./styles.css";
-import { agentFetch } from "agents/client";
 import { nanoid } from "nanoid";
 import type { MCPServersState } from "agents";
+import type { MyAgent } from "./server";
 
 let sessionId = localStorage.getItem("sessionId");
 if (!sessionId) {
@@ -24,7 +24,7 @@ function App() {
     resources: [],
   });
 
-  const agent = useAgent({
+  const agent = useAgent<MyAgent, never>({
     agent: "my-agent",
     name: sessionId!,
     onOpen: () => setIsConnected(true),
@@ -50,18 +50,7 @@ function App() {
     if (!mcpNameInputRef.current || !mcpNameInputRef.current.value.trim())
       return;
     const serverName = mcpNameInputRef.current.value;
-    agentFetch(
-      {
-        host: agent.host,
-        agent: "my-agent",
-        name: sessionId!,
-        path: "add-mcp",
-      },
-      {
-        method: "POST",
-        body: JSON.stringify({ url: serverUrl, name: serverName }),
-      }
-    );
+    agent.call("addUserMcpServer", [serverName, serverUrl]);
     setMcpState({
       ...mcpState,
       servers: {
@@ -126,6 +115,25 @@ function App() {
             )}
           </div>
         ))}
+      </div>
+
+      <div className="connect-disconnect">
+        <button
+          type="button"
+          onClick={() => {
+            agent.call("disconnectServers");
+          }}
+        >
+          Disconnect All
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            agent.call("connectServers");
+          }}
+        >
+          Connect All
+        </button>
       </div>
 
       <div className="messages-section">

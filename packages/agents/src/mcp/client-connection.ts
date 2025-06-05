@@ -20,14 +20,17 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 
+export type MCPConnectionState =
+  | "disconnected"
+  | "authenticating"
+  | "connecting"
+  | "ready"
+  | "discovering"
+  | "failed";
+
 export class MCPClientConnection {
   client: Client;
-  connectionState:
-    | "authenticating"
-    | "connecting"
-    | "ready"
-    | "discovering"
-    | "failed" = "connecting";
+  connectionState: MCPConnectionState = "connecting";
   instructions?: string;
   tools: Tool[] = [];
   prompts: Prompt[] = [];

@@ -143,12 +143,6 @@ export class MCPClientManager {
       throw new Error(`Could not find serverId: ${serverId}`);
     }
 
-    if (this.mcpConnections[serverId].connectionState !== "authenticating") {
-      throw new Error(
-        "Failed to authenticate: the client isn't in the `authenticating` state"
-      );
-    }
-
     const conn = this.mcpConnections[serverId];
     if (!conn.options.transport.authProvider) {
       throw new Error(
@@ -217,9 +211,9 @@ export class MCPClientManager {
    * Closes all connections to MCP servers
    */
   async closeAllConnections() {
-    return Promise.all(
-      Object.values(this.mcpConnections).map(async (connection) => {
-        await connection.client.close();
+    await Promise.all(
+      Object.keys(this.mcpConnections).map(async (id) => {
+        this.closeConnection(id);
       })
     );
   }
