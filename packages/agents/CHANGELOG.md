@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.95
+
+### Patch Changes
+
+- [#316](https://github.com/cloudflare/agents/pull/316) [`7856b4d`](https://github.com/cloudflare/agents/commit/7856b4d90afbd3faf59f2d264b59f878648153dd) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Add fallback message when agent returns no response
+
 ## 0.0.94
 
 ### Patch Changes
