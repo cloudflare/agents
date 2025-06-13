@@ -888,7 +888,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param callback Name of the method to call
    * @returns The ID of the queued task
    */
-  async queue<T = unknown>(payload: T, callback: keyof this): Promise<string> {
+  queue<T = unknown>(callback: keyof this, payload: T): string {
     const id = nanoid(9);
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
@@ -950,8 +950,41 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
   }
 
-  async dequeue(id: string) {
+  /**
+   * Dequeue a task by ID
+   * @param id ID of the task to dequeue
+   */
+  dequeue(id: string) {
     this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
+  }
+
+  /**
+   * Dequeue all tasks
+   */
+  dequeueAll() {
+    this.sql`DELETE FROM cf_agents_queues`;
+  }
+
+  /**
+   * Dequeue all tasks by callback
+   * @param callback Name of the callback to dequeue
+   */
+  dequeueAllByCallback(callback: string) {
+    this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
+  }
+
+  /**
+   * Get a queued task by ID
+   * @param id ID of the task to get
+   * @returns The task or undefined if not found
+   */
+  getQueue(id: string): QueueItem<string> | undefined {
+    const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues WHERE id = ${id}
+    `;
+    return result
+      ? { ...result[0], payload: JSON.parse(result[0].payload) }
+      : undefined;
   }
 
   /**
