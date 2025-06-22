@@ -1,6 +1,6 @@
 import {
-  unstable_callable as callable,
   Agent,
+  unstable_callable as callable,
   type StreamingResponse,
 } from "agents";
 import type { Env } from "../server";

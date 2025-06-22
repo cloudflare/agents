@@ -1,13 +1,13 @@
-import { AIChatAgent } from "agents/ai-chat-agent";
-import type { Env } from "../server";
-import PostalMime from "postal-mime";
 import { getAgentByName } from "agents";
+import { AIChatAgent } from "agents/ai-chat-agent";
+import type { StreamTextOnFinishCallback } from "ai";
+import { createDataStreamResponse, streamText } from "ai";
 
 import { createMimeMessage } from "mimetext";
-import { streamText, createDataStreamResponse } from "ai";
-import type { StreamTextOnFinishCallback } from "ai";
+// import PostalMime from "postal-mime";
 import * as MockEmail from "../mock-cloudflare-email";
 import { model } from "../model";
+import type { Env } from "../server";
 export async function sendEmail(
   id: DurableObjectId,
   EMAIL: SendEmail,
@@ -24,7 +24,7 @@ export async function sendEmail(
   }
 
   const msg = createMimeMessage();
-  msg.setSender({ name: fromName, addr: from });
+  msg.setSender({ addr: from, name: fromName });
   msg.setRecipient(recipient);
   msg.setSubject(subject);
   msg.addMessage({
@@ -59,7 +59,7 @@ async function createMockEmail(options: {
   contentType: string;
 }) {
   const email = createMimeMessage();
-  email.setSender({ name: options.name, addr: options.from });
+  email.setSender({ addr: options.from, name: options.name });
   email.setRecipient(options.to);
   email.setSubject(options.subject);
   email.addMessage({
@@ -98,7 +98,7 @@ export class EmailAgent extends AIChatAgent<Env> {
     return super.onRequest(request);
   }
 
-  async onEmail(email: ForwardableEmailMessage) {
+  async onEmail(_email: ForwardableEmailMessage) {
     //
   }
 
@@ -106,8 +106,9 @@ export class EmailAgent extends AIChatAgent<Env> {
     const dataStreamResponse = createDataStreamResponse({
       execute: async (dataStream) => {
         const result = streamText({
-          model,
           messages: this.messages,
+          model,
+          onFinish,
           onStepFinish: async (step) => {
             // if ([...this.getConnections()].length === 0) {
 
@@ -122,19 +123,19 @@ export class EmailAgent extends AIChatAgent<Env> {
                   "default"
                 );
                 const emailToSend = await createMockEmail({
-                  id: this.ctx.id.toString(),
-                  from: "emailAgent@example.com",
-                  name: "emailAgent",
-                  to: "theman@example.com",
-                  subject: "Email from emailAgent",
                   body: step.text,
                   contentType: "text/plain",
+                  from: "emailAgent@example.com",
+                  id: this.ctx.id.toString(),
+                  name: "emailAgent",
+                  subject: "Email from emailAgent",
+                  to: "theman@example.com",
                 });
                 mockEmail
                   .toInbox({
                     from: emailToSend.from,
-                    to: emailToSend.to,
                     message: emailToSend.message,
+                    to: emailToSend.to,
                   })
                   .catch((e) => {
                     console.error("error sending email", e);
@@ -144,7 +145,6 @@ export class EmailAgent extends AIChatAgent<Env> {
               }
             }
           },
-          onFinish,
         });
 
         result.mergeIntoDataStream(dataStream);

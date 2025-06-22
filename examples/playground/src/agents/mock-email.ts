@@ -4,10 +4,10 @@ import {
   type Connection,
   type WSMessage,
 } from "agents";
-import * as MockEmail from "../mock-cloudflare-email";
-import PostalMime from "postal-mime";
 import { createMimeMessage } from "mimetext";
 import type { Email as PostalEmail } from "postal-mime";
+import PostalMime from "postal-mime";
+// import * as MockEmail from "../mock-cloudflare-email";
 export class MockEmailService<Env> extends Agent<Env> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
@@ -32,13 +32,13 @@ export class MockEmailService<Env> extends Agent<Env> {
     }
     connection.send(
       JSON.stringify({
-        type: "inbox:all",
         messages: emails,
+        type: "inbox:all",
       })
     );
   }
 
-  onMessage(connection: Connection, message: WSMessage) {
+  onMessage(_connection: Connection, message: WSMessage) {
     console.log("onMessage", message);
     const parsed = JSON.parse(message as string);
     if (parsed.type === "send-email") {
@@ -49,8 +49,8 @@ export class MockEmailService<Env> extends Agent<Env> {
       `;
       this.broadcast(
         JSON.stringify({
-          type: "inbox:all",
           messages: [],
+          type: "inbox:all",
         })
       );
     }
@@ -72,8 +72,8 @@ export class MockEmailService<Env> extends Agent<Env> {
     const parsed = await PostalMime.parse(mail._raw);
     this.broadcast(
       JSON.stringify({
-        type: "inbox:new-message",
         message: parsed,
+        type: "inbox:new-message",
       })
     );
   }
@@ -81,7 +81,7 @@ export class MockEmailService<Env> extends Agent<Env> {
   async toOutbox(to: string, subject: string, text: string): Promise<void> {
     console.log("toOutbox", to, subject, text);
     const email = createMimeMessage();
-    email.setSender({ name: "The Man", addr: "theman@example.com" });
+    email.setSender({ addr: "theman@example.com", name: "The Man" });
     email.setRecipient(to);
     email.setSubject(subject);
     email.addMessage({
@@ -97,21 +97,21 @@ export class MockEmailService<Env> extends Agent<Env> {
     `;
     this.broadcast(
       JSON.stringify({
-        type: "outbox:new-message",
         message: mail,
+        type: "outbox:new-message",
       })
     );
 
     await fetch("http://localhost:5173/agents/email-agent/default/api/email", {
-      method: "POST",
+      body: JSON.stringify({
+        from: "theman@example.com",
+        message: raw,
+        to: to,
+      }),
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: "theman@example.com",
-        to: to,
-        message: raw,
-      }),
+      method: "POST",
     });
   }
 }

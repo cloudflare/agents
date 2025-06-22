@@ -1,6 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { describe, expect, it } from "vitest";
 
 import worker, { type Env } from "./worker";
 
@@ -13,22 +13,21 @@ declare module "cloudflare:test" {
  */
 const TEST_MESSAGES = {
   initialize: {
+    id: "init-1",
     jsonrpc: "2.0",
     method: "initialize",
     params: {
+      capabilities: {},
       clientInfo: { name: "test-client", version: "1.0" },
       protocolVersion: "2025-03-26",
-      capabilities: {},
     },
-
-    id: "init-1",
   } as JSONRPCMessage,
 
   toolsList: {
+    id: "tools-1",
     jsonrpc: "2.0",
     method: "tools/list",
     params: {},
-    id: "tools-1",
   } as JSONRPCMessage,
 };
 
@@ -53,8 +52,8 @@ async function sendPostRequest(
   sessionId?: string
 ): Promise<Response> {
   const headers: Record<string, string> = {
-    "Content-Type": "application/json",
     Accept: "application/json, text/event-stream",
+    "Content-Type": "application/json",
   };
 
   if (sessionId) {
@@ -62,9 +61,9 @@ async function sendPostRequest(
   }
 
   const request = new Request(baseUrl, {
-    method: "POST",
-    headers,
     body: JSON.stringify(message),
+    headers,
+    method: "POST",
   });
 
   return worker.fetch(request, env, ctx);
@@ -76,11 +75,11 @@ function expectErrorResponse(
   expectedMessagePattern: RegExp
 ): void {
   expect(data).toMatchObject({
-    jsonrpc: "2.0",
     error: expect.objectContaining({
       code: expectedCode,
       message: expect.stringMatching(expectedMessagePattern),
     }),
+    jsonrpc: "2.0",
   });
 }
 
@@ -150,13 +149,13 @@ describe("McpAgent Streamable HTTP Transport", () => {
     const batchInitMessages: JSONRPCMessage[] = [
       TEST_MESSAGES.initialize,
       {
+        id: "init-2",
         jsonrpc: "2.0",
         method: "initialize",
         params: {
           clientInfo: { name: "test-client-2", version: "1.0" },
           protocolVersion: "2025-03-26",
         },
-        id: "init-2",
       },
     ];
 
@@ -194,16 +193,16 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     const eventData = JSON.parse(dataLine!.substring(5));
     expect(eventData).toMatchObject({
+      id: "tools-1",
       jsonrpc: "2.0",
       result: expect.objectContaining({
         tools: expect.arrayContaining([
           expect.objectContaining({
-            name: "greet",
             description: "A simple greeting tool",
+            name: "greet",
           }),
         ]),
       }),
-      id: "tools-1",
     });
   });
 
@@ -212,15 +211,15 @@ describe("McpAgent Streamable HTTP Transport", () => {
     const sessionId = await initializeServer(ctx);
 
     const toolCallMessage: JSONRPCMessage = {
+      id: "call-1",
       jsonrpc: "2.0",
       method: "tools/call",
       params: {
-        name: "greet",
         arguments: {
           name: "Test User",
         },
+        name: "greet",
       },
-      id: "call-1",
     };
 
     const response = await sendPostRequest(
@@ -238,16 +237,16 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     const eventData = JSON.parse(dataLine!.substring(5));
     expect(eventData).toMatchObject({
+      id: "call-1",
       jsonrpc: "2.0",
       result: {
         content: [
           {
-            type: "text",
             text: "Hello, Test User!",
+            type: "text",
           },
         ],
       },
-      id: "call-1",
     });
   });
 
@@ -289,13 +288,13 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     // Try POST without Accept: text/event-stream
     const request = new Request(baseUrl, {
-      method: "POST",
+      body: JSON.stringify(TEST_MESSAGES.toolsList),
       headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json", // Missing text/event-stream
+        Accept: "application/json",
+        "Content-Type": "application/json", // Missing text/event-stream
         "mcp-session-id": sessionId,
       },
-      body: JSON.stringify(TEST_MESSAGES.toolsList),
+      method: "POST",
     });
     const response = await worker.fetch(request, env, ctx);
 
@@ -315,13 +314,13 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     // Try POST with text/plain Content-Type
     const request = new Request(baseUrl, {
-      method: "POST",
+      body: "This is plain text",
       headers: {
-        "Content-Type": "text/plain",
         Accept: "application/json, text/event-stream",
+        "Content-Type": "text/plain",
         "mcp-session-id": sessionId,
       },
-      body: "This is plain text",
+      method: "POST",
     });
     const response = await worker.fetch(request, env, ctx);
 
@@ -359,12 +358,12 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     // Send batch of requests
     const batchRequests: JSONRPCMessage[] = [
-      { jsonrpc: "2.0", method: "tools/list", params: {}, id: "req-1" },
+      { id: "req-1", jsonrpc: "2.0", method: "tools/list", params: {} },
       {
+        id: "req-2",
         jsonrpc: "2.0",
         method: "tools/call",
-        params: { name: "greet", arguments: { name: "BatchUser" } },
-        id: "req-2",
+        params: { arguments: { name: "BatchUser" }, name: "greet" },
       },
     ];
     const response = await sendPostRequest(
@@ -400,13 +399,13 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     // Send invalid JSON
     const request = new Request(baseUrl, {
-      method: "POST",
+      body: "This is not valid JSON",
       headers: {
-        "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
+        "Content-Type": "application/json",
         "mcp-session-id": sessionId,
       },
-      body: "This is not valid JSON",
+      method: "POST",
     });
     const response = await worker.fetch(request, env, ctx);
 
@@ -420,7 +419,7 @@ describe("McpAgent Streamable HTTP Transport", () => {
     const sessionId = await initializeServer(ctx);
 
     // Invalid JSON-RPC (missing required jsonrpc version)
-    const invalidMessage = { method: "tools/list", params: {}, id: 1 }; // missing jsonrpc version
+    const invalidMessage = { id: 1, method: "tools/list", params: {} }; // missing jsonrpc version
     const response = await sendPostRequest(
       ctx,
       baseUrl,
@@ -431,8 +430,8 @@ describe("McpAgent Streamable HTTP Transport", () => {
     expect(response.status).toBe(400);
     const errorData = await response.json();
     expect(errorData).toMatchObject({
-      jsonrpc: "2.0",
       error: expect.anything(),
+      jsonrpc: "2.0",
     });
   });
 
@@ -441,20 +440,20 @@ describe("McpAgent Streamable HTTP Transport", () => {
     const sessionId = await initializeServer(ctx);
 
     const message1: JSONRPCMessage = {
+      id: "req-1",
       jsonrpc: "2.0",
       method: "tools/list",
       params: {},
-      id: "req-1",
     };
 
     const message2: JSONRPCMessage = {
+      id: "req-2",
       jsonrpc: "2.0",
       method: "tools/call",
       params: {
-        name: "greet",
         arguments: { name: "Connection2" },
+        name: "greet",
       },
-      id: "req-2",
     };
 
     // Make two concurrent fetch connections for different requests
@@ -483,13 +482,13 @@ describe("McpAgent Streamable HTTP Transport", () => {
     const sessionId = await initializeServer(ctx);
 
     const toolCallMessage: JSONRPCMessage = {
+      id: "call-1",
       jsonrpc: "2.0",
       method: "tools/call",
       params: {
-        name: "getPropsTestValue",
         arguments: {},
+        name: "getPropsTestValue",
       },
-      id: "call-1",
     };
 
     const response = await sendPostRequest(
@@ -507,16 +506,16 @@ describe("McpAgent Streamable HTTP Transport", () => {
 
     const eventData = JSON.parse(dataLine!.substring(5));
     expect(eventData).toMatchObject({
+      id: "call-1",
       jsonrpc: "2.0",
       result: {
         content: [
           {
-            type: "text",
             text: "123",
+            type: "text",
           },
         ],
       },
-      id: "call-1",
     });
   });
 });

@@ -1,5 +1,5 @@
-import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
 type Env = {
@@ -21,7 +21,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   async init() {
     this.server.resource("counter", "mcp://resource/counter", (uri) => {
       return {
-        contents: [{ uri: uri.href, text: String(this.state.counter) }],
+        contents: [{ text: String(this.state.counter), uri: uri.href }],
       };
     });
 
@@ -35,8 +35,8 @@ export class MyMCP extends McpAgent<Env, State, {}> {
         return {
           content: [
             {
-              type: "text",
               text: String(`Added ${a}, total is now ${this.state.counter}`),
+              type: "text",
             },
           ],
         };

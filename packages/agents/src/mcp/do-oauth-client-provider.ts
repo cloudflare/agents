@@ -1,9 +1,9 @@
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
-  OAuthTokens,
-  OAuthClientMetadata,
   OAuthClientInformation,
   OAuthClientInformationFull,
+  OAuthClientMetadata,
+  OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
@@ -27,12 +27,12 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
 
   get clientMetadata(): OAuthClientMetadata {
     return {
-      redirect_uris: [this.redirectUrl],
-      token_endpoint_auth_method: "none",
-      grant_types: ["authorization_code", "refresh_token"],
-      response_types: ["code"],
       client_name: this.clientName,
       client_uri: "example.com",
+      grant_types: ["authorization_code", "refresh_token"],
+      redirect_uris: [this.redirectUrl],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
     };
   }
 

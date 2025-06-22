@@ -1,9 +1,9 @@
 import { openai } from "@ai-sdk/openai";
 import {
   Agent,
-  routeAgentRequest,
-  unstable_callable as callable,
   type AgentNamespace,
+  unstable_callable as callable,
+  routeAgentRequest,
 } from "agents";
 
 import { generateObject } from "ai";
@@ -70,9 +70,6 @@ export class TicTacToe extends Agent<Env, TicTacToeState> {
     // now use AI to make a move
     const { object } = await generateObject({
       model: openai("gpt-4o"),
-      schema: z.object({
-        move: z.array(z.number()),
-      }),
       prompt: `You are playing Tic-tac-toe as player ${player === "X" ? "O" : "X"}. Here's the current board state:
 
 ${JSON.stringify(board, null, 2)}
@@ -95,6 +92,9 @@ Strategic priorities (in order):
 
 Analyze the board carefully and make the optimal move following these priorities.
 Return only the [row, col] coordinates for your chosen move.`,
+      schema: z.object({
+        move: z.array(z.number()),
+      }),
     });
     await this.makeMove(
       object.move as [number, number],

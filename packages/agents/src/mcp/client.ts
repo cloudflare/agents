@@ -1,5 +1,3 @@
-import { MCPClientConnection } from "./client-connection";
-
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -16,6 +14,7 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { jsonSchema, type ToolSet } from "ai";
 import { nanoid } from "nanoid";
+import { MCPClientConnection } from "./client-connection";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 
 /**
@@ -85,8 +84,8 @@ export class MCPClientManager {
         version: this._version,
       },
       {
-        transport: options.transport ?? {},
         client: options.client ?? {},
+        transport: options.transport ?? {},
       }
     );
 
@@ -98,9 +97,9 @@ export class MCPClientManager {
         options.transport.authProvider.redirectUrl.toString()
       );
       return {
-        id,
         authUrl,
         clientId: options.transport?.authProvider?.clientId,
+        id,
       };
     }
 
@@ -193,12 +192,11 @@ export class MCPClientManager {
         return [
           `${tool.serverId}_${tool.name}`,
           {
-            parameters: jsonSchema(tool.inputSchema),
             description: tool.description,
             execute: async (args) => {
               const result = await this.callTool({
-                name: tool.name,
                 arguments: args,
+                name: tool.name,
                 serverId: tool.serverId,
               });
               if (result.isError) {
@@ -207,6 +205,7 @@ export class MCPClientManager {
               }
               return result;
             },
+            parameters: jsonSchema(tool.inputSchema),
           },
         ];
       })
@@ -317,7 +316,7 @@ export function getNamespacedData<T extends keyof NamespacedData>(
   type: T
 ): NamespacedData[T] {
   const sets = Object.entries(mcpClients).map(([name, conn]) => {
-    return { name, data: conn[type] };
+    return { data: conn[type], name };
   });
 
   const namespacedData = sets.flatMap(({ name: serverId, data }) => {

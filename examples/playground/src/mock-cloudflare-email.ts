@@ -1,4 +1,5 @@
 // a shim for cloudflare:email
+/** biome-ignore-all lint/correctness/noUnusedFunctionParameters: todo */
 
 export class MockEmailMessage implements EmailMessage {
   from: string;
@@ -12,8 +13,8 @@ export class MockEmailMessage implements EmailMessage {
   toJSON(): string {
     return JSON.stringify({
       from: this.from,
-      to: this.to,
       message: this.message,
+      to: this.to,
     });
   }
 }

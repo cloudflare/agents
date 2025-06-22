@@ -1,20 +1,20 @@
 {
-  "name": "cross-domain",
-  "main": "src/server.ts",
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {
-        "name": "MyAgent",
         "class_name": "MyAgent",
+        "name": "MyAgent",
       },
     ],
   },
+  "main": "src/server.ts",
   "migrations": [
     {
-      "tag": "v1",
       "new_sqlite_classes": ["MyAgent"],
+      "tag": "v1",
     },
   ],
+  "name": "cross-domain",
 }

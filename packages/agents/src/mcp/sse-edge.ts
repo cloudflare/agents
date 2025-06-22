@@ -1,8 +1,8 @@
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import {
   SSEClientTransport,
   type SSEClientTransportOptions,
 } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 
 export class SSEEdgeClientTransport extends SSEClientTransport {
   private authProvider: OAuthClientProvider | undefined;
@@ -26,7 +26,6 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
       };
 
       // Remove unsupported properties
-      // biome-ignore lint/performance/noDelete: workaround for workers environment
       delete workerOptions.mode;
 
       // Call the original fetch with fixed options

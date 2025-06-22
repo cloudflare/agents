@@ -203,6 +203,7 @@ header p {
   font-size: 1.1rem;
   color: var(--color-text);
   max-width: 800px;
+  /* biome-ignore lint/suspicious/noDuplicateProperties: eh */
   margin: 0 auto;
 }
 

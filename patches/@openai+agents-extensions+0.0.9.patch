@@ -1,0 +1,42 @@
+diff --git a/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.d.ts b/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.d.ts
+index 23731fc..4d65dcf 100644
+--- a/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.d.ts
++++ b/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.d.ts
+@@ -1,5 +1,5 @@
+ import { OpenAIRealtimeWebSocket, OpenAIRealtimeWebSocketOptions, RealtimeTransportLayerConnectOptions, TransportLayerAudio, RealtimeSessionConfig } from '@openai/agents/realtime';
+-import type { WebSocket } from 'ws';
++
+ /**
+  * The options for the Twilio Realtime Transport Layer.
+  */
+diff --git a/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.mjs b/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.mjs
+index 89a79a7..8ebc1a3 100644
+--- a/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.mjs
++++ b/node_modules/@openai/agents-extensions/dist/TwilioRealtimeTransport.mjs
+@@ -55,9 +55,9 @@ export class TwilioRealtimeTransportLayer extends OpenAIRealtimeWebSocket {
+     async connect(options) {
+         options.initialSessionConfig = this._setInputAndOutputAudioFormat(options.initialSessionConfig);
+         // listen to Twilio messages as quickly as possible
+-        this.#twilioWebSocket.on('message', (message) => {
++        this.#twilioWebSocket.addEventListener('message', (message) => {
+             try {
+-                const data = JSON.parse(message.toString());
++                const data = JSON.parse(message.data.toString());
+                 if (this.#logger.dontLogModelData) {
+                     this.#logger.debug('Twilio message:', data.event);
+                 }
+@@ -105,12 +105,12 @@ export class TwilioRealtimeTransportLayer extends OpenAIRealtimeWebSocket {
+                 });
+             }
+         });
+-        this.#twilioWebSocket.on('close', () => {
++        this.#twilioWebSocket.addEventListener('close', () => {
+             if (this.status !== 'disconnected') {
+                 this.close();
+             }
+         });
+-        this.#twilioWebSocket.on('error', (error) => {
++        this.#twilioWebSocket.addEventListener('error', (error) => {
+             this.emit('error', {
+                 type: 'error',
+                 error,

@@ -1,8 +1,10 @@
-import { build } from "tsup";
 import { execSync } from "node:child_process";
+import { build } from "tsup";
 
 async function main() {
   await build({
+    clean: true,
+    dts: true,
     entry: [
       "src/*.ts",
       "src/*.tsx",
@@ -10,9 +12,6 @@ async function main() {
       "src/mcp/client.ts",
       "src/mcp/do-oauth-client-provider.ts",
     ],
-    splitting: true,
-    sourcemap: true,
-    clean: true,
     external: [
       "cloudflare:workers",
       "@ai-sdk/react",
@@ -22,7 +21,8 @@ async function main() {
       "@modelcontextprotocol/sdk",
     ],
     format: "esm",
-    dts: true,
+    sourcemap: true,
+    splitting: true,
   });
 
   // then run prettier on the generated .d.ts files

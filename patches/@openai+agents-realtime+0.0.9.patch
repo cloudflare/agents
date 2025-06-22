@@ -1,0 +1,79 @@
+diff --git a/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.js b/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.js
+index 969d987..d67ad5a 100644
+--- a/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.js
++++ b/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.js
+@@ -81,7 +81,7 @@ export class OpenAIRealtimeWebSocket extends OpenAIRealtimeBase {
+             !this.#useInsecureApiKey) {
+             throw new UserError('Using the WebSocket connection in a browser environment requires an ephemeral client key. If you have to use a regular API key, set the `useInsecureApiKey` option to true.');
+         }
+-        const websocketArguments = isBrowserEnvironment()
++        const websocketArguments = true
+             ? [
+                 'realtime',
+                 // Auth
+diff --git a/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.mjs b/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.mjs
+index c3762ba..569f46d 100644
+--- a/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.mjs
++++ b/node_modules/@openai/agents-realtime/dist/openaiRealtimeWebsocket.mjs
+@@ -81,7 +81,7 @@ export class OpenAIRealtimeWebSocket extends OpenAIRealtimeBase {
+             !this.#useInsecureApiKey) {
+             throw new UserError('Using the WebSocket connection in a browser environment requires an ephemeral client key. If you have to use a regular API key, set the `useInsecureApiKey` option to true.');
+         }
+-        const websocketArguments = isBrowserEnvironment()
++        const websocketArguments = true
+             ? [
+                 'realtime',
+                 // Auth
+diff --git a/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.d.ts b/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.d.ts
+new file mode 100644
+index 0000000..c3d5d17
+--- /dev/null
++++ b/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.d.ts
+@@ -0,0 +1,9 @@
++export declare const WebSocket: {
++    new (url: string | URL, protocols?: string | string[]): WebSocket;
++    prototype: WebSocket;
++    readonly CONNECTING: 0;
++    readonly OPEN: 1;
++    readonly CLOSING: 2;
++    readonly CLOSED: 3;
++};
++export declare function isBrowserEnvironment(): boolean;
+diff --git a/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.js b/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.js
+new file mode 100644
+index 0000000..6b26387
+--- /dev/null
++++ b/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.js
+@@ -0,0 +1,4 @@
++export const WebSocket = globalThis.WebSocket;
++export function isBrowserEnvironment() {
++    return false;
++}
+\ No newline at end of file
+diff --git a/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.mjs b/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.mjs
+new file mode 100644
+index 0000000..6b26387
+--- /dev/null
++++ b/node_modules/@openai/agents-realtime/dist/shims/shims-workerd.mjs
+@@ -0,0 +1,4 @@
++export const WebSocket = globalThis.WebSocket;
++export function isBrowserEnvironment() {
++    return false;
++}
+\ No newline at end of file
+diff --git a/node_modules/@openai/agents-realtime/package.json b/node_modules/@openai/agents-realtime/package.json
+index 5eb4614..e4fcca8 100644
+--- a/node_modules/@openai/agents-realtime/package.json
++++ b/node_modules/@openai/agents-realtime/package.json
+@@ -23,6 +23,11 @@
+       "default": "./dist/index.mjs"
+     },
+     "./_shims": {
++      "workerd": {
++        "require": "./dist/shims/shims-workerd.js",
++        "types": "./dist/shims/shims-workerd.d.ts",
++        "default": "./dist/shims/shims-workerd.mjs"
++      },
+       "browser": {
+         "require": "./dist/shims/shims-browser.js",
+         "types": "./dist/shims/shims-browser.d.ts",

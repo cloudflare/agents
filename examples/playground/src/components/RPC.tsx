@@ -142,7 +142,7 @@ export default function RPC({
               {messages.map((message, messageId) => (
                 <div
                   key={`message-${
-                    // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
+                    // biome-ignore lint/suspicious/noArrayIndexKey: eh
                     messageId
                   }`}
                   className="message-item"

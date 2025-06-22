@@ -1,5 +1,5 @@
 import type { env } from "cloudflare:workers";
-import { unstable_callable as callable, Agent } from "..";
+import { Agent, unstable_callable as callable } from "..";
 import { useAgent } from "../react.tsx";
 
 class MyAgent extends Agent<typeof env, {}> {
@@ -9,7 +9,7 @@ class MyAgent extends Agent<typeof env, {}> {
   }
 
   @callable()
-  async perform(task: string, p1?: number): Promise<void> {
+  async perform(_task: string, _p1?: number): Promise<void> {
     // do something
   }
 
@@ -19,6 +19,7 @@ class MyAgent extends Agent<typeof env, {}> {
   }
 }
 
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const { stub } = useAgent<MyAgent, {}>({ agent: "my-agent" });
 // return type is promisified
 stub.sayHello() satisfies Promise<string>;
@@ -38,6 +39,7 @@ await stub.nonRpc();
 // @ts-expect-error nonSerializable is not serializable
 await stub.nonSerializable("hello", new Date());
 
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const { stub: stub2 } = useAgent<Omit<MyAgent, "nonRpc">, {}>({
   agent: "my-agent",
 });
