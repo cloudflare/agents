@@ -3,7 +3,7 @@
   "description": "A basic OpenAI ⨉ Cloudflare Agents example, duplicate this repo when making more examples",
   "keywords": [],
   "license": "ISC",
-  "name": "handoffs",
+  "name": "@cloudflare/agents-openai-handoffs",
   "scripts": {
     "clean": "rm -rf .wrangler node_modules/.vite",
     "start": "vite dev"

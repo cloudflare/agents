@@ -3,7 +3,7 @@
   "description": "Human in the loop example with OpenAI ⨉ Cloudflare Agents",
   "keywords": [],
   "license": "ISC",
-  "name": "human-in-the-loop",
+  "name": "@cloudflare/agents-openai-human-in-the-loop",
   "scripts": {
     "clean": "rm -rf .wrangler node_modules/.vite",
     "start": "vite dev"

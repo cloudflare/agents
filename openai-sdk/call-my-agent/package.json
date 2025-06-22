@@ -3,7 +3,7 @@
   "description": "A simple agent that can receive phone calls and respond to them.",
   "keywords": [],
   "license": "ISC",
-  "name": "@cloudflare/agents-call-my-agent",
+  "name": "@cloudflare/agents-openai-call-my-agent",
   "private": true,
   "scripts": {
     "clean": "rm -rf dist .wrangler node_modules/.vite node_modules/.vite-temp",

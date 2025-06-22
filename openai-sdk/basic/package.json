@@ -3,7 +3,7 @@
   "description": "A basic OpenAI ⨉ Cloudflare Agents example, duplicate this repo when making more examples",
   "keywords": [],
   "license": "ISC",
-  "name": "basic",
+  "name": "@cloudflare/agents-openai-basic",
   "scripts": {
     "clean": "rm -rf .wrangler node_modules/.vite",
     "start": "vite dev"
