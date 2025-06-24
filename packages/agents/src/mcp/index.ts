@@ -21,7 +21,8 @@ function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
   const origin = "*";
   return {
     "Access-Control-Allow-Headers":
-      corsOptions.headers || "Content-Type, mcp-session-id",
+      corsOptions.headers ||
+      "Content-Type, mcp-session-id, mcp-protocol-version",
     "Access-Control-Allow-Methods": corsOptions.methods || "GET, POST, OPTIONS",
     "Access-Control-Allow-Origin": corsOptions.origin || origin,
     "Access-Control-Expose-Headers":
