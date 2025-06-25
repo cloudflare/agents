@@ -5,13 +5,18 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.2.2",
+    "agents": "^0.0.98",
     "hono": "^4.8.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0"
   },
   "keywords": [],
   "name": "@cloudflare/agents-a2a-example",
   "private": true,
   "scripts": {
-    "start": "vite dev"
+    "build": "node build.js",
+    "start": "wrangler dev"
   },
   "type": "module"
 }

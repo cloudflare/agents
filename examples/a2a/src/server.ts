@@ -167,7 +167,6 @@ export default {
     agentExecutor
   );
 
-  // 4. Create and setup A2AHonoApp
   const appBuilder = new A2AHonoApp(requestHandler);
 
   const app = appBuilder.setupRoutes(new Hono())
