@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.99
+
+### Patch Changes
+
+- [#332](https://github.com/cloudflare/agents/pull/332) [`75614c2`](https://github.com/cloudflare/agents/commit/75614c2532ab3e9f95e4a45e6e5b4a62be33a846) Thanks [@mchockal](https://github.com/mchockal)! - MCP connect / reconnect refactor
+
 ## 0.0.98
 
 ### Patch Changes
