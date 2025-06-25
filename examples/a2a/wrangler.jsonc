@@ -7,14 +7,18 @@
         "class_name": "MyA2A",
         "name": "MyA2A"
       },
-    ],
+      {
+        "class_name": "TaskStoreAgent",
+        "name": "TaskStoreAgent"
+      }
+    ]
   },
   "main": "src/server.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["MyA2A"],
+      "new_sqlite_classes": ["MyA2A", "TaskStoreAgent"],
       "tag": "v1"
-    },
+    }
   ],
   "name": "a2a-agent-demo"
 }

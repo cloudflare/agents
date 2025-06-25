@@ -1,9 +1,6 @@
-import type { Hono } from 'hono';
-import type { Context } from 'hono';
-import type { A2AResponse, JSONRPCErrorResponse, JSONRPCSuccessResponse } from "@a2a-js/sdk";
-import { A2AError } from "@a2a-js/sdk";
-import type { A2ARequestHandler } from "@a2a-js/sdk";
-import { JsonRpcTransportHandler } from "@a2a-js/sdk";
+import type { A2ARequestHandler, A2AResponse, JSONRPCErrorResponse, JSONRPCSuccessResponse } from "@a2a-js/sdk";
+import { A2AError, JsonRpcTransportHandler } from "@a2a-js/sdk";
+import type { Context, Hono } from 'hono';
 
 export class A2AHonoApp {
     private requestHandler: A2ARequestHandler;
@@ -25,7 +22,7 @@ export class A2AHonoApp {
             try {
                 const agentCard = await this.requestHandler.getAgentCard();
                 return c.json(agentCard);
-            } catch (error: any) {
+            } catch (error) {
                 console.error("Error fetching agent card:", error);
                 return c.json({ error: "Failed to retrieve agent card" }, 500);
             }
@@ -37,7 +34,8 @@ export class A2AHonoApp {
                 const rpcResponseOrStream = await this.jsonRpcTransportHandler.handle(body);
 
                 // Check if it's an AsyncGenerator (stream)
-                if (typeof (rpcResponseOrStream as any)?.[Symbol.asyncIterator] === 'function') {
+                // biome-ignore lint/suspicious/noExplicitAny: to fix
+                                if (typeof (rpcResponseOrStream as any)?.[Symbol.asyncIterator] === 'function') {
                     const stream = rpcResponseOrStream as AsyncGenerator<JSONRPCSuccessResponse, void, undefined>;
 
                     // Create streaming response
@@ -51,9 +49,9 @@ export class A2AHonoApp {
                                 const chunk = `id: ${Date.now()}\ndata: ${JSON.stringify(event)}\n\n`;
                                 await writer.write(new TextEncoder().encode(chunk));
                             }
-                        } catch (streamError: any) {
+                        } catch (streamError) {
                             console.error(`Error during SSE streaming (request ${body?.id}):`, streamError);
-                            const a2aError = streamError instanceof A2AError ? streamError : A2AError.internalError(streamError.message || 'Streaming error.');
+                            const a2aError = streamError instanceof A2AError ? streamError : A2AError.internalError((streamError as Error).message || 'Streaming error.');
                             const errorResponse: JSONRPCErrorResponse = {
                                 error: a2aError.toJSONRPCError(),
                                 id: body?.id || null,
@@ -68,9 +66,9 @@ export class A2AHonoApp {
 
                     return new Response(readable, {
                         headers: {
-                            'Content-Type': 'text/event-stream',
                             'Cache-Control': 'no-cache',
                             'Connection': 'keep-alive',
+                            'Content-Type': 'text/event-stream',
                         },
                     });
                 } else {
@@ -78,7 +76,7 @@ export class A2AHonoApp {
                     const rpcResponse = rpcResponseOrStream as A2AResponse;
                     return c.json(rpcResponse);
                 }
-            } catch (error: any) {
+            } catch (error) {
                 console.error("Unhandled error in A2AHonoApp POST handler:", error);
                 const a2aError = error instanceof A2AError ? error : A2AError.internalError('General processing error.');
                 const errorResponse: JSONRPCErrorResponse = {
