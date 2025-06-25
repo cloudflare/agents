@@ -1,0 +1,17 @@
+{
+  "author": {
+    "email": "matt@stackone.com",
+    "name": "Matt Carey"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "^0.2.2",
+    "hono": "^4.8.3"
+  },
+  "keywords": [],
+  "name": "@cloudflare/agents-a2a-example",
+  "private": true,
+  "scripts": {
+    "start": "vite dev"
+  },
+  "type": "module"
+}
