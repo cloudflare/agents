@@ -21,6 +21,8 @@
       "!**/dist",
       "!.wrangler",
       "!**/.wrangler",
+      "!wrangler.jsonc",
+      "!**/wrangler.jsonc",
       "!./tsconfig.base.json",
       "!**/tsconfig.base.json",
       "!**/normalize.css"
