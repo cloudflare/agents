@@ -16,6 +16,7 @@
   "private": true,
   "scripts": {
     "build": "node build.js",
+    "cli": "npx tsx src/cli.ts",
     "start": "wrangler dev"
   },
   "type": "module"

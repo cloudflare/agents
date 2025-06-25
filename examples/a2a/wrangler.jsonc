@@ -2,27 +2,23 @@
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
   "build": {
-    "command": "npm run build"
+    "command": "npm run build",
   },
   "durable_objects": {
     "bindings": [
       {
         "class_name": "MyA2A",
-        "name": "MyA2A"
+        "name": "MyA2A",
       },
-      {
-        "class_name": "TaskStoreAgent",
-        "name": "TaskStoreAgent"
-      }
-    ]
+    ],
   },
   "main": "dist/server.js",
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "migrations": [
     {
-      "new_sqlite_classes": ["MyA2A", "TaskStoreAgent"],
-      "tag": "v1"
-    }
+      "new_sqlite_classes": ["MyA2A"],
+      "tag": "v1",
+    },
   ],
-  "name": "a2a-agent-demo"
+  "name": "a2a-agent-demo",
 }
