@@ -101,16 +101,25 @@ function Chat() {
 npm install
 ```
 
-2. Configure your `wrangler.toml`:
+2. Add bindings to your `wrangler.jsonc`:
 
-```toml
-[[durable_objects.bindings]]
-binding = "HumanInTheLoop"
-class_name = "HumanInTheLoop"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["HumanInTheLoop"]
+```json
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HumanInTheLoop",
+        "class_name": "HumanInTheLoop"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["HumanInTheLoop"]
+    }
+  ]
+}
 ```
 
 3. Deploy your agent:
