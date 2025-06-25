@@ -32,8 +32,7 @@ const agentCard: AgentCard = {
   },
   defaultInputModes: ["text"],
   defaultOutputModes: ["text", "task-status"],
-  description:
-    "Use Cloudflare Agents SDK as an A2A agent.",
+  description: "Use Cloudflare Agents SDK as an A2A agent.",
   name: "Cloudflare A2A Agent",
   provider: {
     organization: "Cloudflare",

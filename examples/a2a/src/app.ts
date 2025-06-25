@@ -41,7 +41,7 @@ export class A2AHonoApp {
 
         // Check if it's an AsyncGenerator (stream)
         if (
-        // biome-ignore lint/suspicious/noExplicitAny: to fix
+          // biome-ignore lint/suspicious/noExplicitAny: to fix
           typeof (rpcResponseOrStream as any)?.[Symbol.asyncIterator] ===
           "function"
         ) {
