@@ -528,32 +528,29 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           `;
 
           // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-          await Promise.allSettled(
-            servers
-              .filter((server) => server.auth_url === null)
-              .map((server) => {
-                return this._connectToMcpServerInternal(
-                  server.name,
-                  server.server_url,
-                  server.callback_url,
-                  server.server_options
-                    ? JSON.parse(server.server_options)
-                    : undefined,
-                  {
-                    id: server.id,
-                    oauthClientId: server.client_id ?? undefined,
-                  }
-                );
-              })
-          );
-
-          this.broadcast(
-            JSON.stringify({
-              mcp: this.getMcpServers(),
-              type: "cf_agent_mcp_servers",
+          Promise.allSettled(
+            servers.map((server) => {
+              return this._connectToMcpServerInternal(
+                server.name,
+                server.server_url,
+                server.callback_url,
+                server.server_options
+                  ? JSON.parse(server.server_options)
+                  : undefined,
+                {
+                  id: server.id,
+                  oauthClientId: server.client_id ?? undefined,
+                }
+              );
             })
-          );
-
+          ).then((_results) => {
+            this.broadcast(
+              JSON.stringify({
+                type: "cf_agent_mcp_servers",
+                mcp: this.getMcpServers(),
+              })
+            );
+          });
           await this._tryCatch(() => _onStart());
         }
       );
@@ -956,6 +953,19 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       callbackUrl,
       options
     );
+    this.sql`
+        INSERT
+        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${result.id},
+        ${serverName},
+        ${url},
+        ${result.clientId ?? null},
+        ${result.authUrl ?? null},
+        ${callbackUrl},
+        ${options ? JSON.stringify(options) : null}
+        );
+    `;
 
     this.broadcast(
       JSON.stringify({
@@ -968,7 +978,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   async _connectToMcpServerInternal(
-    serverName: string,
+    _serverName: string,
     url: string,
     callbackUrl: string,
     // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
@@ -989,7 +999,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       id: string;
       oauthClientId?: string;
     }
-  ): Promise<{ id: string; authUrl: string | undefined }> {
+  ): Promise<{
+    id: string;
+    authUrl: string | undefined;
+    clientId: string | undefined;
+  }> {
     const authProvider = new DurableObjectOAuthClientProvider(
       this.ctx.storage,
       this.name,
@@ -1030,21 +1044,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       },
     });
 
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${id},
-        ${serverName},
-        ${url},
-        ${clientId ?? null},
-        ${authUrl ?? null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-      );
-    `;
-
     return {
       authUrl,
+      clientId,
       id,
     };
   }
