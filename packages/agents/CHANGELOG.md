@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.98
+
+### Patch Changes
+
+- [`b4ebb44`](https://github.com/cloudflare/agents/commit/b4ebb44196ff423e06beb347bb0e7b16f08773b4) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
 ## 0.0.97
 
 ### Patch Changes
