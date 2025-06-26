@@ -20,54 +20,54 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.js"
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     },
     "./ai-chat-agent": {
-      "types": "./dist/ai-chat-agent.d.ts",
       "import": "./dist/ai-chat-agent.js",
-      "require": "./dist/ai-chat-agent.js"
+      "require": "./dist/ai-chat-agent.js",
+      "types": "./dist/ai-chat-agent.d.ts"
     },
     "./ai-react": {
-      "types": "./dist/ai-react.d.ts",
       "import": "./dist/ai-react.js",
-      "require": "./dist/ai-react.js"
+      "require": "./dist/ai-react.js",
+      "types": "./dist/ai-react.d.ts"
     },
     "./ai-types": {
-      "types": "./dist/ai-types.d.ts",
       "import": "./dist/ai-types.js",
-      "require": "./dist/ai-types.js"
+      "require": "./dist/ai-types.js",
+      "types": "./dist/ai-types.d.ts"
     },
     "./client": {
-      "types": "./dist/client.d.ts",
       "import": "./dist/client.js",
-      "require": "./dist/client.js"
+      "require": "./dist/client.js",
+      "types": "./dist/client.d.ts"
     },
     "./mcp": {
-      "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js",
-      "require": "./dist/mcp/index.js"
+      "require": "./dist/mcp/index.js",
+      "types": "./dist/mcp/index.d.ts"
     },
     "./mcp/client": {
-      "types": "./dist/mcp/client.d.ts",
       "import": "./dist/mcp/client.js",
-      "require": "./dist/mcp/client.js"
+      "require": "./dist/mcp/client.js",
+      "types": "./dist/mcp/client.d.ts"
     },
     "./mcp/do-oauth-client-provider": {
-      "types": "./dist/mcp/do-oauth-client-provider.d.ts",
       "import": "./dist/mcp/do-oauth-client-provider.js",
-      "require": "./dist/mcp/do-oauth-client-provider.js"
+      "require": "./dist/mcp/do-oauth-client-provider.js",
+      "types": "./dist/mcp/do-oauth-client-provider.d.ts"
     },
     "./react": {
-      "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
-      "require": "./dist/react.js"
+      "require": "./dist/react.js",
+      "types": "./dist/react.d.ts"
     },
     "./schedule": {
-      "types": "./dist/schedule.d.ts",
       "import": "./dist/schedule.js",
-      "require": "./dist/schedule.js"
+      "require": "./dist/schedule.js",
+      "types": "./dist/schedule.d.ts"
     }
   },
   "files": [
