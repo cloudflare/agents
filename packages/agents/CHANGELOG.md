@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.100
+
+### Patch Changes
+
+- [#331](https://github.com/cloudflare/agents/pull/331) [`7acfd65`](https://github.com/cloudflare/agents/commit/7acfd654bc1773c975fd8f61111c76e83c132fe5) Thanks [@geelen](https://github.com/geelen)! - Adding a new MCP header to the CORS allowlist to follow the updated spec
+
 ## 0.0.99
 
 ### Patch Changes
