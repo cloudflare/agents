@@ -1,34 +1,55 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "vcs": {
-    "enabled": false,
-    "clientKind": "git",
-    "useIgnoreFile": false
+  "$schema": "https://biomejs.dev/schemas/2.0.5/schema.json",
+  "assist": {
+    "actions": {
+      "source": {
+        "useSortedKeys": "on"
+      }
+    },
+    "enabled": true
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": ["node_modules", "dist", ".wrangler", "./tsconfig.base.json"]
+    "includes": [
+      "examples/**",
+      "openai-sdk/**",
+      "packages/**",
+      "guides/**",
+      "!node_modules",
+      "!**/node_modules",
+      "!dist",
+      "!**/dist",
+      "!.wrangler",
+      "!**/.wrangler",
+      "!wrangler.jsonc",
+      "!**/wrangler.jsonc",
+      "!./tsconfig.base.json",
+      "!**/tsconfig.base.json",
+      "!**/normalize.css"
+    ]
   },
   "formatter": {
     "enabled": false,
     "indentStyle": "tab"
   },
-  "organizeImports": {
-    "enabled": true
-  },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
-      "style": {
-        "noNonNullAssertion": "off"
-      },
       "a11y": {
         "useKeyWithClickEvents": "off"
       },
       "complexity": {
         "noBannedTypes": "off"
+      },
+      "recommended": true,
+      "style": {
+        "noNonNullAssertion": "off"
       }
     }
+  },
+  "vcs": {
+    "clientKind": "git",
+    "enabled": false,
+    "useIgnoreFile": false
   }
 }

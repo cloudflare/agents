@@ -1,35 +1,30 @@
-import {
-  Server,
-  routePartykitRequest,
-  type PartyServerOptions,
-  getServerByName,
-  type Connection,
-  type ConnectionContext,
-  type WSMessage,
-} from "partyserver";
-
-import { parseCronExpression } from "cron-schedule";
-import { nanoid } from "nanoid";
-
 import { AsyncLocalStorage } from "node:async_hooks";
-import { MCPClientManager } from "./mcp/client";
-import {
-  DurableObjectOAuthClientProvider,
-  type AgentsOAuthProvider,
-} from "./mcp/do-oauth-client-provider";
-import type {
-  Tool,
-  Resource,
-  Prompt,
-  ServerCapabilities,
-} from "@modelcontextprotocol/sdk/types.js";
-
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
+import type {
+  Prompt,
+  Resource,
+  ServerCapabilities,
+  Tool,
+} from "@modelcontextprotocol/sdk/types.js";
+import { parseCronExpression } from "cron-schedule";
+import { nanoid } from "nanoid";
+import {
+  type Connection,
+  type ConnectionContext,
+  getServerByName,
+  type PartyServerOptions,
+  routePartykitRequest,
+  Server,
+  type WSMessage,
+} from "partyserver";
 import { camelCaseToKebabCase } from "./client";
+import { MCPClientManager } from "./mcp/client";
+// import type { MCPClientConnection } from "./mcp/client-connection";
+import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 
-export type { Connection, WSMessage, ConnectionContext } from "partyserver";
+export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
 /**
  * RPC request message from client
@@ -122,6 +117,7 @@ const callableMetadata = new Map<Function, CallableMetadata>();
 export function unstable_callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
     context: ClassMethodDecoratorContext
   ) {
     if (!callableMetadata.has(target)) {
@@ -194,6 +190,9 @@ export type MCPServer = {
   name: string;
   server_url: string;
   auth_url: string | null;
+  // This state is specifically about the temporary process of getting a token (if needed).
+  // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
+  // to communicate a change to a non-ready state.
   state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
   instructions: string | null;
   capabilities: ServerCapabilities | null;
@@ -397,15 +396,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             // after the MCP connection handshake, we can send updated mcp state
             this.broadcast(
               JSON.stringify({
-                type: "cf_agent_mcp_servers",
                 mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers",
               })
             );
 
             // We probably should let the user configure this response/redirect, but this is fine for now.
             return new Response("<script>window.close();</script>", {
-              status: 200,
               headers: { "content-type": "text/html" },
+              status: 200,
             });
           }
 
@@ -426,7 +425,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           let parsed: unknown;
           try {
             parsed = JSON.parse(message);
-          } catch (e) {
+          } catch (_e) {
             // silently fail and let the onMessage handler handle it
             return this._tryCatch(() => _onMessage(connection, message));
           }
@@ -462,21 +461,21 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               // For regular methods, execute and send response
               const result = await methodFn.apply(this, args);
               const response: RPCResponse = {
-                type: "rpc",
-                id,
-                success: true,
-                result,
                 done: true,
+                id,
+                result,
+                success: true,
+                type: "rpc",
               };
               connection.send(JSON.stringify(response));
             } catch (e) {
               // Send error response
               const response: RPCResponse = {
-                type: "rpc",
-                id: parsed.id,
-                success: false,
                 error:
                   e instanceof Error ? e.message : "Unknown error occurred",
+                id: parsed.id,
+                success: false,
+                type: "rpc",
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
@@ -500,16 +499,16 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             if (this.state) {
               connection.send(
                 JSON.stringify({
-                  type: "cf_agent_state",
                   state: this.state,
+                  type: "cf_agent_state",
                 })
               );
             }
 
             connection.send(
               JSON.stringify({
-                type: "cf_agent_mcp_servers",
                 mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers",
               })
             );
 
@@ -528,8 +527,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
           `;
 
-          // from DO storage, reconnect to all servers using our saved auth information
-          await Promise.allSettled(
+          // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
+          Promise.allSettled(
             servers.map((server) => {
               return this._connectToMcpServerInternal(
                 server.name,
@@ -544,15 +543,14 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 }
               );
             })
-          );
-
-          this.broadcast(
-            JSON.stringify({
-              type: "cf_agent_mcp_servers",
-              mcp: this.getMcpServers(),
-            })
-          );
-
+          ).then((_results) => {
+            this.broadcast(
+              JSON.stringify({
+                type: "cf_agent_mcp_servers",
+                mcp: this.getMcpServers(),
+              })
+            );
+          });
           await this._tryCatch(() => _onStart());
         }
       );
@@ -574,8 +572,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   `;
     this.broadcast(
       JSON.stringify({
-        type: "cf_agent_state",
         state: state,
+        type: "cf_agent_state",
       }),
       source !== "server" ? [source.id] : []
     );
@@ -603,6 +601,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
@@ -611,6 +610,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Called when the Agent receives an email
    * @param email Email message to process
    */
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
   onEmail(email: ForwardableEmailMessage) {
     return agentContext.run(
       { agent: this, connection: undefined, request: undefined },
@@ -697,8 +697,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       await this._scheduleNextAlarm();
 
       return {
-        id,
         callback: callback,
+        id,
         payload: payload as T,
         time: timestamp,
         type: "scheduled",
@@ -718,10 +718,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       await this._scheduleNextAlarm();
 
       return {
-        id,
         callback: callback,
-        payload: payload as T,
         delayInSeconds: when,
+        id,
+        payload: payload as T,
         time: timestamp,
         type: "delayed",
       };
@@ -740,10 +740,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       await this._scheduleNextAlarm();
 
       return {
-        id,
         callback: callback,
-        payload: payload as T,
         cron: when,
+        id,
+        payload: payload as T,
         time: timestamp,
         type: "cron",
       };
@@ -913,6 +913,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    this.ctx.abort("destroyed"); // enforce that the agent is evicted
   }
 
   /**
@@ -952,11 +953,24 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       callbackUrl,
       options
     );
+    this.sql`
+        INSERT
+        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${result.id},
+        ${serverName},
+        ${url},
+        ${result.clientId ?? null},
+        ${result.authUrl ?? null},
+        ${callbackUrl},
+        ${options ? JSON.stringify(options) : null}
+        );
+    `;
 
     this.broadcast(
       JSON.stringify({
-        type: "cf_agent_mcp_servers",
         mcp: this.getMcpServers(),
+        type: "cf_agent_mcp_servers",
       })
     );
 
@@ -964,7 +978,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   async _connectToMcpServerInternal(
-    serverName: string,
+    _serverName: string,
     url: string,
     callbackUrl: string,
     // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
@@ -985,7 +999,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       id: string;
       oauthClientId?: string;
     }
-  ): Promise<{ id: string; authUrl: string | undefined }> {
+  ): Promise<{
+    id: string;
+    authUrl: string | undefined;
+    clientId: string | undefined;
+  }> {
     const authProvider = this.createOAuthProvider(callbackUrl);
 
     if (reconnect) {
@@ -1014,30 +1032,18 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
 
     const { id, authUrl, clientId } = await this.mcp.connect(url, {
+      client: options?.client,
       reconnect,
       transport: {
         ...headerTransportOpts,
         authProvider,
       },
-      client: options?.client,
     });
 
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${id},
-        ${serverName},
-        ${url},
-        ${clientId ?? null},
-        ${authUrl ?? null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-      );
-    `;
-
     return {
-      id,
       authUrl,
+      clientId,
+      id,
     };
   }
 
@@ -1048,18 +1054,18 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     `;
     this.broadcast(
       JSON.stringify({
-        type: "cf_agent_mcp_servers",
         mcp: this.getMcpServers(),
+        type: "cf_agent_mcp_servers",
       })
     );
   }
 
   getMcpServers(): MCPServersState {
     const mcpState: MCPServersState = {
-      servers: {},
-      tools: this.mcp.listTools(),
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
+      servers: {},
+      tools: this.mcp.listTools(),
     };
 
     const servers = this.sql<MCPServerRow>`
@@ -1067,14 +1073,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     `;
 
     for (const server of servers) {
+      const serverConn = this.mcp.mcpConnections[server.id];
       mcpState.servers[server.id] = {
+        auth_url: server.auth_url,
+        capabilities: serverConn?.serverCapabilities ?? null,
+        instructions: serverConn?.instructions ?? null,
         name: server.name,
         server_url: server.server_url,
-        auth_url: server.auth_url,
-        state: this.mcp.mcpConnections[server.id].connectionState,
-        instructions: this.mcp.mcpConnections[server.id].instructions ?? null,
-        capabilities:
-          this.mcp.mcpConnections[server.id].serverCapabilities ?? null,
+        // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
+        state: serverConn?.connectionState ?? "authenticating",
       };
     }
 
@@ -1127,9 +1134,9 @@ export async function routeAgentRequest<Env>(
   const corsHeaders =
     options?.cors === true
       ? {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
           "Access-Control-Allow-Credentials": "true",
+          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+          "Access-Control-Allow-Origin": "*",
           "Access-Control-Max-Age": "86400",
         }
       : options?.cors;
@@ -1177,9 +1184,9 @@ export async function routeAgentRequest<Env>(
  * @param options Routing options
  */
 export async function routeAgentEmail<Env>(
-  email: ForwardableEmailMessage,
-  env: Env,
-  options?: AgentOptions<Env>
+  _email: ForwardableEmailMessage,
+  _env: Env,
+  _options?: AgentOptions<Env>
 ): Promise<void> {}
 
 /**
@@ -1224,11 +1231,11 @@ export class StreamingResponse {
       throw new Error("StreamingResponse is already closed");
     }
     const response: RPCResponse = {
-      type: "rpc",
-      id: this._id,
-      success: true,
-      result: chunk,
       done: false,
+      id: this._id,
+      result: chunk,
+      success: true,
+      type: "rpc",
     };
     this._connection.send(JSON.stringify(response));
   }
@@ -1243,11 +1250,11 @@ export class StreamingResponse {
     }
     this._closed = true;
     const response: RPCResponse = {
-      type: "rpc",
-      id: this._id,
-      success: true,
-      result: finalChunk,
       done: true,
+      id: this._id,
+      result: finalChunk,
+      success: true,
+      type: "rpc",
     };
     this._connection.send(JSON.stringify(response));
   }

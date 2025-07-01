@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Connection, WSMessage } from "../";
-import { Agent } from "../";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import {
   InitializeRequestSchema,
@@ -11,22 +11,23 @@ import {
   isJSONRPCResponse,
   JSONRPCMessageSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { Connection, WSMessage } from "../";
+import { Agent } from "../";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
 // CORS helper functions
-function corsHeaders(request: Request, corsOptions: CORSOptions = {}) {
+function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
   const origin = "*";
   return {
-    "Access-Control-Allow-Origin": corsOptions.origin || origin,
-    "Access-Control-Allow-Methods": corsOptions.methods || "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers":
-      corsOptions.headers || "Content-Type, mcp-session-id",
-    "Access-Control-Max-Age": (corsOptions.maxAge || 86400).toString(),
+      corsOptions.headers ||
+      "Content-Type, mcp-session-id, mcp-protocol-version",
+    "Access-Control-Allow-Methods": corsOptions.methods || "GET, POST, OPTIONS",
+    "Access-Control-Allow-Origin": corsOptions.origin || origin,
     "Access-Control-Expose-Headers":
       corsOptions.exposeHeaders || "mcp-session-id",
+    "Access-Control-Max-Age": (corsOptions.maxAge || 86400).toString(),
   };
 }
 
@@ -248,6 +249,7 @@ export abstract class McpAgent<
   setState(state: State) {
     return this._agent.setState(state);
   }
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
@@ -447,7 +449,7 @@ export abstract class McpAgent<
   // All messages received over SSE after the initial connection has been established
   // will be passed here
   async onSSEMcpMessage(
-    sessionId: string,
+    _sessionId: string,
     request: Request
   ): Promise<Error | null> {
     if (this._status !== "started") {
@@ -661,10 +663,10 @@ export abstract class McpAgent<
 
           // Handle WebSocket errors
           ws.addEventListener("error", (error) => {
-            async function onError(error: Event) {
+            async function onError(_error: Event) {
               try {
                 await writer.close();
-              } catch (e) {
+              } catch (_e) {
                 // Ignore errors when closing
               }
             }
@@ -686,9 +688,9 @@ export abstract class McpAgent<
           // Return the SSE response
           return new Response(readable, {
             headers: {
-              "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
+              "Content-Type": "text/event-stream",
               ...corsHeaders(request, corsOptions),
             },
           });
@@ -736,24 +738,24 @@ export abstract class McpAgent<
 
           if (error) {
             return new Response(error.message, {
-              status: 400,
               headers: {
-                "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 Connection: "keep-alive",
+                "Content-Type": "text/event-stream",
                 ...corsHeaders(request, corsOptions),
               },
+              status: 400,
             });
           }
 
           return new Response("Accepted", {
-            status: 202,
             headers: {
-              "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
+              "Content-Type": "text/event-stream",
               ...corsHeaders(request, corsOptions),
             },
+            status: 202,
           });
         }
 
@@ -816,13 +818,13 @@ export abstract class McpAgent<
             !acceptHeader.includes("text/event-stream")
           ) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
                 message:
                   "Not Acceptable: Client must accept both application/json and text/event-stream",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 406 });
           }
@@ -830,13 +832,13 @@ export abstract class McpAgent<
           const ct = request.headers.get("content-type");
           if (!ct || !ct.includes("application/json")) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
                 message:
                   "Unsupported Media Type: Content-Type must be application/json",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 415 });
           }
@@ -848,12 +850,12 @@ export abstract class McpAgent<
           );
           if (contentLength > MAXIMUM_MESSAGE_SIZE_BYTES) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
                 message: `Request body too large. Maximum size is ${MAXIMUM_MESSAGE_SIZE_BYTES} bytes`,
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 413 });
           }
@@ -863,14 +865,14 @@ export abstract class McpAgent<
 
           try {
             rawMessage = await request.json();
-          } catch (error) {
+          } catch (_error) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32700,
                 message: "Parse error: Invalid JSON",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 400 });
           }
@@ -889,12 +891,12 @@ export abstract class McpAgent<
           for (const msg of arrayMessage) {
             if (!JSONRPCMessageSchema.safeParse(msg).success) {
               const body = JSON.stringify({
-                jsonrpc: "2.0",
                 error: {
                   code: -32700,
                   message: "Parse error: Invalid JSON-RPC message",
                 },
                 id: null,
+                jsonrpc: "2.0",
               });
               return new Response(body, { status: 400 });
             }
@@ -911,13 +913,13 @@ export abstract class McpAgent<
 
           if (isInitializationRequest && sessionId) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32600,
                 message:
                   "Invalid Request: Initialization requests must not include a sessionId",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 400 });
           }
@@ -925,13 +927,13 @@ export abstract class McpAgent<
           // The initialization request must be the only request in the batch
           if (isInitializationRequest && messages.length > 1) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32600,
                 message:
                   "Invalid Request: Only one initialization request is allowed",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 400 });
           }
@@ -941,12 +943,12 @@ export abstract class McpAgent<
           // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
           if (!isInitializationRequest && !sessionId) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
                 message: "Bad Request: Mcp-Session-Id header is required",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 400 });
           }
@@ -967,12 +969,12 @@ export abstract class McpAgent<
             // if we have gotten here, then a session id that was never initialized
             // was provided
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32001,
                 message: "Session not found",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 404 });
           }
@@ -1005,12 +1007,12 @@ export abstract class McpAgent<
 
             await writer.close();
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32001,
                 message: "Failed to establish WebSocket connection",
               },
               id: null,
+              jsonrpc: "2.0",
             });
             return new Response(body, { status: 500 });
           }
@@ -1068,10 +1070,10 @@ export abstract class McpAgent<
 
           // Handle WebSocket errors
           ws.addEventListener("error", (error) => {
-            async function onError(error: Event) {
+            async function onError(_error: Event) {
               try {
                 await writer.close();
-              } catch (e) {
+              } catch (_e) {
                 // Ignore errors when closing
               }
             }
@@ -1104,8 +1106,8 @@ export abstract class McpAgent<
             ws.close();
 
             return new Response(null, {
-              status: 202,
               headers: corsHeaders(request, corsOptions),
+              status: 202,
             });
           }
 
@@ -1123,9 +1125,9 @@ export abstract class McpAgent<
           // handler
           return new Response(readable, {
             headers: {
-              "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
+              "Content-Type": "text/event-stream",
               "mcp-session-id": sessionId,
               ...corsHeaders(request, corsOptions),
             },
@@ -1135,12 +1137,12 @@ export abstract class McpAgent<
 
         // We don't yet support GET or DELETE requests
         const body = JSON.stringify({
-          jsonrpc: "2.0",
           error: {
             code: -32000,
             message: "Method not allowed",
           },
           id: null,
+          jsonrpc: "2.0",
         });
         return new Response(body, { status: 405 });
       },

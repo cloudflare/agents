@@ -1,14 +1,14 @@
 {
-  "name": "@cloudflare/agents-human-in-the-loop",
-  "version": "0.0.0",
-  "description": "Human in the Loop",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "start": "vite dev",
-    "deploy": "vite build && wrangler deploy"
-  },
-  "keywords": [],
   "author": "",
-  "license": "ISC"
+  "description": "Human in the Loop",
+  "keywords": [],
+  "license": "ISC",
+  "name": "@cloudflare/agents-human-in-the-loop",
+  "private": true,
+  "scripts": {
+    "deploy": "vite build && wrangler deploy",
+    "start": "vite dev"
+  },
+  "type": "module",
+  "version": "0.0.0"
 }

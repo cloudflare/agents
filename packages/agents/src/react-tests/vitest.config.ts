@@ -3,7 +3,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     browser: {
-      provider: "playwright",
       enabled: true,
       instances: [
         {
@@ -11,6 +10,7 @@ export default defineConfig({
           headless: true,
         },
       ],
+      provider: "playwright",
     },
     clearMocks: true,
   },

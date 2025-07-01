@@ -1,5 +1,5 @@
-import { Agent } from "..";
 import type { env } from "cloudflare:workers";
+import { Agent } from "..";
 import { useAgent } from "../react";
 
 declare class A extends Agent<typeof env, {}> {
@@ -9,6 +9,7 @@ declare class A extends Agent<typeof env, {}> {
   nonSerializableReturn: (a: string) => Date;
 }
 
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const { stub } = useAgent<{}>({
   agent: "test",
 });

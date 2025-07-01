@@ -1,24 +1,23 @@
-import { SSEEdgeClientTransport } from "./sse-edge";
-
-import {
-  ToolListChangedNotificationSchema,
-  type ClientCapabilities,
-  type Resource,
-  type Tool,
-  type Prompt,
-  ResourceListChangedNotificationSchema,
-  PromptListChangedNotificationSchema,
-  type ListToolsResult,
-  type ListResourcesResult,
-  type ListPromptsResult,
-  type ServerCapabilities,
-  type ResourceTemplate,
-  type ListResourceTemplatesResult,
-  type Notification,
-} from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import {
+  // type ClientCapabilities,
+  type ListPromptsResult,
+  type ListResourcesResult,
+  type ListResourceTemplatesResult,
+  type ListToolsResult,
+  // type Notification,
+  type Prompt,
+  PromptListChangedNotificationSchema,
+  type Resource,
+  ResourceListChangedNotificationSchema,
+  type ResourceTemplate,
+  type ServerCapabilities,
+  type Tool,
+  ToolListChangedNotificationSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import { SSEEdgeClientTransport } from "./sse-edge";
 
 export class MCPClientConnection {
   client: Client;
@@ -43,7 +42,7 @@ export class MCPClientConnection {
         authProvider?: AgentsOAuthProvider;
       };
       client: ConstructorParameters<typeof Client>[1];
-    } = { transport: {}, client: {} }
+    } = { client: {}, transport: {} }
   ) {
     this.client = new Client(info, options.client);
   }

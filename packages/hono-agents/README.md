@@ -66,18 +66,23 @@ export default app;
 
 ## Configuration
 
-To properly configure your Cloudflare Workers project to use agents, update your `wrangler.toml` file:
+To properly configure your Cloudflare Workers project to use agents, add bindings to your `wrangler.jsonc` file:
 
-```toml
-[durable_objects]
-bindings = [
-  { name = "ChatAgent", class_name = "ChatAgent" },
-  { name = "AssistantAgent", class_name = "AssistantAgent" }
-]
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["ChatAgent", "AssistantAgent"]
+```json
+{
+  "durable_objects": {
+    "bindings": [
+      { "name": "ChatAgent", "class_name": "ChatAgent" },
+      { "name": "AssistantAgent", "class_name": "AssistantAgent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChatAgent", "AssistantAgent"]
+    }
+  ]
+}
 ```
 
 ## How It Works

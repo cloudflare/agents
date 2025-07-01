@@ -1,17 +1,17 @@
 {
-  "name": "@cloudflare/agents-anthropic-patterns",
-  "version": "0.0.0",
-  "type": "module",
-  "private": true,
-  "scripts": {
-    "start": "vite dev",
-    "deploy": "vite build && wrangler deploy"
-  },
+  "author": "",
   "dependencies": {
     "nanoid": "^5.1.5"
   },
+  "description": "The anthropic patterns, implemented with cloudflare agents",
   "keywords": [],
-  "author": "",
   "license": "ISC",
-  "description": "The anthropic patterns, implemented with cloudflare agents"
+  "name": "@cloudflare/agents-anthropic-patterns",
+  "private": true,
+  "scripts": {
+    "deploy": "vite build && wrangler deploy",
+    "start": "vite dev"
+  },
+  "type": "module",
+  "version": "0.0.0"
 }

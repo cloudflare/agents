@@ -1,7 +1,7 @@
-import { useAgent } from "agents/react";
-import { createRoot } from "react-dom/client";
-import { useRef, useState } from "react";
 import { agentFetch } from "agents/client";
+import { useAgent } from "agents/react";
+import { useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 interface Message {
@@ -19,6 +19,7 @@ function App() {
   const agent = useAgent({
     agent: "my-agent",
     host: "http://localhost:8787",
+    onClose: () => setIsConnected(false),
     onMessage: (message) => {
       const newMessage: Message = {
         id: Math.random().toString(36).substring(7),
@@ -29,7 +30,6 @@ function App() {
       setMessages((prev) => [...prev, newMessage]);
     },
     onOpen: () => setIsConnected(true),
-    onClose: () => setIsConnected(false),
   });
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {

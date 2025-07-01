@@ -1,16 +1,16 @@
 {
-  "name": "@cloudflare/agents-mcp-client-example",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "start": "vite dev",
-    "build": "vite build",
-    "deploy": "wrangler deploy"
-  },
-  "keywords": [],
   "author": "",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.4",
+    "@modelcontextprotocol/sdk": "^1.13.1",
     "nanoid": "^5.1.5"
-  }
+  },
+  "keywords": [],
+  "name": "@cloudflare/agents-mcp-client-example",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "deploy": "wrangler deploy",
+    "start": "vite dev"
+  },
+  "type": "module"
 }

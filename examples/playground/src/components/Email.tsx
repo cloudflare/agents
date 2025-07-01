@@ -1,15 +1,8 @@
 import { useAgentChat } from "agents/ai-react";
 import { useAgent } from "agents/react";
-import { useState, useEffect } from "react";
 import type { Email as PostalEmail } from "postal-mime";
+import { useEffect, useState } from "react";
 import "./Email.css";
-
-interface Message {
-  id: string;
-  text: string;
-  sender: "user" | "agent";
-  timestamp: Date;
-}
 
 interface EmailProps {
   addToast: (message: string, type?: "success" | "error" | "info") => void;
@@ -26,16 +19,16 @@ export default function Email({ addToast }: EmailProps) {
 
   const [emails, setEmails] = useState<PostalEmail[]>([
     {
+      attachments: [],
+      date: new Date().toISOString(),
+      from: {
+        address: "agent@example.com",
+        name: "Agent",
+      },
+      headers: [],
       messageId: "1",
       subject: "Welcome to the Email Agent",
       text: "Hello! This is your first email from the agent. You can reply to this email when chat is disconnected.",
-      from: {
-        name: "Agent",
-        address: "agent@example.com",
-      },
-      headers: [],
-      attachments: [],
-      date: new Date().toISOString(),
     },
   ]);
 
@@ -88,25 +81,25 @@ export default function Email({ addToast }: EmailProps) {
     if (!emailSubject.trim() || !emailBody.trim()) return;
 
     const newEmail: PostalEmail = {
+      attachments: [],
+      date: new Date().toISOString(),
+      from: {
+        address: "user",
+        name: "User",
+      },
+      headers: [],
       messageId: crypto.randomUUID(),
       subject: emailSubject,
       text: emailBody,
-      from: {
-        name: "User",
-        address: "user",
-      },
-      headers: [],
-      attachments: [],
-      date: new Date().toISOString(),
     };
 
     setEmails((prev) => [...prev, newEmail]);
     mailboxAgent.send(
       JSON.stringify({
-        type: "send-email",
-        to: "theman@example.com",
         subject: emailSubject,
         text: emailBody,
+        to: "theman@example.com",
+        type: "send-email",
       })
     );
     setEmailSubject("");

@@ -1,5 +1,74 @@
 # hono-agents
 
+## 0.0.90
+
+### Patch Changes
+
+- Updated dependencies [[`7acfd65`](https://github.com/cloudflare/agents/commit/7acfd654bc1773c975fd8f61111c76e83c132fe5)]:
+  - agents@0.0.100
+
+## 0.0.89
+
+### Patch Changes
+
+- Updated dependencies [[`75614c2`](https://github.com/cloudflare/agents/commit/75614c2532ab3e9f95e4a45e6e5b4a62be33a846)]:
+  - agents@0.0.99
+
+## 0.0.88
+
+### Patch Changes
+
+- [`b4ebb44`](https://github.com/cloudflare/agents/commit/b4ebb44196ff423e06beb347bb0e7b16f08773b4) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- Updated dependencies [[`b4ebb44`](https://github.com/cloudflare/agents/commit/b4ebb44196ff423e06beb347bb0e7b16f08773b4)]:
+  - agents@0.0.98
+
+## 0.0.87
+
+### Patch Changes
+
+- [`efffe3e`](https://github.com/cloudflare/agents/commit/efffe3e2e42a7cf3d97f05122cfd5ffc3ab1ad64) Thanks [@threepointone](https://github.com/threepointone)! - trigger release
+
+- Updated dependencies [[`efffe3e`](https://github.com/cloudflare/agents/commit/efffe3e2e42a7cf3d97f05122cfd5ffc3ab1ad64)]:
+  - agents@0.0.97
+
+## 0.0.86
+
+### Patch Changes
+
+- [#325](https://github.com/cloudflare/agents/pull/325) [`7e0777b`](https://github.com/cloudflare/agents/commit/7e0777b12624cb6903053976742a33ef54ba65d7) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+- Updated dependencies [[`7e0777b`](https://github.com/cloudflare/agents/commit/7e0777b12624cb6903053976742a33ef54ba65d7)]:
+  - agents@0.0.96
+
+## 0.0.85
+
+### Patch Changes
+
+- Updated dependencies [[`7856b4d`](https://github.com/cloudflare/agents/commit/7856b4d90afbd3faf59f2d264b59f878648153dd)]:
+  - agents@0.0.95
+
+## 0.0.84
+
+### Patch Changes
+
+- Updated dependencies [[`9c6b2d7`](https://github.com/cloudflare/agents/commit/9c6b2d7c79ff91c1d73279608fa55568f8b91a5a), [`8a4558c`](https://github.com/cloudflare/agents/commit/8a4558cd9f95c1194f3d696bcb23050c3db7d257)]:
+  - agents@0.0.94
+
+## 0.0.83
+
+### Patch Changes
+
+- Updated dependencies [[`b57e1d9`](https://github.com/cloudflare/agents/commit/b57e1d918d02607dcb68e1ca55790b6362964090)]:
+  - agents@0.0.93
+
+## 0.0.82
+
+### Patch Changes
+
+- Updated dependencies [[`eeb70e2`](https://github.com/cloudflare/agents/commit/eeb70e256594d688bb291fd49d96faa6839e4d8a)]:
+  - agents@0.0.92
+
 ## 0.0.81
 
 ### Patch Changes

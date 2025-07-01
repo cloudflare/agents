@@ -1,10 +1,10 @@
 import { useAgent } from "agents/react";
-import { createRoot } from "react-dom/client";
 import { useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import "./styles.css";
+import type { MCPServersState } from "agents";
 import { agentFetch } from "agents/client";
 import { nanoid } from "nanoid";
-import type { MCPServersState } from "agents";
 
 let sessionId = localStorage.getItem("sessionId");
 if (!sessionId) {
@@ -18,20 +18,20 @@ function App() {
   const mcpUrlInputRef = useRef<HTMLInputElement>(null);
   const mcpNameInputRef = useRef<HTMLInputElement>(null);
   const [mcpState, setMcpState] = useState<MCPServersState>({
-    servers: {},
-    tools: [],
     prompts: [],
     resources: [],
+    servers: {},
+    tools: [],
   });
 
   const agent = useAgent({
     agent: "my-agent",
     name: sessionId!,
-    onOpen: () => setIsConnected(true),
     onClose: () => setIsConnected(false),
     onMcpUpdate: (mcpServers: MCPServersState) => {
       setMcpState(mcpServers);
     },
+    onOpen: () => setIsConnected(true),
   });
 
   function openPopup(authUrl: string) {
@@ -52,14 +52,14 @@ function App() {
     const serverName = mcpNameInputRef.current.value;
     agentFetch(
       {
-        host: agent.host,
         agent: "my-agent",
+        host: agent.host,
         name: sessionId!,
         path: "add-mcp",
       },
       {
+        body: JSON.stringify({ name: serverName, url: serverUrl }),
         method: "POST",
-        body: JSON.stringify({ url: serverUrl, name: serverName }),
       }
     );
     setMcpState({
@@ -67,12 +67,12 @@ function App() {
       servers: {
         ...mcpState.servers,
         placeholder: {
+          auth_url: null,
+          capabilities: null,
+          instructions: null,
           name: serverName,
           server_url: serverUrl,
           state: "connecting",
-          auth_url: null,
-          instructions: null,
-          capabilities: null,
         },
       },
     });

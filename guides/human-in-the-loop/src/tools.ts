@@ -9,15 +9,15 @@ const getWeatherInformation = tool({
 
 const getLocalTime = tool({
   description: "get the local time for a specified location",
-  parameters: z.object({ location: z.string() }),
   // including execute function -> no confirmation required
   execute: async ({ location }) => {
     console.log(`Getting local time for ${location}`);
     return "10am";
   },
+  parameters: z.object({ location: z.string() }),
 });
 
 export const tools = {
-  getWeatherInformation,
   getLocalTime,
+  getWeatherInformation,
 };

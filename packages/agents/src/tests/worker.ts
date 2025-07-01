@@ -1,7 +1,7 @@
-import { McpAgent } from "../mcp/index.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { McpAgent } from "../mcp/index.ts";
 
 export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
@@ -25,7 +25,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       "A simple greeting tool",
       { name: z.string().describe("Name to greet") },
       async ({ name }): Promise<CallToolResult> => {
-        return { content: [{ type: "text", text: `Hello, ${name}!` }] };
+        return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
       }
     );
 
@@ -34,7 +34,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       {},
       async (): Promise<CallToolResult> => {
         return {
-          content: [{ type: "text", text: this.props.testValue }],
+          content: [{ text: this.props.testValue, type: "text" }],
         };
       }
     );

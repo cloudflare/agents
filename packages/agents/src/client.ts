@@ -1,7 +1,7 @@
 import {
+  type PartyFetchOptions,
   PartySocket,
   type PartySocketOptions,
-  type PartyFetchOptions,
 } from "partysocket";
 import type { RPCRequest, RPCResponse } from "./";
 import type {
@@ -98,8 +98,8 @@ export class AgentClient<State = unknown> extends PartySocket {
   constructor(options: AgentClientOptions<State>) {
     const agentNamespace = camelCaseToKebabCase(options.agent);
     super({
-      prefix: "agents",
       party: agentNamespace,
+      prefix: "agents",
       room: options.name || "default",
       ...options,
     });
@@ -112,7 +112,7 @@ export class AgentClient<State = unknown> extends PartySocket {
         let parsedMessage: Record<string, unknown>;
         try {
           parsedMessage = JSON.parse(event.data);
-        } catch (error) {
+        } catch (_error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
           return;
@@ -153,7 +153,7 @@ export class AgentClient<State = unknown> extends PartySocket {
   }
 
   setState(state: State) {
-    this.send(JSON.stringify({ type: "cf_agent_state", state }));
+    this.send(JSON.stringify({ state, type: "cf_agent_state" }));
     this.options.onStateUpdate?.(state, "client");
   }
 
@@ -182,17 +182,17 @@ export class AgentClient<State = unknown> extends PartySocket {
     return new Promise<T>((resolve, reject) => {
       const id = Math.random().toString(36).slice(2);
       this._pendingCalls.set(id, {
-        resolve: (value: unknown) => resolve(value as T),
         reject,
+        resolve: (value: unknown) => resolve(value as T),
         stream: streamOptions,
         type: null as T,
       });
 
       const request: RPCRequest = {
-        type: "rpc",
+        args,
         id,
         method,
-        args,
+        type: "rpc",
       };
 
       this.send(JSON.stringify(request));
@@ -211,8 +211,8 @@ export function agentFetch(opts: AgentClientFetchOptions, init?: RequestInit) {
 
   return PartySocket.fetch(
     {
-      prefix: "agents",
       party: agentNamespace,
+      prefix: "agents",
       room: opts.name || "default",
       ...opts,
     },

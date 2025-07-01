@@ -1,8 +1,8 @@
-import PostalMime from "postal-mime";
 import { createMimeMessage } from "mimetext";
+import PostalMime from "postal-mime";
 
 const msg = createMimeMessage();
-msg.setSender({ name: "John Doe", addr: "john.doe@example.com" });
+msg.setSender({ addr: "john.doe@example.com", name: "John Doe" });
 msg.setRecipient("jane.doe@example.com");
 msg.setSubject("Hello, world!");
 msg.addMessage({

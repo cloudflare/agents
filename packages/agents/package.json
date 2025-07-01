@@ -1,101 +1,101 @@
 {
-  "name": "agents",
-  "version": "0.0.91",
-  "main": "src/index.ts",
-  "types": "dist/index.d.ts",
-  "type": "module",
-  "scripts": {
-    "check:test": "npm run check:test:workers && npm run check:test:react",
-    "check:test:workers": "vitest -r src/tests --watch false",
-    "check:test:react": "vitest -r src/react-tests --watch false",
-    "test": "vitest -r src/tests",
-    "test:react": "vitest -r src/react-tests",
-    "evals": "(cd evals; evalite)",
-    "build": "tsx ./scripts/build.ts"
+  "author": "Cloudflare Inc.",
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.1",
+    "ai": "^4.3.16",
+    "cron-schedule": "^5.0.4",
+    "nanoid": "^5.1.5",
+    "partyserver": "^0.0.72",
+    "partysocket": "1.1.4",
+    "zod": "^3.25.67"
+  },
+  "description": "A home for your AI agents",
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.46",
+    "react": "*",
+    "vitest-browser-react": "^1.0.0"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./ai-chat-agent": {
+      "import": "./dist/ai-chat-agent.js",
+      "require": "./dist/ai-chat-agent.js",
+      "types": "./dist/ai-chat-agent.d.ts"
+    },
+    "./ai-react": {
+      "import": "./dist/ai-react.js",
+      "require": "./dist/ai-react.js",
+      "types": "./dist/ai-react.d.ts"
+    },
+    "./ai-types": {
+      "import": "./dist/ai-types.js",
+      "require": "./dist/ai-types.js",
+      "types": "./dist/ai-types.d.ts"
+    },
+    "./client": {
+      "import": "./dist/client.js",
+      "require": "./dist/client.js",
+      "types": "./dist/client.d.ts"
+    },
+    "./mcp": {
+      "import": "./dist/mcp/index.js",
+      "require": "./dist/mcp/index.js",
+      "types": "./dist/mcp/index.d.ts"
+    },
+    "./mcp/client": {
+      "import": "./dist/mcp/client.js",
+      "require": "./dist/mcp/client.js",
+      "types": "./dist/mcp/client.d.ts"
+    },
+    "./mcp/do-oauth-client-provider": {
+      "import": "./dist/mcp/do-oauth-client-provider.js",
+      "require": "./dist/mcp/do-oauth-client-provider.js",
+      "types": "./dist/mcp/do-oauth-client-provider.d.ts"
+    },
+    "./react": {
+      "import": "./dist/react.js",
+      "require": "./dist/react.js",
+      "types": "./dist/react.d.ts"
+    },
+    "./schedule": {
+      "import": "./dist/schedule.js",
+      "require": "./dist/schedule.js",
+      "types": "./dist/schedule.d.ts"
+    }
   },
   "files": [
     "dist",
     "README.md"
   ],
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "require": "./dist/index.js",
-      "import": "./dist/index.js"
-    },
-    "./client": {
-      "types": "./dist/client.d.ts",
-      "require": "./dist/client.js",
-      "import": "./dist/client.js"
-    },
-    "./react": {
-      "types": "./dist/react.d.ts",
-      "require": "./dist/react.js",
-      "import": "./dist/react.js"
-    },
-    "./ai-react": {
-      "types": "./dist/ai-react.d.ts",
-      "require": "./dist/ai-react.js",
-      "import": "./dist/ai-react.js"
-    },
-    "./ai-chat-agent": {
-      "types": "./dist/ai-chat-agent.d.ts",
-      "require": "./dist/ai-chat-agent.js",
-      "import": "./dist/ai-chat-agent.js"
-    },
-    "./ai-types": {
-      "types": "./dist/ai-types.d.ts",
-      "require": "./dist/ai-types.js",
-      "import": "./dist/ai-types.js"
-    },
-    "./schedule": {
-      "types": "./dist/schedule.d.ts",
-      "require": "./dist/schedule.js",
-      "import": "./dist/schedule.js"
-    },
-    "./mcp": {
-      "types": "./dist/mcp/index.d.ts",
-      "require": "./dist/mcp/index.js",
-      "import": "./dist/mcp/index.js"
-    },
-    "./mcp/client": {
-      "types": "./dist/mcp/client.d.ts",
-      "require": "./dist/mcp/client.js",
-      "import": "./dist/mcp/client.js"
-    },
-    "./mcp/do-oauth-client-provider": {
-      "types": "./dist/mcp/do-oauth-client-provider.d.ts",
-      "require": "./dist/mcp/do-oauth-client-provider.js",
-      "import": "./dist/mcp/do-oauth-client-provider.js"
-    }
-  },
   "keywords": [],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/cloudflare/agents.git",
-    "directory": "packages/agents"
-  },
-  "bugs": {
-    "url": "https://github.com/cloudflare/agents/issues"
-  },
-  "author": "Cloudflare Inc.",
   "license": "MIT",
-  "description": "A home for your AI agents",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.4",
-    "ai": "^4.3.16",
-    "cron-schedule": "^5.0.4",
-    "nanoid": "^5.1.5",
-    "partyserver": "^0.0.71",
-    "partysocket": "1.1.4",
-    "zod": "^3.25.17"
-  },
+  "main": "src/index.ts",
+  "name": "agents",
   "peerDependencies": {
     "react": "*"
   },
-  "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.8.31",
-    "react": "*",
-    "vitest-browser-react": "^0.2.0"
-  }
+  "repository": {
+    "directory": "packages/agents",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "check:test": "npm run check:test:workers && npm run check:test:react",
+    "check:test:react": "vitest -r src/react-tests --watch false",
+    "check:test:workers": "vitest -r src/tests --watch false",
+    "evals": "(cd evals; evalite)",
+    "test": "vitest -r src/tests",
+    "test:react": "vitest -r src/react-tests"
+  },
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "version": "0.0.100"
 }

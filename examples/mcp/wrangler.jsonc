@@ -1,20 +1,20 @@
 {
-  "name": "mcp-agent-demo",
-  "main": "src/server.ts",
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {
-        "name": "MyMCP",
         "class_name": "MyMCP",
+        "name": "MyMCP",
       },
     ],
   },
+  "main": "src/server.ts",
   "migrations": [
     {
-      "tag": "v1",
       "new_sqlite_classes": ["MyMCP"],
+      "tag": "v1",
     },
   ],
+  "name": "mcp-agent-demo",
 }

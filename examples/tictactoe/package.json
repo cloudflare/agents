@@ -1,13 +1,13 @@
 {
+  "author": "",
+  "description": "A simple demo showing a smart agent playing Tic Tac Toe against a human.",
+  "keywords": [],
+  "license": "ISC",
   "name": "@cloudflare/agents-tictactoe",
   "private": true,
-  "version": "0.0.0",
-  "type": "module",
   "scripts": {
     "start": "vite dev"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "A simple demo showing a smart agent playing Tic Tac Toe against a human."
+  "type": "module",
+  "version": "0.0.0"
 }

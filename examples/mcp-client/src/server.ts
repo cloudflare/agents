@@ -1,4 +1,4 @@
-import { Agent, routeAgentRequest, type AgentNamespace } from "agents";
+import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
 import { MCPClientManager } from "agents/mcp/client";
 
 type Env = {

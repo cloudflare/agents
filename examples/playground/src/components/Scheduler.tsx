@@ -1,5 +1,5 @@
-import { useState } from "react";
 import { useAgent } from "agents/react";
+import { useState } from "react";
 import type {
   IncomingMessage,
   OutgoingMessage,
@@ -43,8 +43,8 @@ export function Scheduler({ addToast }: SchedulerProps) {
 
     agent.send(
       JSON.stringify({
-        type: "schedule",
         input: input,
+        type: "schedule",
       } satisfies IncomingMessage)
     );
     setInput("");
@@ -53,8 +53,8 @@ export function Scheduler({ addToast }: SchedulerProps) {
   const handleDelete = (id: string) => {
     agent.send(
       JSON.stringify({
-        type: "delete-schedule",
         id,
+        type: "delete-schedule",
       } satisfies IncomingMessage)
     );
     setScheduledItems((items) => items.filter((item) => item.id !== id));

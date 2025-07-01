@@ -1,5 +1,5 @@
-import { Agent } from "..";
 import type { env } from "cloudflare:workers";
+import { Agent } from "..";
 import { useAgent } from "../react";
 
 declare class A extends Agent<typeof env, {}> {
@@ -17,10 +17,12 @@ declare class A extends Agent<typeof env, {}> {
 }
 
 // @ts-expect-error state doesn't match type A state
-const a2 = useAgent<A, { foo: "bar" }>({
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
+const _a2 = useAgent<A, { foo: "bar" }>({
   agent: "test",
 });
 
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const a1 = useAgent<A, {}>({
   agent: "test",
 });

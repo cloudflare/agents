@@ -1,49 +1,47 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "playground",
-  "main": "src/server.ts",
+
+  "assets": {
+    "binding": "ASSETS",
+  },
   "compatibility_date": "2025-02-19",
   "compatibility_flags": [
     "nodejs_compat",
     "nodejs_compat_populate_process_env",
   ],
 
-  "assets": {
-    "binding": "ASSETS",
-  },
-
   "durable_objects": {
     "bindings": [
       {
-        "name": "Scheduler",
         "class_name": "Scheduler",
+        "name": "Scheduler",
       },
       {
-        "name": "Stateful",
         "class_name": "Stateful",
+        "name": "Stateful",
       },
       {
-        "name": "EmailAgent",
         "class_name": "EmailAgent",
+        "name": "EmailAgent",
       },
       {
-        "name": "MockEmailService",
         "class_name": "MockEmailService",
+        "name": "MockEmailService",
       },
       {
-        "name": "Chat",
         "class_name": "Chat",
+        "name": "Chat",
       },
       {
-        "name": "Rpc",
         "class_name": "Rpc",
+        "name": "Rpc",
       },
     ],
   },
+  "main": "src/server.ts",
 
   "migrations": [
     {
-      "tag": "v1",
       "new_sqlite_classes": [
         "Scheduler",
         "Stateful",
@@ -52,8 +50,10 @@
         "Chat",
         "Rpc",
       ],
+      "tag": "v1",
     },
   ],
+  "name": "playground",
 
   "send_email": [
     {

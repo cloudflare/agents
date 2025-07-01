@@ -1,0 +1,19 @@
+{
+  "compatibility_date": "2025-04-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TestMcpAgent",
+        "name": "MCP_OBJECT",
+      },
+    ],
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["TestMcpAgent"],
+      "tag": "v1",
+    },
+  ],
+}

@@ -1,7 +1,7 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef } from "react";
-import type { MCPServersState, RPCRequest, RPCResponse, Agent } from "./";
+import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
 
@@ -170,8 +170,8 @@ export function useAgent<State>(
   // "use()" to get the value and pass it
   // as a query parameter to usePartySocket
   const agent = usePartySocket({
-    prefix: "agents",
     party: agentNamespace,
+    prefix: "agents",
     room: options.name || "default",
     ...options,
     onMessage: (message) => {
@@ -179,7 +179,7 @@ export function useAgent<State>(
         let parsedMessage: Record<string, unknown>;
         try {
           parsedMessage = JSON.parse(message.data);
-        } catch (error) {
+        } catch (_error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
           return options.onMessage?.(message);
@@ -240,16 +240,16 @@ export function useAgent<State>(
       return new Promise((resolve, reject) => {
         const id = Math.random().toString(36).slice(2);
         pendingCallsRef.current.set(id, {
-          resolve: resolve as (value: unknown) => void,
           reject,
+          resolve: resolve as (value: unknown) => void,
           stream: streamOptions,
         });
 
         const request: RPCRequest = {
-          type: "rpc",
+          args,
           id,
           method,
-          args,
+          type: "rpc",
         };
 
         agent.send(JSON.stringify(request));
@@ -259,7 +259,7 @@ export function useAgent<State>(
   );
 
   agent.setState = (state: State) => {
-    agent.send(JSON.stringify({ type: "cf_agent_state", state }));
+    agent.send(JSON.stringify({ state, type: "cf_agent_state" }));
     options.onStateUpdate?.(state, "client");
   };
 
@@ -270,7 +270,7 @@ export function useAgent<State>(
   agent.stub = new Proxy<any>(
     {},
     {
-      get: (target, method) => {
+      get: (_target, method) => {
         return (...args: unknown[]) => {
           return call(method as string, args);
         };

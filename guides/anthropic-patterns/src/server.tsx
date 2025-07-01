@@ -1,14 +1,14 @@
 // implementing https://www.anthropic.com/research/building-effective-agents
 
+import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";
 import {
   Agent,
   type AgentNamespace,
-  routeAgentRequest,
   type Connection,
+  routeAgentRequest,
   type WSMessage,
 } from "agents";
-import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";
-import { generateText, generateObject } from "ai";
+import { generateObject, generateText } from "ai";
 import { z } from "zod";
 
 type Env = {
@@ -29,7 +29,7 @@ function createAgent<
   Props extends Record<string, unknown>,
   Output extends Record<string, unknown>,
 >(
-  name: string,
+  _name: string,
   workflow: (
     props: Props,
     ctx: {
@@ -60,8 +60,8 @@ function createAgent<
     onConnect(connection: Connection) {
       connection.send(
         JSON.stringify({
-          type: "status",
           status: this.status,
+          type: "status",
         })
       );
     }
@@ -69,16 +69,16 @@ function createAgent<
     toast = (message: string, type: "info" | "error" = "info") => {
       this.broadcast(
         JSON.stringify({
-          type: "toast",
           toast: {
             message,
             type,
           },
+          type: "toast",
         })
       );
     };
 
-    onMessage(connection: Connection, message: WSMessage) {
+    onMessage(_connection: Connection, message: WSMessage) {
       const data = JSON.parse(message as string);
       switch (data.type) {
         case "run":
@@ -94,7 +94,7 @@ function createAgent<
 
     setStatus(status: typeof this.status) {
       this.status = status;
-      this.broadcast(JSON.stringify({ type: "status", status: this.status }));
+      this.broadcast(JSON.stringify({ status: this.status, type: "status" }));
     }
 
     async run(data: { input: Record<string, string> }) {
@@ -103,8 +103,8 @@ function createAgent<
 
       try {
         const result = await workflow(data.input as Props, {
-          toast: this.toast,
           openai: this.openai,
+          toast: this.toast,
         });
         this.setStatus({ isRunning: false, output: JSON.stringify(result) });
       } catch (error) {
@@ -141,17 +141,17 @@ export const Sequential = createAgent<{ input: string }, { copy: string }>(
     // Perform quality check on copy
     const { object: qualityMetrics } = await generateObject({
       model,
-      schema: z.object({
-        hasCallToAction: z.boolean(),
-        emotionalAppeal: z.number().min(1).max(10),
-        clarity: z.number().min(1).max(10),
-      }),
       prompt: `Evaluate this marketing copy for:
       1. Presence of call to action (true/false)
       2. Emotional appeal (1-10)
       3. Clarity (1-10)
   
       Copy to evaluate: ${copy}`,
+      schema: z.object({
+        clarity: z.number().min(1).max(10),
+        emotionalAppeal: z.number().min(1).max(10),
+        hasCallToAction: z.boolean(),
+      }),
     });
     ctx.toast("Quality check complete");
     // If quality check fails, regenerate with more specific instructions
@@ -196,11 +196,6 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
     // First step: Classify the query type
     const { object: classification } = await generateObject({
       model,
-      schema: z.object({
-        reasoning: z.string(),
-        type: z.enum(["general", "refund", "technical"]),
-        complexity: z.enum(["simple", "complex"]),
-      }),
       prompt: `Classify this customer query:
       ${props.query}
   
@@ -208,6 +203,11 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
       1. Query type (general, refund, or technical)
       2. Complexity (simple or complex)
       3. Brief reasoning for classification`,
+      schema: z.object({
+        complexity: z.enum(["simple", "complex"]),
+        reasoning: z.string(),
+        type: z.enum(["general", "refund", "technical"]),
+      }),
     });
     ctx.toast("Query classified");
     // Route based on classification
@@ -217,6 +217,7 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
         classification.complexity === "simple"
           ? ctx.openai("gpt-4o-mini")
           : ctx.openai("o1-mini"),
+      prompt: props.query,
       system: {
         general:
           "You are an expert customer service agent handling general inquiries.",
@@ -225,10 +226,9 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
         technical:
           "You are a technical support specialist with deep product knowledge. Focus on clear step-by-step troubleshooting.",
       }[classification.type],
-      prompt: props.query,
     });
     ctx.toast("Response generated");
-    return { response, classification };
+    return { classification, response };
   }
 );
 
@@ -251,41 +251,41 @@ export const Parallel = createAgent<
       await Promise.all([
         generateObject({
           model,
-          system:
-            "You are an expert in code security. Focus on identifying security vulnerabilities, injection risks, and authentication issues.",
+          prompt: `Review this code:
+      ${props.code}`,
           schema: z.object({
-            vulnerabilities: z.array(z.string()),
             riskLevel: z.enum(["low", "medium", "high"]),
             suggestions: z.array(z.string()),
+            vulnerabilities: z.array(z.string()),
           }),
-          prompt: `Review this code:
-      ${props.code}`,
+          system:
+            "You are an expert in code security. Focus on identifying security vulnerabilities, injection risks, and authentication issues.",
         }),
 
         generateObject({
           model,
-          system:
-            "You are an expert in code performance. Focus on identifying performance bottlenecks, memory leaks, and optimization opportunities.",
+          prompt: `Review this code:
+      ${props.code}`,
           schema: z.object({
-            issues: z.array(z.string()),
             impact: z.enum(["low", "medium", "high"]),
+            issues: z.array(z.string()),
             optimizations: z.array(z.string()),
           }),
-          prompt: `Review this code:
-      ${props.code}`,
+          system:
+            "You are an expert in code performance. Focus on identifying performance bottlenecks, memory leaks, and optimization opportunities.",
         }),
 
         generateObject({
           model,
-          system:
-            "You are an expert in code quality. Focus on code structure, readability, and adherence to best practices.",
+          prompt: `Review this code:
+      ${props.code}`,
           schema: z.object({
             concerns: z.array(z.string()),
             qualityScore: z.number().min(1).max(10),
             recommendations: z.array(z.string()),
           }),
-          prompt: `Review this code:
-      ${props.code}`,
+          system:
+            "You are an expert in code quality. Focus on code structure, readability, and adherence to best practices.",
         }),
       ]);
 
@@ -300,9 +300,9 @@ export const Parallel = createAgent<
     // Aggregate results using another model instance
     const { text: summary } = await generateText({
       model,
-      system: "You are a technical lead summarizing multiple code reviews.",
       prompt: `Synthesize these code review results into a concise summary with key actions:
     ${JSON.stringify(reviews, null, 2)}`,
+      system: "You are a technical lead summarizing multiple code reviews.",
     });
 
     ctx.toast("Code review summary complete");
@@ -337,20 +337,20 @@ export const Orchestrator = createAgent<
     // It dynamically breaks down tasks and delegates them to worker LLMs, synthesizing their results.
     const { object: implementationPlan } = await generateObject({
       model: ctx.openai("o1"),
+      prompt: `Analyze this feature request and create an implementation plan:
+      ${props.featureRequest}`,
       schema: z.object({
+        estimatedComplexity: z.enum(["low", "medium", "high"]),
         files: z.array(
           z.object({
-            purpose: z.string(),
-            filePath: z.string(),
             changeType: z.enum(["create", "modify", "delete"]),
+            filePath: z.string(),
+            purpose: z.string(),
           })
         ),
-        estimatedComplexity: z.enum(["low", "medium", "high"]),
       }),
       system:
         "You are a senior software architect planning feature implementations.",
-      prompt: `Analyze this feature request and create an implementation plan:
-      ${props.featureRequest}`,
     });
     ctx.toast("Implementation plan created");
     // Workers: Execute the planned changes
@@ -360,24 +360,24 @@ export const Orchestrator = createAgent<
         const workerSystemPrompt = {
           create:
             "You are an expert at implementing new files following best practices and project patterns.",
-          modify:
-            "You are an expert at modifying existing code while maintaining consistency and avoiding regressions.",
           delete:
             "You are an expert at safely removing code while ensuring no breaking changes.",
+          modify:
+            "You are an expert at modifying existing code while maintaining consistency and avoiding regressions.",
         }[file.changeType];
 
         const { object: change } = await generateObject({
           model: ctx.openai("gpt-4o"),
-          schema: z.object({
-            explanation: z.string(),
-            code: z.string(),
-          }),
-          system: workerSystemPrompt,
           prompt: `Implement the changes for ${file.filePath} to support:
           ${file.purpose}
   
           Consider the overall feature ctx:
           ${props.featureRequest}`,
+          schema: z.object({
+            code: z.string(),
+            explanation: z.string(),
+          }),
+          system: workerSystemPrompt,
         });
         ctx.toast("File change implemented");
         return {
@@ -389,8 +389,8 @@ export const Orchestrator = createAgent<
 
     ctx.toast("File changes implemented");
     return {
-      plan: implementationPlan,
       changes: fileChanges,
+      plan: implementationPlan,
     };
   }
 );
@@ -411,9 +411,9 @@ export const Evaluator = createAgent(
     // Initial translation
     const { text: translation } = await generateText({
       model: ctx.openai("gpt-4o-mini"), // use small model for first attempt
-      system: "You are an expert literary translator.",
       prompt: `Translate this text to ${props.targetLanguage}, preserving tone and cultural nuances:
       ${props.text}`,
+      system: "You are an expert literary translator.",
     });
 
     ctx.toast("Initial translation complete");
@@ -425,15 +425,6 @@ export const Evaluator = createAgent(
       // Evaluate current translation
       const { object: evaluation } = await generateObject({
         model,
-        schema: z.object({
-          qualityScore: z.number().min(1).max(10),
-          preservesTone: z.boolean(),
-          preservesNuance: z.boolean(),
-          culturallyAccurate: z.boolean(),
-          specificIssues: z.array(z.string()),
-          improvementSuggestions: z.array(z.string()),
-        }),
-        system: "You are an expert in evaluating literary translations.",
         prompt: `Evaluate this translation:
   
         Original: ${props.text}
@@ -444,6 +435,15 @@ export const Evaluator = createAgent(
         2. Preservation of tone
         3. Preservation of nuance
         4. Cultural accuracy`,
+        schema: z.object({
+          culturallyAccurate: z.boolean(),
+          improvementSuggestions: z.array(z.string()),
+          preservesNuance: z.boolean(),
+          preservesTone: z.boolean(),
+          qualityScore: z.number().min(1).max(10),
+          specificIssues: z.array(z.string()),
+        }),
+        system: "You are an expert in evaluating literary translations.",
       });
 
       ctx.toast(`Evaluation complete: ${evaluation.qualityScore}`);
@@ -461,13 +461,13 @@ export const Evaluator = createAgent(
       // Generate improved translation based on feedback
       const { text: improvedTranslation } = await generateText({
         model: ctx.openai("gpt-4o"), // use a larger model
-        system: "You are an expert literary translator.",
         prompt: `Improve this translation based on the following feedback:
         ${evaluation.specificIssues.join("\n")}
         ${evaluation.improvementSuggestions.join("\n")}
   
         Original: ${props.text}
         Current Translation: ${currentTranslation}`,
+        system: "You are an expert literary translator.",
       });
 
       ctx.toast("Improved translation complete");

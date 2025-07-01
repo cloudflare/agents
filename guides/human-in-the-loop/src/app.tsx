@@ -1,10 +1,10 @@
 import type { Message } from "@ai-sdk/react";
-import { APPROVAL } from "./utils";
 import type { tools } from "./tools";
+import { APPROVAL } from "./utils";
 import "./styles.css";
-import { useEffect, useState, useRef, useCallback } from "react";
-import { useAgent } from "agents/react";
 import { useAgentChat } from "agents/ai-react";
+import { useAgent } from "agents/react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function Chat() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -125,8 +125,8 @@ export default function Chat() {
                               className="button-approve"
                               onClick={() =>
                                 addToolResult({
-                                  toolCallId,
                                   result: APPROVAL.YES,
+                                  toolCallId,
                                 })
                               }
                             >
@@ -137,8 +137,8 @@ export default function Chat() {
                               className="button-reject"
                               onClick={() =>
                                 addToolResult({
-                                  toolCallId,
                                   result: APPROVAL.NO,
+                                  toolCallId,
                                 })
                               }
                             >

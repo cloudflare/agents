@@ -9,8 +9,8 @@ import type { z } from "zod";
 
 // Approval string to be shared across frontend and backend
 export const APPROVAL = {
-  YES: "Yes, confirmed.",
   NO: "No, denied.",
+  YES: "Yes, confirmed.",
 } as const;
 
 function isValidToolName<K extends PropertyKey, T extends object>(
@@ -101,8 +101,8 @@ export async function processToolCalls<
       // Forward updated tool result to the client.
       dataStream.write(
         formatDataStreamPart("tool_result", {
-          toolCallId: toolInvocation.toolCallId,
           result,
+          toolCallId: toolInvocation.toolCallId,
         })
       );
 

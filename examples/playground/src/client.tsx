@@ -1,12 +1,12 @@
 import "./styles.css";
+import { nanoid } from "nanoid";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { useState, useEffect } from "react";
+import Chat from "./components/Chat";
+import Email from "./components/Email";
+import RPC from "./components/RPC";
 import { Scheduler } from "./components/Scheduler";
 import { Stateful } from "./components/Stateful";
-import Email from "./components/Email";
-import Chat from "./components/Chat";
-import RPC from "./components/RPC";
-import { nanoid } from "nanoid";
 
 interface Toast {
   id: string;

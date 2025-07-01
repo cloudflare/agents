@@ -45,15 +45,15 @@ describe("test", () => {
     const toolsRequest = new Request(
       `http://example.com/sse/message?sessionId=${sessionId}`,
       {
-        method: "POST",
+        body: JSON.stringify({
+          id: "1",
+          jsonrpc: "2.0",
+          method: "tools/list",
+        }),
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "tools/list",
-          id: "1",
-        }),
+        method: "POST",
       }
     );
 
@@ -78,20 +78,20 @@ describe("test", () => {
     expect(jsonResponse.result.tools).toBeDefined();
     expect(jsonResponse.result.tools.length).toBe(2);
     expect(jsonResponse.result.tools[0]).toEqual({
-      name: "greet",
       description: "A simple greeting tool",
       inputSchema: {
-        type: "object",
+        $schema: "http://json-schema.org/draft-07/schema#",
+        additionalProperties: false,
         properties: {
           name: {
-            type: "string",
             description: "Name to greet",
+            type: "string",
           },
         },
         required: ["name"],
-        additionalProperties: false,
-        $schema: "http://json-schema.org/draft-07/schema#",
+        type: "object",
       },
+      name: "greet",
     });
   });
 
@@ -114,19 +114,19 @@ describe("test", () => {
     const toolsRequest = new Request(
       `http://example.com/sse/message?sessionId=${sessionId}`,
       {
-        method: "POST",
+        body: JSON.stringify({
+          id: "1",
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            arguments: { name: "Citizen" },
+            name: "greet",
+          },
+        }),
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "tools/call",
-          id: "1",
-          params: {
-            name: "greet",
-            arguments: { name: "Citizen" },
-          },
-        }),
+        method: "POST",
       }
     );
 
@@ -144,13 +144,13 @@ describe("test", () => {
     );
 
     expect(jsonResponse).toEqual({
-      jsonrpc: "2.0",
       id: "1",
+      jsonrpc: "2.0",
       result: {
         content: [
           {
-            type: "text",
             text: "Hello, Citizen!",
+            type: "text",
           },
         ],
       },
@@ -176,19 +176,19 @@ describe("test", () => {
     const toolsRequest = new Request(
       `http://example.com/sse/message?sessionId=${sessionId}`,
       {
-        method: "POST",
+        body: JSON.stringify({
+          id: "2",
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            arguments: {},
+            name: "getPropsTestValue",
+          },
+        }),
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "tools/call",
-          id: "2",
-          params: {
-            name: "getPropsTestValue",
-            arguments: {},
-          },
-        }),
+        method: "POST",
       }
     );
 
@@ -206,13 +206,13 @@ describe("test", () => {
     );
 
     expect(jsonResponse).toEqual({
-      jsonrpc: "2.0",
       id: "2",
+      jsonrpc: "2.0",
       result: {
         content: [
           {
-            type: "text",
             text: "123",
+            type: "text",
           },
         ],
       },

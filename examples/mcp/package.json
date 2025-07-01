@@ -1,16 +1,16 @@
 {
+  "author": "",
+  "dependencies": {
+    "mcp-remote": "^0.1.16"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.1"
+  },
+  "keywords": [],
   "name": "@cloudflare/agents-mcp-example",
   "private": true,
-  "type": "module",
   "scripts": {
     "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"vite dev\" --kill-others"
   },
-  "keywords": [],
-  "author": "",
-  "dependencies": {
-    "mcp-remote": "^0.1.9"
-  },
-  "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.4"
-  }
+  "type": "module"
 }

@@ -1,9 +1,9 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
+import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import type { useAgent } from "./react";
-import { nanoid } from "nanoid";
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -56,8 +56,8 @@ export function useAgentChat<State = unknown>(
     const getMessagesUrl = new URL(url);
     getMessagesUrl.pathname += "/get-messages";
     const response = await fetch(getMessagesUrl.toString(), {
-      headers: options.headers,
       credentials: options.credentials,
+      headers: options.headers,
     });
     return response.json<Message[]>();
   }
@@ -140,8 +140,8 @@ export function useAgentChat<State = unknown>(
       // We need to communciate cancellation as a websocket message, instead of a request signal
       agent.send(
         JSON.stringify({
-          type: "cf_agent_chat_request_cancel",
           id,
+          type: "cf_agent_chat_request_cancel",
         })
       );
 
@@ -165,7 +165,7 @@ export function useAgentChat<State = unknown>(
         let data: OutgoingMessage;
         try {
           data = JSON.parse(event.data) as OutgoingMessage;
-        } catch (error) {
+        } catch (_error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
           return;
@@ -193,33 +193,33 @@ export function useAgentChat<State = unknown>(
 
     agent.send(
       JSON.stringify({
-        type: "cf_agent_use_chat_request",
         id,
-        url: request.toString(),
         init: {
-          method,
-          keepalive,
-          headers,
           body,
-          redirect,
-          integrity,
           credentials,
+          headers,
+          integrity,
+          keepalive,
+          method,
           mode,
+          redirect,
           referrer,
           referrerPolicy,
           window,
           // dispatcher,
           // duplex
         },
+        type: "cf_agent_use_chat_request",
+        url: request.toString(),
       })
     );
 
     return new Response(stream);
   }
   const useChatHelpers = useChat({
+    fetch: aiFetch,
     initialMessages,
     sendExtraMessageFields: true,
-    fetch: aiFetch,
     ...rest,
   });
 
@@ -231,7 +231,7 @@ export function useAgentChat<State = unknown>(
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (error) {
+      } catch (_error) {
         // silently ignore invalid messages for now
         // TODO: log errors with log levels
         return;
@@ -248,7 +248,7 @@ export function useAgentChat<State = unknown>(
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (error) {
+      } catch (_error) {
         // silently ignore invalid messages for now
         // TODO: log errors with log levels
         return;
@@ -270,19 +270,6 @@ export function useAgentChat<State = unknown>(
   return {
     ...useChatHelpers,
     /**
-     * Set the chat messages and synchronize with the Agent
-     * @param messages New messages to set
-     */
-    setMessages: (messages: Message[]) => {
-      useChatHelpers.setMessages(messages);
-      agent.send(
-        JSON.stringify({
-          type: "cf_agent_chat_messages",
-          messages,
-        })
-      );
-    },
-    /**
      * Clear chat history on both client and Agent
      */
     clearHistory: () => {
@@ -290,6 +277,19 @@ export function useAgentChat<State = unknown>(
       agent.send(
         JSON.stringify({
           type: "cf_agent_chat_clear",
+        })
+      );
+    },
+    /**
+     * Set the chat messages and synchronize with the Agent
+     * @param messages New messages to set
+     */
+    setMessages: (messages: Message[]) => {
+      useChatHelpers.setMessages(messages);
+      agent.send(
+        JSON.stringify({
+          messages,
+          type: "cf_agent_chat_messages",
         })
       );
     },
