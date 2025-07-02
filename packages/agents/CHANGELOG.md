@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.101
+
+### Patch Changes
+
+- [#339](https://github.com/cloudflare/agents/pull/339) [`22d140b`](https://github.com/cloudflare/agents/commit/22d140b360365ac51ed9ebdad2beab6bc7095c9e) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
 ## 0.0.100
 
 ### Patch Changes
