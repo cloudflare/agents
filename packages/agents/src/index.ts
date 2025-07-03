@@ -13,11 +13,11 @@ import { nanoid } from "nanoid";
 import {
   type Connection,
   type ConnectionContext,
-  getServerByName,
   type PartyServerOptions,
-  routePartykitRequest,
   Server,
-  type WSMessage
+  type WSMessage,
+  getServerByName,
+  routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager } from "./mcp/client";
@@ -676,16 +676,16 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     emailBinding: SendEmail,
     from: string,
     fromName: string,
-    options: Omit<EmailSendOptions, 'agentName' | 'agentId'>
+    options: Omit<EmailSendOptions, "agentName" | "agentId">
   ): Promise<void> {
     const agentName = camelCaseToKebabCase(this._ParentClass.name);
     const agentId = this.name;
-    
+
     return sendEmailWithRouting(emailBinding, from, fromName, {
       ...options,
       agentName,
       agentId,
-      includeRoutingHeaders: true,
+      includeRoutingHeaders: true
     });
   }
 
@@ -1318,7 +1318,7 @@ async function defaultEmailResolver<Env>(
     const messageIdMatch = messageId.match(/<([^@]+)@([^>]+)>/);
     if (messageIdMatch) {
       const [, agentId, domain] = messageIdMatch;
-      const agentName = domain.split('.')[0];
+      const agentName = domain.split(".")[0];
       return { agentName, agentId };
     }
   }
@@ -1329,7 +1329,7 @@ async function defaultEmailResolver<Env>(
     if (referencesMatch) {
       const [, base64Id, domain] = referencesMatch;
       const agentId = Buffer.from(base64Id, "base64").toString("hex");
-      const agentName = domain.split('.')[0];
+      const agentName = domain.split(".")[0];
       return { agentName, agentId };
     }
   }
@@ -1351,19 +1351,19 @@ export function createEmailAddressResolver<Env>(
     if (!emailMatch) {
       return null;
     }
-    
+
     const [, localPart, subAddress] = emailMatch;
-    
+
     if (subAddress) {
       return {
         agentName: localPart,
-        agentId: subAddress,
+        agentId: subAddress
       };
     }
-    
+
     return {
       agentName: localPart,
-      agentId: defaultAgentName || localPart,
+      agentId: defaultAgentName || localPart
     };
   };
 }
@@ -1397,7 +1397,7 @@ export async function routeAgentEmail<Env>(
   if (!routingInfo && options?.defaultAgentName && options?.defaultAgentId) {
     routingInfo = {
       agentName: options.defaultAgentName,
-      agentId: options.defaultAgentId,
+      agentId: options.defaultAgentId
     };
   }
 
@@ -1406,9 +1406,13 @@ export async function routeAgentEmail<Env>(
     return;
   }
 
-  const namespace = env[routingInfo.agentName as keyof Env] as AgentNamespace<Agent<Env>>;
+  const namespace = env[routingInfo.agentName as keyof Env] as AgentNamespace<
+    Agent<Env>
+  >;
   if (!namespace) {
-    console.error(`Agent namespace '${routingInfo.agentName}' not found in environment`);
+    console.error(
+      `Agent namespace '${routingInfo.agentName}' not found in environment`
+    );
     return;
   }
 
@@ -1435,26 +1439,28 @@ export async function sendEmailWithRouting(
   options: EmailSendOptions
 ): Promise<void> {
   const { createMimeMessage } = await import("mimetext");
-  
+
   let EmailMessage: any;
   try {
     const cloudflareEmail = await import("cloudflare:email");
     EmailMessage = cloudflareEmail.EmailMessage;
   } catch (error) {
-    throw new Error("cloudflare:email module not available. This function must be called in a Cloudflare Workers environment.");
+    throw new Error(
+      "cloudflare:email module not available. This function must be called in a Cloudflare Workers environment."
+    );
   }
-  
+
   const msg = createMimeMessage();
   msg.setSender({ addr: from, name: fromName });
   msg.setRecipient(options.to);
   msg.setSubject(options.subject);
   msg.addMessage({
     contentType: options.contentType || "text/plain",
-    data: options.body,
+    data: options.body
   });
 
   if (options.includeRoutingHeaders && options.agentName && options.agentId) {
-    const domain = options.domain || from.split('@')[1];
+    const domain = options.domain || from.split("@")[1];
     const messageId = `<${options.agentId}@${domain}>`;
     msg.setHeader("Message-ID", messageId);
     msg.setHeader("X-Agent-Name", options.agentName);

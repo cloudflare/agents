@@ -1,13 +1,13 @@
 {
   "compilerOptions": {
-    "types": ["@cloudflare/workers-types"],
-    "jsx": "react-jsx",
     "allowSyntheticDefaultImports": true,
-    "module": "ESNext",
-    "target": "ES2022",
+    "jsx": "react-jsx",
     "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
     "moduleResolution": "bundler",
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "target": "ES2022",
+    "types": ["@cloudflare/workers-types"]
   },
   "include": ["src/**/*", "test-mail.ts", "test-comprehensive.ts"]
 }

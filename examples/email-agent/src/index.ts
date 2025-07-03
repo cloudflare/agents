@@ -1,4 +1,9 @@
-import { Agent, routeAgentEmail, routeAgentRequest, createEmailAddressResolver } from "agents";
+import {
+  Agent,
+  createEmailAddressResolver,
+  routeAgentEmail,
+  routeAgentRequest,
+} from "agents";
 import PostalMime from "postal-mime";
 
 interface EmailData {
@@ -37,11 +42,11 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
   async onEmail(email: ForwardableEmailMessage) {
     try {
       console.log("📧 Received email from:", email.from, "to:", email.to);
-      
+
       const rawStream = email.raw;
       const reader = rawStream.getReader();
       const chunks: Uint8Array[] = [];
-      
+
       let done = false;
       while (!done) {
         const { value, done: readerDone } = await reader.read();
@@ -50,7 +55,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
           chunks.push(value);
         }
       }
-      
+
       const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
       const combined = new Uint8Array(totalLength);
       let offset = 0;
@@ -58,7 +63,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
         combined.set(chunk, offset);
         offset += chunk.length;
       }
-      
+
       const parsed = await PostalMime.parse(combined);
       console.log("📧 Parsed email:", {
         from: parsed.from?.address,
@@ -68,7 +73,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
 
       const emailData: EmailData = {
         from: parsed.from?.address || email.from,
-        subject: parsed.subject || 'No Subject',
+        subject: parsed.subject || "No Subject",
         text: parsed.text,
         html: parsed.html,
         to: email.to,
@@ -82,7 +87,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
         emails: [...this.state.emails.slice(-9), emailData],
         autoReplyEnabled: this.state.autoReplyEnabled,
       };
-      
+
       this.setState(newState);
 
       console.log("📊 Agent state updated:", {
@@ -93,35 +98,44 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
       if (this.state.autoReplyEnabled && !this.isAutoReply(parsed)) {
         await this.sendAutoReply(emailData);
       }
-
     } catch (error) {
       console.error("❌ Error processing email:", error);
     }
   }
 
-  private isAutoReply(parsed: any): boolean {
-    const autoReplyHeaders = ['auto-submitted', 'x-auto-response-suppress', 'precedence'];
-    
+  private isAutoReply(parsed: { headers?: Record<string, string>; subject?: string }): boolean {
+    const autoReplyHeaders = [
+      "auto-submitted",
+      "x-auto-response-suppress",
+      "precedence",
+    ];
+
     for (const header of autoReplyHeaders) {
       if (parsed.headers?.[header]) {
         return true;
       }
     }
-    
-    const subject = (parsed.subject || '').toLowerCase();
-    return subject.includes('auto-reply') || 
-           subject.includes('out of office') ||
-           subject.includes('automatic reply');
+
+    const subject = (parsed.subject || "").toLowerCase();
+    return (
+      subject.includes("auto-reply") ||
+      subject.includes("out of office") ||
+      subject.includes("automatic reply")
+    );
   }
 
   private async sendAutoReply(originalEmail: EmailData) {
     try {
       console.log("🤖 Sending auto-reply to:", originalEmail.from);
-      
-      await this.sendEmail(this.env.EMAIL, this.env.FROM_EMAIL, this.env.FROM_NAME, {
-        to: originalEmail.from,
-        subject: `Re: ${originalEmail.subject}`,
-        body: `Thank you for your email! 
+
+      await this.sendEmail(
+        this.env.EMAIL,
+        this.env.FROM_EMAIL,
+        this.env.FROM_NAME,
+        {
+          to: originalEmail.from,
+          subject: `Re: ${originalEmail.subject}`,
+          body: `Thank you for your email! 
 
 I received your message with subject: "${originalEmail.subject}"
 
@@ -133,12 +147,13 @@ Current stats:
 
 Best regards,
 Email Agent`,
-        headers: {
-          'Auto-Submitted': 'auto-replied',
-          'X-Auto-Response-Suppress': 'All',
-        },
-      });
-      
+          headers: {
+            "Auto-Submitted": "auto-replied",
+            "X-Auto-Response-Suppress": "All",
+          },
+        }
+      );
+
       console.log("✅ Auto-reply sent successfully");
     } catch (error) {
       console.error("❌ Failed to send auto-reply:", error);
@@ -148,9 +163,9 @@ Email Agent`,
 
 export const email: EmailExportedHandler<Env> = async (email, env) => {
   console.log("📮 Email received via email handler");
-  
+
   const addressResolver = createEmailAddressResolver("default");
-  
+
   await routeAgentEmail(email, env, {
     resolver: addressResolver,
     defaultAgentName: "EmailAgent",
@@ -162,26 +177,26 @@ export default {
   async fetch(request: Request, env: Env) {
     try {
       const url = new URL(request.url);
-      
+
       // Handle custom email webhook endpoint for testing
-      if (url.pathname === '/webhook/email' && request.method === 'POST') {
+      if (url.pathname === "/webhook/email" && request.method === "POST") {
         const urlParams = new URLSearchParams(url.search);
-        const from = urlParams.get('from') || 'unknown@example.com';
-        const to = urlParams.get('to') || 'agent@example.com';
+        const from = urlParams.get("from") || "unknown@example.com";
+        const to = urlParams.get("to") || "agent@example.com";
         const body = await request.text();
-        
+
         // Create mock email from the raw content
         const mockEmail = {
           from,
           to,
           headers: new Headers({
-            'subject': 'Test Email',
+            subject: "Test Email",
           }),
           raw: new ReadableStream({
             start(controller) {
               controller.enqueue(new TextEncoder().encode(body));
               controller.close();
-            }
+            },
           }),
           rawSize: body.length,
           setReject: () => {},
@@ -196,10 +211,10 @@ export default {
           defaultAgentName: "EmailAgent",
           defaultAgentId: "default",
         });
-        
+
         return new Response("Worker successfully processed email");
       }
-      
+
       return (
         (await routeAgentRequest(request, env)) ||
         new Response("Not found", { status: 404 })
@@ -207,13 +222,13 @@ export default {
     } catch (error) {
       console.error("Fetch error in Worker:", error);
       return new Response(
-        JSON.stringify({ 
-          error: "Internal Server Error", 
-          message: error instanceof Error ? error.message : "Unknown error" 
-        }), 
-        { 
+        JSON.stringify({
+          error: "Internal Server Error",
+          message: error instanceof Error ? error.message : "Unknown error",
+        }),
+        {
           status: 500,
-          headers: { "Content-Type": "application/json" }
+          headers: { "Content-Type": "application/json" },
         }
       );
     }

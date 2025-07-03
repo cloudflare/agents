@@ -5,7 +5,7 @@ This example demonstrates how to build an email-processing agent using the email
 ## Features
 
 - **Email Routing**: Routes emails to agents based on email addresses (e.g., `agent+id@domain.com`)
-- **Email Parsing**: Uses PostalMime to parse incoming emails 
+- **Email Parsing**: Uses PostalMime to parse incoming emails
 - **Auto-Reply**: Automatically responds to incoming emails
 - **State Management**: Tracks email count and stores recent emails
 - **API Interface**: REST API for testing and management
@@ -21,16 +21,19 @@ The agent supports multiple routing strategies:
 ## Setup
 
 1. Install dependencies:
+
    ```bash
    npm install
    ```
 
 2. Test email parsing locally:
+
    ```bash
    npm run test-email
    ```
 
 3. Start development server:
+
    ```bash
    npm run start
    ```
@@ -45,6 +48,7 @@ The agent supports multiple routing strategies:
 ### Local Testing
 
 Run the email parsing test:
+
 ```bash
 npm run test-email
 ```
@@ -56,23 +60,26 @@ This will test email creation, parsing, and routing logic without requiring a de
 Once the agent is running (dev or deployed), you can test with these endpoints:
 
 #### Get Agent Stats
+
 ```bash
 curl http://localhost:8787/api/stats/test123
 ```
 
 #### Send Test Email (Simple API)
+
 ```bash
 curl -X POST http://localhost:8787/api/test-email \
   -H "Content-Type: application/json" \
   -d '{
     "from": "user@example.com",
-    "to": "agent+test123@example.com", 
+    "to": "agent+test123@example.com",
     "subject": "Test Email",
     "body": "Hello from test!"
   }'
 ```
 
 #### Send Test Email (Real Email Worker - More Comprehensive)
+
 ```bash
 curl --request POST 'http://localhost:8787/webhook/email' \
   --url-query 'from=user@example.com' \
@@ -90,11 +97,13 @@ Hello Email Agent!'
 ```
 
 #### Toggle Auto-Reply
+
 ```bash
 curl -X POST http://localhost:8787/api/toggle-auto-reply/test123
 ```
 
 #### Clear Email History
+
 ```bash
 curl -X POST http://localhost:8787/api/clear/test123
 ```
@@ -104,6 +113,7 @@ curl -X POST http://localhost:8787/api/clear/test123
 To test with real emails:
 
 1. Deploy the worker:
+
    ```bash
    npm run deploy
    ```
@@ -131,7 +141,7 @@ const resolver = createEmailAddressResolver("default");
 ```typescript
 // Routes based on custom headers
 // Email with headers:
-//   X-Agent-Name: EmailAgent  
+//   X-Agent-Name: EmailAgent
 //   X-Agent-ID: customer-123
 // → routes to EmailAgent:customer-123
 ```
@@ -157,13 +167,13 @@ class EmailAgent extends Agent<Env, EmailAgentState> {
   async onEmail(email: ForwardableEmailMessage) {
     // Parse email content
     const parsed = await PostalMime.parse(emailBuffer);
-    
+
     // Update agent state
     this.setState({
       emailCount: this.state.emailCount + 1,
       emails: [...this.state.emails, emailData],
     });
-    
+
     // Send auto-reply
     await this.sendEmail(this.env.EMAIL, fromEmail, fromName, {
       to: parsed.from.address,
@@ -182,7 +192,7 @@ Update `wrangler.jsonc` for your domain:
 {
   "send_email": [
     {
-      "name": "EMAIL", 
+      "name": "EMAIL",
       "destination_address": "*@yourdomain.com"
     }
   ],
@@ -199,7 +209,7 @@ Update `wrangler.jsonc` for your domain:
 This example supports:
 
 1. **Customer Support**: Route support emails to different agents based on priority/category
-2. **Auto-Responders**: Automatically acknowledge receipt of emails  
+2. **Auto-Responders**: Automatically acknowledge receipt of emails
 3. **Email Processing**: Parse and extract data from emails
 4. **Thread Management**: Maintain email conversation state
 5. **Multi-tenant Systems**: Route emails to different customer/tenant agents

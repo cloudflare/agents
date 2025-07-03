@@ -34,14 +34,20 @@ console.log("");
 console.log("=== Test 2: Email Parsing ===");
 const parsed = await PostalMime.parse(raw);
 console.log("📋 Parsed email structure:");
-console.log(JSON.stringify({
-  from: parsed.from,
-  to: parsed.to,
-  subject: parsed.subject,
-  text: parsed.text,
-  messageId: parsed.messageId,
-  headers: Object.fromEntries(Object.entries(parsed.headers || {})),
-}, null, 2));
+console.log(
+  JSON.stringify(
+    {
+      from: parsed.from,
+      to: parsed.to,
+      subject: parsed.subject,
+      text: parsed.text,
+      messageId: parsed.messageId,
+      headers: Object.fromEntries(Object.entries(parsed.headers || {})),
+    },
+    null,
+    2
+  )
+);
 console.log("");
 
 // Test 3: Routing simulation
@@ -53,16 +59,16 @@ function simulateAddressRouting(toAddress: string) {
   if (!emailMatch) {
     return null;
   }
-  
+
   const [, localPart, subAddress] = emailMatch;
-  
+
   if (subAddress) {
     return {
       agentName: localPart,
       agentId: subAddress,
     };
   }
-  
+
   return {
     agentName: localPart,
     agentId: "default",
@@ -82,27 +88,27 @@ const scenarios = [
     from: "customer@business.com",
     to: "support+urgent@example.com",
     subject: "Urgent: System Down",
-    body: "Our system is down and we need immediate assistance!"
+    body: "Our system is down and we need immediate assistance!",
   },
   {
-    name: "Auto-Reply Test", 
+    name: "Auto-Reply Test",
     from: "noreply@system.com",
     to: "agent@example.com",
     subject: "Auto-Reply: Your request received",
-    body: "This is an automated response."
+    body: "This is an automated response.",
   },
   {
     name: "Newsletter",
-    from: "newsletter@company.com", 
+    from: "newsletter@company.com",
     to: "agent+newsletter@example.com",
     subject: "Weekly Newsletter #42",
-    body: "Here's what's new this week..."
-  }
+    body: "Here's what's new this week...",
+  },
 ];
 
 for (const scenario of scenarios) {
   console.log(`📨 Scenario: ${scenario.name}`);
-  
+
   const testMsg = createMimeMessage();
   testMsg.setSender({ addr: scenario.from });
   testMsg.setRecipient(scenario.to);
@@ -111,13 +117,15 @@ for (const scenario of scenarios) {
     contentType: "text/plain",
     data: scenario.body,
   });
-  
+
   const routing = simulateAddressRouting(scenario.to);
-  
+
   console.log(`   From: ${scenario.from}`);
   console.log(`   To: ${scenario.to}`);
   console.log(`   Subject: ${scenario.subject}`);
-  console.log(`   Routing: ${routing ? `${routing.agentName}:${routing.agentId}` : 'No routing'}`);
+  console.log(
+    `   Routing: ${routing ? `${routing.agentName}:${routing.agentId}` : "No routing"}`
+  );
   console.log("");
 }
 
@@ -134,10 +142,10 @@ console.log("");
 console.log("🧪 Send test email:");
 console.log("   POST /api/test-email");
 console.log("   Body: {");
-console.log("     \"from\": \"user@example.com\",");
-console.log("     \"to\": \"agent+test123@example.com\",");
-console.log("     \"subject\": \"Test Email\",");
-console.log("     \"body\": \"Hello from test!\"");
+console.log('     "from": "user@example.com",');
+console.log('     "to": "agent+test123@example.com",');
+console.log('     "subject": "Test Email",');
+console.log('     "body": "Hello from test!"');
 console.log("   }");
 console.log("");
 console.log("🗑️  Clear emails:");

@@ -1,5 +1,5 @@
 {
-  "name": "@cloudflare/agents-email-agent", 
+  "name": "@cloudflare/agents-email-agent",
   "version": "0.0.0",
   "description": "Email routing agent example",
   "private": true,

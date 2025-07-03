@@ -10,10 +10,15 @@ console.log("🧪 Comprehensive Email Agent Testing...\n");
 // Test 1: Create a real email with proper headers
 console.log("=== Test 1: Creating Real Email Format ===");
 
-const createRealEmail = (from: string, to: string, subject: string, body: string) => {
+const createRealEmail = (
+  from: string,
+  to: string,
+  subject: string,
+  body: string
+) => {
   const timestamp = new Date().toUTCString();
   const messageId = `<test-${Date.now()}@example.com>`;
-  
+
   return `Received: from smtp.example.com (127.0.0.1) by cloudflare-email.com
 From: "Test User" <${from}>
 To: <${to}>
@@ -29,7 +34,7 @@ ${body}`;
 
 const realEmail = createRealEmail(
   "user@example.com",
-  "agent+test123@example.com", 
+  "agent+test123@example.com",
   "Comprehensive Test Email",
   "Hello Email Agent! This is a comprehensive test that simulates how emails actually arrive through Cloudflare Email Workers."
 );
@@ -82,21 +87,21 @@ const scenarios = [
     name: "Address-based routing with subaddress",
     to: "support+urgent@example.com",
     expectedAgent: "support",
-    expectedId: "urgent"
+    expectedId: "urgent",
   },
   {
-    name: "Address-based routing without subaddress", 
+    name: "Address-based routing without subaddress",
     to: "sales@example.com",
-    expectedAgent: "sales", 
-    expectedId: "default"
+    expectedAgent: "sales",
+    expectedId: "default",
   },
   {
     name: "Header-based routing",
     to: "any@example.com",
     headers: { "X-Agent-Name": "EmailAgent", "X-Agent-ID": "custom123" },
     expectedAgent: "EmailAgent",
-    expectedId: "custom123"
-  }
+    expectedId: "custom123",
+  },
 ];
 
 for (const scenario of scenarios) {
@@ -105,8 +110,10 @@ for (const scenario of scenarios) {
   if (scenario.headers) {
     console.log(`   Headers: ${JSON.stringify(scenario.headers)}`);
   }
-  console.log(`   Expected routing: ${scenario.expectedAgent}:${scenario.expectedId}`);
-  
+  console.log(
+    `   Expected routing: ${scenario.expectedAgent}:${scenario.expectedId}`
+  );
+
   // Generate real email for this scenario
   const scenarioEmail = createRealEmail(
     "test@example.com",
@@ -114,13 +121,15 @@ for (const scenario of scenarios) {
     `Test: ${scenario.name}`,
     `Testing ${scenario.name} routing scenario`
   );
-  
+
   console.log(`   Test command:`);
-  console.log(`   curl --request POST 'http://localhost:8787/webhook/email' \\`);
+  console.log(
+    `   curl --request POST 'http://localhost:8787/webhook/email' \\`
+  );
   console.log(`     --url-query 'from=test@example.com' \\`);
   console.log(`     --url-query 'to=${scenario.to}' \\`);
   console.log(`     --header 'Content-Type: text/plain' \\`);
-  console.log(`     --data-raw '${scenarioEmail.split('\n')[0]}...'`);
+  console.log(`     --data-raw '${scenarioEmail.split("\n")[0]}...'`);
   console.log("");
 }
 

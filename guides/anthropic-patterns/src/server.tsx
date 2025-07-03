@@ -1,12 +1,12 @@
 // implementing https://www.anthropic.com/research/building-effective-agents
 
-import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";
+import { type OpenAIProvider, createOpenAI } from "@ai-sdk/openai";
 import {
   Agent,
   type AgentNamespace,
   type Connection,
-  routeAgentRequest,
-  type WSMessage
+  type WSMessage,
+  routeAgentRequest
 } from "agents";
 import { generateObject, generateText } from "ai";
 import { z } from "zod";

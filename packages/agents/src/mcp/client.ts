@@ -12,7 +12,7 @@ import type {
   ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import { jsonSchema, type ToolSet } from "ai";
+import { type ToolSet, jsonSchema } from "ai";
 import { nanoid } from "nanoid";
 import { MCPClientConnection } from "./client-connection";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";

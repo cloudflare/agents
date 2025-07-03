@@ -1,4 +1,4 @@
-import { act, StrictMode, Suspense } from "react";
+import { StrictMode, Suspense, act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { useAgentChat } from "../ai-react";
