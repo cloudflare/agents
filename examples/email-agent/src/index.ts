@@ -166,7 +166,7 @@ Email Agent`,
 export const email: EmailExportedHandler<Env> = async (email, env) => {
   console.log("📮 Email received via email handler");
 
-  const addressResolver = createEmailAddressResolver("default");
+  const addressResolver = createEmailAddressResolver("EmailAgent");
 
   await routeAgentEmail(email, env, {
     defaultAgentId: "default",
@@ -208,7 +208,7 @@ export default {
         } as ForwardableEmailMessage;
 
         // Route the email using our email routing system
-        const resolver = createEmailAddressResolver("default");
+        const resolver = createEmailAddressResolver("EmailAgent");
         await routeAgentEmail(mockEmail, env, {
           defaultAgentId: "default",
           defaultAgentName: "EmailAgent",

@@ -1253,9 +1253,11 @@ export function createEmailAddressResolver<Env>(
       };
     }
 
+    // Option 2: Use defaultAgentName namespace, localPart as agentId
+    // Common for catch-all email routing to a single EmailAgent namespace
     return {
-      agentName: localPart,
-      agentId: defaultAgentName || localPart,
+      agentName: defaultAgentName,
+      agentId: localPart,
     };
   };
 }
