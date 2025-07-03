@@ -33,10 +33,10 @@ interface Env {
 
 export class EmailAgent extends Agent<Env, EmailAgentState> {
   initialState: EmailAgentState = {
-    emailCount: 0,
-    lastUpdated: new Date(),
-    emails: [],
     autoReplyEnabled: true,
+    emailCount: 0,
+    emails: [],
+    lastUpdated: new Date(),
   };
 
   async onEmail(email: ForwardableEmailMessage) {
@@ -73,19 +73,19 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
 
       const emailData: EmailData = {
         from: parsed.from?.address || email.from,
+        html: parsed.html,
+        messageId: parsed.messageId,
         subject: parsed.subject || "No Subject",
         text: parsed.text,
-        html: parsed.html,
-        to: email.to,
         timestamp: new Date(),
-        messageId: parsed.messageId,
+        to: email.to,
       };
 
       const newState = {
-        emailCount: this.state.emailCount + 1,
-        lastUpdated: new Date(),
-        emails: [...this.state.emails.slice(-9), emailData],
         autoReplyEnabled: this.state.autoReplyEnabled,
+        emailCount: this.state.emailCount + 1,
+        emails: [...this.state.emails.slice(-9), emailData],
+        lastUpdated: new Date(),
       };
 
       this.setState(newState);
@@ -103,10 +103,8 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
     }
   }
 
-  private isAutoReply(parsed: {
-    headers?: Record<string, string>;
-    subject?: string;
-  }): boolean {
+  // biome-ignore lint/suspicious/noExplicitAny: PostalMime types are complex
+  private isAutoReply(parsed: any): boolean {
     const autoReplyHeaders = [
       "auto-submitted",
       "x-auto-response-suppress",
@@ -114,7 +112,8 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
     ];
 
     for (const header of autoReplyHeaders) {
-      if (parsed.headers?.[header]) {
+      const headerValue = parsed.headers?.[header];
+      if (headerValue) {
         return true;
       }
     }
@@ -136,8 +135,6 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
         this.env.FROM_EMAIL,
         this.env.FROM_NAME,
         {
-          to: originalEmail.from,
-          subject: `Re: ${originalEmail.subject}`,
           body: `Thank you for your email! 
 
 I received your message with subject: "${originalEmail.subject}"
@@ -154,6 +151,8 @@ Email Agent`,
             "Auto-Submitted": "auto-replied",
             "X-Auto-Response-Suppress": "All",
           },
+          subject: `Re: ${originalEmail.subject}`,
+          to: originalEmail.from,
         }
       );
 
@@ -170,13 +169,14 @@ export const email: EmailExportedHandler<Env> = async (email, env) => {
   const addressResolver = createEmailAddressResolver("default");
 
   await routeAgentEmail(email, env, {
-    resolver: addressResolver,
-    defaultAgentName: "EmailAgent",
     defaultAgentId: "default",
+    defaultAgentName: "EmailAgent",
+    resolver: addressResolver,
   });
 };
 
 export default {
+  email,
   async fetch(request: Request, env: Env) {
     try {
       const url = new URL(request.url);
@@ -190,8 +190,8 @@ export default {
 
         // Create mock email from the raw content
         const mockEmail = {
+          forward: async () => {},
           from,
-          to,
           headers: new Headers({
             subject: "Test Email",
           }),
@@ -202,17 +202,17 @@ export default {
             },
           }),
           rawSize: body.length,
-          setReject: () => {},
-          forward: async () => {},
           reply: async () => {},
+          setReject: () => {},
+          to,
         } as ForwardableEmailMessage;
 
         // Route the email using our email routing system
         const resolver = createEmailAddressResolver("default");
         await routeAgentEmail(mockEmail, env, {
-          resolver,
-          defaultAgentName: "EmailAgent",
           defaultAgentId: "default",
+          defaultAgentName: "EmailAgent",
+          resolver,
         });
 
         return new Response("Worker successfully processed email");
@@ -230,11 +230,10 @@ export default {
           message: error instanceof Error ? error.message : "Unknown error",
         }),
         {
-          status: 500,
           headers: { "Content-Type": "application/json" },
+          status: 500,
         }
       );
     }
   },
-  email,
 } satisfies ExportedHandler<Env>;

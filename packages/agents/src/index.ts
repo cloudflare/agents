@@ -1325,7 +1325,6 @@ async function defaultEmailResolver<Env>(
 
   const references = email.headers.get("references");
   if (references) {
-      // biome-ignore lint/suspicious/noExplicitAny: vibes
     const referencesMatch = references.match(/<([A-Za-z0-9+\/]{43}=)@([^>]+)>/);
     if (referencesMatch) {
       const [, base64Id, domain] = referencesMatch;
@@ -1440,11 +1439,11 @@ export async function sendEmailWithRouting(
   options: EmailSendOptions
 ): Promise<void> {
   const { createMimeMessage } = await import("mimetext");
-  // biome-ignore lint/suspicious/noExplicitAny: vibes
+  // biome-ignore lint/suspicious/noExplicitAny: EmailMessage type is dynamically imported from cloudflare:email
   let EmailMessage: any;
   try {
     const cloudflareEmail = await import("cloudflare:email");
-      // biome-ignore lint/suspicious/noExplicitAny: vibes
+    // biome-ignore lint/suspicious/noExplicitAny: EmailMessage constructor is dynamically imported
     EmailMessage = cloudflareEmail.EmailMessage;
   } catch (error) {
     throw new Error(
