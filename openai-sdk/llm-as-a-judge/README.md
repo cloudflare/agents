@@ -13,7 +13,7 @@ This example demonstrates a web-based LLM as a judge interface for OpenAI Agents
 
 The agent is configured to generate a slogan and then receive feedback on the slogan, until it's is deemed worthy. Here's the workflow:
 
-1. **User provides a description of a product** 
+1. **User provides a description of a product**
 2. **Agent processes the request** and generates a new slogan
 3. **Evaluator Agent** judges the slogan and provides feedback
 4. **Agent retries** up until 15 times.
@@ -58,6 +58,7 @@ The agent is configured to generate a slogan and then receive feedback on the sl
 
 1. **Generate a new slogan**: Describe your product like "A taco cart that has very spicy hot sauce"
 2. **View results**: As the agent generates slogan, you can see the LLM judge and provide feedback.
+
 ## Technical Details
 
 ### Architecture
