@@ -1,9 +1,4 @@
-import {
-  Agent,
-  run,
-  withTrace,
-  type AgentInputItem,
-} from "@openai/agents";
+import { Agent, run, withTrace, type AgentInputItem } from "@openai/agents";
 import {
   Agent as CFAgent,
   unstable_callable as callable,
@@ -29,6 +24,7 @@ export type Attempt = {
 
 export type CFAgentState = {
   chosenSlogan?: string;
+  status?: string;
   attempts: Attempt[];
 };
 
@@ -36,6 +32,8 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
   initialState: CFAgentState = {
     attempts: [],
   };
+
+  shouldReset = false;
 
   marketingAgent = new Agent({
     name: "Marketer",
@@ -46,9 +44,17 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
   evaluator = new Agent({
     name: "Evaluator",
     instructions:
-      "You evaluate marketing slogans. You will provide a score and possible feedback on how it can be improved. Never accept the very first attempt.",
+      "You evaluate marketing slogans. You will provide a score and possible feedback on how it can be improved. Do not directly suggest new slogans, your job is to judge. Never accept the very first attempt.",
     outputType: EvaluationFeedback,
   });
+
+  setStatus(status: string) {
+    console.log("[MyAgent] Updating status", status);
+    this.setState({
+      ...this.state,
+      status,
+    });
+  }
 
   @callable()
   async generateSlogan(description: string) {
@@ -60,8 +66,10 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
       let inputItems: AgentInputItem[] = [
         { role: "user", content: description },
       ];
-      while (this.state.attempts.length <= 5) {
+      this.shouldReset = false;
+      while (this.state.attempts.length <= 15 && !this.shouldReset) {
         console.log("[MyAgent] Starting agent run...");
+        this.setStatus("🤔 Generating");
         const sloganResult = await run(this.marketingAgent, inputItems);
         const slogan = sloganResult.finalOutput;
         if (slogan === undefined) {
@@ -69,6 +77,7 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
           return;
         }
         console.log("[MyAgent] Evaluating slogan:", slogan);
+        this.setStatus("🧑‍⚖️ Judging");
         // Ensure the whole history is present
         inputItems = sloganResult.history;
         const evaluationResult = await run(this.evaluator, inputItems);
@@ -87,11 +96,11 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
         });
         if (evaluation?.score === "pass") {
           console.log("[MyAgent] Slogan passed judgment", slogan);
-
           this.setState({
             ...this.state,
-            chosenSlogan: slogan
-          })
+            status: "🏆 We have a winner",
+            chosenSlogan: slogan,
+          });
           return;
         }
         if (evaluation?.feedback) {
@@ -102,6 +111,11 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
         }
       }
     });
+  }
+  @callable()
+  async reset() {
+    this.setState({ attempts: [] });
+    this.shouldReset = true;
   }
 }
 
