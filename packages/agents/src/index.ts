@@ -660,7 +660,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Override this method to handle incoming emails
    * @param email Email message to process
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: later
   async onEmail(email: ForwardableEmailMessage) {
     return agentContext.run(
       { agent: this, connection: undefined, request: undefined },
@@ -1325,6 +1325,7 @@ async function defaultEmailResolver<Env>(
 
   const references = email.headers.get("references");
   if (references) {
+      // biome-ignore lint/suspicious/noExplicitAny: vibes
     const referencesMatch = references.match(/<([A-Za-z0-9+\/]{43}=)@([^>]+)>/);
     if (referencesMatch) {
       const [, base64Id, domain] = referencesMatch;
@@ -1439,10 +1440,11 @@ export async function sendEmailWithRouting(
   options: EmailSendOptions
 ): Promise<void> {
   const { createMimeMessage } = await import("mimetext");
-
+  // biome-ignore lint/suspicious/noExplicitAny: vibes
   let EmailMessage: any;
   try {
     const cloudflareEmail = await import("cloudflare:email");
+      // biome-ignore lint/suspicious/noExplicitAny: vibes
     EmailMessage = cloudflareEmail.EmailMessage;
   } catch (error) {
     throw new Error(

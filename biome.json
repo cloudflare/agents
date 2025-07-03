@@ -1,6 +1,6 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.0.6/schema.json",
-  "assists": {
+  "assist": {
     "actions": {
       "source": {
         "useSortedKeys": "off",
@@ -10,18 +10,27 @@
     "enabled": true
   },
   "files": {
-    "ignore": [
-      "node_modules",
-      "dist",
-      ".wrangler",
-      "wrangler.jsonc",
-      "tsconfig.base.json",
-      "normalize.css",
-      "package.json",
-      "package-lock.json"
-    ],
     "ignoreUnknown": false,
-    "include": ["examples/**", "openai-sdk/**", "packages/**", "guides/**"]
+    "includes": [
+      "examples/**",
+      "openai-sdk/**",
+      "packages/**",
+      "guides/**",
+      "!node_modules",
+      "!**/node_modules",
+      "!dist",
+      "!**/dist",
+      "!.wrangler",
+      "!**/.wrangler",
+      "!wrangler.jsonc",
+      "!**/wrangler.jsonc",
+      "!./tsconfig.base.json",
+      "!**/tsconfig.base.json",
+      "!**/normalize.css",
+      "!package.json",
+      "!**/package.json",
+      "!package-lock.json"
+    ]
   },
   "formatter": {
     "enabled": false,

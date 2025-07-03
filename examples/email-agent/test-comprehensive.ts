@@ -3,7 +3,6 @@
  * Tests both the simple API and the real email worker endpoint
  */
 
-import { createMimeMessage } from "mimetext";
 
 console.log("🧪 Comprehensive Email Agent Testing...\n");
 
