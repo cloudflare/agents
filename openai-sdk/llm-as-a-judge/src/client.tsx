@@ -122,6 +122,7 @@ function App() {
       {attempts.length > 0 && (
         <div style={{ marginTop: "20px" }}>
           <button
+            type="button"
             onClick={() => setAttemptsExpanded(!attemptsExpanded)}
             style={{
               backgroundColor: "#6c757d",
@@ -152,9 +153,9 @@ function App() {
                 overflowY: "auto",
               }}
             >
-              {attempts.map((attempt, index) => (
+              {attempts.map((attempt) => (
                 <div
-                  key={index}
+                  key={attempt.slogan}
                   style={{
                     backgroundColor: "white",
                     border: "1px solid #e9ecef",
