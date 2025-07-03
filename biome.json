@@ -20,12 +20,7 @@
       "package-lock.json"
     ],
     "ignoreUnknown": false,
-    "include": [
-      "examples/**",
-      "openai-sdk/**",
-      "packages/**",
-      "guides/**"
-    ]
+    "include": ["examples/**", "openai-sdk/**", "packages/**", "guides/**"]
   },
   "formatter": {
     "enabled": false,

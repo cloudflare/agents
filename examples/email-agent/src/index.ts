@@ -103,7 +103,10 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
     }
   }
 
-  private isAutoReply(parsed: { headers?: Record<string, string>; subject?: string }): boolean {
+  private isAutoReply(parsed: {
+    headers?: Record<string, string>;
+    subject?: string;
+  }): boolean {
     const autoReplyHeaders = [
       "auto-submitted",
       "x-auto-response-suppress",
