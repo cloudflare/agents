@@ -1,0 +1,21 @@
+{
+  "name": "@cloudflare/agents-email-agent", 
+  "version": "0.0.0",
+  "description": "Email routing agent example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "start": "wrangler dev --local --port 8787",
+    "start-vite": "vite dev",
+    "test-email": "tsx test-mail.ts",
+    "test-comprehensive": "tsx test-comprehensive.ts"
+  },
+  "dependencies": {
+    "mimetext": "^3.0.27",
+    "postal-mime": "^2.4.4"
+  },
+  "keywords": [],
+  "license": "ISC",
+  "author": ""
+}
