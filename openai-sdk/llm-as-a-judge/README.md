@@ -1,24 +1,22 @@
 # LLM as a Judge
 
-This example demonstrates a web-based llm as a judge interface for OpenAI Agents, where certain tool calls require human approval before execution.
+This example demonstrates a web-based LLM as a judge interface for OpenAI Agents.
 
 ## Features
 
 - **Interactive Chat Interface**: Modern web UI for conversing with the weather agent
-- **Human-in-the-Loop Approval**: Automatic approval requests for sensitive operations
 - **Real-time Updates**: WebSocket communication for live agent responses
 - **State Persistence**: Conversation history and approval state management
 - **Responsive Design**: Works on desktop and mobile devices
 
 ## How It Works
 
-The agent is configured with a weather lookup tool that requires approval for queries about San Francisco. Here's the workflow:
+The agent is configured to generate a slogan and then receive feedback on the slogan, until it's is deemed worthy. Here's the workflow:
 
-1. **User asks a question** asking about weather in different cities
-2. **Agent processes the request** and identifies which tool calls need approval
-3. **Approval modal appears** when San Francisco weather is requested
-4. **User approves or rejects** the tool call and the agent continues execution
-5. **Agent continues execution** and provides the final result
+1. **User provides a description of a product** 
+2. **Agent processes the request** and generates a new slogan
+3. **Evaluator Agent** judges the slogan and provides feedback
+4. **Agent retries** up until 15 times.
 
 ## Getting Started
 
@@ -58,51 +56,30 @@ The agent is configured with a weather lookup tool that requires approval for qu
 
 ## Usage
 
-1. **Ask about weather**: Type questions like "What's the weather in San Francisco?"
-2. **Handle approvals**: When the modal appears, review the tool call details and approve/reject
-3. **View results**: See the agent's final response after all approvals are handled
-
-## Example Conversations
-
-- "What's the weather in New York?" (No approval needed)
-- "What's the weather in San Francisco?" (Approval required)
-- "Compare weather in Oakland and San Francisco" (Approval required for SF)
-
+1. **Generate a new slogan**: Describe your product like "A taco cart that has very spicy hot sauce"
+2. **View results**: As the agent generates slogan, you can see the LLM judge and provide feedback.
 ## Technical Details
 
 ### Architecture
 
 - **Frontend**: React with TypeScript and Tailwind CSS
-- **Backend**: Cloudflare Workers with Durable Objects
+- **Backend**: Cloudflare Workers with Agent Framework
 - **Communication**: WebSocket for real-time updates
 - **State Management**: Agent state serialization/deserialization
 
 ### Key Components
 
-- **Agent Configuration**: Weather tool with approval logic
+- **Agent Configuration**: Two OpenAI SDK agents, Marketer and Evaluatior
 - **WebSocket Handler**: Real-time message passing
-- **Approval Workflow**: Modal interface for tool call approval
-- **State Persistence**: Database storage for conversation history
-
-### Customization
-
-To modify the approval logic, edit the `needsApproval` function in `src/server.ts`:
-
-```typescript
-needsApproval: async (_context, { location }) => {
-  // Customize approval conditions here
-  return location === "San Francisco";
-},
-```
+- **State Persistence**: State storage for generation history
 
 ## Troubleshooting
 
 - **WebSocket connection issues**: Check that the development server is running
-- **Approval not working**: Verify the agent state is properly managed
 - **No responses**: Ensure your OpenAI API key is correctly configured
 
 ## Learn More
 
 - [OpenAI Agents Documentation](https://openai.github.io/openai-agents-js/)
-- [Human-in-the-Loop Guide](https://openai.github.io/openai-agents-js/guides/human-in-the-loop/)
+- [LLM As a Judge Guide](https://github.com/openai/openai-agents-js/blob/main/examples/agent-patterns/llm-as-a-judge.ts)
 - [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)
