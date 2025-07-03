@@ -8,6 +8,7 @@ function App() {
   const [description, setDescription] = useState<string>("");
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [chosenSlogan, setChosenSlogan] = useState<string>();
+  const [attemptsExpanded, setAttemptsExpanded] = useState<boolean>(false);
 
   console.log("[Client] Current description:", description);
 
@@ -74,15 +75,109 @@ function App() {
         </button>
       </div>
 
-      {chosenSlogan && <h2>{chosenSlogan}</h2> }
-      
-      {attempts.map((attempt, index) => (
-        <div className="attempt">
-          <div>Slogan: {attempt.slogan}</div>
-          <div>Score: {attempt.score}</div>
-          <div>Feedback: {attempt.feedback}</div>
+      {chosenSlogan && (
+        <div style={{
+          backgroundColor: "#f8f9fa",
+          border: "3px solid #28a745",
+          borderRadius: "12px",
+          padding: "24px",
+          margin: "20px 0",
+          textAlign: "center",
+          boxShadow: "0 8px 16px rgba(0,0,0,0.1)",
+          background: "linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%)"
+        }}>
+          <h2 style={{
+            color: "#2c3e50",
+            fontSize: "28px",
+            fontWeight: "bold",
+            margin: "0",
+            textShadow: "2px 2px 4px rgba(0,0,0,0.1)"
+          }}>
+            🎯 {chosenSlogan}
+          </h2>
+          <p style={{
+            color: "#34495e",
+            fontSize: "16px",
+            fontStyle: "italic",
+            margin: "8px 0 0 0"
+          }}>
+            Selected Winner
+          </p>
         </div>
-      ))}
+      )}
+
+      {attempts.length > 0 && (
+        <div style={{ marginTop: "20px" }}>
+          <button
+            onClick={() => setAttemptsExpanded(!attemptsExpanded)}
+            style={{
+              backgroundColor: "#6c757d",
+              border: "none",
+              borderRadius: "6px",
+              color: "white",
+              cursor: "pointer",
+              fontSize: "14px",
+              padding: "8px 16px",
+              marginBottom: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px"
+            }}
+          >
+            {attemptsExpanded ? "▼" : "▶"} 
+            View All Attempts ({attempts.length})
+          </button>
+          
+          {attemptsExpanded && (
+            <div style={{
+              backgroundColor: "#f8f9fa",
+              border: "1px solid #dee2e6",
+              borderRadius: "8px",
+              padding: "16px",
+              maxHeight: "400px",
+              overflowY: "auto"
+            }}>
+              {attempts.map((attempt, index) => (
+                <div key={index} style={{
+                  backgroundColor: "white",
+                  border: "1px solid #e9ecef",
+                  borderRadius: "6px",
+                  padding: "12px",
+                  marginBottom: "8px",
+                  boxShadow: "0 2px 4px rgba(0,0,0,0.05)"
+                }}>
+                  <div style={{
+                    fontWeight: "bold",
+                    color: "#495057",
+                    marginBottom: "4px"
+                  }}>
+                    Slogan: {attempt.slogan}
+                  </div>
+                  <div style={{
+                    color: "#6c757d",
+                    fontSize: "14px",
+                    marginBottom: "4px"
+                  }}>
+                    Score: <span style={{
+                      fontWeight: "bold",
+                      color: attempt.score === 'pass' ? "#28a745" : attempt.score === 'needs_improvement' ? "#ffc107" : "#dc3545"
+                    }}>
+                      {attempt.score}
+                    </span>
+                  </div>
+                  <div style={{
+                    color: "#6c757d",
+                    fontSize: "14px",
+                    fontStyle: "italic"
+                  }}>
+                    Feedback: {attempt.feedback}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       </div>
       
