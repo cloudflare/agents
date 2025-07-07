@@ -662,7 +662,6 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Override this method to handle incoming emails
    * @param email Email message to process
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: later
   async onEmail(email: ForwardableEmailMessage) {
     return agentContext.run(
       { agent: this, connection: undefined, request: undefined },
@@ -1326,7 +1325,7 @@ export function createHeaderBasedResolver<Env>(): EmailResolver<Env> {
     const references = email.headers.get("references");
     if (references) {
       const referencesMatch = references.match(
-        /<([A-Za-z0-9+\/]{43}=)@([^>]+)>/
+        /<([A-Za-z0-9+/]{43}=)@([^>]+)>/
       );
       if (referencesMatch) {
         const [, base64Id, domain] = referencesMatch;
@@ -1396,15 +1395,28 @@ export async function routeAgentEmail<Env>(
     return;
   }
 
-  const namespace = env[routingInfo.agentName as keyof Env] as AgentNamespace<
-    Agent<Env>
-  >;
-  if (!namespace) {
+  const namespaceBinding = env[routingInfo.agentName as keyof Env];
+  if (!namespaceBinding) {
     console.error(
       `Agent namespace '${routingInfo.agentName}' not found in environment`
     );
     return;
   }
+
+  // Type guard to check if this is actually a DurableObjectNamespace (AgentNamespace)
+  if (
+    typeof namespaceBinding !== "object" ||
+    !("idFromName" in namespaceBinding) ||
+    typeof namespaceBinding.idFromName !== "function"
+  ) {
+    console.error(
+      `Environment binding '${routingInfo.agentName}' is not an AgentNamespace (found: ${typeof namespaceBinding})`
+    );
+    return;
+  }
+
+  // Safe cast after runtime validation
+  const namespace = namespaceBinding as unknown as AgentNamespace<Agent<Env>>;
 
   const agent = await getAgentByName(namespace, routingInfo.agentId);
   await agent.onEmail(email);

@@ -181,7 +181,12 @@ export default {
 
       // Handle test email API endpoint
       if (url.pathname === "/api/test-email" && request.method === "POST") {
-        const emailData = await request.json() as { from?: string; to?: string; subject?: string; body?: string };
+        const emailData = (await request.json()) as {
+          from?: string;
+          to?: string;
+          subject?: string;
+          body?: string;
+        };
         const { from, to, subject, body } = emailData;
 
         console.log("📧 Received test email data:", emailData);
@@ -211,12 +216,15 @@ export default {
           resolver,
         });
 
-        return new Response(JSON.stringify({ 
-          success: true, 
-          message: "Email processed successfully" 
-        }), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({
+            success: true,
+            message: "Email processed successfully",
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+          }
+        );
       }
 
       // Handle custom email webhook endpoint for testing

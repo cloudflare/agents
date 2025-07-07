@@ -3,12 +3,12 @@
 // Simple test script for the email agent
 async function testEmail() {
   const url = "http://localhost:8787/api/test-email";
-  
+
   const testData = {
     from: "user@example.com",
     to: "agent+test123@example.com",
     subject: "Test Email",
-    body: "Hello from test script!"
+    body: "Hello from test script!",
   };
 
   console.log("🧪 Testing email agent with:", testData);
