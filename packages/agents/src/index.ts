@@ -9,7 +9,9 @@ import type {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
+import { createMimeMessage } from "mimetext";
 import { nanoid } from "nanoid";
+import { EmailMessage } from "cloudflare:email";
 import {
   type Connection,
   type ConnectionContext,
@@ -1309,41 +1311,42 @@ export type EmailResolver<Env> = (
   agentId: string;
 } | null>;
 
-async function defaultEmailResolver<Env>(
-  email: ForwardableEmailMessage,
-  _env: Env
-): Promise<{ agentName: string; agentId: string } | null> {
-  const messageId = email.headers.get("message-id");
-  if (messageId) {
-    const messageIdMatch = messageId.match(/<([^@]+)@([^>]+)>/);
-    if (messageIdMatch) {
-      const [, agentId, domain] = messageIdMatch;
-      const agentName = domain.split(".")[0];
+export function createHeaderBasedResolver<Env>(): EmailResolver<Env> {
+  return async (email: ForwardableEmailMessage, _env: Env) => {
+    const messageId = email.headers.get("message-id");
+    if (messageId) {
+      const messageIdMatch = messageId.match(/<([^@]+)@([^>]+)>/);
+      if (messageIdMatch) {
+        const [, agentId, domain] = messageIdMatch;
+        const agentName = domain.split(".")[0];
+        return { agentName, agentId };
+      }
+    }
+
+    const references = email.headers.get("references");
+    if (references) {
+      const referencesMatch = references.match(
+        /<([A-Za-z0-9+\/]{43}=)@([^>]+)>/
+      );
+      if (referencesMatch) {
+        const [, base64Id, domain] = referencesMatch;
+        const agentId = Buffer.from(base64Id, "base64").toString("hex");
+        const agentName = domain.split(".")[0];
+        return { agentName, agentId };
+      }
+    }
+
+    const agentName = email.headers.get("x-agent-name");
+    const agentId = email.headers.get("x-agent-id");
+    if (agentName && agentId) {
       return { agentName, agentId };
     }
-  }
 
-  const references = email.headers.get("references");
-  if (references) {
-    const referencesMatch = references.match(/<([A-Za-z0-9+\/]{43}=)@([^>]+)>/);
-    if (referencesMatch) {
-      const [, base64Id, domain] = referencesMatch;
-      const agentId = Buffer.from(base64Id, "base64").toString("hex");
-      const agentName = domain.split(".")[0];
-      return { agentName, agentId };
-    }
-  }
-
-  const agentName = email.headers.get("x-agent-name");
-  const agentId = email.headers.get("x-agent-id");
-  if (agentName && agentId) {
-    return { agentName, agentId };
-  }
-
-  return null;
+    return null;
+  };
 }
 
-export function createEmailAddressResolver<Env>(
+export function createAddressBasedResolver<Env>(
   defaultAgentName: string
 ): EmailResolver<Env> {
   return async (email: ForwardableEmailMessage, _env: Env) => {
@@ -1378,30 +1381,15 @@ export function createCatchAllResolver<Env>(
 }
 
 export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
-  resolver?: EmailResolver<Env>;
-  defaultAgentName?: string;
-  defaultAgentId?: string;
+  resolver: EmailResolver<Env>;
 };
 
 export async function routeAgentEmail<Env>(
   email: ForwardableEmailMessage,
   env: Env,
-  options?: EmailRoutingOptions<Env>
+  options: EmailRoutingOptions<Env>
 ): Promise<void> {
-  let routingInfo: { agentName: string; agentId: string } | null = null;
-
-  if (options?.resolver) {
-    routingInfo = await options.resolver(email, env);
-  } else {
-    routingInfo = await defaultEmailResolver(email, env);
-  }
-
-  if (!routingInfo && options?.defaultAgentName && options?.defaultAgentId) {
-    routingInfo = {
-      agentName: options.defaultAgentName,
-      agentId: options.defaultAgentId
-    };
-  }
+  const routingInfo = await options.resolver(email, env);
 
   if (!routingInfo) {
     console.warn("No routing information found for email, dropping message");
@@ -1440,19 +1428,6 @@ export async function sendEmailWithRouting(
   fromName: string,
   options: EmailSendOptions
 ): Promise<void> {
-  const { createMimeMessage } = await import("mimetext");
-  // biome-ignore lint/suspicious/noExplicitAny: EmailMessage type is dynamically imported from cloudflare:email
-  let EmailMessage: any;
-  try {
-    const cloudflareEmail = await import("cloudflare:email");
-    // biome-ignore lint/suspicious/noExplicitAny: EmailMessage constructor is dynamically imported
-    EmailMessage = cloudflareEmail.EmailMessage;
-  } catch (error) {
-    throw new Error(
-      "cloudflare:email module not available. This function must be called in a Cloudflare Workers environment."
-    );
-  }
-
   const msg = createMimeMessage();
   msg.setSender({ addr: from, name: fromName });
   msg.setRecipient(options.to);

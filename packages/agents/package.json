@@ -7,6 +7,7 @@
     "@modelcontextprotocol/sdk": "^1.13.3",
     "ai": "^4.3.16",
     "cron-schedule": "^5.0.4",
+    "mimetext": "^3.0.27",
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.72",
     "partysocket": "1.1.4",

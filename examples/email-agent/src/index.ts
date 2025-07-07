@@ -1,6 +1,6 @@
 import {
   Agent,
-  createEmailAddressResolver,
+  createAddressBasedResolver,
   routeAgentEmail,
   routeAgentRequest,
 } from "agents";
@@ -166,11 +166,9 @@ Email Agent`,
 export const email: EmailExportedHandler<Env> = async (email, env) => {
   console.log("📮 Email received via email handler");
 
-  const addressResolver = createEmailAddressResolver("EmailAgent");
+  const addressResolver = createAddressBasedResolver("EmailAgent");
 
   await routeAgentEmail(email, env, {
-    defaultAgentId: "default",
-    defaultAgentName: "EmailAgent",
     resolver: addressResolver,
   });
 };
@@ -180,6 +178,46 @@ export default {
   async fetch(request: Request, env: Env) {
     try {
       const url = new URL(request.url);
+
+      // Handle test email API endpoint
+      if (url.pathname === "/api/test-email" && request.method === "POST") {
+        const emailData = await request.json() as { from?: string; to?: string; subject?: string; body?: string };
+        const { from, to, subject, body } = emailData;
+
+        console.log("📧 Received test email data:", emailData);
+
+        // Create mock email from the JSON payload
+        const mockEmail = {
+          forward: async () => {},
+          from: from || "unknown@example.com",
+          headers: new Headers({
+            subject: subject || "Test Email",
+          }),
+          raw: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(body || ""));
+              controller.close();
+            },
+          }),
+          rawSize: (body || "").length,
+          reply: async () => {},
+          setReject: () => {},
+          to: to || "agent@example.com",
+        } as ForwardableEmailMessage;
+
+        // Route the email using our email routing system
+        const resolver = createAddressBasedResolver("EmailAgent");
+        await routeAgentEmail(mockEmail, env, {
+          resolver,
+        });
+
+        return new Response(JSON.stringify({ 
+          success: true, 
+          message: "Email processed successfully" 
+        }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      }
 
       // Handle custom email webhook endpoint for testing
       if (url.pathname === "/webhook/email" && request.method === "POST") {
@@ -208,10 +246,8 @@ export default {
         } as ForwardableEmailMessage;
 
         // Route the email using our email routing system
-        const resolver = createEmailAddressResolver("EmailAgent");
+        const resolver = createAddressBasedResolver("EmailAgent");
         await routeAgentEmail(mockEmail, env, {
-          defaultAgentId: "default",
-          defaultAgentName: "EmailAgent",
           resolver,
         });
 

@@ -6,7 +6,7 @@ async function main() {
     clean: true,
     dts: true,
     entry: ["src/*.ts", "src/*.tsx"],
-    external: ["cloudflare:workers"],
+    external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
     sourcemap: true,
     splitting: true
