@@ -9,7 +9,6 @@ import type {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
-import { createMimeMessage } from "mimetext";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
 import {
@@ -1440,6 +1439,7 @@ export async function sendEmailWithRouting(
   fromName: string,
   options: EmailSendOptions
 ): Promise<void> {
+  const { createMimeMessage } = await import("mimetext");
   const msg = createMimeMessage();
   msg.setSender({ addr: from, name: fromName });
   msg.setRecipient(options.to);
