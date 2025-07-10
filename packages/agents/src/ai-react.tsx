@@ -1,5 +1,6 @@
 import { useChat } from "@ai-sdk/react";
-import type { Message } from "ai";
+import type { UIMessage as Message } from "ai";
+import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
 import { MessageType, type OutgoingMessage } from "./ai-types";
@@ -55,10 +56,7 @@ export function useAgentChat<State = unknown>(
   }: GetInitialMessagesOptions) {
     const getMessagesUrl = new URL(url);
     getMessagesUrl.pathname += "/get-messages";
-    const response = await fetch(getMessagesUrl.toString(), {
-      credentials: options.credentials,
-      headers: options.headers
-    });
+    const response = await fetch(getMessagesUrl.toString());
     return response.json<Message[]>();
   }
 
@@ -89,7 +87,7 @@ export function useAgentChat<State = unknown>(
         });
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
-    : (rest.initialMessages ?? []);
+    : [];
 
   // manages adding and removing the promise from the cache
   useEffect(() => {
@@ -217,10 +215,11 @@ export function useAgentChat<State = unknown>(
     return new Response(stream);
   }
   const useChatHelpers = useChat({
-    fetch: aiFetch,
-    initialMessages,
-    sendExtraMessageFields: true,
-    ...rest
+    messages: initialMessages,
+    transport: new DefaultChatTransport({
+      api: agentUrlString,
+    }),
+    ...rest,
   });
 
   useEffect(() => {

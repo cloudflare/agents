@@ -3,6 +3,8 @@ import { Chat } from "./agents/chat";
 import { Rpc } from "./agents/rpc";
 import { Scheduler } from "./agents/scheduler";
 import { Stateful } from "./agents/stateful";
+import { EmailAgent } from "./agents/email";
+import { MockEmailService } from "./agents/mock-email";
 
 export type Env = {
   Scheduler: DurableObjectNamespace<Scheduler>;

@@ -1,4 +1,4 @@
-import type { Message as ChatMessage } from "ai";
+import type { UIMessage as ChatMessage } from "ai";
 
 /**
  * Enum for message types used in Agent communication
