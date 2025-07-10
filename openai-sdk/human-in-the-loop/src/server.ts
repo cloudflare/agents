@@ -134,9 +134,8 @@ export default {
         `[Server] Agent request routed successfully, status: ${response.status}`
       );
       return response;
-    } else {
-      console.log(`[Server] No agent route matched, returning 404`);
-      return new Response("Not found", { status: 404 });
     }
+    console.log("[Server] No agent route matched, returning 404");
+    return new Response("Not found", { status: 404 });
   },
 };

@@ -22,7 +22,7 @@ export class A2AHonoApp {
    * @param baseUrl The base URL for A2A endpoints (e.g., "/a2a/api").
    * @returns The Hono app with A2A routes.
    */
-  public setupRoutes(app: Hono, baseUrl: string = ""): Hono {
+  public setupRoutes(app: Hono, baseUrl = ""): Hono {
     app.get(`${baseUrl}/.well-known/agent.json`, async (c: Context) => {
       try {
         const agentCard = await this.requestHandler.getAgentCard();
@@ -92,11 +92,10 @@ export class A2AHonoApp {
               "Content-Type": "text/event-stream",
             },
           });
-        } else {
-          // Single JSON-RPC response
-          const rpcResponse = rpcResponseOrStream as A2AResponse;
-          return c.json(rpcResponse);
         }
+        // Single JSON-RPC response
+        const rpcResponse = rpcResponseOrStream as A2AResponse;
+        return c.json(rpcResponse);
       } catch (error) {
         console.error("Unhandled error in A2AHonoApp POST handler:", error);
         const a2aError =

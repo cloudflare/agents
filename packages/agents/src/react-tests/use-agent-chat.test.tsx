@@ -40,7 +40,7 @@ describe("useAgentChat", () => {
     const suspenseRendered = vi.fn();
     const SuspenseObserver = () => {
       suspenseRendered();
-      return <>Suspended</>;
+      return "Suspended";
     };
 
     const TestComponent = () => {

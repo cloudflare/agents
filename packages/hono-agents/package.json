@@ -5,14 +5,14 @@
   },
   "description": "Add Cloudflare Agents to your Hono app",
   "devDependencies": {
-    "agents": "^0.0.100",
+    "agents": "^0.0.101",
     "hono": "^4.8.3"
   },
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js"
     }
   },
   "files": [
@@ -28,7 +28,7 @@
   "main": "src/index.ts",
   "name": "hono-agents",
   "peerDependencies": {
-    "agents": "^0.0.100",
+    "agents": "^0.0.101",
     "hono": "^4.6.17"
   },
   "repository": {
@@ -42,5 +42,5 @@
   },
   "type": "module",
   "types": "dist/index.d.ts",
-  "version": "0.0.90"
+  "version": "0.0.91"
 }

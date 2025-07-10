@@ -1,5 +1,14 @@
 # hono-agents
 
+## 0.0.91
+
+### Patch Changes
+
+- [#339](https://github.com/cloudflare/agents/pull/339) [`22d140b`](https://github.com/cloudflare/agents/commit/22d140b360365ac51ed9ebdad2beab6bc7095c9e) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
+- Updated dependencies [[`22d140b`](https://github.com/cloudflare/agents/commit/22d140b360365ac51ed9ebdad2beab6bc7095c9e)]:
+  - agents@0.0.101
+
 ## 0.0.90
 
 ### Patch Changes

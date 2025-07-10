@@ -1,0 +1,14 @@
+{
+  "author": "",
+  "description": "LLM as a Judge example with OpenAI ⨉ Cloudflare Agents",
+  "keywords": [],
+  "license": "ISC",
+  "name": "@cloudflare/agents-openai-llm-as-a-judge",
+  "private": true,
+  "scripts": {
+    "clean": "rm -rf .wrangler node_modules/.vite",
+    "start": "vite dev"
+  },
+  "type": "module",
+  "version": "0.0.0"
+}

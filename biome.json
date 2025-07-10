@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.0.5/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.0.6/schema.json",
   "assist": {
     "actions": {
       "source": {
@@ -25,7 +25,10 @@
       "!**/wrangler.jsonc",
       "!./tsconfig.base.json",
       "!**/tsconfig.base.json",
-      "!**/normalize.css"
+      "!**/normalize.css",
+      "!package.json",
+      "!**/package.json",
+      "!package-lock.json"
     ]
   },
   "formatter": {
@@ -43,7 +46,17 @@
       },
       "recommended": true,
       "style": {
-        "noNonNullAssertion": "off"
+        "noInferrableTypes": "error",
+        "noNonNullAssertion": "off",
+        "noParameterAssign": "error",
+        "noUnusedTemplateLiteral": "error",
+        "noUselessElse": "error",
+        "useAsConstAssertion": "error",
+        "useDefaultParameterLast": "error",
+        "useEnumInitializers": "error",
+        "useNumberNamespace": "error",
+        "useSelfClosingElements": "error",
+        "useSingleVarDeclarator": "error"
       }
     }
   },

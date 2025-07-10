@@ -180,7 +180,7 @@ async function fetchAndDisplayAgentCard() {
     // client.getAgentCard() uses the agentBaseUrl provided during client construction
     const card: AgentCard = await client.getAgentCard();
     agentName = card.name || "Agent"; // Update global agent name
-    console.log(colorize("green", `✓ Agent Card Found:`));
+    console.log(colorize("green", "✓ Agent Card Found:"));
     console.log(`  Name:        ${colorize("bright", agentName)}`);
     if (card.description) {
       console.log(`  Description: ${card.description}`);
@@ -197,14 +197,14 @@ async function fetchAndDisplayAgentCard() {
     // The prompt is set dynamically before each rl.prompt() call in the main loop
     // to reflect the current agentName if it changes (though unlikely after initial fetch).
   } catch (error) {
-    console.log(colorize("yellow", `⚠️ Error fetching or parsing agent card`));
+    console.log(colorize("yellow", "⚠️ Error fetching or parsing agent card"));
     throw error;
   }
 }
 
 // --- Main Loop ---
 async function main() {
-  console.log(colorize("bright", `A2A Terminal Client`));
+  console.log(colorize("bright", "A2A Terminal Client"));
   console.log(colorize("dim", `Agent Base URL: ${serverUrl}`));
 
   await fetchAndDisplayAgentCard(); // Fetch the card before starting the loop
@@ -240,7 +240,7 @@ async function main() {
       console.log(
         colorize(
           "bright",
-          `✨ Starting new session. Task and Context IDs are cleared.`
+          "✨ Starting new session. Task and Context IDs are cleared."
         )
       );
       rl.prompt();
@@ -390,7 +390,7 @@ async function main() {
         }
       }
       console.log(
-        colorize("dim", `--- End of response stream for this input ---`)
+        colorize("dim", "--- End of response stream for this input ---")
       );
       // biome-ignore lint/suspicious/noExplicitAny: comes direct from the google samples
     } catch (error: any) {
@@ -398,7 +398,7 @@ async function main() {
       const prefix = colorize("red", `\n${agentName} [${timestamp}] ERROR:`);
       console.error(
         prefix,
-        `Error communicating with agent:`,
+        "Error communicating with agent:",
         error.message || error
       );
       if (error.code) {

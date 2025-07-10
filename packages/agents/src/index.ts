@@ -546,8 +546,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           ).then((_results) => {
             this.broadcast(
               JSON.stringify({
-                type: "cf_agent_mcp_servers",
                 mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers",
               })
             );
           });
