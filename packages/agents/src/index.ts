@@ -1633,27 +1633,6 @@ export async function getAgentByName<Env, T extends Agent<Env>>(
   return getServerByName<Env, T>(namespace, name, options);
 }
 
-// export async function getAgentById<Env, T extends Agent<Env>>(
-//   namespace: AgentNamespace<T>,
-//   id: string,
-//   options?: {
-//     jurisdiction?: DurableObjectJurisdiction;
-//     locationHint?: DurableObjectLocationHint;
-//   }
-// ): Promise<DurableObjectStub<T>> {
-//   throw new Error("Not implemented");
-// }
-
-// export async function getNamespaceById<Env, T extends Agent<Env>>(
-//   namespace: AgentNamespace<T>,
-//   options?: {
-//     jurisdiction?: DurableObjectJurisdiction;
-//     locationHint?: DurableObjectLocationHint;
-//   }
-// ): Promise<DurableObjectNamespace<T>> {
-//   throw new Error("Not implemented");
-// }
-
 /**
  * A wrapper for streaming responses in callable methods
  */

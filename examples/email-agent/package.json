@@ -7,7 +7,6 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "start": "wrangler dev",
-    "start-vite": "vite dev",
     "test-email": "tsx test-mail.ts"
   },
   "dependencies": {
