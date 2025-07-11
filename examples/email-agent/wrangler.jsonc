@@ -7,25 +7,25 @@
     "bindings": [
       {
         "name": "EmailAgent",
-        "class_name": "EmailAgent",
-      },
-    ],
+        "class_name": "EmailAgent"
+      }
+    ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["EmailAgent"],
-    },
+      "new_sqlite_classes": ["EmailAgent"]
+    }
   ],
   "send_email": [
     {
       "name": "EMAIL",
-      "destination_address": "*@example.com",
-    },
+      "destination_address": "*@example.com"
+    }
   ],
   "vars": {
     "EMAIL_DOMAIN": "example.com",
     "FROM_EMAIL": "agent@example.com",
-    "FROM_NAME": "Email Agent",
-  },
+    "FROM_NAME": "Email Agent"
+  }
 }

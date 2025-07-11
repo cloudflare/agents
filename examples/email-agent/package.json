@@ -6,10 +6,9 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "start": "wrangler dev --local --port 8787",
+    "start": "wrangler dev",
     "start-vite": "vite dev",
-    "test-email": "tsx test-mail.ts",
-    "test-comprehensive": "tsx test-comprehensive.ts"
+    "test-email": "tsx test-mail.ts"
   },
   "dependencies": {
     "mimetext": "^3.0.27",

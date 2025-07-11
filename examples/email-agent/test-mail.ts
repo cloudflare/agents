@@ -8,7 +8,7 @@ async function testEmail() {
     from: "user@example.com",
     to: "agent+test123@example.com",
     subject: "Test Email",
-    body: "Hello from test script!",
+    body: "Hello from test script!"
   };
 
   console.log("🧪 Testing email agent with:", testData);
@@ -17,9 +17,9 @@ async function testEmail() {
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify(testData),
+      body: JSON.stringify(testData)
     });
 
     if (response.ok) {

@@ -2,7 +2,7 @@ import {
   Agent,
   createAddressBasedResolver,
   routeAgentEmail,
-  routeAgentRequest,
+  routeAgentRequest
 } from "agents";
 import PostalMime from "postal-mime";
 
@@ -36,7 +36,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
     autoReplyEnabled: true,
     emailCount: 0,
     emails: [],
-    lastUpdated: new Date(),
+    lastUpdated: new Date()
   };
 
   async onEmail(email: ForwardableEmailMessage) {
@@ -68,7 +68,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
       console.log("📧 Parsed email:", {
         from: parsed.from?.address,
         subject: parsed.subject,
-        textLength: parsed.text?.length || 0,
+        textLength: parsed.text?.length || 0
       });
 
       const emailData: EmailData = {
@@ -78,21 +78,21 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
         subject: parsed.subject || "No Subject",
         text: parsed.text,
         timestamp: new Date(),
-        to: email.to,
+        to: email.to
       };
 
       const newState = {
         autoReplyEnabled: this.state.autoReplyEnabled,
         emailCount: this.state.emailCount + 1,
         emails: [...this.state.emails.slice(-9), emailData],
-        lastUpdated: new Date(),
+        lastUpdated: new Date()
       };
 
       this.setState(newState);
 
       console.log("📊 Agent state updated:", {
         emailCount: newState.emailCount,
-        totalEmails: newState.emails.length,
+        totalEmails: newState.emails.length
       });
 
       if (this.state.autoReplyEnabled && !this.isAutoReply(parsed)) {
@@ -108,7 +108,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
     const autoReplyHeaders = [
       "auto-submitted",
       "x-auto-response-suppress",
-      "precedence",
+      "precedence"
     ];
 
     for (const header of autoReplyHeaders) {
@@ -149,10 +149,10 @@ Best regards,
 Email Agent`,
           headers: {
             "Auto-Submitted": "auto-replied",
-            "X-Auto-Response-Suppress": "All",
+            "X-Auto-Response-Suppress": "All"
           },
           subject: `Re: ${originalEmail.subject}`,
-          to: originalEmail.from,
+          to: originalEmail.from
         }
       );
 
@@ -169,7 +169,7 @@ export const email: EmailExportedHandler<Env> = async (email, env) => {
   const addressResolver = createAddressBasedResolver("EmailAgent");
 
   await routeAgentEmail(email, env, {
-    resolver: addressResolver,
+    resolver: addressResolver
   });
 };
 
@@ -196,33 +196,33 @@ export default {
           forward: async () => {},
           from: from || "unknown@example.com",
           headers: new Headers({
-            subject: subject || "Test Email",
+            subject: subject || "Test Email"
           }),
           raw: new ReadableStream({
             start(controller) {
               controller.enqueue(new TextEncoder().encode(body || ""));
               controller.close();
-            },
+            }
           }),
           rawSize: (body || "").length,
           reply: async () => {},
           setReject: () => {},
-          to: to || "agent@example.com",
+          to: to || "agent@example.com"
         } as ForwardableEmailMessage;
 
         // Route the email using our email routing system
         const resolver = createAddressBasedResolver("EmailAgent");
         await routeAgentEmail(mockEmail, env, {
-          resolver,
+          resolver
         });
 
         return new Response(
           JSON.stringify({
             success: true,
-            message: "Email processed successfully",
+            message: "Email processed successfully"
           }),
           {
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json" }
           }
         );
       }
@@ -239,24 +239,24 @@ export default {
           forward: async () => {},
           from,
           headers: new Headers({
-            subject: "Test Email",
+            subject: "Test Email"
           }),
           raw: new ReadableStream({
             start(controller) {
               controller.enqueue(new TextEncoder().encode(body));
               controller.close();
-            },
+            }
           }),
           rawSize: body.length,
           reply: async () => {},
           setReject: () => {},
-          to,
+          to
         } as ForwardableEmailMessage;
 
         // Route the email using our email routing system
         const resolver = createAddressBasedResolver("EmailAgent");
         await routeAgentEmail(mockEmail, env, {
-          resolver,
+          resolver
         });
 
         return new Response("Worker successfully processed email");
@@ -271,13 +271,13 @@ export default {
       return new Response(
         JSON.stringify({
           error: "Internal Server Error",
-          message: error instanceof Error ? error.message : "Unknown error",
+          message: error instanceof Error ? error.message : "Unknown error"
         }),
         {
           headers: { "Content-Type": "application/json" },
-          status: 500,
+          status: 500
         }
       );
     }
-  },
+  }
 } satisfies ExportedHandler<Env>;
