@@ -8,7 +8,7 @@ async function main() {
 
     for (const path of [
       "./packages/agents/package.json",
-      "./packages/hono-agents/package.json"
+      "./packages/hono-agents/package.json",
     ]) {
       const packageJson = JSON.parse(fs.readFileSync(path, "utf-8"));
       packageJson.version = `0.0.0-${stdout.trim()}`;

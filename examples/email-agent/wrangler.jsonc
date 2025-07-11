@@ -7,22 +7,22 @@
     "bindings": [
       {
         "name": "EmailAgent",
-        "class_name": "EmailAgent"
-      }
-    ]
+        "class_name": "EmailAgent",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["EmailAgent"]
-    }
+      "new_sqlite_classes": ["EmailAgent"],
+    },
   ],
   "send_email": [
     {
-      "name": "EMAIL"
-    }
+      "name": "EMAIL",
+    },
   ],
   "vars": {
-    "FROM_NAME": "Sunil Pai's agent"
-  }
+    "FROM_NAME": "Sunil Pai's agent",
+  },
 }

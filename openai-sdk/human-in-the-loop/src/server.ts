@@ -2,7 +2,7 @@ import { Agent, type RunResult, RunState, run, tool } from "@openai/agents";
 import {
   Agent as CFAgent,
   unstable_callable as callable,
-  routeAgentRequest
+  routeAgentRequest,
 } from "agents";
 import { z } from "zod";
 
@@ -29,8 +29,8 @@ const getWeatherTool = tool({
     return needsApproval;
   },
   parameters: z.object({
-    location: z.string()
-  })
+    location: z.string(),
+  }),
 });
 
 export type AgentState = {
@@ -39,7 +39,7 @@ export type AgentState = {
 
 export class MyAgent extends CFAgent<Env, AgentState> {
   initialState: AgentState = {
-    serialisedRunState: null
+    serialisedRunState: null,
   };
 
   // biome-ignore lint/suspicious/noExplicitAny: later
@@ -47,7 +47,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
   agent = new Agent({
     instructions: "You are a helpful assistant",
     name: "Assistant",
-    tools: [getWeatherTool]
+    tools: [getWeatherTool],
   });
 
   async onStart() {
@@ -83,7 +83,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
     console.log("[MyAgent] Serialising state:", serialisedState);
 
     this.setState({
-      serialisedRunState: serialisedState
+      serialisedRunState: serialisedState,
     });
 
     console.log("[MyAgent] State updated, serialisedRunState saved");
@@ -115,7 +115,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
       console.log("[MyAgent] Serialising state:", serialisedState);
 
       this.setState({
-        serialisedRunState: serialisedState
+        serialisedRunState: serialisedState,
       });
     } else {
       throw new Error(`[MyAgent] No interruption found with id: ${id}`);
@@ -137,5 +137,5 @@ export default {
     }
     console.log("[Server] No agent route matched, returning 404");
     return new Response("Not found", { status: 404 });
-  }
+  },
 };

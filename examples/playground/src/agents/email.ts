@@ -29,7 +29,7 @@ export async function sendEmail(
   msg.setSubject(subject);
   msg.addMessage({
     contentType: contentType,
-    data: body
+    data: body,
   });
   msg.setHeader("Message-ID", `<${idToBase64(id)}@${fromDomain}>`);
 
@@ -64,7 +64,7 @@ async function createMockEmail(options: {
   email.setSubject(options.subject);
   email.addMessage({
     contentType: options.contentType,
-    data: options.body
+    data: options.body,
   });
   email.setHeader("Message-ID", `<${options.id}@${options.from}>`);
   const mockEmailMessage = new MockEmail.MockEmailMessage(
@@ -129,13 +129,13 @@ export class EmailAgent extends AIChatAgent<Env> {
                   id: this.ctx.id.toString(),
                   name: "emailAgent",
                   subject: "Email from emailAgent",
-                  to: "theman@example.com"
+                  to: "theman@example.com",
                 });
                 mockEmail
                   .toInbox({
                     from: emailToSend.from,
                     message: emailToSend.message,
-                    to: emailToSend.to
+                    to: emailToSend.to,
                   })
                   .catch((e) => {
                     console.error("error sending email", e);
@@ -144,11 +144,11 @@ export class EmailAgent extends AIChatAgent<Env> {
                 console.error("error sending email", e);
               }
             }
-          }
+          },
         });
 
         result.mergeIntoDataStream(dataStream);
-      }
+      },
     });
 
     return dataStreamResponse;

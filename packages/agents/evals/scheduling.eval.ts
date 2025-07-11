@@ -6,7 +6,7 @@ import { createScorer, evalite } from "evalite";
 import {
   type Schedule,
   unstable_getSchedulePrompt,
-  unstable_scheduleSchema
+  unstable_scheduleSchema,
 } from "../src/schedule";
 
 const model = openai("gpt-4o");
@@ -27,7 +27,7 @@ const getsType = createScorer<string, Schedule>({
   name: "getsType",
   scorer: ({ output, expected }) => {
     return output.when.type === expected?.when.type ? 1 : 0;
-  }
+  },
 });
 
 const getsDetail = createScorer<string, Schedule>({
@@ -65,7 +65,7 @@ const getsDetail = createScorer<string, Schedule>({
       default:
         return 0;
     }
-  }
+  },
 });
 
 const getsDescription = createScorer<string, Schedule>({
@@ -77,7 +77,7 @@ const getsDescription = createScorer<string, Schedule>({
       expected?.description.toLowerCase()
       ? 1
       : 0;
-  }
+  },
 });
 
 evalite<string, Schedule>("Evals for scheduling", {
@@ -87,9 +87,9 @@ evalite<string, Schedule>("Evals for scheduling", {
       {
         expected: {
           description: "jump",
-          when: { delayInSeconds: 6, type: "delayed" }
+          when: { delayInSeconds: 6, type: "delayed" },
         },
-        input: "jump in 6 seconds"
+        input: "jump in 6 seconds",
       },
       {
         expected: {
@@ -101,76 +101,76 @@ evalite<string, Schedule>("Evals for scheduling", {
               date.setHours(14, 0, 0, 0);
               return date;
             })(),
-            type: "scheduled"
-          }
+            type: "scheduled",
+          },
         },
-        input: "meeting with team at 2pm tomorrow"
+        input: "meeting with team at 2pm tomorrow",
       },
       {
         expected: {
           description: "run backup",
-          when: { cron: "0 0 * * *", type: "cron" }
+          when: { cron: "0 0 * * *", type: "cron" },
         },
-        input: "run backup every day at midnight"
+        input: "run backup every day at midnight",
       },
       {
         expected: {
           description: "send report",
-          when: { delayInSeconds: 1800, type: "delayed" }
+          when: { delayInSeconds: 1800, type: "delayed" },
         },
-        input: "send report in 30 minutes"
+        input: "send report in 30 minutes",
       },
       {
         expected: {
           description: "weekly team sync",
-          when: { cron: "0 10 * * 1", type: "cron" }
+          when: { cron: "0 10 * * 1", type: "cron" },
         },
-        input: "weekly team sync every Monday at 10am"
+        input: "weekly team sync every Monday at 10am",
       },
       {
         expected: {
           description: "just a task without timing",
-          when: { type: "no-schedule" }
+          when: { type: "no-schedule" },
         },
-        input: "just a task without timing"
+        input: "just a task without timing",
       },
       {
         expected: {
           description: "quarterly review",
           when: {
             date: new Date(new Date().getFullYear(), 2, 15, 9, 0, 0, 0),
-            type: "scheduled"
-          }
+            type: "scheduled",
+          },
         },
-        input: "quarterly review on March 15th at 9am"
+        input: "quarterly review on March 15th at 9am",
       },
       {
         expected: {
           description: "clean database",
-          when: { cron: "0 3 * * 0", type: "cron" }
+          when: { cron: "0 3 * * 0", type: "cron" },
         },
-        input: "clean database every Sunday at 3am"
+        input: "clean database every Sunday at 3am",
       },
       {
         expected: {
           description: "process data",
-          when: { cron: "*/5 * * * *", type: "cron" }
+          when: { cron: "*/5 * * * *", type: "cron" },
         },
-        input: "process data every 5 minutes"
+        input: "process data every 5 minutes",
       },
       {
         expected: {
           description: "run maintenance",
-          when: { cron: "0 2 1 * *", type: "cron" }
+          when: { cron: "0 2 1 * *", type: "cron" },
         },
-        input: "run maintenance at 2am every first day of month"
+        input: "run maintenance at 2am every first day of month",
       },
       {
         expected: {
           description: "send reminder",
-          when: { delayInSeconds: 7200, type: "delayed" }
+          when: { delayInSeconds: 7200, type: "delayed" },
         },
-        input: "send reminder in 2 hours"
+        input: "send reminder in 2 hours",
       },
       {
         expected: {
@@ -183,144 +183,144 @@ evalite<string, Schedule>("Evals for scheduling", {
               date.setHours(15, 30, 0, 0);
               return date;
             })(),
-            type: "scheduled"
-          }
+            type: "scheduled",
+          },
         },
-        input: "team meeting next Friday at 3:30pm"
+        input: "team meeting next Friday at 3:30pm",
       },
       {
         expected: {
           description: "backup database",
-          when: { cron: "0 */6 * * *", type: "cron" }
+          when: { cron: "0 */6 * * *", type: "cron" },
         },
-        input: "backup database every 6 hours"
+        input: "backup database every 6 hours",
       },
       {
         expected: {
           description: "generate report",
-          when: { cron: "0 9 * * 1-5", type: "cron" }
+          when: { cron: "0 9 * * 1-5", type: "cron" },
         },
-        input: "generate report every weekday at 9am"
+        input: "generate report every weekday at 9am",
       },
       {
         expected: {
           description: "check system",
-          when: { delayInSeconds: 15, type: "delayed" }
+          when: { delayInSeconds: 15, type: "delayed" },
         },
-        input: "check system in 15 seconds"
+        input: "check system in 15 seconds",
       },
       {
         expected: {
           description: "update cache",
-          when: { cron: "*/30 9-17 * * 1-5", type: "cron" }
+          when: { cron: "*/30 9-17 * * 1-5", type: "cron" },
         },
-        input: "update cache every 30 minutes during business hours"
+        input: "update cache every 30 minutes during business hours",
       },
       {
         expected: {
           description: "archive logs",
-          when: { cron: "0 0 * * 0,6", type: "cron" }
+          when: { cron: "0 0 * * 0,6", type: "cron" },
         },
-        input: "archive logs at midnight on weekends"
+        input: "archive logs at midnight on weekends",
       },
       {
         expected: {
           description: "sync data",
-          when: { delayInSeconds: 3600, type: "delayed" }
+          when: { delayInSeconds: 3600, type: "delayed" },
         },
-        input: "sync data in 1 hour"
+        input: "sync data in 1 hour",
       },
       {
         expected: {
           description: "run health check",
-          when: { cron: "*/10 9-17 * * 1-5", type: "cron" }
+          when: { cron: "*/10 9-17 * * 1-5", type: "cron" },
         },
-        input: "run health check every 10 minutes during work hours"
+        input: "run health check every 10 minutes during work hours",
       },
       {
         expected: {
           description: "send daily digest",
-          when: { cron: "0 8 * * 1-5", type: "cron" }
+          when: { cron: "0 8 * * 1-5", type: "cron" },
         },
-        input: "send daily digest at 8am on weekdays"
+        input: "send daily digest at 8am on weekdays",
       },
       {
         expected: {
           description: "process invoices",
-          when: { cron: "*/15 9-17 * * 1-5", type: "cron" }
+          when: { cron: "*/15 9-17 * * 1-5", type: "cron" },
         },
-        input: "process invoices every 15 minutes during business hours"
+        input: "process invoices every 15 minutes during business hours",
       },
       {
         expected: {
           description: "run backup",
-          when: { cron: "0 1,13 * * *", type: "cron" }
+          when: { cron: "0 1,13 * * *", type: "cron" },
         },
-        input: "run backup at 1am and 1pm every day"
+        input: "run backup at 1am and 1pm every day",
       },
       {
         expected: {
           description: "check system status",
-          when: { delayInSeconds: 45, type: "delayed" }
+          when: { delayInSeconds: 45, type: "delayed" },
         },
-        input: "check system status in 45 seconds"
+        input: "check system status in 45 seconds",
       },
       {
         expected: {
           description: "generate monthly report",
-          when: { cron: "0 6 1 * *", type: "cron" }
+          when: { cron: "0 6 1 * *", type: "cron" },
         },
-        input: "generate monthly report on the 1st at 6am"
+        input: "generate monthly report on the 1st at 6am",
       },
       {
         expected: {
           description: "clean temp files",
-          when: { cron: "0 */2 * * *", type: "cron" }
+          when: { cron: "0 */2 * * *", type: "cron" },
         },
-        input: "clean temp files every 2 hours"
+        input: "clean temp files every 2 hours",
       },
       {
         expected: {
           description: "sync data",
-          when: { cron: "0 9,17 * * 1-5", type: "cron" }
+          when: { cron: "0 9,17 * * 1-5", type: "cron" },
         },
-        input: "sync data at 9am and 5pm on weekdays"
+        input: "sync data at 9am and 5pm on weekdays",
       },
       {
         expected: {
           description: "run maintenance",
-          when: { cron: "0 3 * * 0,6", type: "cron" }
+          when: { cron: "0 3 * * 0,6", type: "cron" },
         },
-        input: "run maintenance at 3am on weekends"
+        input: "run maintenance at 3am on weekends",
       },
       {
         expected: {
           description: "archive old data",
-          when: { cron: "0 0 28-31 * *", type: "cron" }
+          when: { cron: "0 0 28-31 * *", type: "cron" },
         },
-        input: "archive old data at midnight on the last day of each month"
+        input: "archive old data at midnight on the last day of each month",
       },
       {
         expected: {
           description: "send notification",
-          when: { delayInSeconds: 10800, type: "delayed" }
+          when: { delayInSeconds: 10800, type: "delayed" },
         },
-        input: "send notification in 3 hours"
+        input: "send notification in 3 hours",
       },
       {
         expected: {
           description: "run diagnostics",
-          when: { cron: "0 2 * * 1-5", type: "cron" }
+          when: { cron: "0 2 * * 1-5", type: "cron" },
         },
-        input: "run diagnostics at 2am on weekdays"
+        input: "run diagnostics at 2am on weekdays",
       },
       {
         expected: {
           description: "process logs",
-          when: { cron: "*/30 9-17 * * 1-5", type: "cron" }
+          when: { cron: "*/30 9-17 * * 1-5", type: "cron" },
         },
-        input: "process logs every 30 minutes during business hours"
-      }
+        input: "process logs every 30 minutes during business hours",
+      },
     ];
   },
   scorers: [getsType, getsDetail, getsDescription],
@@ -336,12 +336,12 @@ Input to parse: "${input}"`,
         // mode: "json",
         // schemaName: "task",
         // schemaDescription: "A task to be scheduled",
-        schema: unstable_scheduleSchema
+        schema: unstable_scheduleSchema,
       });
       return result.object;
     } catch (error) {
       console.error(error);
       throw error;
     }
-  }
+  },
 });

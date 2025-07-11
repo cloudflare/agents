@@ -4,7 +4,7 @@ import { getCurrentAgent } from "../index";
 
 type BaseEvent<
   T extends string,
-  Payload extends Record<string, unknown> = {}
+  Payload extends Record<string, unknown> = {},
 > = {
   type: T;
   /**
@@ -86,7 +86,7 @@ export const genericObservability: Observability = {
     }
 
     console.log(event);
-  }
+  },
 };
 
 let localMode = false;

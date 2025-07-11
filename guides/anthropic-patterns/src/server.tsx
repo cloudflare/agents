@@ -6,7 +6,7 @@ import {
   type AgentNamespace,
   type Connection,
   type WSMessage,
-  routeAgentRequest
+  routeAgentRequest,
 } from "agents";
 import { generateObject, generateText } from "ai";
 import { z } from "zod";
@@ -27,7 +27,7 @@ type Env = {
 // with helpers for sending/receiving messages to the client and updating the status
 function createAgent<
   Props extends Record<string, unknown>,
-  Output extends Record<string, unknown>
+  Output extends Record<string, unknown>,
 >(
   _name: string,
   workflow: (
@@ -43,25 +43,25 @@ function createAgent<
       apiKey: this.env.OPENAI_API_KEY,
       baseURL: `https://gateway.ai.cloudflare.com/v1/${this.env.AI_GATEWAY_ACCOUNT_ID}/${this.env.AI_GATEWAY_ID}/openai`,
       headers: {
-        "cf-aig-authorization": `Bearer ${this.env.AI_GATEWAY_TOKEN}`
-      }
+        "cf-aig-authorization": `Bearer ${this.env.AI_GATEWAY_TOKEN}`,
+      },
     });
     static options = {
-      hibernate: true
+      hibernate: true,
     };
     status: {
       isRunning: boolean;
       output: string | undefined;
     } = {
       isRunning: false,
-      output: undefined
+      output: undefined,
     };
 
     onConnect(connection: Connection) {
       connection.send(
         JSON.stringify({
           status: this.status,
-          type: "status"
+          type: "status",
         })
       );
     }
@@ -71,9 +71,9 @@ function createAgent<
         JSON.stringify({
           toast: {
             message,
-            type
+            type,
           },
-          type: "toast"
+          type: "toast",
         })
       );
     };
@@ -104,7 +104,7 @@ function createAgent<
       try {
         const result = await workflow(data.input as Props, {
           openai: this.openai,
-          toast: this.toast
+          toast: this.toast,
         });
         this.setStatus({ isRunning: false, output: JSON.stringify(result) });
       } catch (error) {
@@ -134,7 +134,7 @@ export const Sequential = createAgent<{ input: string }, { copy: string }>(
     // First step: Generate marketing copy
     const { text: copy } = await generateText({
       model,
-      prompt: `Write persuasive marketing copy for: ${props.input}. Focus on benefits and emotional appeal.`
+      prompt: `Write persuasive marketing copy for: ${props.input}. Focus on benefits and emotional appeal.`,
     });
     ctx.toast("Copy generated");
 
@@ -150,8 +150,8 @@ export const Sequential = createAgent<{ input: string }, { copy: string }>(
       schema: z.object({
         clarity: z.number().min(1).max(10),
         emotionalAppeal: z.number().min(1).max(10),
-        hasCallToAction: z.boolean()
-      })
+        hasCallToAction: z.boolean(),
+      }),
     });
     ctx.toast("Quality check complete");
     // If quality check fails, regenerate with more specific instructions
@@ -171,7 +171,7 @@ export const Sequential = createAgent<{ input: string }, { copy: string }>(
         }
         ${qualityMetrics.clarity < 7 ? "- Improved clarity and directness" : ""}
   
-        Original copy: ${copy}`
+        Original copy: ${copy}`,
       });
       return { copy: improvedCopy, qualityMetrics };
     }
@@ -206,8 +206,8 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
       schema: z.object({
         complexity: z.enum(["simple", "complex"]),
         reasoning: z.string(),
-        type: z.enum(["general", "refund", "technical"])
-      })
+        type: z.enum(["general", "refund", "technical"]),
+      }),
     });
     ctx.toast("Query classified");
     // Route based on classification
@@ -224,8 +224,8 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
         refund:
           "You are a customer service agent specializing in refund requests. Follow company policy and collect necessary information.",
         technical:
-          "You are a technical support specialist with deep product knowledge. Focus on clear step-by-step troubleshooting."
-      }[classification.type]
+          "You are a technical support specialist with deep product knowledge. Focus on clear step-by-step troubleshooting.",
+      }[classification.type],
     });
     ctx.toast("Response generated");
     return { classification, response };
@@ -256,10 +256,10 @@ export const Parallel = createAgent<
           schema: z.object({
             riskLevel: z.enum(["low", "medium", "high"]),
             suggestions: z.array(z.string()),
-            vulnerabilities: z.array(z.string())
+            vulnerabilities: z.array(z.string()),
           }),
           system:
-            "You are an expert in code security. Focus on identifying security vulnerabilities, injection risks, and authentication issues."
+            "You are an expert in code security. Focus on identifying security vulnerabilities, injection risks, and authentication issues.",
         }),
 
         generateObject({
@@ -269,10 +269,10 @@ export const Parallel = createAgent<
           schema: z.object({
             impact: z.enum(["low", "medium", "high"]),
             issues: z.array(z.string()),
-            optimizations: z.array(z.string())
+            optimizations: z.array(z.string()),
           }),
           system:
-            "You are an expert in code performance. Focus on identifying performance bottlenecks, memory leaks, and optimization opportunities."
+            "You are an expert in code performance. Focus on identifying performance bottlenecks, memory leaks, and optimization opportunities.",
         }),
 
         generateObject({
@@ -282,11 +282,11 @@ export const Parallel = createAgent<
           schema: z.object({
             concerns: z.array(z.string()),
             qualityScore: z.number().min(1).max(10),
-            recommendations: z.array(z.string())
+            recommendations: z.array(z.string()),
           }),
           system:
-            "You are an expert in code quality. Focus on code structure, readability, and adherence to best practices."
-        })
+            "You are an expert in code quality. Focus on code structure, readability, and adherence to best practices.",
+        }),
       ]);
 
     ctx.toast("Code reviews complete");
@@ -294,7 +294,7 @@ export const Parallel = createAgent<
     const reviews = [
       { ...securityReview.object, type: "security" },
       { ...performanceReview.object, type: "performance" },
-      { ...maintainabilityReview.object, type: "maintainability" }
+      { ...maintainabilityReview.object, type: "maintainability" },
     ];
 
     // Aggregate results using another model instance
@@ -302,7 +302,7 @@ export const Parallel = createAgent<
       model,
       prompt: `Synthesize these code review results into a concise summary with key actions:
     ${JSON.stringify(reviews, null, 2)}`,
-      system: "You are a technical lead summarizing multiple code reviews."
+      system: "You are a technical lead summarizing multiple code reviews.",
     });
 
     ctx.toast("Code review summary complete");
@@ -345,12 +345,12 @@ export const Orchestrator = createAgent<
           z.object({
             changeType: z.enum(["create", "modify", "delete"]),
             filePath: z.string(),
-            purpose: z.string()
+            purpose: z.string(),
           })
-        )
+        ),
       }),
       system:
-        "You are a senior software architect planning feature implementations."
+        "You are a senior software architect planning feature implementations.",
     });
     ctx.toast("Implementation plan created");
     // Workers: Execute the planned changes
@@ -363,7 +363,7 @@ export const Orchestrator = createAgent<
           delete:
             "You are an expert at safely removing code while ensuring no breaking changes.",
           modify:
-            "You are an expert at modifying existing code while maintaining consistency and avoiding regressions."
+            "You are an expert at modifying existing code while maintaining consistency and avoiding regressions.",
         }[file.changeType];
 
         const { object: change } = await generateObject({
@@ -375,14 +375,14 @@ export const Orchestrator = createAgent<
           ${props.featureRequest}`,
           schema: z.object({
             code: z.string(),
-            explanation: z.string()
+            explanation: z.string(),
           }),
-          system: workerSystemPrompt
+          system: workerSystemPrompt,
         });
         ctx.toast("File change implemented");
         return {
           file,
-          implementation: change
+          implementation: change,
         };
       })
     );
@@ -390,7 +390,7 @@ export const Orchestrator = createAgent<
     ctx.toast("File changes implemented");
     return {
       changes: fileChanges,
-      plan: implementationPlan
+      plan: implementationPlan,
     };
   }
 );
@@ -413,7 +413,7 @@ export const Evaluator = createAgent(
       model: ctx.openai("gpt-4o-mini"), // use small model for first attempt
       prompt: `Translate this text to ${props.targetLanguage}, preserving tone and cultural nuances:
       ${props.text}`,
-      system: "You are an expert literary translator."
+      system: "You are an expert literary translator.",
     });
 
     ctx.toast("Initial translation complete");
@@ -441,9 +441,9 @@ export const Evaluator = createAgent(
           preservesNuance: z.boolean(),
           preservesTone: z.boolean(),
           qualityScore: z.number().min(1).max(10),
-          specificIssues: z.array(z.string())
+          specificIssues: z.array(z.string()),
         }),
-        system: "You are an expert in evaluating literary translations."
+        system: "You are an expert in evaluating literary translations.",
       });
 
       ctx.toast(`Evaluation complete: ${evaluation.qualityScore}`);
@@ -467,7 +467,7 @@ export const Evaluator = createAgent(
   
         Original: ${props.text}
         Current Translation: ${currentTranslation}`,
-        system: "You are an expert literary translator."
+        system: "You are an expert literary translator.",
       });
 
       ctx.toast("Improved translation complete");
@@ -480,7 +480,7 @@ export const Evaluator = createAgent(
 
     return {
       finalTranslation: currentTranslation,
-      iterationsRequired: iterations
+      iterationsRequired: iterations,
     };
   }
 );
@@ -491,5 +491,5 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  }
+  },
 } satisfies ExportedHandler<Env>;

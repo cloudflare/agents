@@ -101,7 +101,7 @@ const socket = usePartySocket({
         setWorkflowState(data.state);
         break;
     }
-  }
+  },
 });
 ```
 

@@ -81,7 +81,7 @@ type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
     : Promise<ReturnType<AgentMethods<T>[K]>>;
 
 type OptionalArgsAgentMethodCall<AgentT> = <
-  K extends keyof OptionalAgentMethods<AgentT>
+  K extends keyof OptionalAgentMethods<AgentT>,
 >(
   method: K,
   args?: Parameters<OptionalAgentMethods<AgentT>[K]>,
@@ -89,7 +89,7 @@ type OptionalArgsAgentMethodCall<AgentT> = <
 ) => AgentPromiseReturnType<AgentT, K>;
 
 type RequiredArgsAgentMethodCall<AgentT> = <
-  K extends keyof RequiredAgentMethods<AgentT>
+  K extends keyof RequiredAgentMethods<AgentT>,
 >(
   method: K,
   args: Parameters<RequiredAgentMethods<AgentT>[K]>,
@@ -134,7 +134,7 @@ export function useAgent<
   AgentT extends {
     get state(): State;
   },
-  State
+  State,
 >(
   options: UseAgentOptions<State>
 ): PartySocket & {
@@ -222,7 +222,7 @@ export function useAgent<State>(
         }
       }
       options.onMessage?.(message);
-    }
+    },
   }) as PartySocket & {
     agent: string;
     name: string;
@@ -242,14 +242,14 @@ export function useAgent<State>(
         pendingCallsRef.current.set(id, {
           reject,
           resolve: resolve as (value: unknown) => void,
-          stream: streamOptions
+          stream: streamOptions,
         });
 
         const request: RPCRequest = {
           args,
           id,
           method,
-          type: "rpc"
+          type: "rpc",
         };
 
         agent.send(JSON.stringify(request));
@@ -274,7 +274,7 @@ export function useAgent<State>(
         return (...args: unknown[]) => {
           return call(method as string, args);
         };
-      }
+      },
     }
   );
 

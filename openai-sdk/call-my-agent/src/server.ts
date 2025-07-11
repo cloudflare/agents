@@ -5,7 +5,7 @@ import {
   type AgentNamespace,
   type Connection,
   type ConnectionContext,
-  routeAgentRequest
+  routeAgentRequest,
 } from "agents";
 
 type Env = {
@@ -21,21 +21,21 @@ export class MyAgent extends Agent<Env> {
       const agent = new RealtimeAgent({
         instructions:
           "You are a helpful assistant that starts every conversation with a creative greeting.",
-        name: "Triage Agent"
+        name: "Triage Agent",
       });
 
       connection.send(`Welcome! You are connected with ID: ${connection.id}`);
 
       const twilioTransportLayer = new TwilioRealtimeTransportLayer({
-        twilioWebSocket: connection
+        twilioWebSocket: connection,
       });
 
       const session = new RealtimeSession(agent, {
-        transport: twilioTransportLayer
+        transport: twilioTransportLayer,
       });
 
       await session.connect({
-        apiKey: process.env.OPENAI_API_KEY as string
+        apiKey: process.env.OPENAI_API_KEY as string,
       });
 
       session.on("history_updated", (history) => {
@@ -64,13 +64,13 @@ export default {
 </Response>`.trim();
       return new Response(twimlResponse, {
         headers: {
-          "Content-Type": "text/xml"
-        }
+          "Content-Type": "text/xml",
+        },
       });
     }
     return (
       (await routeAgentRequest(request, env, { cors: true })) ||
       new Response("Not found", { status: 404 })
     );
-  }
+  },
 } satisfies ExportedHandler<Env>;

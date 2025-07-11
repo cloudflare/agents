@@ -18,24 +18,24 @@ function App() {
     board: [
       [null, null, null],
       [null, null, null],
-      [null, null, null]
+      [null, null, null],
     ],
     currentPlayer: "X",
-    winner: null
+    winner: null,
   });
   const [gamesPlayed, setGamesPlayed] = useState(0);
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
   const [stats, setStats] = useState({
     draws: 0,
     oWins: 0,
-    xWins: 0
+    xWins: 0,
   });
   const agent = useAgent<TicTacToeState>({
     agent: "tic-tac-toe",
     onStateUpdate: (state) => {
       setState(state);
     },
-    prefix: "some/prefix"
+    prefix: "some/prefix",
   });
 
   // Make random move when new game starts

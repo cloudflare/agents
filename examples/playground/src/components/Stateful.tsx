@@ -19,14 +19,14 @@ export function Stateful({ addToast }: StateProps) {
     color: "#3B82F6",
     counter: 0,
     initialState: true,
-    text: "" // this gets wiped out by the server message
+    text: "", // this gets wiped out by the server message
   });
 
   const agent = useAgent<State>({
     agent: "stateful",
     onStateUpdate: (state, _source: "server" | "client") => {
       setSyncedState(state);
-    }
+    },
   });
 
   const handleIncrement = () => {

@@ -34,7 +34,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       {},
       async (): Promise<CallToolResult> => {
         return {
-          content: [{ text: this.props.testValue, type: "text" }]
+          content: [{ text: this.props.testValue, type: "text" }],
         };
       }
     );
@@ -47,7 +47,7 @@ export default {
 
     // set some props that should be passed init
     ctx.props = {
-      testValue: "123"
+      testValue: "123",
     };
 
     if (url.pathname === "/sse" || url.pathname === "/sse/message") {
@@ -59,5 +59,5 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
-  }
+  },
 };

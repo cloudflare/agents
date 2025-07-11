@@ -3,7 +3,7 @@ import { useState } from "react";
 import "./RPC.css";
 
 export default function RPC({
-  addToast
+  addToast,
 }: {
   addToast: (message: string, type: "success" | "error" | "info") => void;
 }) {
@@ -31,7 +31,7 @@ export default function RPC({
       await call("testStreaming", [], {
         onChunk: (chunk: unknown) => {
           setMessages((prev) => [...prev, chunk as string]);
-        }
+        },
       });
     } catch (error) {
       addToast(`Error: ${error}`, "error");

@@ -23,7 +23,7 @@ for (const tsconfig of tsconfigs) {
   try {
     const output = execSync(`tsc -p ${tsconfig}`, {
       encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
     });
     results.push({ tsconfig, success: true, output });
     console.log(`✅ ${tsconfig} - OK`);

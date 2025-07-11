@@ -1,7 +1,7 @@
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import {
   SSEClientTransport,
-  type SSEClientTransportOptions
+  type SSEClientTransportOptions,
 } from "@modelcontextprotocol/sdk/client/sse.js";
 
 export class SSEEdgeClientTransport extends SSEClientTransport {
@@ -21,8 +21,8 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
         headers: {
           ...options.requestInit?.headers,
           ...fetchInit?.headers,
-          ...headers
-        }
+          ...headers,
+        },
       };
 
       // Remove unsupported properties
@@ -42,8 +42,8 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
       ...options,
       eventSourceInit: {
         ...options.eventSourceInit,
-        fetch: fetchOverride
-      }
+        fetch: fetchOverride,
+      },
     });
     this.authProvider = options.authProvider;
   }
@@ -53,7 +53,7 @@ export class SSEEdgeClientTransport extends SSEClientTransport {
       const tokens = await this.authProvider.tokens();
       if (tokens) {
         return {
-          Authorization: `Bearer ${tokens.access_token}`
+          Authorization: `Bearer ${tokens.access_token}`,
         };
       }
     }

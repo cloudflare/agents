@@ -21,7 +21,7 @@ Inside your `McpAgent`'s `async init()` method, you can use the MCP SDK to defin
 export class MyMCP extends McpAgent<Env> {
   server = new McpServer({
     name: "Demo",
-    version: "1.0.0"
+    version: "1.0.0",
   });
 
   async init() {

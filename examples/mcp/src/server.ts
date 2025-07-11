@@ -11,17 +11,17 @@ type State = { counter: number };
 export class MyMCP extends McpAgent<Env, State, {}> {
   server = new McpServer({
     name: "Demo",
-    version: "1.0.0"
+    version: "1.0.0",
   });
 
   initialState: State = {
-    counter: 1
+    counter: 1,
   };
 
   async init() {
     this.server.resource("counter", "mcp://resource/counter", (uri) => {
       return {
-        contents: [{ text: String(this.state.counter), uri: uri.href }]
+        contents: [{ text: String(this.state.counter), uri: uri.href }],
       };
     });
 
@@ -36,9 +36,9 @@ export class MyMCP extends McpAgent<Env, State, {}> {
           content: [
             {
               text: String(`Added ${a}, total is now ${this.state.counter}`),
-              type: "text"
-            }
-          ]
+              type: "text",
+            },
+          ],
         };
       }
     );
@@ -50,5 +50,5 @@ export class MyMCP extends McpAgent<Env, State, {}> {
 }
 
 export default MyMCP.mount("/sse", {
-  binding: "MyMCP"
+  binding: "MyMCP",
 });

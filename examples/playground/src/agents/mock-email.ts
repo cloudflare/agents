@@ -2,7 +2,7 @@ import {
   Agent,
   type AgentContext,
   type Connection,
-  type WSMessage
+  type WSMessage,
 } from "agents";
 import { createMimeMessage } from "mimetext";
 import type { Email as PostalEmail } from "postal-mime";
@@ -33,7 +33,7 @@ export class MockEmailService<Env> extends Agent<Env> {
     connection.send(
       JSON.stringify({
         messages: emails,
-        type: "inbox:all"
+        type: "inbox:all",
       })
     );
   }
@@ -50,7 +50,7 @@ export class MockEmailService<Env> extends Agent<Env> {
       this.broadcast(
         JSON.stringify({
           messages: [],
-          type: "inbox:all"
+          type: "inbox:all",
         })
       );
     }
@@ -73,7 +73,7 @@ export class MockEmailService<Env> extends Agent<Env> {
     this.broadcast(
       JSON.stringify({
         message: parsed,
-        type: "inbox:new-message"
+        type: "inbox:new-message",
       })
     );
   }
@@ -86,7 +86,7 @@ export class MockEmailService<Env> extends Agent<Env> {
     email.setSubject(subject);
     email.addMessage({
       contentType: "text/plain",
-      data: text
+      data: text,
     });
     const raw = email.asRaw();
 
@@ -98,7 +98,7 @@ export class MockEmailService<Env> extends Agent<Env> {
     this.broadcast(
       JSON.stringify({
         message: mail,
-        type: "outbox:new-message"
+        type: "outbox:new-message",
       })
     );
 
@@ -106,12 +106,12 @@ export class MockEmailService<Env> extends Agent<Env> {
       body: JSON.stringify({
         from: "theman@example.com",
         message: raw,
-        to: to
+        to: to,
       }),
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       },
-      method: "POST"
+      method: "POST",
     });
   }
 }

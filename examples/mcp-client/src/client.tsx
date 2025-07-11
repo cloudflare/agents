@@ -21,7 +21,7 @@ function App() {
     prompts: [],
     resources: [],
     servers: {},
-    tools: []
+    tools: [],
   });
 
   const agent = useAgent({
@@ -31,7 +31,7 @@ function App() {
     onMcpUpdate: (mcpServers: MCPServersState) => {
       setMcpState(mcpServers);
     },
-    onOpen: () => setIsConnected(true)
+    onOpen: () => setIsConnected(true),
   });
 
   function openPopup(authUrl: string) {
@@ -55,11 +55,11 @@ function App() {
         agent: "my-agent",
         host: agent.host,
         name: sessionId!,
-        path: "add-mcp"
+        path: "add-mcp",
       },
       {
         body: JSON.stringify({ name: serverName, url: serverUrl }),
-        method: "POST"
+        method: "POST",
       }
     );
     setMcpState({
@@ -72,9 +72,9 @@ function App() {
           instructions: null,
           name: serverName,
           server_url: serverUrl,
-          state: "connecting"
-        }
-      }
+          state: "connecting",
+        },
+      },
     });
   };
 

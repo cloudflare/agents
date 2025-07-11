@@ -3,7 +3,7 @@ import { build } from "esbuild";
 await build({
   bundle: true,
   define: {
-    "process.env.NODE_ENV": '"production"'
+    "process.env.NODE_ENV": '"production"',
   },
   entryPoints: ["src/server.ts"],
   external: ["express", "cloudflare:workers"],
@@ -14,5 +14,5 @@ await build({
   outfile: "dist/server.js",
   platform: "node",
   sourcemap: true,
-  target: "es2022"
+  target: "es2022",
 });

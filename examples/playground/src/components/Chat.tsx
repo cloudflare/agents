@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const ROOMS = [
   { id: "1", label: "Room 1" },
   { id: "2", label: "Room 2" },
-  { id: "3", label: "Room 3" }
+  { id: "3", label: "Room 3" },
 ];
 
 interface ChatProps {
@@ -28,13 +28,13 @@ function ChatRoom({ roomId }: ChatProps) {
 
   const agent = useAgent({
     agent: "chat",
-    name: `chat-${roomId}`
+    name: `chat-${roomId}`,
   });
 
   const { messages, input, handleInputChange, handleSubmit, clearHistory } =
     useAgentChat({
       agent,
-      maxSteps: 5
+      maxSteps: 5,
     });
 
   // Scroll to bottom when messages change

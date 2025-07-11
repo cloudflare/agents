@@ -31,7 +31,7 @@ export default function Chat() {
   };
 
   const agent = useAgent({
-    agent: "human-in-the-loop"
+    agent: "human-in-the-loop",
   });
 
   const {
@@ -40,10 +40,10 @@ export default function Chat() {
     handleInputChange,
     handleSubmit,
     addToolResult,
-    clearHistory
+    clearHistory,
   } = useAgentChat({
     agent,
-    maxSteps: 5
+    maxSteps: 5,
   });
 
   // Scroll to bottom when messages change
@@ -53,7 +53,7 @@ export default function Chat() {
 
   // List of tools that require human confirmation
   const toolsRequiringConfirmation: (keyof typeof tools)[] = [
-    "getWeatherInformation"
+    "getWeatherInformation",
   ];
 
   const pendingToolCallConfirmation = messages.some((m: Message) =>
@@ -126,7 +126,7 @@ export default function Chat() {
                               onClick={() =>
                                 addToolResult({
                                   result: APPROVAL.YES,
-                                  toolCallId
+                                  toolCallId,
                                 })
                               }
                             >
@@ -138,7 +138,7 @@ export default function Chat() {
                               onClick={() =>
                                 addToolResult({
                                   result: APPROVAL.NO,
-                                  toolCallId
+                                  toolCallId,
                                 })
                               }
                             >

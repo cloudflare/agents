@@ -51,13 +51,13 @@ export function useAgentChat<State = unknown>(
   const agentUrlString = agentUrl.toString();
 
   async function defaultGetInitialMessagesFetch({
-    url
+    url,
   }: GetInitialMessagesOptions) {
     const getMessagesUrl = new URL(url);
     getMessagesUrl.pathname += "/get-messages";
     const response = await fetch(getMessagesUrl.toString(), {
       credentials: options.credentials,
-      headers: options.headers
+      headers: options.headers,
     });
     return response.json<Message[]>();
   }
@@ -85,7 +85,7 @@ export function useAgentChat<State = unknown>(
       : doGetInitialMessages({
           agent: agent.agent,
           name: agent.name,
-          url: agentUrlString
+          url: agentUrlString,
         });
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
@@ -129,7 +129,7 @@ export function useAgentChat<State = unknown>(
       mode,
       referrer,
       referrerPolicy,
-      window
+      window,
       //  dispatcher, duplex
     } = options;
     const id = nanoid(8);
@@ -141,7 +141,7 @@ export function useAgentChat<State = unknown>(
       agent.send(
         JSON.stringify({
           id,
-          type: "cf_agent_chat_request_cancel"
+          type: "cf_agent_chat_request_cancel",
         })
       );
 
@@ -188,7 +188,7 @@ export function useAgentChat<State = unknown>(
     const stream = new ReadableStream({
       start(c) {
         controller = c;
-      }
+      },
     });
 
     agent.send(
@@ -205,12 +205,12 @@ export function useAgentChat<State = unknown>(
           redirect,
           referrer,
           referrerPolicy,
-          window
+          window,
           // dispatcher,
           // duplex
         },
         type: "cf_agent_use_chat_request",
-        url: request.toString()
+        url: request.toString(),
       })
     );
 
@@ -220,7 +220,7 @@ export function useAgentChat<State = unknown>(
     fetch: aiFetch,
     initialMessages,
     sendExtraMessageFields: true,
-    ...rest
+    ...rest,
   });
 
   useEffect(() => {
@@ -276,7 +276,7 @@ export function useAgentChat<State = unknown>(
       useChatHelpers.setMessages([]);
       agent.send(
         JSON.stringify({
-          type: "cf_agent_chat_clear"
+          type: "cf_agent_chat_clear",
         })
       );
     },
@@ -289,9 +289,9 @@ export function useAgentChat<State = unknown>(
       agent.send(
         JSON.stringify({
           messages,
-          type: "cf_agent_chat_messages"
+          type: "cf_agent_chat_messages",
         })
       );
-    }
+    },
   };
 }

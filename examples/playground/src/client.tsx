@@ -17,7 +17,7 @@ interface Toast {
 function Toast({
   message,
   type,
-  onClose
+  onClose,
 }: {
   message: string;
   type: "success" | "error" | "info";
@@ -43,7 +43,7 @@ function App() {
     const newToast: Toast = {
       id: nanoid(8),
       message,
-      type
+      type,
     };
     setToasts((prev) => [...prev, newToast]);
   };

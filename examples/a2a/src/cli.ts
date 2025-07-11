@@ -15,7 +15,7 @@ import {
   type Part, // Added for explicit Part typing
   type Task, // Added for direct Task events
   type TaskArtifactUpdateEvent,
-  type TaskStatusUpdateEvent
+  type TaskStatusUpdateEvent,
 } from "@a2a-js/sdk";
 
 // --- ANSI Colors ---
@@ -29,7 +29,7 @@ const colors = {
   magenta: "\x1b[35m",
   red: "\x1b[31m",
   reset: "\x1b[0m",
-  yellow: "\x1b[33m"
+  yellow: "\x1b[33m",
 };
 
 // --- Helper Functions ---
@@ -53,7 +53,7 @@ let agentName = "Agent"; // Default, try to get from agent card later
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
-  prompt: colorize("cyan", "You: ")
+  prompt: colorize("cyan", "You: "),
 });
 
 // --- Response Handling ---
@@ -121,7 +121,7 @@ function printAgentEvent(
       messageId: generateId(), // Assuming artifact parts are from agent
       parts: update.artifact.parts,
       role: "agent",
-      taskId: update.taskId
+      taskId: update.taskId,
     });
   } else {
     // This case should ideally not be reached if called correctly
@@ -261,10 +261,10 @@ async function main() {
       parts: [
         {
           kind: "text", // Required by TextPart interface
-          text: input
-        }
+          text: input,
+        },
       ],
-      role: "user"
+      role: "user",
     };
 
     // Conditionally add taskId to the message payload
@@ -277,7 +277,7 @@ async function main() {
     }
 
     const params: MessageSendParams = {
-      message: messagePayload
+      message: messagePayload,
       // Optional: configuration for streaming, blocking, etc.
       // configuration: {
       //   acceptedOutputModes: ['text/plain', 'application/json'], // Example

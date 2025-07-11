@@ -66,13 +66,13 @@ export class AIAgent extends Agent {
   async onRequest(request) {
     // Connect with AI capabilities
     const ai = new OpenAI({
-      apiKey: this.env.OPENAI_API_KEY
+      apiKey: this.env.OPENAI_API_KEY,
     });
 
     // Process and understand
     const response = await ai.chat.completions.create({
       model: "gpt-4",
-      messages: [{ role: "user", content: await request.text() }]
+      messages: [{ role: "user", content: await request.text() }],
     });
 
     return new Response(response.choices[0].message.content);
@@ -96,17 +96,17 @@ Define your agent's domain:
     "bindings": [
       {
         "name": "AIAgent",
-        "class_name": "AIAgent"
-      }
-    ]
+        "class_name": "AIAgent",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
       // Mandatory for the Agent to store state
-      "new_sqlite_classes": ["AIAgent"]
-    }
-  ]
+      "new_sqlite_classes": ["AIAgent"],
+    },
+  ],
 }
 ```
 
@@ -123,7 +123,7 @@ const agent = env.AIAgent.get(id);
 await agent.processTask({
   type: "analysis",
   context: "incoming_data",
-  parameters: initialConfig
+  parameters: initialConfig,
 });
 
 // Or reconnect with an existing one
@@ -143,7 +143,7 @@ export class APIAgent extends Agent {
 
     return Response.json({
       insight: await this.process(data),
-      moment: Date.now()
+      moment: Date.now(),
     });
   }
 }
@@ -175,7 +175,7 @@ import { AgentClient } from "agents/client";
 
 const connection = new AgentClient({
   agent: "dialogue-agent",
-  name: "insight-seeker"
+  name: "insight-seeker",
 });
 
 connection.addEventListener("message", (event) => {
@@ -185,7 +185,7 @@ connection.addEventListener("message", (event) => {
 connection.send(
   JSON.stringify({
     type: "inquiry",
-    content: "What patterns do you see?"
+    content: "What patterns do you see?",
   })
 );
 ```
@@ -205,14 +205,14 @@ function AgentInterface() {
       console.log("Understanding received:", message.data);
     },
     onOpen: () => console.log("Connection established"),
-    onClose: () => console.log("Connection closed")
+    onClose: () => console.log("Connection closed"),
   });
 
   const inquire = () => {
     connection.send(
       JSON.stringify({
         type: "inquiry",
-        content: "What insights have you gathered?"
+        content: "What insights have you gathered?",
       })
     );
   };
@@ -235,14 +235,14 @@ export class ThinkingAgent extends Agent {
     this.setState({
       ...this.state,
       insights: [...(this.state.insights || []), newInsight],
-      understanding: this.state.understanding + 1
+      understanding: this.state.understanding + 1,
     });
   }
 
   onStateUpdate(state, source) {
     console.log("Understanding deepened:", {
       newState: state,
-      origin: source
+      origin: source,
     });
   }
 }
@@ -259,7 +259,7 @@ function StateInterface() {
 
   const agent = useAgent({
     agent: "thinking-agent",
-    onStateUpdate: (newState) => setState(newState)
+    onStateUpdate: (newState) => setState(newState),
   });
 
   const increment = () => {
@@ -289,7 +289,7 @@ export class TimeAwareAgent extends Agent {
 
     // Daily synthesis
     this.schedule("0 0 * * *", "dailySynthesis", {
-      depth: "comprehensive"
+      depth: "comprehensive",
     });
 
     // Milestone review
@@ -325,11 +325,11 @@ export class DialogueAgent extends AIChatAgent {
         const stream = streamText({
           model: openai("gpt-4o"),
           messages: this.messages,
-          onFinish // call onFinish so that messages get saved
+          onFinish, // call onFinish so that messages get saved
         });
 
         stream.mergeIntoDataStream(dataStream);
-      }
+      },
     });
   }
 }
@@ -346,14 +346,14 @@ import { useAgentChat } from "agents/ai-react";
 function ChatInterface() {
   // Connect to the agent
   const agent = useAgent({
-    agent: "dialogue-agent"
+    agent: "dialogue-agent",
   });
 
   // Set up the chat interaction
   const { messages, input, handleInputChange, handleSubmit, clearHistory } =
     useAgentChat({
       agent,
-      maxSteps: 5
+      maxSteps: 5,
     });
 
   return (

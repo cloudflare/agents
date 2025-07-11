@@ -10,11 +10,11 @@ interface EmailProps {
 
 export default function Email({ addToast }: EmailProps) {
   const agent = useAgent({
-    agent: "email-agent"
+    agent: "email-agent",
   });
   const { messages, input, handleInputChange, handleSubmit, clearHistory } =
     useAgentChat({
-      agent
+      agent,
     });
 
   const [emails, setEmails] = useState<PostalEmail[]>([
@@ -23,13 +23,13 @@ export default function Email({ addToast }: EmailProps) {
       date: new Date().toISOString(),
       from: {
         address: "agent@example.com",
-        name: "Agent"
+        name: "Agent",
       },
       headers: [],
       messageId: "1",
       subject: "Welcome to the Email Agent",
-      text: "Hello! This is your first email from the agent. You can reply to this email when chat is disconnected."
-    }
+      text: "Hello! This is your first email from the agent. You can reply to this email when chat is disconnected.",
+    },
   ]);
 
   const mailboxAgent = useAgent({
@@ -42,7 +42,7 @@ export default function Email({ addToast }: EmailProps) {
         const email = msg.message;
         setEmails((prev) => [...prev, email]);
       }
-    }
+    },
   });
 
   // const [chatInput, setChatInput] = useState("");
@@ -85,12 +85,12 @@ export default function Email({ addToast }: EmailProps) {
       date: new Date().toISOString(),
       from: {
         address: "user",
-        name: "User"
+        name: "User",
       },
       headers: [],
       messageId: crypto.randomUUID(),
       subject: emailSubject,
-      text: emailBody
+      text: emailBody,
     };
 
     setEmails((prev) => [...prev, newEmail]);
@@ -99,7 +99,7 @@ export default function Email({ addToast }: EmailProps) {
         subject: emailSubject,
         text: emailBody,
         to: "theman@example.com",
-        type: "send-email"
+        type: "send-email",
       })
     );
     setEmailSubject("");
@@ -121,7 +121,7 @@ export default function Email({ addToast }: EmailProps) {
     setEmails([]);
     mailboxAgent.send(
       JSON.stringify({
-        type: "clear-emails"
+        type: "clear-emails",
       })
     );
 

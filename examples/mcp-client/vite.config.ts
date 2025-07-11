@@ -7,7 +7,7 @@ export default defineConfig({
     react(),
     cloudflare({
       // ensure that we can run two instances of the dev server
-      inspectorPort: 9230
-    })
-  ]
+      inspectorPort: 9230,
+    }),
+  ],
 });

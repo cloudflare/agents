@@ -11,7 +11,7 @@ declare class A extends Agent<typeof env, {}> {
 
 // biome-ignore lint/correctness/useHookAtTopLevel: tests
 const { stub } = useAgent<{}>({
-  agent: "test"
+  agent: "test",
 });
 
 // ensure retro-compatibility with useAgent<State> API

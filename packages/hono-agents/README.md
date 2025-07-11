@@ -43,8 +43,8 @@ app.use(
         const token = req.headers.get("authorization");
         // validate token
         if (!token) return new Response("Unauthorized", { status: 401 });
-      }
-    }
+      },
+    },
   })
 );
 
@@ -56,8 +56,8 @@ app.use(
   "*",
   agentsMiddleware({
     options: {
-      prefix: "agents" // Handles /agents/* routes only
-    }
+      prefix: "agents", // Handles /agents/* routes only
+    },
   })
 );
 

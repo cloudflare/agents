@@ -57,7 +57,7 @@ const LANGUAGES = [
   { label: "Russian", value: "russian" },
   { label: "Italian", value: "italian" },
   { label: "Klingon", value: "klingon" },
-  { label: "Portuguese", value: "portuguese" }
+  { label: "Portuguese", value: "portuguese" },
 ] as const;
 
 function Toast({ toast, onClose }: { toast: Toast; onClose: () => void }) {
@@ -93,7 +93,7 @@ function Toast({ toast, onClose }: { toast: Toast; onClose: () => void }) {
 
 function ToastContainer({
   toasts,
-  onClose
+  onClose,
 }: {
   toasts: Toast[];
   onClose: (id: number) => void;
@@ -123,7 +123,7 @@ function PatternSection({
   image,
   code,
   index,
-  sessionId
+  sessionId,
 }: PatternProps & { sessionId: string }) {
   const [activeTab, setActiveTab] = useState<"diagram" | "code">("diagram");
   const [isCodeExpanded, setIsCodeExpanded] = useState(false);
@@ -141,20 +141,20 @@ function PatternSection({
           const event = new CustomEvent("showToast", {
             detail: {
               message: data.toast.message,
-              type: data.toast.type as ToastType
-            }
+              type: data.toast.type as ToastType,
+            },
           });
           window.dispatchEvent(event);
           break;
         }
       }
     },
-    prefix: "agents"
+    prefix: "agents",
   });
 
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>({
     isRunning: false,
-    output: ""
+    output: "",
   });
 
   const [formState, setFormState] = useState<FormState[typeof type]>(() => {
@@ -169,17 +169,17 @@ function PatternSection({
   // TODO: Add validation
   database.save(data);
   return true;
-}`
+}`,
         };
       case "orchestrator":
         return {
           featureRequest:
-            "Add dark mode support to the dashboard, including theme persistence and system preference detection"
+            "Add dark mode support to the dashboard, including theme persistence and system preference detection",
         };
       case "evaluator":
         return {
           targetLanguage: LANGUAGES[0].value,
-          text: "The early bird catches the worm"
+          text: "The early bird catches the worm",
         };
     }
   });
@@ -342,18 +342,18 @@ function PatternSection({
       socket.send(
         JSON.stringify({
           input: formState,
-          type: "run"
+          type: "run",
         })
       );
       // Show success toast when workflow starts
       const event = new CustomEvent("showToast", {
-        detail: { message: `Started ${title} workflow...`, type: "info" }
+        detail: { message: `Started ${title} workflow...`, type: "info" },
       });
       window.dispatchEvent(event);
     } catch (_error) {
       // Show error toast if something goes wrong
       const event = new CustomEvent("showToast", {
-        detail: { message: `Failed to start ${title} workflow`, type: "error" }
+        detail: { message: `Failed to start ${title} workflow`, type: "error" },
       });
       window.dispatchEvent(event);
     }
@@ -514,36 +514,36 @@ export default function App() {
       description:
         "One LLM generates responses while another provides evaluation and feedback in a loop.",
       image: "/flows/05 evaluator.png",
-      title: "Evaluator-Optimizer"
+      title: "Evaluator-Optimizer",
     },
     orchestrator: {
       code: orchestratorCode,
       description:
         "A central LLM dynamically breaks down tasks, delegates to worker LLMs, and synthesizes results.",
       image: "/flows/04 orchestrator.png",
-      title: "Orchestrator-Workers"
+      title: "Orchestrator-Workers",
     },
     parallel: {
       code: parallelCode,
       description:
         "Enables simultaneous task processing through sectioning or voting mechanisms.",
       image: "/flows/03 parallel.png",
-      title: "Parallelization"
+      title: "Parallelization",
     },
     routing: {
       code: routingCode,
       description:
         "Classifies input and directs it to specialized followup tasks, allowing for separation of concerns.",
       image: "/flows/02 routing.png",
-      title: "Routing"
+      title: "Routing",
     },
     sequential: {
       code: sequentialCode,
       description:
         "Decomposes tasks into a sequence of steps, where each LLM call processes the output of the previous one.",
       image: "/flows/01 sequential.png",
-      title: "Prompt Chaining"
-    }
+      title: "Prompt Chaining",
+    },
   };
 
   return (
@@ -596,7 +596,7 @@ export default function App() {
         {(
           Object.entries(patterns) as [
             WorkflowType,
-            (typeof patterns)[keyof typeof patterns]
+            (typeof patterns)[keyof typeof patterns],
           ][]
         ).map(([type, pattern], index) => (
           <PatternSection

@@ -11,7 +11,7 @@ async function main() {
       "src/mcp/index.ts",
       "src/mcp/client.ts",
       "src/mcp/do-oauth-client-provider.ts",
-      "src/observability/index.ts"
+      "src/observability/index.ts",
     ],
     external: [
       "cloudflare:workers",
@@ -20,11 +20,11 @@ async function main() {
       "ai",
       "react",
       "zod",
-      "@modelcontextprotocol/sdk"
+      "@modelcontextprotocol/sdk",
     ],
     format: "esm",
     sourcemap: true,
-    splitting: true
+    splitting: true,
   });
 
   // then run prettier on the generated .d.ts files

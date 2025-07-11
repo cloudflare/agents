@@ -7,11 +7,11 @@ export default defineConfig({
       instances: [
         {
           browser: "chromium",
-          headless: true
-        }
+          headless: true,
+        },
       ],
-      provider: "playwright"
+      provider: "playwright",
     },
-    clearMocks: true
-  }
+    clearMocks: true,
+  },
 });
