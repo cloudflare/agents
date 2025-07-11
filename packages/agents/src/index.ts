@@ -10,15 +10,14 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
-import { EmailMessage } from "cloudflare:email";
 import {
   type Connection,
   type ConnectionContext,
+  getServerByName,
   type PartyServerOptions,
+  routePartykitRequest,
   Server,
   type WSMessage,
-  getServerByName,
-  routePartykitRequest,
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager } from "./mcp/client";
@@ -658,35 +657,16 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
   /**
    * Called when the Agent receives an email
-   * Override this method to handle incoming emails
    * @param email Email message to process
    */
-  async onEmail(email: ForwardableEmailMessage) {
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+  onEmail(email: ForwardableEmailMessage) {
     return agentContext.run(
       { agent: this, connection: undefined, request: undefined },
       async () => {
-        console.log("Received email from:", email.from, "to:", email.to);
-        console.log("Subject:", email.headers.get("subject"));
-        console.log("Override onEmail() in your agent to process emails");
+        console.error("onEmail not implemented");
       }
     );
-  }
-
-  async sendEmail(
-    emailBinding: SendEmail,
-    from: string,
-    fromName: string,
-    options: Omit<EmailSendOptions, "agentName" | "agentId">
-  ): Promise<void> {
-    const agentName = camelCaseToKebabCase(this._ParentClass.name);
-    const agentId = this.name;
-
-    return sendEmailWithRouting(emailBinding, from, fromName, {
-      ...options,
-      agentName,
-      agentId,
-      includeRoutingHeaders: true,
-    });
   }
 
   private async _tryCatch<T>(fn: () => T | Promise<T>) {
@@ -1301,170 +1281,17 @@ export async function routeAgentRequest<Env>(
   return response;
 }
 
-export type EmailResolver<Env> = (
-  email: ForwardableEmailMessage,
-  env: Env
-) => Promise<{
-  agentName: string;
-  agentId: string;
-} | null>;
-
-export function createHeaderBasedResolver<Env>(): EmailResolver<Env> {
-  return async (email: ForwardableEmailMessage, _env: Env) => {
-    const messageId = email.headers.get("message-id");
-    if (messageId) {
-      const messageIdMatch = messageId.match(/<([^@]+)@([^>]+)>/);
-      if (messageIdMatch) {
-        const [, agentId, domain] = messageIdMatch;
-        const agentName = domain.split(".")[0];
-        return { agentName, agentId };
-      }
-    }
-
-    const references = email.headers.get("references");
-    if (references) {
-      const referencesMatch = references.match(
-        /<([A-Za-z0-9+/]{43}=)@([^>]+)>/
-      );
-      if (referencesMatch) {
-        const [, base64Id, domain] = referencesMatch;
-        const agentId = Buffer.from(base64Id, "base64").toString("hex");
-        const agentName = domain.split(".")[0];
-        return { agentName, agentId };
-      }
-    }
-
-    const agentName = email.headers.get("x-agent-name");
-    const agentId = email.headers.get("x-agent-id");
-    if (agentName && agentId) {
-      return { agentName, agentId };
-    }
-
-    return null;
-  };
-}
-
-export function createAddressBasedResolver<Env>(
-  defaultAgentName: string
-): EmailResolver<Env> {
-  return async (email: ForwardableEmailMessage, _env: Env) => {
-    const emailMatch = email.to.match(/^([^+@]+)(?:\+([^@]+))?@(.+)$/);
-    if (!emailMatch) {
-      return null;
-    }
-
-    const [, localPart, subAddress] = emailMatch;
-
-    if (subAddress) {
-      return {
-        agentName: localPart,
-        agentId: subAddress,
-      };
-    }
-
-    // Option 2: Use defaultAgentName namespace, localPart as agentId
-    // Common for catch-all email routing to a single EmailAgent namespace
-    return {
-      agentName: defaultAgentName,
-      agentId: localPart,
-    };
-  };
-}
-
-export function createCatchAllResolver<Env>(
-  agentName: string,
-  agentId: string
-): EmailResolver<Env> {
-  return async () => ({ agentName, agentId });
-}
-
-export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
-  resolver: EmailResolver<Env>;
-};
-
+/**
+ * Route an email to the appropriate Agent
+ * @param email Email message to route
+ * @param env Environment containing Agent bindings
+ * @param options Routing options
+ */
 export async function routeAgentEmail<Env>(
-  email: ForwardableEmailMessage,
-  env: Env,
-  options: EmailRoutingOptions<Env>
-): Promise<void> {
-  const routingInfo = await options.resolver(email, env);
-
-  if (!routingInfo) {
-    console.warn("No routing information found for email, dropping message");
-    return;
-  }
-
-  const namespaceBinding = env[routingInfo.agentName as keyof Env];
-  if (!namespaceBinding) {
-    console.error(
-      `Agent namespace '${routingInfo.agentName}' not found in environment`
-    );
-    return;
-  }
-
-  // Type guard to check if this is actually a DurableObjectNamespace (AgentNamespace)
-  if (
-    typeof namespaceBinding !== "object" ||
-    !("idFromName" in namespaceBinding) ||
-    typeof namespaceBinding.idFromName !== "function"
-  ) {
-    console.error(
-      `Environment binding '${routingInfo.agentName}' is not an AgentNamespace (found: ${typeof namespaceBinding})`
-    );
-    return;
-  }
-
-  // Safe cast after runtime validation
-  const namespace = namespaceBinding as unknown as AgentNamespace<Agent<Env>>;
-
-  const agent = await getAgentByName(namespace, routingInfo.agentId);
-  await agent.onEmail(email);
-}
-
-export type EmailSendOptions = {
-  to: string;
-  subject: string;
-  body: string;
-  contentType?: string;
-  headers?: Record<string, string>;
-  includeRoutingHeaders?: boolean;
-  agentName?: string;
-  agentId?: string;
-  domain?: string;
-};
-
-export async function sendEmailWithRouting(
-  emailBinding: SendEmail,
-  from: string,
-  fromName: string,
-  options: EmailSendOptions
-): Promise<void> {
-  const { createMimeMessage } = await import("mimetext");
-  const msg = createMimeMessage();
-  msg.setSender({ addr: from, name: fromName });
-  msg.setRecipient(options.to);
-  msg.setSubject(options.subject);
-  msg.addMessage({
-    contentType: options.contentType || "text/plain",
-    data: options.body,
-  });
-
-  if (options.includeRoutingHeaders && options.agentName && options.agentId) {
-    const domain = options.domain || from.split("@")[1];
-    const messageId = `<${options.agentId}@${domain}>`;
-    msg.setHeader("Message-ID", messageId);
-    msg.setHeader("X-Agent-Name", options.agentName);
-    msg.setHeader("X-Agent-ID", options.agentId);
-  }
-
-  if (options.headers) {
-    for (const [key, value] of Object.entries(options.headers)) {
-      msg.setHeader(key, value);
-    }
-  }
-
-  await emailBinding.send(new EmailMessage(from, options.to, msg.asRaw()));
-}
+  _email: ForwardableEmailMessage,
+  _env: Env,
+  _options?: AgentOptions<Env>
+): Promise<void> {}
 
 /**
  * Get or create an Agent by name

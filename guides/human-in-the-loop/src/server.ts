@@ -2,8 +2,8 @@ import { openai } from "@ai-sdk/openai";
 import { routeAgentRequest } from "agents";
 import { AIChatAgent } from "agents/ai-chat-agent";
 import {
-  type StreamTextOnFinishCallback,
   createDataStreamResponse,
+  type StreamTextOnFinishCallback,
   streamText,
 } from "ai";
 import { tools } from "./tools";

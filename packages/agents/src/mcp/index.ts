@@ -5,11 +5,11 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import {
   InitializeRequestSchema,
-  JSONRPCMessageSchema,
   isJSONRPCError,
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResponse,
+  JSONRPCMessageSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
 import { Agent } from "../";

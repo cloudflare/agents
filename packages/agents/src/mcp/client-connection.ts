@@ -3,8 +3,8 @@ import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client
 import {
   // type ClientCapabilities,
   type ListPromptsResult,
-  type ListResourceTemplatesResult,
   type ListResourcesResult,
+  type ListResourceTemplatesResult,
   type ListToolsResult,
   // type Notification,
   type Prompt,

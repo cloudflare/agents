@@ -1,5 +1,5 @@
-import { TwilioRealtimeTransportLayer } from "@openai/agents-extensions";
 import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
+import { TwilioRealtimeTransportLayer } from "@openai/agents-extensions";
 import {
   Agent,
   type AgentNamespace,

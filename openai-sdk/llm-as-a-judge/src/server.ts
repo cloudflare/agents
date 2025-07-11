@@ -1,4 +1,4 @@
-import { Agent, type AgentInputItem, run, withTrace } from "@openai/agents";
+import { Agent, run, withTrace, type AgentInputItem } from "@openai/agents";
 import {
   Agent as CFAgent,
   unstable_callable as callable,

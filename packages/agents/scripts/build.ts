@@ -15,7 +15,6 @@ async function main() {
     ],
     external: [
       "cloudflare:workers",
-      "cloudflare:email",
       "@ai-sdk/react",
       "ai",
       "react",
