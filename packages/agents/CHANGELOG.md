@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.103
+
+### Patch Changes
+
+- [#350](https://github.com/cloudflare/agents/pull/350) [`70ed631`](https://github.com/cloudflare/agents/commit/70ed6317bc50d32115f39119133fea5f154cde94) Thanks [@ghostwriternr](https://github.com/ghostwriternr)! - Fix TypeScript types resolution by reordering export conditions
+
 ## 0.0.102
 
 ### Patch Changes
