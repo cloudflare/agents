@@ -1,5 +1,0 @@
----
-"agents": patch
----
-
-email adaptor
