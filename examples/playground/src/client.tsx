@@ -3,7 +3,6 @@ import { nanoid } from "nanoid";
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import Chat from "./components/Chat";
-import Email from "./components/Email";
 import RPC from "./components/RPC";
 import { Scheduler } from "./components/Scheduler";
 import { Stateful } from "./components/Stateful";
@@ -73,10 +72,6 @@ function App() {
         <div className="col-span-1">
           <h2 className="text-xl font-bold mb-4">State Sync Demo</h2>
           <Stateful addToast={addToast} />
-        </div>
-        <div className="col-span-1">
-          <h2 className="text-xl font-bold mb-4">Email (wip)</h2>
-          <Email addToast={addToast} />
         </div>
         <div className="col-span-1">
           <h2 className="text-xl font-bold mb-4">Chat</h2>

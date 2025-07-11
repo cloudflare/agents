@@ -5,7 +5,6 @@
   "build": {
     "command": "npm run build",
   },
-
   "durable_objects": {
     "bindings": [
       {

@@ -26,16 +26,16 @@ The agent supports multiple routing strategies:
    npm install
    ```
 
-2. Test email parsing locally:
-
-   ```bash
-   npm run test-email
-   ```
-
-3. Start development server:
+2. Start development server:
 
    ```bash
    npm run start
+   ```
+
+3. Test email parsing locally:
+
+   ```bash
+   npm run test-email
    ```
 
 4. Deploy to Cloudflare:
@@ -94,18 +94,6 @@ Message-ID: <test-'"$(date +%s)"'@example.com>
 Content-Type: text/plain; charset=UTF-8
 
 Hello Email Agent!'
-```
-
-#### Toggle Auto-Reply
-
-```bash
-curl -X POST http://localhost:8787/api/toggle-auto-reply/test123
-```
-
-#### Clear Email History
-
-```bash
-curl -X POST http://localhost:8787/api/clear/test123
 ```
 
 ### Real Email Testing
