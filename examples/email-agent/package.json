@@ -10,7 +10,6 @@
     "test-email": "tsx test-mail.ts"
   },
   "dependencies": {
-    "mimetext": "^3.0.27",
     "postal-mime": "^2.4.4"
   },
   "keywords": [],
