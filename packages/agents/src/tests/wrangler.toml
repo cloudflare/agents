@@ -6,6 +6,6 @@ compatibility_flags = ["nodejs_compat"]
 name = "MCP_OBJECT"
 class_name = "TestMcpAgent"
 
- [[migrations]]
+[[migrations]]
 tag = "v1" # Should be unique for each entry
 new_sqlite_classes = ["TestMcpAgent"]

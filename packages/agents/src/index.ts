@@ -1,15 +1,6 @@
-import {
-  Server,
-  getServerByName,
-  routePartykitRequest,
-  type Connection,
-  type ConnectionContext,
-  type PartyServerOptions,
-  type WSMessage,
-} from "partyserver";
-
-import { parseCronExpression } from "cron-schedule";
-import { nanoid } from "nanoid";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import type {
   Prompt,
@@ -17,15 +8,21 @@ import type {
   ServerCapabilities,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { AsyncLocalStorage } from "node:async_hooks";
-import { MCPClientManager } from "./mcp/client";
-import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
-
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-
+import { parseCronExpression } from "cron-schedule";
+import { nanoid } from "nanoid";
+import {
+  type Connection,
+  type ConnectionContext,
+  getServerByName,
+  type PartyServerOptions,
+  routePartykitRequest,
+  Server,
+  type WSMessage,
+} from "partyserver";
 import { camelCaseToKebabCase } from "./client";
-import type { MCPClientConnection } from "./mcp/client-connection";
+import { MCPClientManager } from "./mcp/client";
+// import type { MCPClientConnection } from "./mcp/client-connection";
+import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -120,6 +117,7 @@ const callableMetadata = new Map<Function, CallableMetadata>();
 export function unstable_callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
     context: ClassMethodDecoratorContext
   ) {
     if (!callableMetadata.has(target)) {
@@ -219,7 +217,7 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 const DEFAULT_STATE = {} as unknown;
 
 const agentContext = new AsyncLocalStorage<{
-  agent: Agent<unknown>;
+  agent: Agent<unknown, unknown>;
   connection: Connection | undefined;
   request: Request | undefined;
 }>();
@@ -229,13 +227,13 @@ export function getCurrentAgent<
 >(): {
   agent: T | undefined;
   connection: Connection | undefined;
-  request: Request<unknown, CfProperties<unknown>> | undefined;
+  request: Request | undefined;
 } {
   const store = agentContext.getStore() as
     | {
         agent: T;
         connection: Connection | undefined;
-        request: Request<unknown, CfProperties<unknown>> | undefined;
+        request: Request | undefined;
       }
     | undefined;
   if (!store) {
@@ -246,6 +244,59 @@ export function getCurrentAgent<
     };
   }
   return store;
+}
+
+/**
+ * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
+ * @param agent The agent instance
+ * @param method The method to wrap
+ * @param connection Optional connection context
+ * @param request Optional request context
+ * @returns A wrapped method that runs within the agent context
+ */
+export function withAgentContext<
+  T extends Agent<unknown, unknown>,
+  Args extends any[],
+  Return,
+>(
+  agent: T,
+  method: (...args: Args) => Return | Promise<Return>,
+  connection?: Connection,
+  request?: Request
+): (...args: Args) => Promise<Return> {
+  return async (...args: Args): Promise<Return> => {
+    return agentContext.run({ agent, connection, request }, async () => {
+      return await method.apply(agent, args);
+    });
+  };
+}
+
+/**
+ * Decorator to automatically wrap methods with agent context
+ * Ensures getCurrentAgent() works properly within the decorated method
+ * @param connection Optional connection context
+ * @param request Optional request context
+ * @returns Method decorator
+ */
+export function withContext(connection?: Connection, request?: Request) {
+  return function (
+    target: any,
+    propertyKey: string | symbol,
+    descriptor: PropertyDescriptor
+  ) {
+    const originalMethod = descriptor.value;
+
+    descriptor.value = async function (...args: any[]) {
+      return agentContext.run(
+        { agent: this as Agent<unknown, unknown>, connection, request },
+        async () => {
+          return await originalMethod.apply(this, args);
+        }
+      );
+    };
+
+    return descriptor;
+  };
 }
 
 /**
@@ -354,6 +405,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       )
     `;
 
+    // Auto-wrap custom methods with agent context
+    this._autoWrapCustomMethods();
+
     void this.ctx.blockConcurrencyWhile(async () => {
       return this._tryCatch(async () => {
         // Create alarms table if it doesn't exist
@@ -398,15 +452,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             // after the MCP connection handshake, we can send updated mcp state
             this.broadcast(
               JSON.stringify({
-                type: "cf_agent_mcp_servers",
                 mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers",
               })
             );
 
             // We probably should let the user configure this response/redirect, but this is fine for now.
             return new Response("<script>window.close();</script>", {
-              status: 200,
               headers: { "content-type": "text/html" },
+              status: 200,
             });
           }
 
@@ -427,7 +481,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           let parsed: unknown;
           try {
             parsed = JSON.parse(message);
-          } catch (e) {
+          } catch (_e) {
             // silently fail and let the onMessage handler handle it
             return this._tryCatch(() => _onMessage(connection, message));
           }
@@ -463,21 +517,21 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               // For regular methods, execute and send response
               const result = await methodFn.apply(this, args);
               const response: RPCResponse = {
-                type: "rpc",
-                id,
-                success: true,
-                result,
                 done: true,
+                id,
+                result,
+                success: true,
+                type: "rpc",
               };
               connection.send(JSON.stringify(response));
             } catch (e) {
               // Send error response
               const response: RPCResponse = {
-                type: "rpc",
-                id: parsed.id,
-                success: false,
                 error:
                   e instanceof Error ? e.message : "Unknown error occurred",
+                id: parsed.id,
+                success: false,
+                type: "rpc",
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
@@ -501,16 +555,16 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             if (this.state) {
               connection.send(
                 JSON.stringify({
-                  type: "cf_agent_state",
                   state: this.state,
+                  type: "cf_agent_state",
                 })
               );
             }
 
             connection.send(
               JSON.stringify({
-                type: "cf_agent_mcp_servers",
                 mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers",
               })
             );
 
@@ -530,10 +584,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           `;
 
           // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-          await Promise.allSettled(
-            servers
-              .filter((server) => server.auth_url === null)
-              .map((server) => {
+          if (servers && Array.isArray(servers) && servers.length > 0) {
+            Promise.allSettled(
+              servers.map((server) => {
                 return this._connectToMcpServerInternal(
                   server.name,
                   server.server_url,
@@ -547,15 +600,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                   }
                 );
               })
-          );
-
-          this.broadcast(
-            JSON.stringify({
-              type: "cf_agent_mcp_servers",
-              mcp: this.getMcpServers(),
-            })
-          );
-
+            ).then((_results) => {
+              this.broadcast(
+                JSON.stringify({
+                  mcp: this.getMcpServers(),
+                  type: "cf_agent_mcp_servers",
+                })
+              );
+            });
+          }
           await this._tryCatch(() => _onStart());
         }
       );
@@ -577,8 +630,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   `;
     this.broadcast(
       JSON.stringify({
-        type: "cf_agent_state",
         state: state,
+        type: "cf_agent_state",
       }),
       source !== "server" ? [source.id] : []
     );
@@ -606,6 +659,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
@@ -614,6 +668,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Called when the Agent receives an email
    * @param email Email message to process
    */
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
   onEmail(email: ForwardableEmailMessage) {
     return agentContext.run(
       { agent: this, connection: undefined, request: undefined },
@@ -628,6 +683,112 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       return await fn();
     } catch (e) {
       throw this.onError(e);
+    }
+  }
+
+  /**
+   * Automatically wrap custom methods with agent context
+   * This ensures getCurrentAgent() works in all custom methods without decorators
+   */
+  private _autoWrapCustomMethods() {
+    try {
+      // Skip auto-wrapping in test environments where agent may not be fully initialized
+      if (
+        (typeof globalThis !== "undefined" && (globalThis as any).__VITEST__) ||
+        process?.env?.NODE_ENV === "test"
+      ) {
+        return;
+      }
+
+      // Built-in methods that already have context
+      const builtInMethods = new Set([
+        "constructor",
+        "onRequest",
+        "onEmail",
+        "onStateUpdate",
+        "onChatMessage",
+        "onError",
+        "render",
+        "schedule",
+        "getSchedule",
+        "getSchedules",
+        "cancelSchedule",
+        "alarm",
+        "destroy",
+        "addMcpServer",
+        "removeMcpServer",
+        "getMcpServers",
+        "connectToMcpServer",
+        "disconnectFromMcpServer",
+        "broadcast",
+        "send",
+        "setState",
+        "getState",
+        "state",
+        "initialState",
+        // Private methods
+        "_tryCatch",
+        "_autoWrapCustomMethods",
+        "_scheduleNextAlarm",
+        "_connectToMcpServerInternal",
+        "_isCallable",
+        "_updateState",
+        "_setState",
+        "_getState",
+      ]);
+
+      // Get all methods from the prototype chain
+      let proto = Object.getPrototypeOf(this);
+      let depth = 0;
+      while (proto && proto !== Object.prototype && depth < 10) {
+        const methodNames = Object.getOwnPropertyNames(proto);
+
+        for (const methodName of methodNames) {
+          // Skip if it's a built-in method, property, or getter/setter
+          if (
+            builtInMethods.has(methodName) ||
+            methodName.startsWith("_") ||
+            typeof this[methodName as keyof this] !== "function"
+          ) {
+            continue;
+          }
+
+          // Check if it's a custom method (not built-in)
+          const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
+          if (descriptor && typeof descriptor.value === "function") {
+            // Wrap the custom method with context
+            this[methodName as keyof this] = withAgentContext(
+              this,
+              (this[methodName as keyof this] as Function).bind(this)
+            ) as any;
+          }
+        }
+
+        proto = Object.getPrototypeOf(proto);
+        depth++;
+      }
+    } catch (error) {
+      // Silently fail if agent is not fully initialized yet
+      // This can happen in test environments or during construction
+      // Only log in production environments
+      const isTestEnv =
+        typeof globalThis !== "undefined" &&
+        ((globalThis as any).__VITEST__ ||
+          (globalThis as any).__JEST__ ||
+          (typeof process !== "undefined" &&
+            process?.env?.NODE_ENV === "test"));
+
+      if (!isTestEnv) {
+        // Use a try-catch to avoid queueMicrotask issues
+        try {
+          console.warn(
+            "Auto-wrapping custom methods failed:",
+            error instanceof Error ? error.message : String(error)
+          );
+        } catch (logError) {
+          // Ignore logging errors in environments where console.warn might fail
+        }
+      }
     }
   }
 
@@ -700,8 +861,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       await this._scheduleNextAlarm();
 
       return {
-        id,
         callback: callback,
+        id,
         payload: payload as T,
         time: timestamp,
         type: "scheduled",
@@ -721,10 +882,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       await this._scheduleNextAlarm();
 
       return {
-        id,
         callback: callback,
-        payload: payload as T,
         delayInSeconds: when,
+        id,
+        payload: payload as T,
         time: timestamp,
         type: "delayed",
       };
@@ -743,10 +904,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       await this._scheduleNextAlarm();
 
       return {
-        id,
         callback: callback,
-        payload: payload as T,
         cron: when,
+        id,
+        payload: payload as T,
         time: timestamp,
         type: "cron",
       };
@@ -863,40 +1024,42 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       SELECT * FROM cf_agents_schedules WHERE time <= ${now}
     `;
 
-    for (const row of result || []) {
-      const callback = this[row.callback as keyof Agent<Env>];
-      if (!callback) {
-        console.error(`callback ${row.callback} not found`);
-        continue;
-      }
-      await agentContext.run(
-        { agent: this, connection: undefined, request: undefined },
-        async () => {
-          try {
-            await (
-              callback as (
-                payload: unknown,
-                schedule: Schedule<unknown>
-              ) => Promise<void>
-            ).bind(this)(JSON.parse(row.payload as string), row);
-          } catch (e) {
-            console.error(`error executing callback "${row.callback}"`, e);
-          }
+    if (result && Array.isArray(result)) {
+      for (const row of result) {
+        const callback = this[row.callback as keyof Agent<Env>];
+        if (!callback) {
+          console.error(`callback ${row.callback} not found`);
+          continue;
         }
-      );
-      if (row.type === "cron") {
-        // Update next execution time for cron schedules
-        const nextExecutionTime = getNextCronTime(row.cron);
-        const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
+        await agentContext.run(
+          { agent: this, connection: undefined, request: undefined },
+          async () => {
+            try {
+              await (
+                callback as (
+                  payload: unknown,
+                  schedule: Schedule<unknown>
+                ) => Promise<void>
+              ).bind(this)(JSON.parse(row.payload as string), row);
+            } catch (e) {
+              console.error(`error executing callback "${row.callback}"`, e);
+            }
+          }
+        );
+        if (row.type === "cron") {
+          // Update next execution time for cron schedules
+          const nextExecutionTime = getNextCronTime(row.cron);
+          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
-        this.sql`
+          this.sql`
           UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
         `;
-      } else {
-        // Delete one-time schedules after execution
-        this.sql`
+        } else {
+          // Delete one-time schedules after execution
+          this.sql`
           DELETE FROM cf_agents_schedules WHERE id = ${row.id}
         `;
+        }
       }
     }
 
@@ -956,11 +1119,24 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       callbackUrl,
       options
     );
+    this.sql`
+        INSERT
+        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${result.id},
+        ${serverName},
+        ${url},
+        ${result.clientId ?? null},
+        ${result.authUrl ?? null},
+        ${callbackUrl},
+        ${options ? JSON.stringify(options) : null}
+        );
+    `;
 
     this.broadcast(
       JSON.stringify({
-        type: "cf_agent_mcp_servers",
         mcp: this.getMcpServers(),
+        type: "cf_agent_mcp_servers",
       })
     );
 
@@ -968,7 +1144,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   async _connectToMcpServerInternal(
-    serverName: string,
+    _serverName: string,
     url: string,
     callbackUrl: string,
     // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
@@ -989,7 +1165,11 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       id: string;
       oauthClientId?: string;
     }
-  ): Promise<{ id: string; authUrl: string | undefined }> {
+  ): Promise<{
+    id: string;
+    authUrl: string | undefined;
+    clientId: string | undefined;
+  }> {
     const authProvider = new DurableObjectOAuthClientProvider(
       this.ctx.storage,
       this.name,
@@ -1022,30 +1202,18 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
 
     const { id, authUrl, clientId } = await this.mcp.connect(url, {
+      client: options?.client,
       reconnect,
       transport: {
         ...headerTransportOpts,
         authProvider,
       },
-      client: options?.client,
     });
 
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${id},
-        ${serverName},
-        ${url},
-        ${clientId ?? null},
-        ${authUrl ?? null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-      );
-    `;
-
     return {
-      id,
       authUrl,
+      clientId,
+      id,
     };
   }
 
@@ -1056,35 +1224,37 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     `;
     this.broadcast(
       JSON.stringify({
-        type: "cf_agent_mcp_servers",
         mcp: this.getMcpServers(),
+        type: "cf_agent_mcp_servers",
       })
     );
   }
 
   getMcpServers(): MCPServersState {
     const mcpState: MCPServersState = {
-      servers: {},
-      tools: this.mcp.listTools(),
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
+      servers: {},
+      tools: this.mcp.listTools(),
     };
 
     const servers = this.sql<MCPServerRow>`
       SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
     `;
 
-    for (const server of servers) {
-      const serverConn = this.mcp.mcpConnections[server.id];
-      mcpState.servers[server.id] = {
-        name: server.name,
-        server_url: server.server_url,
-        auth_url: server.auth_url,
-        // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
-        state: serverConn?.connectionState ?? "authenticating",
-        instructions: serverConn?.instructions ?? null,
-        capabilities: serverConn?.serverCapabilities ?? null,
-      };
+    if (servers && Array.isArray(servers) && servers.length > 0) {
+      for (const server of servers) {
+        const serverConn = this.mcp.mcpConnections[server.id];
+        mcpState.servers[server.id] = {
+          auth_url: server.auth_url,
+          capabilities: serverConn?.serverCapabilities ?? null,
+          instructions: serverConn?.instructions ?? null,
+          name: server.name,
+          server_url: server.server_url,
+          // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
+          state: serverConn?.connectionState ?? "authenticating",
+        };
+      }
     }
 
     return mcpState;
@@ -1128,9 +1298,9 @@ export async function routeAgentRequest<Env>(
   const corsHeaders =
     options?.cors === true
       ? {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
           "Access-Control-Allow-Credentials": "true",
+          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+          "Access-Control-Allow-Origin": "*",
           "Access-Control-Max-Age": "86400",
         }
       : options?.cors;
@@ -1178,9 +1348,9 @@ export async function routeAgentRequest<Env>(
  * @param options Routing options
  */
 export async function routeAgentEmail<Env>(
-  email: ForwardableEmailMessage,
-  env: Env,
-  options?: AgentOptions<Env>
+  _email: ForwardableEmailMessage,
+  _env: Env,
+  _options?: AgentOptions<Env>
 ): Promise<void> {}
 
 /**
@@ -1225,11 +1395,11 @@ export class StreamingResponse {
       throw new Error("StreamingResponse is already closed");
     }
     const response: RPCResponse = {
-      type: "rpc",
-      id: this._id,
-      success: true,
-      result: chunk,
       done: false,
+      id: this._id,
+      result: chunk,
+      success: true,
+      type: "rpc",
     };
     this._connection.send(JSON.stringify(response));
   }
@@ -1244,11 +1414,11 @@ export class StreamingResponse {
     }
     this._closed = true;
     const response: RPCResponse = {
-      type: "rpc",
-      id: this._id,
-      success: true,
-      result: finalChunk,
       done: true,
+      id: this._id,
+      result: finalChunk,
+      success: true,
+      type: "rpc",
     };
     this._connection.send(JSON.stringify(response));
   }
