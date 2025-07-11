@@ -6,7 +6,7 @@ async function testEmail() {
 
   const testData = {
     from: "user@example.com",
-    to: "agent+test123@example.com",
+    to: "EmailAgent+test123@example.com",
     subject: "Test Email",
     body: "Hello from test script!"
   };

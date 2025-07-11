@@ -19,13 +19,10 @@
   ],
   "send_email": [
     {
-      "name": "EMAIL",
-      "destination_address": "*@example.com"
+      "name": "EMAIL"
     }
   ],
   "vars": {
-    "EMAIL_DOMAIN": "example.com",
-    "FROM_EMAIL": "agent@example.com",
-    "FROM_NAME": "Email Agent"
+    "FROM_NAME": "Sunil Pai's agent"
   }
 }

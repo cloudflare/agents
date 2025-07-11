@@ -1,8 +1,9 @@
 import {
   Agent,
-  createAddressBasedResolver,
+  createAddressBasedEmailResolver,
   routeAgentEmail,
-  routeAgentRequest
+  routeAgentRequest,
+  type SerialisedEmail
 } from "agents";
 import PostalMime from "postal-mime";
 
@@ -26,50 +27,24 @@ interface EmailAgentState {
 interface Env {
   EmailAgent: DurableObjectNamespace<EmailAgent>;
   EMAIL: SendEmail;
-  EMAIL_DOMAIN: string;
-  FROM_EMAIL: string;
   FROM_NAME: string;
 }
 
 export class EmailAgent extends Agent<Env, EmailAgentState> {
-  initialState: EmailAgentState = {
+  initialState = {
     autoReplyEnabled: true,
     emailCount: 0,
     emails: [],
     lastUpdated: new Date()
   };
 
-  async onEmail(email: ForwardableEmailMessage) {
+  async onEmail(email: SerialisedEmail) {
     try {
       console.log("📧 Received email from:", email.from, "to:", email.to);
 
-      const rawStream = email.raw;
-      const reader = rawStream.getReader();
-      const chunks: Uint8Array[] = [];
+      const raw = await email.getRaw();
 
-      let done = false;
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        if (value) {
-          chunks.push(value);
-        }
-      }
-
-      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      const combined = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const chunk of chunks) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      const parsed = await PostalMime.parse(combined);
-      console.log("📧 Parsed email:", {
-        from: parsed.from?.address,
-        subject: parsed.subject,
-        textLength: parsed.text?.length || 0
-      });
+      const parsed = await PostalMime.parse(raw);
 
       const emailData: EmailData = {
         from: parsed.from?.address || email.from,
@@ -90,21 +65,32 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
 
       this.setState(newState);
 
-      console.log("📊 Agent state updated:", {
-        emailCount: newState.emailCount,
-        totalEmails: newState.emails.length
-      });
-
       if (this.state.autoReplyEnabled && !this.isAutoReply(parsed)) {
-        await this.sendAutoReply(emailData);
+        await this.replyToEmail(email, {
+          fromName: this.env.FROM_NAME,
+          body: `Thank you for your email! 
+
+I received your message with subject: "${email.headers.get("subject")}"
+
+This is an automated response. Your email has been recorded and I will process it accordingly.
+
+Current stats:
+- Total emails processed: ${this.state.emailCount}
+- Last updated: ${this.state.lastUpdated.toISOString()}
+
+Best regards,
+Email Agent`
+        });
       }
     } catch (error) {
       console.error("❌ Error processing email:", error);
+      throw error;
     }
   }
 
-  // biome-ignore lint/suspicious/noExplicitAny: PostalMime types are complex
-  private isAutoReply(parsed: any): boolean {
+  private isAutoReply(
+    parsed: Awaited<ReturnType<typeof PostalMime.parse>>
+  ): boolean {
     const autoReplyHeaders = [
       "auto-submitted",
       "x-auto-response-suppress",
@@ -112,8 +98,10 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
     ];
 
     for (const header of autoReplyHeaders) {
-      const headerValue = parsed.headers?.[header];
-      if (headerValue) {
+      const hasHeader = parsed.headers.some((h) =>
+        Object.keys(h).includes(header)
+      );
+      if (hasHeader) {
         return true;
       }
     }
@@ -125,56 +113,18 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
       subject.includes("automatic reply")
     );
   }
-
-  private async sendAutoReply(originalEmail: EmailData) {
-    try {
-      console.log("🤖 Sending auto-reply to:", originalEmail.from);
-
-      await this.sendEmail(
-        this.env.EMAIL,
-        this.env.FROM_EMAIL,
-        this.env.FROM_NAME,
-        {
-          body: `Thank you for your email! 
-
-I received your message with subject: "${originalEmail.subject}"
-
-This is an automated response. Your email has been recorded and I will process it accordingly.
-
-Current stats:
-- Total emails processed: ${this.state.emailCount}
-- Last updated: ${this.state.lastUpdated.toISOString()}
-
-Best regards,
-Email Agent`,
-          headers: {
-            "Auto-Submitted": "auto-replied",
-            "X-Auto-Response-Suppress": "All"
-          },
-          subject: `Re: ${originalEmail.subject}`,
-          to: originalEmail.from
-        }
-      );
-
-      console.log("✅ Auto-reply sent successfully");
-    } catch (error) {
-      console.error("❌ Failed to send auto-reply:", error);
-    }
-  }
 }
 
-export const email: EmailExportedHandler<Env> = async (email, env) => {
-  console.log("📮 Email received via email handler");
-
-  const addressResolver = createAddressBasedResolver("EmailAgent");
-
-  await routeAgentEmail(email, env, {
-    resolver: addressResolver
-  });
-};
-
 export default {
-  email,
+  async email(email, env) {
+    console.log("📮 Email received via email handler");
+
+    const addressResolver = createAddressBasedEmailResolver("EmailAgent");
+
+    await routeAgentEmail(email, env, {
+      resolver: addressResolver
+    });
+  },
   async fetch(request: Request, env: Env) {
     try {
       const url = new URL(request.url);
@@ -211,7 +161,7 @@ export default {
         } as ForwardableEmailMessage;
 
         // Route the email using our email routing system
-        const resolver = createAddressBasedResolver("EmailAgent");
+        const resolver = createAddressBasedEmailResolver("EmailAgent");
         await routeAgentEmail(mockEmail, env, {
           resolver
         });
@@ -254,9 +204,8 @@ export default {
         } as ForwardableEmailMessage;
 
         // Route the email using our email routing system
-        const resolver = createAddressBasedResolver("EmailAgent");
         await routeAgentEmail(mockEmail, env, {
-          resolver
+          resolver: createAddressBasedEmailResolver("EmailAgent")
         });
 
         return new Response("Worker successfully processed email");
