@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.102
+
+### Patch Changes
+
+- [#238](https://github.com/cloudflare/agents/pull/238) [`dc7a99c`](https://github.com/cloudflare/agents/commit/dc7a99ca3cc60a8be069bb1094c6dd15bd2555f2) Thanks [@zebp](https://github.com/zebp)! - Basic observability instrumentation
+
 ## 0.0.101
 
 ### Patch Changes
