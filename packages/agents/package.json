@@ -59,9 +59,9 @@
       "require": "./dist/mcp/do-oauth-client-provider.js"
     },
     "./observability": {
+      "types": "./dist/observability/index.d.ts",
       "import": "./dist/observability/index.js",
-      "require": "./dist/observability/index.js",
-      "types": "./dist/observability/index.d.ts"
+      "require": "./dist/observability/index.js"
     },
     "./react": {
       "types": "./dist/react.d.ts",
