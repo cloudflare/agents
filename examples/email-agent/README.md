@@ -78,24 +78,6 @@ curl -X POST http://localhost:8787/api/test-email \
   }'
 ```
 
-#### Send Test Email (Real Email Worker - More Comprehensive)
-
-```bash
-curl --request POST 'http://localhost:8787/webhook/email' \
-  --url-query 'from=user@example.com' \
-  --url-query 'to=agent+test123@example.com' \
-  --header 'Content-Type: text/plain' \
-  --data-raw 'Received: from smtp.example.com (127.0.0.1) by cloudflare-email.com
-From: "Test User" <user@example.com>
-To: <agent+test123@example.com>
-Subject: Test Email for Agent
-Date: '"$(date -R)"'
-Message-ID: <test-'"$(date +%s)"'@example.com>
-Content-Type: text/plain; charset=UTF-8
-
-Hello Email Agent!'
-```
-
 ### Real Email Testing
 
 To test with real emails:

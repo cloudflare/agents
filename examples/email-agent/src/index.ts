@@ -28,6 +28,12 @@ interface Env {
   EmailAgent: DurableObjectNamespace<EmailAgent>;
 }
 
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) {
+    throw new Error(message);
+  }
+}
+
 export class EmailAgent extends Agent<Env, EmailAgentState> {
   initialState = {
     autoReplyEnabled: true,
@@ -43,6 +49,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
       const raw = await email.getRaw();
 
       const parsed = await PostalMime.parse(raw);
+      console.log("📧 Parsed email:", parsed);
 
       const emailData: EmailData = {
         from: parsed.from?.address || email.from,
@@ -136,27 +143,38 @@ export default {
           body?: string;
         };
         const { from, to, subject, body } = emailData;
+        assert(from, "from is required");
+        assert(to, "to is required");
+        assert(subject, "subject is required");
+        assert(body, "body is required");
 
         console.log("📧 Received test email data:", emailData);
 
         // Create mock email from the JSON payload
-        const mockEmail = {
-          forward: async () => {},
-          from: from || "unknown@example.com",
+        const mockEmail: ForwardableEmailMessage = {
+          from,
+          to,
           headers: new Headers({
-            subject: subject || "Test Email"
+            subject,
+            "Message-ID": `test-message-id-${crypto.randomUUID()}`
           }),
           raw: new ReadableStream({
             start(controller) {
-              controller.enqueue(new TextEncoder().encode(body || ""));
+              controller.enqueue(new TextEncoder().encode(body));
               controller.close();
             }
           }),
-          rawSize: (body || "").length,
-          reply: async () => {},
-          setReject: () => {},
-          to: to || "agent@example.com"
-        } as ForwardableEmailMessage;
+          rawSize: body.length,
+          reply: async (message: EmailMessage) => {
+            console.log("📧 Reply to email:", message);
+          },
+          forward: async (rcptTo: string, headers?: Headers) => {
+            console.log("📧 Forwarding email to:", rcptTo, headers);
+          },
+          setReject: (reason: string) => {
+            console.log("📧 Rejecting email:", reason);
+          }
+        };
 
         // Route the email using our email routing system
         const resolver = createAddressBasedEmailResolver("EmailAgent");
@@ -173,40 +191,6 @@ export default {
             headers: { "Content-Type": "application/json" }
           }
         );
-      }
-
-      // Handle custom email webhook endpoint for testing
-      if (url.pathname === "/webhook/email" && request.method === "POST") {
-        const urlParams = new URLSearchParams(url.search);
-        const from = urlParams.get("from") || "unknown@example.com";
-        const to = urlParams.get("to") || "agent@example.com";
-        const body = await request.text();
-
-        // Create mock email from the raw content
-        const mockEmail = {
-          forward: async () => {},
-          from,
-          headers: new Headers({
-            subject: "Test Email"
-          }),
-          raw: new ReadableStream({
-            start(controller) {
-              controller.enqueue(new TextEncoder().encode(body));
-              controller.close();
-            }
-          }),
-          rawSize: body.length,
-          reply: async () => {},
-          setReject: () => {},
-          to
-        } as ForwardableEmailMessage;
-
-        // Route the email using our email routing system
-        await routeAgentEmail(mockEmail, env, {
-          resolver: createAddressBasedEmailResolver("EmailAgent")
-        });
-
-        return new Response("Worker successfully processed email");
       }
 
       return (
