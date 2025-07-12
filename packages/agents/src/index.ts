@@ -1008,6 +1008,19 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   /**
+   * Get all queues by key and value
+   * @param key Key to filter by
+   * @param value Value to filter by
+   * @returns Array of matching QueueItem objects
+   */
+  async getQueues(key: string, value: string): Promise<QueueItem<string>[]> {
+    const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues
+    `;
+    return result.filter((row) => JSON.parse(row.payload)[key] === value);
+  }
+
+  /**
    * Schedule a task to be executed in the future
    * @template T Type of the payload data
    * @param when When to execute the task (Date, seconds delay, or cron expression)
