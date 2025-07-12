@@ -919,15 +919,21 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     return id;
   }
 
+  private _flushingQueue = false;
+
   private async _flushQueue() {
+    if (this._flushingQueue) {
+      return;
+    }
+    this._flushingQueue = true;
     while (true) {
+      const executed: string[] = [];
       const result = this.sql<QueueItem<string>>`
       SELECT * FROM cf_agents_queues
       ORDER BY created_at ASC
-      LIMIT 1
     `;
 
-      if (!result) {
+      if (!result || result.length === 0) {
         break;
       }
 
@@ -953,10 +959,15 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 queueItem: QueueItem<string>
               ) => Promise<void>
             ).bind(this)(JSON.parse(row.payload as string), row);
+            executed.push(row.id);
           }
         );
       }
+      for (const id of executed) {
+        await this.dequeue(id);
+      }
     }
+    this._flushingQueue = false;
   }
 
   /**
