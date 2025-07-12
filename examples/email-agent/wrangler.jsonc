@@ -16,13 +16,5 @@
       "tag": "v1",
       "new_sqlite_classes": ["EmailAgent"]
     }
-  ],
-  "send_email": [
-    {
-      "name": "EMAIL"
-    }
-  ],
-  "vars": {
-    "FROM_NAME": "Sunil Pai's agent"
-  }
+  ]
 }

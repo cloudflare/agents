@@ -222,7 +222,7 @@ const agentContext = new AsyncLocalStorage<{
   agent: Agent<unknown>;
   connection: Connection | undefined;
   request: Request | undefined;
-  email: SerialisedEmail | undefined;
+  email: AgentEmail | undefined;
 }>();
 
 export function getCurrentAgent<
@@ -667,7 +667,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Override this method to handle incoming emails
    * @param email Email message to process
    */
-  async _onEmail(email: SerialisedEmail) {
+  async _onEmail(email: AgentEmail) {
     // nb: we use this roundabout way of getting to onEmail
     // because of https://github.com/cloudflare/workerd/issues/4499
     return agentContext.run(
@@ -675,34 +675,17 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       async () => {
         if ("onEmail" in this && typeof this.onEmail === "function") {
           return this._tryCatch(() =>
-            (this.onEmail as (email: SerialisedEmail) => Promise<void>)(email)
+            (this.onEmail as (email: AgentEmail) => Promise<void>)(email)
           );
         } else {
           console.log("Received email from:", email.from, "to:", email.to);
           console.log("Subject:", email.headers.get("subject"));
           console.log(
-            "Implement onEmail(email: SerialisedEmail): Promise<void> in your agent to process emails"
+            "Implement onEmail(email: AgentEmail): Promise<void> in your agent to process emails"
           );
         }
       }
     );
-  }
-
-  async sendEmail(
-    emailBinding: SendEmail,
-    from: string,
-    fromName: string,
-    options: Omit<EmailSendOptions, "agentName" | "agentId">
-  ): Promise<void> {
-    const agentName = camelCaseToKebabCase(this._ParentClass.name);
-    const agentId = this.name;
-
-    return sendEmailWithRouting(emailBinding, from, fromName, {
-      ...options,
-      agentName,
-      agentId,
-      includeRoutingHeaders: true
-    });
   }
 
   /**
@@ -712,7 +695,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @returns void
    */
   async replyToEmail(
-    email: SerialisedEmail,
+    email: AgentEmail,
     options: {
       fromName: string;
       subject?: string | undefined;
@@ -1513,7 +1496,7 @@ export async function routeAgentEmail<Env>(
   const agent = await getAgentByName(namespace, routingInfo.agentId);
 
   // let's make a serialisable version of the email
-  const serialisableEmail: SerialisedEmail = {
+  const serialisableEmail: AgentEmail = {
     getRaw: async () => {
       const reader = email.raw.getReader();
       const chunks: Uint8Array[] = [];
@@ -1557,7 +1540,7 @@ export async function routeAgentEmail<Env>(
   await agent._onEmail(serialisableEmail);
 }
 
-export type SerialisedEmail = {
+export type AgentEmail = {
   from: string;
   to: string;
   getRaw: () => Promise<Uint8Array>;
@@ -1579,39 +1562,6 @@ export type EmailSendOptions = {
   agentId?: string;
   domain?: string;
 };
-
-export async function sendEmailWithRouting(
-  emailBinding: SendEmail,
-  from: string,
-  fromName: string,
-  options: EmailSendOptions
-): Promise<void> {
-  const { createMimeMessage } = await import("mimetext");
-  const msg = createMimeMessage();
-  msg.setSender({ addr: from, name: fromName });
-  msg.setRecipient(options.to);
-  msg.setSubject(options.subject);
-  msg.addMessage({
-    contentType: options.contentType || "text/plain",
-    data: options.body
-  });
-
-  if (options.includeRoutingHeaders && options.agentName && options.agentId) {
-    const domain = options.domain || from.split("@")[1];
-    const messageId = `<${options.agentId}@${domain}>`;
-    msg.setHeader("Message-ID", messageId);
-    msg.setHeader("X-Agent-Name", options.agentName);
-    msg.setHeader("X-Agent-ID", options.agentId);
-  }
-
-  if (options.headers) {
-    for (const [key, value] of Object.entries(options.headers)) {
-      msg.setHeader(key, value);
-    }
-  }
-
-  await emailBinding.send(new EmailMessage(from, options.to, msg.asRaw()));
-}
 
 /**
  * Get or create an Agent by name

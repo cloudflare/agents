@@ -3,7 +3,7 @@ import {
   createAddressBasedEmailResolver,
   routeAgentEmail,
   routeAgentRequest,
-  type SerialisedEmail
+  type AgentEmail
 } from "agents";
 import PostalMime from "postal-mime";
 
@@ -26,8 +26,6 @@ interface EmailAgentState {
 
 interface Env {
   EmailAgent: DurableObjectNamespace<EmailAgent>;
-  EMAIL: SendEmail;
-  FROM_NAME: string;
 }
 
 export class EmailAgent extends Agent<Env, EmailAgentState> {
@@ -38,7 +36,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
     lastUpdated: new Date()
   };
 
-  async onEmail(email: SerialisedEmail) {
+  async onEmail(email: AgentEmail) {
     try {
       console.log("📧 Received email from:", email.from, "to:", email.to);
 
@@ -67,7 +65,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
 
       if (this.state.autoReplyEnabled && !this.isAutoReply(parsed)) {
         await this.replyToEmail(email, {
-          fromName: this.env.FROM_NAME,
+          fromName: "My Email Agent",
           body: `Thank you for your email! 
 
 I received your message with subject: "${email.headers.get("subject")}"

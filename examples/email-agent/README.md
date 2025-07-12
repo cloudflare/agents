@@ -29,7 +29,7 @@ The agent supports multiple routing strategies:
 2. Start development server:
 
    ```bash
-   npm run start
+   npm start
    ```
 
 3. Test email parsing locally:
@@ -108,6 +108,8 @@ To test with real emails:
 
 2. Configure your domain's email routing to point to your worker
 
+- go to `https://dash.cloudflare.com/<account id>/<domain>/email/routing/routes`
+
 3. Send emails to addresses like:
    - `agent@yourdomain.com` (routes to agent "agent" with ID "default")
    - `support+urgent@yourdomain.com` (routes to agent "support" with ID "urgent")
@@ -152,42 +154,22 @@ The `EmailAgent` class demonstrates:
 
 ```typescript
 class EmailAgent extends Agent<Env, EmailAgentState> {
-  async onEmail(email: ForwardableEmailMessage) {
+  async onEmail(email: AgentEmail) {
     // Parse email content
     const parsed = await PostalMime.parse(emailBuffer);
 
     // Update agent state
     this.setState({
       emailCount: this.state.emailCount + 1,
-      emails: [...this.state.emails, emailData],
+      emails: [...this.state.emails, emailData]
     });
 
     // Send auto-reply
-    await this.sendEmail(this.env.EMAIL, fromEmail, fromName, {
-      to: parsed.from.address,
-      subject: \`Re: \${parsed.subject}\`,
-      body: "Thank you for your email!",
+    await this.replyToEmail(email, {
+      from_name: "My Agent's name",
+      body: "Thank you for your email!"
+      // optionally set subject, headers, etc
     });
-  }
-}
-```
-
-## Configuration
-
-Update `wrangler.jsonc` for your domain:
-
-```json
-{
-  "send_email": [
-    {
-      "name": "EMAIL",
-      "destination_address": "*@yourdomain.com"
-    }
-  ],
-  "vars": {
-    "EMAIL_DOMAIN": "yourdomain.com",
-    "FROM_EMAIL": "agent@yourdomain.com",
-    "FROM_NAME": "Your Email Agent"
   }
 }
 ```
