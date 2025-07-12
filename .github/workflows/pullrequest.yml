@@ -24,7 +24,6 @@ jobs:
           cache: "npm"
 
       - run: npm install
-      - run: npx playwright install chromium --with-deps
       - run: npm run build
       - run: npm run check
       - run: CI=true npm run test
