@@ -5,35 +5,35 @@
   "compatibility_date": "2025-02-19",
   "compatibility_flags": [
     "nodejs_compat",
-    "nodejs_compat_populate_process_env",
+    "nodejs_compat_populate_process_env"
   ],
   "assets": {
-    "binding": "ASSETS",
+    "binding": "ASSETS"
   },
   "durable_objects": {
     "bindings": [
       {
         "class_name": "Scheduler",
-        "name": "Scheduler",
+        "name": "Scheduler"
       },
       {
         "class_name": "Stateful",
-        "name": "Stateful",
+        "name": "Stateful"
       },
       {
         "class_name": "Chat",
-        "name": "Chat",
+        "name": "Chat"
       },
       {
         "class_name": "Rpc",
-        "name": "Rpc",
-      },
-    ],
+        "name": "Rpc"
+      }
+    ]
   },
   "migrations": [
     {
       "new_sqlite_classes": ["Scheduler", "Stateful", "Chat", "Rpc"],
-      "tag": "v1",
-    },
-  ],
+      "tag": "v1"
+    }
+  ]
 }

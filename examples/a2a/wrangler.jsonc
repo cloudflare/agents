@@ -3,22 +3,22 @@
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
   "build": {
-    "command": "npm run build",
+    "command": "npm run build"
   },
   "durable_objects": {
     "bindings": [
       {
         "class_name": "MyA2A",
-        "name": "MyA2A",
-      },
-    ],
+        "name": "MyA2A"
+      }
+    ]
   },
   "main": "dist/server.js",
   "migrations": [
     {
       "new_sqlite_classes": ["MyA2A"],
-      "tag": "v1",
-    },
+      "tag": "v1"
+    }
   ],
-  "name": "a2a-agent-demo",
+  "name": "a2a-agent-demo"
 }

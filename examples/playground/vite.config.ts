@@ -20,7 +20,7 @@ export default defineConfig({
           next();
         });
       },
-      name: "requestLogger",
-    },
-  ],
+      name: "requestLogger"
+    }
+  ]
 });

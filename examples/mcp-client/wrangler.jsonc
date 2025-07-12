@@ -1,6 +1,6 @@
 {
   "assets": {
-    "directory": "dist/client",
+    "directory": "dist/client"
   },
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
@@ -8,24 +8,24 @@
     "bindings": [
       {
         "class_name": "MyAgent",
-        "name": "MyAgent",
-      },
-    ],
+        "name": "MyAgent"
+      }
+    ]
   },
   "main": "src/server.ts",
   "migrations": [
     {
       "new_sqlite_classes": ["MyAgent"],
-      "tag": "v1",
-    },
+      "tag": "v1"
+    }
   ],
   "name": "mcp-client",
   "observability": {
     "logs": {
-      "enabled": true,
-    },
+      "enabled": true
+    }
   },
   "vars": {
-    "HOST": "<DEPLOYED_HOSTNAME>",
-  },
+    "HOST": "<DEPLOYED_HOSTNAME>"
+  }
 }

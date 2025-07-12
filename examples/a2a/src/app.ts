@@ -2,7 +2,7 @@ import type {
   A2ARequestHandler,
   A2AResponse,
   JSONRPCErrorResponse,
-  JSONRPCSuccessResponse,
+  JSONRPCSuccessResponse
 } from "@a2a-js/sdk";
 import { A2AError, JsonRpcTransportHandler } from "@a2a-js/sdk";
 import type { Context, Hono } from "hono";
@@ -76,7 +76,7 @@ export class A2AHonoApp {
               const errorResponse: JSONRPCErrorResponse = {
                 error: a2aError.toJSONRPCError(),
                 id: body?.id || null,
-                jsonrpc: "2.0",
+                jsonrpc: "2.0"
               };
               const errorChunk = `id: ${Date.now()}\nevent: error\ndata: ${JSON.stringify(errorResponse)}\n\n`;
               await writer.write(new TextEncoder().encode(errorChunk));
@@ -89,8 +89,8 @@ export class A2AHonoApp {
             headers: {
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
-              "Content-Type": "text/event-stream",
-            },
+              "Content-Type": "text/event-stream"
+            }
           });
         }
         // Single JSON-RPC response
@@ -105,7 +105,7 @@ export class A2AHonoApp {
         const errorResponse: JSONRPCErrorResponse = {
           error: a2aError.toJSONRPCError(),
           id: null,
-          jsonrpc: "2.0",
+          jsonrpc: "2.0"
         };
         return c.json(errorResponse, 500);
       }

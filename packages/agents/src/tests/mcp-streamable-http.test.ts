@@ -19,16 +19,16 @@ const TEST_MESSAGES = {
     params: {
       capabilities: {},
       clientInfo: { name: "test-client", version: "1.0" },
-      protocolVersion: "2025-03-26",
-    },
+      protocolVersion: "2025-03-26"
+    }
   } as JSONRPCMessage,
 
   toolsList: {
     id: "tools-1",
     jsonrpc: "2.0",
     method: "tools/list",
-    params: {},
-  } as JSONRPCMessage,
+    params: {}
+  } as JSONRPCMessage
 };
 
 /**
@@ -53,7 +53,7 @@ async function sendPostRequest(
 ): Promise<Response> {
   const headers: Record<string, string> = {
     Accept: "application/json, text/event-stream",
-    "Content-Type": "application/json",
+    "Content-Type": "application/json"
   };
 
   if (sessionId) {
@@ -63,7 +63,7 @@ async function sendPostRequest(
   const request = new Request(baseUrl, {
     body: JSON.stringify(message),
     headers,
-    method: "POST",
+    method: "POST"
   });
 
   return worker.fetch(request, env, ctx);
@@ -77,9 +77,9 @@ function expectErrorResponse(
   expect(data).toMatchObject({
     error: expect.objectContaining({
       code: expectedCode,
-      message: expect.stringMatching(expectedMessagePattern),
+      message: expect.stringMatching(expectedMessagePattern)
     }),
-    jsonrpc: "2.0",
+    jsonrpc: "2.0"
   });
 }
 
@@ -123,7 +123,7 @@ describe("McpAgent Streamable HTTP Transport", () => {
     // Try second initialize
     const secondInitMessage = {
       ...TEST_MESSAGES.initialize,
-      id: "second-init",
+      id: "second-init"
     };
 
     const response = await sendPostRequest(
@@ -154,9 +154,9 @@ describe("McpAgent Streamable HTTP Transport", () => {
         method: "initialize",
         params: {
           clientInfo: { name: "test-client-2", version: "1.0" },
-          protocolVersion: "2025-03-26",
-        },
-      },
+          protocolVersion: "2025-03-26"
+        }
+      }
     ];
 
     const response = await sendPostRequest(ctx, baseUrl, batchInitMessages);
@@ -199,10 +199,10 @@ describe("McpAgent Streamable HTTP Transport", () => {
         tools: expect.arrayContaining([
           expect.objectContaining({
             description: "A simple greeting tool",
-            name: "greet",
-          }),
-        ]),
-      }),
+            name: "greet"
+          })
+        ])
+      })
     });
   });
 
@@ -216,10 +216,10 @@ describe("McpAgent Streamable HTTP Transport", () => {
       method: "tools/call",
       params: {
         arguments: {
-          name: "Test User",
+          name: "Test User"
         },
-        name: "greet",
-      },
+        name: "greet"
+      }
     };
 
     const response = await sendPostRequest(
@@ -243,10 +243,10 @@ describe("McpAgent Streamable HTTP Transport", () => {
         content: [
           {
             text: "Hello, Test User!",
-            type: "text",
-          },
-        ],
-      },
+            type: "text"
+          }
+        ]
+      }
     });
   });
 
@@ -292,9 +292,9 @@ describe("McpAgent Streamable HTTP Transport", () => {
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json", // Missing text/event-stream
-        "mcp-session-id": sessionId,
+        "mcp-session-id": sessionId
       },
-      method: "POST",
+      method: "POST"
     });
     const response = await worker.fetch(request, env, ctx);
 
@@ -318,9 +318,9 @@ describe("McpAgent Streamable HTTP Transport", () => {
       headers: {
         Accept: "application/json, text/event-stream",
         "Content-Type": "text/plain",
-        "mcp-session-id": sessionId,
+        "mcp-session-id": sessionId
       },
-      method: "POST",
+      method: "POST"
     });
     const response = await worker.fetch(request, env, ctx);
 
@@ -340,7 +340,7 @@ describe("McpAgent Streamable HTTP Transport", () => {
     // Send batch of notifications (no IDs)
     const batchNotifications: JSONRPCMessage[] = [
       { jsonrpc: "2.0", method: "someNotification1", params: {} },
-      { jsonrpc: "2.0", method: "someNotification2", params: {} },
+      { jsonrpc: "2.0", method: "someNotification2", params: {} }
     ];
     const response = await sendPostRequest(
       ctx,
@@ -363,8 +363,8 @@ describe("McpAgent Streamable HTTP Transport", () => {
         id: "req-2",
         jsonrpc: "2.0",
         method: "tools/call",
-        params: { arguments: { name: "BatchUser" }, name: "greet" },
-      },
+        params: { arguments: { name: "BatchUser" }, name: "greet" }
+      }
     ];
     const response = await sendPostRequest(
       ctx,
@@ -403,9 +403,9 @@ describe("McpAgent Streamable HTTP Transport", () => {
       headers: {
         Accept: "application/json, text/event-stream",
         "Content-Type": "application/json",
-        "mcp-session-id": sessionId,
+        "mcp-session-id": sessionId
       },
-      method: "POST",
+      method: "POST"
     });
     const response = await worker.fetch(request, env, ctx);
 
@@ -431,7 +431,7 @@ describe("McpAgent Streamable HTTP Transport", () => {
     const errorData = await response.json();
     expect(errorData).toMatchObject({
       error: expect.anything(),
-      jsonrpc: "2.0",
+      jsonrpc: "2.0"
     });
   });
 
@@ -443,7 +443,7 @@ describe("McpAgent Streamable HTTP Transport", () => {
       id: "req-1",
       jsonrpc: "2.0",
       method: "tools/list",
-      params: {},
+      params: {}
     };
 
     const message2: JSONRPCMessage = {
@@ -452,8 +452,8 @@ describe("McpAgent Streamable HTTP Transport", () => {
       method: "tools/call",
       params: {
         arguments: { name: "Connection2" },
-        name: "greet",
-      },
+        name: "greet"
+      }
     };
 
     // Make two concurrent fetch connections for different requests
@@ -487,8 +487,8 @@ describe("McpAgent Streamable HTTP Transport", () => {
       method: "tools/call",
       params: {
         arguments: {},
-        name: "getPropsTestValue",
-      },
+        name: "getPropsTestValue"
+      }
     };
 
     const response = await sendPostRequest(
@@ -512,10 +512,10 @@ describe("McpAgent Streamable HTTP Transport", () => {
         content: [
           {
             text: "123",
-            type: "text",
-          },
-        ],
-      },
+            type: "text"
+          }
+        ]
+      }
     });
   });
 });

@@ -10,7 +10,7 @@ import type {
   TaskIdParams,
   TaskPushNotificationConfig,
   TaskQueryParams,
-  TaskStatusUpdateEvent,
+  TaskStatusUpdateEvent
 } from "@a2a-js/sdk";
 import { Agent, getAgentByName } from "agents";
 import { Hono } from "hono";
@@ -28,7 +28,7 @@ const agentCard: AgentCard = {
   capabilities: {
     pushNotifications: false,
     stateTransitionHistory: true,
-    streaming: true,
+    streaming: true
   },
   defaultInputModes: ["text"],
   defaultOutputModes: ["text", "task-status"],
@@ -36,7 +36,7 @@ const agentCard: AgentCard = {
   name: "Cloudflare A2A Agent",
   provider: {
     organization: "Cloudflare",
-    url: "https://developers.cloudflare.com/agents",
+    url: "https://developers.cloudflare.com/agents"
   },
   security: undefined,
   securitySchemes: undefined,
@@ -46,24 +46,24 @@ const agentCard: AgentCard = {
       examples: [
         "Hello, how are you?",
         "What can you help me with?",
-        "Tell me about yourself.",
+        "Tell me about yourself."
       ],
       id: "general_chat",
       inputModes: ["text"],
       name: "General Chat",
       outputModes: ["text", "task-status"],
-      tags: ["chat", "general"],
-    },
+      tags: ["chat", "general"]
+    }
   ],
   supportsAuthenticatedExtendedCard: false,
   url: "http://localhost:8787/",
-  version: "0.1.0",
+  version: "0.1.0"
 };
 
 // A2A Agent that implements A2ARequestHandler directly
 export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
   initialState = {
-    tasks: {},
+    tasks: {}
   };
 
   private generateId(): string {
@@ -88,8 +88,8 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       kind: "task",
       status: {
         state: "working",
-        timestamp: new Date().toISOString(),
-      },
+        timestamp: new Date().toISOString()
+      }
     };
 
     // Save task to state
@@ -97,8 +97,8 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       ...this.state,
       tasks: {
         ...this.state.tasks,
-        [taskId]: task,
-      },
+        [taskId]: task
+      }
     });
 
     // Process the message
@@ -110,7 +110,7 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       messageId: this.generateId(),
       parts: [{ kind: "text", text: responseText }],
       role: "agent",
-      taskId,
+      taskId
     };
 
     // Update task
@@ -122,16 +122,16 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       status: {
         message: responseMessage,
         state: "completed",
-        timestamp: new Date().toISOString(),
-      },
+        timestamp: new Date().toISOString()
+      }
     };
 
     this.setState({
       ...this.state,
       tasks: {
         ...this.state.tasks,
-        [taskId]: completedTask,
-      },
+        [taskId]: completedTask
+      }
     });
 
     return completedTask;
@@ -156,16 +156,16 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       kind: "task",
       status: {
         state: "working",
-        timestamp: new Date().toISOString(),
-      },
+        timestamp: new Date().toISOString()
+      }
     };
 
     this.setState({
       ...this.state,
       tasks: {
         ...this.state.tasks,
-        [taskId]: task,
-      },
+        [taskId]: task
+      }
     });
 
     // Yield initial task
@@ -178,9 +178,9 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       kind: "status-update",
       status: {
         state: "working",
-        timestamp: new Date().toISOString(),
+        timestamp: new Date().toISOString()
       },
-      taskId,
+      taskId
     } as TaskStatusUpdateEvent;
 
     // Process the message
@@ -192,7 +192,7 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       messageId: this.generateId(),
       parts: [{ kind: "text", text: responseText }],
       role: "agent",
-      taskId,
+      taskId
     };
 
     // Yield response message
@@ -207,16 +207,16 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       status: {
         message: responseMessage,
         state: "completed",
-        timestamp: new Date().toISOString(),
-      },
+        timestamp: new Date().toISOString()
+      }
     };
 
     this.setState({
       ...this.state,
       tasks: {
         ...this.state.tasks,
-        [taskId]: completedTask,
-      },
+        [taskId]: completedTask
+      }
     });
 
     // Yield final status
@@ -225,7 +225,7 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       final: true,
       kind: "status-update",
       status: completedTask.status,
-      taskId,
+      taskId
     } as TaskStatusUpdateEvent;
   }
 
@@ -239,7 +239,7 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
     if (params.historyLength !== undefined && params.historyLength >= 0) {
       resultTask = {
         ...task,
-        history: task.history ? task.history.slice(-params.historyLength) : [],
+        history: task.history ? task.history.slice(-params.historyLength) : []
       };
     }
 
@@ -265,7 +265,7 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       messageId: this.generateId(),
       parts: [{ kind: "text", text: "Task cancellation requested by user." }],
       role: "agent",
-      taskId: task.id,
+      taskId: task.id
     };
 
     const canceledTask: Task = {
@@ -276,16 +276,16 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
       status: {
         message: cancelMessage,
         state: "canceled",
-        timestamp: new Date().toISOString(),
-      },
+        timestamp: new Date().toISOString()
+      }
     };
 
     this.setState({
       ...this.state,
       tasks: {
         ...this.state.tasks,
-        [params.id]: canceledTask,
-      },
+        [params.id]: canceledTask
+      }
     });
 
     return canceledTask;
@@ -342,5 +342,5 @@ export default {
 
     const agent = await getAgentByName(env.MyA2A, "default");
     return agent.fetch(request);
-  },
+  }
 } satisfies ExportedHandler<Env>;

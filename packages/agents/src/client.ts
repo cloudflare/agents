@@ -1,12 +1,12 @@
 import {
   type PartyFetchOptions,
   PartySocket,
-  type PartySocketOptions,
+  type PartySocketOptions
 } from "partysocket";
 import type { RPCRequest, RPCResponse } from "./";
 import type {
   SerializableReturnValue,
-  SerializableValue,
+  SerializableValue
 } from "./serializable";
 
 /**
@@ -101,7 +101,7 @@ export class AgentClient<State = unknown> extends PartySocket {
       party: agentNamespace,
       prefix: "agents",
       room: options.name || "default",
-      ...options,
+      ...options
     });
     this.agent = agentNamespace;
     this.name = options.name || "default";
@@ -185,14 +185,14 @@ export class AgentClient<State = unknown> extends PartySocket {
         reject,
         resolve: (value: unknown) => resolve(value as T),
         stream: streamOptions,
-        type: null as T,
+        type: null as T
       });
 
       const request: RPCRequest = {
         args,
         id,
         method,
-        type: "rpc",
+        type: "rpc"
       };
 
       this.send(JSON.stringify(request));
@@ -214,7 +214,7 @@ export function agentFetch(opts: AgentClientFetchOptions, init?: RequestInit) {
       party: agentNamespace,
       prefix: "agents",
       room: opts.name || "default",
-      ...opts,
+      ...opts
     },
     init
   );

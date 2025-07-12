@@ -12,11 +12,11 @@ export class Chat extends AIChatAgent<Env> {
           messages: this.messages,
           model,
 
-          onFinish,
+          onFinish
         });
 
         result.mergeIntoDataStream(dataStream);
-      },
+      }
     });
 
     return dataStreamResponse;

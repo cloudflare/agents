@@ -16,7 +16,7 @@ declare class A extends Agent<typeof env, {}> {
 
 // biome-ignore lint/correctness/useHookAtTopLevel: tests
 const { stub } = useAgent<A, {}>({
-  agent: "test",
+  agent: "test"
 });
 
 stub.f1() satisfies Promise<number>;

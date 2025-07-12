@@ -75,6 +75,6 @@ export const unstable_scheduleSchema = z.object({
       ),
     type: z
       .enum(["scheduled", "delayed", "cron", "no-schedule"])
-      .describe("The type of scheduling details"),
-  }),
+      .describe("The type of scheduling details")
+  })
 });

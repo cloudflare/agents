@@ -68,7 +68,7 @@ async function handleWebSocketUpgrade<E extends Env>(
 
   return new Response(null, {
     status: 101,
-    webSocket: response.webSocket,
+    webSocket: response.webSocket
   });
 }
 

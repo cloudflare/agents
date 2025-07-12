@@ -19,7 +19,7 @@ interface Message {
 
 function App() {
   const [state, setState] = useState<{ history: RealtimeItem[] }>({
-    history: [],
+    history: []
   });
   const [callStatus, setCallStatus] = useState<
     "connecting" | "connected" | "disconnected"
@@ -35,7 +35,7 @@ function App() {
       if (newState.history && newState.history.length > 0) {
         setCallStatus("connected");
       }
-    },
+    }
   });
 
   // Timer for call duration

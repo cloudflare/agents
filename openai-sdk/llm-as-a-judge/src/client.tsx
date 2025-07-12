@@ -20,7 +20,7 @@ function App() {
       setAttempts(state.attempts);
       setChosenSlogan(state.chosenSlogan);
       setStatus(state.status);
-    },
+    }
   });
 
   const handleGenerate = async () => {
@@ -60,7 +60,7 @@ function App() {
             fontSize: "16px",
             marginRight: "8px",
             padding: "8px 12px",
-            width: "300px",
+            width: "300px"
           }}
         />
         <button
@@ -73,7 +73,7 @@ function App() {
             color: "white",
             cursor: "pointer",
             fontSize: "16px",
-            padding: "8px 16px",
+            padding: "8px 16px"
           }}
         >
           Generate Slogan
@@ -92,7 +92,7 @@ function App() {
             margin: "20px 0",
             textAlign: "center",
             boxShadow: "0 8px 16px rgba(0,0,0,0.1)",
-            background: "linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%)",
+            background: "linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%)"
           }}
         >
           <h2
@@ -101,7 +101,7 @@ function App() {
               fontSize: "28px",
               fontWeight: "bold",
               margin: "0",
-              textShadow: "2px 2px 4px rgba(0,0,0,0.1)",
+              textShadow: "2px 2px 4px rgba(0,0,0,0.1)"
             }}
           >
             🎯 {chosenSlogan}
@@ -111,7 +111,7 @@ function App() {
               color: "#34495e",
               fontSize: "16px",
               fontStyle: "italic",
-              margin: "8px 0 0 0",
+              margin: "8px 0 0 0"
             }}
           >
             Selected Winner
@@ -135,7 +135,7 @@ function App() {
               marginBottom: "10px",
               display: "flex",
               alignItems: "center",
-              gap: "8px",
+              gap: "8px"
             }}
           >
             {attemptsExpanded ? "▼" : "▶"}
@@ -150,7 +150,7 @@ function App() {
                 borderRadius: "8px",
                 padding: "16px",
                 maxHeight: "400px",
-                overflowY: "auto",
+                overflowY: "auto"
               }}
             >
               {attempts.map((attempt) => (
@@ -162,14 +162,14 @@ function App() {
                     borderRadius: "6px",
                     padding: "12px",
                     marginBottom: "8px",
-                    boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
+                    boxShadow: "0 2px 4px rgba(0,0,0,0.05)"
                   }}
                 >
                   <div
                     style={{
                       fontWeight: "bold",
                       color: "#495057",
-                      marginBottom: "4px",
+                      marginBottom: "4px"
                     }}
                   >
                     Slogan: {attempt.slogan}
@@ -178,7 +178,7 @@ function App() {
                     style={{
                       color: "#6c757d",
                       fontSize: "14px",
-                      marginBottom: "4px",
+                      marginBottom: "4px"
                     }}
                   >
                     Score:{" "}
@@ -190,7 +190,7 @@ function App() {
                             ? "#28a745"
                             : attempt.score === "needs_improvement"
                               ? "#ffc107"
-                              : "#dc3545",
+                              : "#dc3545"
                       }}
                     >
                       {attempt.score}
@@ -200,7 +200,7 @@ function App() {
                     style={{
                       color: "#6c757d",
                       fontSize: "14px",
-                      fontStyle: "italic",
+                      fontStyle: "italic"
                     }}
                   >
                     Feedback: {attempt.feedback}

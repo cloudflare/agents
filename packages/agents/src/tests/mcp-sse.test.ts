@@ -48,12 +48,12 @@ describe("test", () => {
         body: JSON.stringify({
           id: "1",
           jsonrpc: "2.0",
-          method: "tools/list",
+          method: "tools/list"
         }),
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
-        method: "POST",
+        method: "POST"
       }
     );
 
@@ -85,13 +85,13 @@ describe("test", () => {
         properties: {
           name: {
             description: "Name to greet",
-            type: "string",
-          },
+            type: "string"
+          }
         },
         required: ["name"],
-        type: "object",
+        type: "object"
       },
-      name: "greet",
+      name: "greet"
     });
   });
 
@@ -120,13 +120,13 @@ describe("test", () => {
           method: "tools/call",
           params: {
             arguments: { name: "Citizen" },
-            name: "greet",
-          },
+            name: "greet"
+          }
         }),
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
-        method: "POST",
+        method: "POST"
       }
     );
 
@@ -150,10 +150,10 @@ describe("test", () => {
         content: [
           {
             text: "Hello, Citizen!",
-            type: "text",
-          },
-        ],
-      },
+            type: "text"
+          }
+        ]
+      }
     });
   });
 
@@ -182,13 +182,13 @@ describe("test", () => {
           method: "tools/call",
           params: {
             arguments: {},
-            name: "getPropsTestValue",
-          },
+            name: "getPropsTestValue"
+          }
         }),
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
-        method: "POST",
+        method: "POST"
       }
     );
 
@@ -212,10 +212,10 @@ describe("test", () => {
         content: [
           {
             text: "123",
-            type: "text",
-          },
-        ],
-      },
+            type: "text"
+          }
+        ]
+      }
     });
   });
 });

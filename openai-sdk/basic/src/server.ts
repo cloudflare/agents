@@ -9,7 +9,7 @@ export class MyAgent extends CFAgent<Env> {
   async onRequest() {
     const agent = new Agent({
       instructions: "You are a helpful assistant.",
-      name: "Assistant",
+      name: "Assistant"
     });
 
     const result = await run(
@@ -26,5 +26,5 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 };
