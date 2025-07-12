@@ -5,15 +5,15 @@
     "bindings": [
       {
         "class_name": "TestMcpAgent",
-        "name": "MCP_OBJECT",
-      },
-    ],
+        "name": "MCP_OBJECT"
+      }
+    ]
   },
   "main": "worker.ts",
   "migrations": [
     {
       "new_sqlite_classes": ["TestMcpAgent"],
-      "tag": "v1",
-    },
-  ],
+      "tag": "v1"
+    }
+  ]
 }

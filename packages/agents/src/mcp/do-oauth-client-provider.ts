@@ -3,7 +3,7 @@ import type {
   OAuthClientInformation,
   OAuthClientInformationFull,
   OAuthClientMetadata,
-  OAuthTokens,
+  OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
@@ -32,7 +32,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
       grant_types: ["authorization_code", "refresh_token"],
       redirect_uris: [this.redirectUrl],
       response_types: ["code"],
-      token_endpoint_auth_method: "none",
+      token_endpoint_auth_method: "none"
     };
   }
 

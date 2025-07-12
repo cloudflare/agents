@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2025-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "MyAgent",
+        "name": "MyAgent"
+      }
+    ]
+  },
+  "main": "./src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["MyAgent"],
+      "tag": "0.0.1"
+    }
+  ],
+  "name": "llm-as-a-judge-openai-cloudflare-agent"
+}

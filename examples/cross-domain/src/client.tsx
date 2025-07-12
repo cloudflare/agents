@@ -25,11 +25,11 @@ function App() {
         id: Math.random().toString(36).substring(7),
         text: message.data as string,
         timestamp: new Date(),
-        type: "incoming",
+        type: "incoming"
       };
       setMessages((prev) => [...prev, newMessage]);
     },
-    onOpen: () => setIsConnected(true),
+    onOpen: () => setIsConnected(true)
   });
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -41,7 +41,7 @@ function App() {
       id: Math.random().toString(36).substring(7),
       text,
       timestamp: new Date(),
-      type: "outgoing",
+      type: "outgoing"
     };
 
     agent.send(text);
@@ -53,14 +53,14 @@ function App() {
     try {
       const response = await agentFetch({
         agent: "my-agent",
-        host: "http://localhost:8787",
+        host: "http://localhost:8787"
       });
       const data = await response.text();
       const newMessage: Message = {
         id: Math.random().toString(36).substring(7),
         text: `Server Response: ${data}`,
         timestamp: new Date(),
-        type: "incoming",
+        type: "incoming"
       };
       setMessages((prev) => [...prev, newMessage]);
     } catch (error) {

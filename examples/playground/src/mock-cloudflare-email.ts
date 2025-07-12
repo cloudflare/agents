@@ -14,7 +14,7 @@ export class MockEmailMessage implements EmailMessage {
     return JSON.stringify({
       from: this.from,
       message: this.message,
-      to: this.to,
+      to: this.to
     });
   }
 }

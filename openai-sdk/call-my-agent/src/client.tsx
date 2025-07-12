@@ -19,7 +19,7 @@ interface Message {
 
 function App() {
   const [state, setState] = useState<{ history: RealtimeItem[] }>({
-    history: [],
+    history: []
   });
   const [callStatus, setCallStatus] = useState<
     "connecting" | "connected" | "disconnected"
@@ -35,7 +35,7 @@ function App() {
       if (newState.history && newState.history.length > 0) {
         setCallStatus("connected");
       }
-    },
+    }
   });
 
   // Timer for call duration
@@ -89,7 +89,7 @@ function App() {
         </div>
         <div className="call-status">
           <div className={`status-indicator ${callStatus}`}>
-            <div className="status-dot"></div>
+            <div className="status-dot" />
             <span>
               {callStatus.charAt(0).toUpperCase() + callStatus.slice(1)}
             </span>
@@ -102,7 +102,7 @@ function App() {
         {!state.history || state.history.length === 0 ? (
           <div className="no-messages">
             <div className="waiting-indicator">
-              <div className="pulse-dot"></div>
+              <div className="pulse-dot" />
               <p>Waiting for call to begin...</p>
             </div>
           </div>
@@ -136,9 +136,9 @@ function App() {
                   </div>
                   {message.status === "in_progress" && (
                     <div className="typing-indicator">
-                      <span></span>
-                      <span></span>
-                      <span></span>
+                      <span />
+                      <span />
+                      <span />
                     </div>
                   )}
                 </div>

@@ -7,7 +7,7 @@ msg.setRecipient("jane.doe@example.com");
 msg.setSubject("Hello, world!");
 msg.addMessage({
   contentType: "text/plain",
-  data: "Hello, world!",
+  data: "Hello, world!"
 });
 
 const raw = msg.asRaw();

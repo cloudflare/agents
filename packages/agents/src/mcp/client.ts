@@ -10,7 +10,7 @@ import type {
   ReadResourceRequest,
   Resource,
   ResourceTemplate,
-  Tool,
+  Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { jsonSchema, type ToolSet } from "ai";
 import { nanoid } from "nanoid";
@@ -81,11 +81,11 @@ export class MCPClientManager {
       new URL(url),
       {
         name: this._name,
-        version: this._version,
+        version: this._version
       },
       {
         client: options.client ?? {},
-        transport: options.transport ?? {},
+        transport: options.transport ?? {}
       }
     );
 
@@ -99,12 +99,12 @@ export class MCPClientManager {
       return {
         authUrl,
         clientId: options.transport?.authProvider?.clientId,
-        id,
+        id
       };
     }
 
     return {
-      id,
+      id
     };
   }
 
@@ -164,9 +164,9 @@ export class MCPClientManager {
       reconnect: {
         id: serverId,
         oauthClientId: clientId,
-        oauthCode: code,
+        oauthCode: code
       },
-      ...conn.options,
+      ...conn.options
     });
 
     if (this.mcpConnections[serverId].connectionState === "authenticating") {
@@ -197,7 +197,7 @@ export class MCPClientManager {
               const result = await this.callTool({
                 arguments: args,
                 name: tool.name,
-                serverId: tool.serverId,
+                serverId: tool.serverId
               });
               if (result.isError) {
                 // @ts-expect-error TODO we should fix this
@@ -205,8 +205,8 @@ export class MCPClientManager {
               }
               return result;
             },
-            parameters: jsonSchema(tool.inputSchema),
-          },
+            parameters: jsonSchema(tool.inputSchema)
+          }
         ];
       })
     );
@@ -270,7 +270,7 @@ export class MCPClientManager {
     return this.mcpConnections[params.serverId].client.callTool(
       {
         ...params,
-        name: unqualifiedName,
+        name: unqualifiedName
       },
       resultSchema,
       options
@@ -324,7 +324,7 @@ export function getNamespacedData<T extends keyof NamespacedData>(
       return {
         ...item,
         // we add a serverId so we can easily pull it out and send the tool call to the right server
-        serverId,
+        serverId
       };
     });
   });

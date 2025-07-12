@@ -41,7 +41,7 @@ await stub.nonSerializable("hello", new Date());
 
 // biome-ignore lint/correctness/useHookAtTopLevel: tests
 const { stub: stub2 } = useAgent<Omit<MyAgent, "nonRpc">, {}>({
-  agent: "my-agent",
+  agent: "my-agent"
 });
 stub2.sayHello();
 // @ts-expect-error nonRpc excluded from useAgent

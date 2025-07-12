@@ -8,8 +8,8 @@ import type { useAgent } from "../react";
 vi.mock("@ai-sdk/react", () => ({
   useChat: vi.fn((args) => ({
     messages: args.initialMessages,
-    setMessages: vi.fn(),
-  })),
+    setMessages: vi.fn()
+  }))
 }));
 
 /**
@@ -26,13 +26,13 @@ describe("useAgentChat", () => {
       id: "fake-agent",
       name: "fake-agent",
       removeEventListener: vi.fn(),
-      send: vi.fn(),
+      send: vi.fn()
       // biome-ignore lint/suspicious/noExplicitAny: tests
     } as any;
 
     const testMessages = [
       { content: "Hi", id: "1", role: "user" as const },
-      { content: "Hello", id: "2", role: "assistant" as const },
+      { content: "Hello", id: "2", role: "assistant" as const }
     ];
     const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
 
@@ -40,13 +40,13 @@ describe("useAgentChat", () => {
     const suspenseRendered = vi.fn();
     const SuspenseObserver = () => {
       suspenseRendered();
-      return <>Suspended</>;
+      return "Suspended";
     };
 
     const TestComponent = () => {
       const chat = useAgentChat({
         agent: mockAgent,
-        getInitialMessages,
+        getInitialMessages
       });
 
       // NOTE: this only works because of how @ai-sdk/react is mocked to use
@@ -62,7 +62,7 @@ describe("useAgentChat", () => {
           <StrictMode>
             <Suspense fallback={<SuspenseObserver />}>{children}</Suspense>
           </StrictMode>
-        ),
+        )
       })
     );
 

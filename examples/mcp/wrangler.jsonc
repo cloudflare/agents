@@ -5,16 +5,16 @@
     "bindings": [
       {
         "class_name": "MyMCP",
-        "name": "MyMCP",
-      },
-    ],
+        "name": "MyMCP"
+      }
+    ]
   },
   "main": "src/server.ts",
   "migrations": [
     {
       "new_sqlite_classes": ["MyMCP"],
-      "tag": "v1",
-    },
+      "tag": "v1"
+    }
   ],
-  "name": "mcp-agent-demo",
+  "name": "mcp-agent-demo"
 }

@@ -2,41 +2,41 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
 
   "assets": {
-    "binding": "ASSETS",
+    "binding": "ASSETS"
   },
   "compatibility_date": "2025-02-19",
   "compatibility_flags": [
     "nodejs_compat",
-    "nodejs_compat_populate_process_env",
+    "nodejs_compat_populate_process_env"
   ],
 
   "durable_objects": {
     "bindings": [
       {
         "class_name": "Scheduler",
-        "name": "Scheduler",
+        "name": "Scheduler"
       },
       {
         "class_name": "Stateful",
-        "name": "Stateful",
+        "name": "Stateful"
       },
       {
         "class_name": "EmailAgent",
-        "name": "EmailAgent",
+        "name": "EmailAgent"
       },
       {
         "class_name": "MockEmailService",
-        "name": "MockEmailService",
+        "name": "MockEmailService"
       },
       {
         "class_name": "Chat",
-        "name": "Chat",
+        "name": "Chat"
       },
       {
         "class_name": "Rpc",
-        "name": "Rpc",
-      },
-    ],
+        "name": "Rpc"
+      }
+    ]
   },
   "main": "src/server.ts",
 
@@ -48,16 +48,16 @@
         "EmailAgent",
         "MockEmailService",
         "Chat",
-        "Rpc",
+        "Rpc"
       ],
-      "tag": "v1",
-    },
+      "tag": "v1"
+    }
   ],
   "name": "playground",
 
   "send_email": [
     {
-      "name": "SEND_EMAIL",
-    },
-  ],
+      "name": "SEND_EMAIL"
+    }
+  ]
 }

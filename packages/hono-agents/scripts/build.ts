@@ -9,7 +9,7 @@ async function main() {
     external: ["cloudflare:workers"],
     format: "esm",
     sourcemap: true,
-    splitting: true,
+    splitting: true
   });
 
   // then run prettier on the generated .d.ts files

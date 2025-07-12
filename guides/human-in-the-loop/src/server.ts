@@ -4,7 +4,7 @@ import { AIChatAgent } from "agents/ai-chat-agent";
 import {
   createDataStreamResponse,
   type StreamTextOnFinishCallback,
-  streamText,
+  streamText
 } from "ai";
 import { tools } from "./tools";
 import { processToolCalls } from "./utils";
@@ -23,7 +23,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
           {
             dataStream,
             messages: this.messages,
-            tools,
+            tools
           },
           {
             // type-safe object for tools without an execute function
@@ -32,7 +32,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
               return `The weather in ${city} is ${
                 conditions[Math.floor(Math.random() * conditions.length)]
               }.`;
-            },
+            }
           }
         );
 
@@ -40,11 +40,11 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
           messages: processedMessages,
           model: openai("gpt-4o"),
           onFinish,
-          tools,
+          tools
         });
 
         result.mergeIntoDataStream(dataStream);
-      },
+      }
     });
 
     return dataStreamResponse;
@@ -57,5 +57,5 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 } satisfies ExportedHandler<Env>;

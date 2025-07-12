@@ -1,26 +1,26 @@
 {
   "assets": {
-    "directory": "public",
+    "directory": "public"
   },
   "compatibility_date": "2025-03-14",
   "compatibility_flags": [
     "nodejs_compat",
-    "nodejs_compat_populate_process_env",
+    "nodejs_compat_populate_process_env"
   ],
   "durable_objects": {
     "bindings": [
       {
         "class_name": "TicTacToe",
-        "name": "TicTacToe",
-      },
-    ],
+        "name": "TicTacToe"
+      }
+    ]
   },
   "main": "src/server.ts",
   "migrations": [
     {
       "new_sqlite_classes": ["TicTacToe"],
-      "tag": "v1",
-    },
+      "tag": "v1"
+    }
   ],
-  "name": "tictactoe",
+  "name": "tictactoe"
 }

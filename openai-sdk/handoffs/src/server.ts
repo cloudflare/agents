@@ -10,20 +10,20 @@ export class MyAgent extends CFAgent<Env> {
     const historyTutorAgent = new Agent({
       instructions:
         "You provide assistance with historical queries. Explain important events and context clearly.",
-      name: "History Tutor",
+      name: "History Tutor"
     });
 
     const mathTutorAgent = new Agent({
       instructions:
         "You provide help with math problems. Explain your reasoning at each step and include examples",
-      name: "Math Tutor",
+      name: "Math Tutor"
     });
 
     const triageAgent = new Agent({
       handoffs: [historyTutorAgent, mathTutorAgent],
       instructions:
         "You determine which agent to use based on the user's homework question",
-      name: "Triage Agent",
+      name: "Triage Agent"
     });
 
     const result = await run(triageAgent, "What is the capital of France?");
@@ -38,5 +38,5 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 };

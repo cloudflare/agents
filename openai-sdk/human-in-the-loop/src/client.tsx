@@ -31,7 +31,7 @@ interface ToolApprovalItem {
 function ApprovalModal({
   interruption,
   onApprove,
-  onReject,
+  onReject
 }: {
   interruption: ToolApprovalItem;
   onApprove: () => void;
@@ -51,7 +51,7 @@ function ApprovalModal({
         position: "fixed",
         right: 0,
         top: 0,
-        zIndex: 1000,
+        zIndex: 1000
       }}
     >
       <div
@@ -61,7 +61,7 @@ function ApprovalModal({
           boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
           maxWidth: "500px",
           padding: "24px",
-          width: "90%",
+          width: "90%"
         }}
       >
         <h2 style={{ color: "#333", marginTop: 0 }}>Tool Approval Required</h2>
@@ -78,7 +78,7 @@ function ApprovalModal({
               borderRadius: "4px",
               fontSize: "14px",
               overflow: "auto",
-              padding: "8px",
+              padding: "8px"
             }}
           >
             {JSON.stringify(args, null, 2)}
@@ -93,7 +93,7 @@ function ApprovalModal({
           style={{
             display: "flex",
             gap: "12px",
-            justifyContent: "flex-end",
+            justifyContent: "flex-end"
           }}
         >
           <button
@@ -105,7 +105,7 @@ function ApprovalModal({
               borderRadius: "4px",
               color: "#dc3545",
               cursor: "pointer",
-              padding: "8px 16px",
+              padding: "8px 16px"
             }}
           >
             Reject
@@ -119,7 +119,7 @@ function ApprovalModal({
               borderRadius: "4px",
               color: "white",
               cursor: "pointer",
-              padding: "8px 16px",
+              padding: "8px 16px"
             }}
           >
             Approve
@@ -164,7 +164,7 @@ function AgentStateDisplay({ state }: any) {
                 border: "1px solid #dee2e6",
                 borderRadius: "4px",
                 padding: "12px",
-                whiteSpace: "pre-wrap",
+                whiteSpace: "pre-wrap"
               }}
             >
               {state.currentStep.output}
@@ -189,7 +189,7 @@ function AgentStateDisplay({ state }: any) {
               borderRadius: "4px",
               maxHeight: "200px",
               overflow: "auto",
-              padding: "12px",
+              padding: "12px"
             }}
           >
             <pre style={{ fontSize: "12px", margin: 0 }}>
@@ -206,7 +206,7 @@ function AgentStateDisplay({ state }: any) {
             border: "1px solid #ffeaa7",
             borderRadius: "4px",
             marginBottom: "16px",
-            padding: "12px",
+            padding: "12px"
           }}
         >
           <strong>⚠️ Tool Approval Required</strong>
@@ -232,7 +232,7 @@ function App() {
     agent: "my-agent",
     name: "weather-chat",
     onStateUpdate({
-      serialisedRunState,
+      serialisedRunState
     }: {
       serialisedRunState: string | null;
     }) {
@@ -259,7 +259,7 @@ function App() {
         setShowApprovalModal(false);
         setCurrentInterruption(null);
       }
-    },
+    }
   });
 
   const handleAsk = () => {
@@ -324,7 +324,7 @@ function App() {
             fontSize: "16px",
             marginRight: "8px",
             padding: "8px 12px",
-            width: "300px",
+            width: "300px"
           }}
         />
         <button
@@ -337,7 +337,7 @@ function App() {
             color: "white",
             cursor: "pointer",
             fontSize: "16px",
-            padding: "8px 16px",
+            padding: "8px 16px"
           }}
         >
           Ask

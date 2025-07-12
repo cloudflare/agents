@@ -1,5 +1,29 @@
 # @cloudflare/agents
 
+## 0.0.103
+
+### Patch Changes
+
+- [#350](https://github.com/cloudflare/agents/pull/350) [`70ed631`](https://github.com/cloudflare/agents/commit/70ed6317bc50d32115f39119133fea5f154cde94) Thanks [@ghostwriternr](https://github.com/ghostwriternr)! - Fix TypeScript types resolution by reordering export conditions
+
+## 0.0.102
+
+### Patch Changes
+
+- [#238](https://github.com/cloudflare/agents/pull/238) [`dc7a99c`](https://github.com/cloudflare/agents/commit/dc7a99ca3cc60a8be069bb1094c6dd15bd2555f2) Thanks [@zebp](https://github.com/zebp)! - Basic observability instrumentation
+
+## 0.0.101
+
+### Patch Changes
+
+- [#339](https://github.com/cloudflare/agents/pull/339) [`22d140b`](https://github.com/cloudflare/agents/commit/22d140b360365ac51ed9ebdad2beab6bc7095c9e) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
+## 0.0.100
+
+### Patch Changes
+
+- [#331](https://github.com/cloudflare/agents/pull/331) [`7acfd65`](https://github.com/cloudflare/agents/commit/7acfd654bc1773c975fd8f61111c76e83c132fe5) Thanks [@geelen](https://github.com/geelen)! - Adding a new MCP header to the CORS allowlist to follow the updated spec
+
 ## 0.0.99
 
 ### Patch Changes
@@ -587,7 +611,7 @@
     initialState = {
       counter: 0,
       text: "",
-      color: "#3B82F6",
+      color: "#3B82F6"
     };
 
     doSomething() {
@@ -604,7 +628,7 @@
     agent: "my-agent",
     onStateUpdate: (state) => {
       setState(state);
-    },
+    }
   });
   ```
 

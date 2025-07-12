@@ -3,7 +3,7 @@ import { useState } from "react";
 import type {
   IncomingMessage,
   OutgoingMessage,
-  ScheduledItem,
+  ScheduledItem
 } from "../shared";
 import "./Schedule.css";
 
@@ -31,7 +31,7 @@ export function Scheduler({ addToast }: SchedulerProps) {
       } else if (parsedMessage.type === "schedule") {
         setScheduledItems((items) => [...items, parsedMessage.data]);
       }
-    },
+    }
   });
 
   const [scheduledItems, setScheduledItems] = useState<ScheduledItem[]>([]);
@@ -44,7 +44,7 @@ export function Scheduler({ addToast }: SchedulerProps) {
     agent.send(
       JSON.stringify({
         input: input,
-        type: "schedule",
+        type: "schedule"
       } satisfies IncomingMessage)
     );
     setInput("");
@@ -54,7 +54,7 @@ export function Scheduler({ addToast }: SchedulerProps) {
     agent.send(
       JSON.stringify({
         id,
-        type: "delete-schedule",
+        type: "delete-schedule"
       } satisfies IncomingMessage)
     );
     setScheduledItems((items) => items.filter((item) => item.id !== id));

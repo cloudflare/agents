@@ -14,7 +14,7 @@ import {
   type ResourceTemplate,
   type ServerCapabilities,
   type Tool,
-  ToolListChangedNotificationSchema,
+  ToolListChangedNotificationSchema
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
@@ -89,7 +89,7 @@ export class MCPClientConnection {
         this.registerTools(),
         this.registerResources(),
         this.registerPrompts(),
-        this.registerResourceTemplates(),
+        this.registerResourceTemplates()
       ]);
 
     this.instructions = instructions;
@@ -169,7 +169,7 @@ export class MCPClientConnection {
     do {
       toolsResult = await this.client
         .listTools({
-          cursor: toolsResult.nextCursor,
+          cursor: toolsResult.nextCursor
         })
         .catch(capabilityErrorHandler({ tools: [] }, "tools/list"));
       toolsAgg = toolsAgg.concat(toolsResult.tools);
@@ -183,7 +183,7 @@ export class MCPClientConnection {
     do {
       resourcesResult = await this.client
         .listResources({
-          cursor: resourcesResult.nextCursor,
+          cursor: resourcesResult.nextCursor
         })
         .catch(capabilityErrorHandler({ resources: [] }, "resources/list"));
       resourcesAgg = resourcesAgg.concat(resourcesResult.resources);
@@ -197,7 +197,7 @@ export class MCPClientConnection {
     do {
       promptsResult = await this.client
         .listPrompts({
-          cursor: promptsResult.nextCursor,
+          cursor: promptsResult.nextCursor
         })
         .catch(capabilityErrorHandler({ prompts: [] }, "prompts/list"));
       promptsAgg = promptsAgg.concat(promptsResult.prompts);
@@ -208,12 +208,12 @@ export class MCPClientConnection {
   async fetchResourceTemplates() {
     let templatesAgg: ResourceTemplate[] = [];
     let templatesResult: ListResourceTemplatesResult = {
-      resourceTemplates: [],
+      resourceTemplates: []
     };
     do {
       templatesResult = await this.client
         .listResourceTemplates({
-          cursor: templatesResult.nextCursor,
+          cursor: templatesResult.nextCursor
         })
         .catch(
           capabilityErrorHandler(
