@@ -382,6 +382,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    // Auto-wrap custom methods with agent context
+    this._autoWrapCustomMethods();
+
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
@@ -389,8 +392,14 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       )
     `;
 
-    // Auto-wrap custom methods with agent context
-    this._autoWrapCustomMethods();
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_queues (
+        id TEXT PRIMARY KEY NOT NULL,
+        payload TEXT,
+        callback TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
 
     void this.ctx.blockConcurrencyWhile(async () => {
       return this._tryCatch(async () => {
@@ -932,9 +941,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         await agentContext.run(
           {
             agent: this,
-            connection: connection,
-            request: request,
-            email: email
+            connection,
+            request,
+            email
           },
           async () => {
             // TODO: add retries and backoff
