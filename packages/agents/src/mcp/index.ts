@@ -613,9 +613,14 @@ export abstract class McpAgent<
           const upgradeUrl = new URL(request.url);
           // enforce that the path that the DO receives is always /sse
           upgradeUrl.pathname = "/sse";
+          const existingHeaders: Record<string, string> = {};
+          request.headers.forEach((value, key) => {
+            existingHeaders[key] = value;
+          });
           const response = await doStub.fetch(
             new Request(upgradeUrl, {
               headers: {
+                ...existingHeaders,
                 Upgrade: "websocket",
                 // Required by PartyServer
                 "x-partykit-room": sessionId
@@ -990,9 +995,14 @@ export abstract class McpAgent<
           // Connect to the Durable Object via WebSocket
           const upgradeUrl = new URL(request.url);
           upgradeUrl.pathname = "/streamable-http";
+          const existingHeaders: Record<string, string> = {};
+          request.headers.forEach((value, key) => {
+            existingHeaders[key] = value;
+          });
           const response = await doStub.fetch(
             new Request(upgradeUrl, {
               headers: {
+                ...existingHeaders,
                 Upgrade: "websocket",
                 // Required by PartyServer
                 "x-partykit-room": sessionId
