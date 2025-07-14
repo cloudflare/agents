@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.105
+
+### Patch Changes
+
+- [#354](https://github.com/cloudflare/agents/pull/354) [`f31397c`](https://github.com/cloudflare/agents/commit/f31397cb7f8b67fc736faece51364edeaf52e5a0) Thanks [@jahands](https://github.com/jahands)! - fix: dequeue items in DB after each task is complete
+
+  Prevents a single failure from causing all items in the queue from being retried (including previously processed items that were successful).
+
 ## 0.0.104
 
 ### Patch Changes
