@@ -19,7 +19,8 @@
     "check": "sherif && prettier --check . && biome lint && npm run typecheck",
     "test": "npm run test -w agents",
     "test:react": "npm run test:react -w agents",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "prepare": "husky"
   },
   "license": "MIT",
   "version": "0.0.0",
@@ -46,6 +47,8 @@
     "concurrently": "^9.2.0",
     "evalite": "^0.11.3",
     "fast-glob": "^3.3.3",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.1.2",
     "partyserver": "^0.0.72",
     "partysocket": "1.1.4",
     "patch-package": "^8.0.0",
@@ -73,6 +76,11 @@
   ],
   "overrides": {
     "esbuild": "^0.25.1"
+  },
+  "lint-staged": {
+    "*": [
+      "prettier --write --ignore-unknown"
+    ]
   },
   "packageManager": "npm@11.4.2"
 }
