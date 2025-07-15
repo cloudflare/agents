@@ -1222,9 +1222,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   private async _scheduleNextAlarm() {
     // Find the next schedule that needs to be executed
     const result = this.sql`
-      SELECT time FROM cf_agents_schedules 
+      SELECT time FROM cf_agents_schedules
       WHERE time > ${Math.floor(Date.now() / 1000)}
-      ORDER BY time ASC 
+      ORDER BY time ASC
       LIMIT 1
     `;
     if (!result) return;
@@ -1692,6 +1692,13 @@ export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
   resolver: EmailResolver<Env>;
 };
 
+// Cache the agent namespace map for email routing
+// This maps both kebab-case and original names to namespaces
+const agentMapCache = new WeakMap<
+  Record<string, unknown>,
+  Record<string, unknown>
+>();
+
 /**
  * Route an email to the appropriate Agent
  * @param email The email to route
@@ -1711,28 +1718,38 @@ export async function routeAgentEmail<Env>(
     return;
   }
 
-  const namespaceBinding = env[routingInfo.agentName as keyof Env];
-  if (!namespaceBinding) {
+  // Build a map that includes both original names and kebab-case versions
+  if (!agentMapCache.has(env as Record<string, unknown>)) {
+    const map: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "idFromName" in value &&
+        typeof value.idFromName === "function"
+      ) {
+        // Add both the original name and kebab-case version
+        map[key] = value;
+        map[camelCaseToKebabCase(key)] = value;
+      }
+    }
+    agentMapCache.set(env as Record<string, unknown>, map);
+  }
+
+  const agentMap = agentMapCache.get(env as Record<string, unknown>)!;
+  const namespace = agentMap[routingInfo.agentName];
+
+  if (!namespace) {
+    // Provide helpful error message listing available agents
+    const availableAgents = Object.keys(agentMap)
+      .filter(key => !key.includes('-')) // Show only original names, not kebab-case duplicates
+      .join(', ');
     throw new Error(
-      `Agent namespace '${routingInfo.agentName}' not found in environment`
+      `Agent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
     );
   }
 
-  // Type guard to check if this is actually a DurableObjectNamespace (AgentNamespace)
-  if (
-    typeof namespaceBinding !== "object" ||
-    !("idFromName" in namespaceBinding) ||
-    typeof namespaceBinding.idFromName !== "function"
-  ) {
-    throw new Error(
-      `Environment binding '${routingInfo.agentName}' is not an AgentNamespace (found: ${typeof namespaceBinding})`
-    );
-  }
-
-  // Safe cast after runtime validation
-  const namespace = namespaceBinding as unknown as AgentNamespace<Agent<Env>>;
-
-  const agent = await getAgentByName(namespace, routingInfo.agentId);
+  const agent = await getAgentByName(namespace as unknown as AgentNamespace<Agent<Env>>, routingInfo.agentId);
 
   // let's make a serialisable version of the email
   const serialisableEmail: AgentEmail = {

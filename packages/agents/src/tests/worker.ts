@@ -2,9 +2,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { McpAgent } from "../mcp/index.ts";
+import { Agent, type AgentEmail } from "../index.ts";
 
 export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
+  EmailAgent: DurableObjectNamespace<TestEmailAgent>;
+  CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
+  UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
 };
 
 type State = unknown;
@@ -41,6 +45,45 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
   }
 }
 
+// Test email agents
+export class TestEmailAgent extends Agent<Env> {
+  emailsReceived: AgentEmail[] = [];
+
+  async onEmail(email: AgentEmail) {
+    this.emailsReceived.push(email);
+  }
+
+  // Override onError to avoid console.error which triggers queueMicrotask issues
+  override onError(error: unknown): void {
+    // Silently handle errors in tests
+    throw error;
+  }
+}
+
+export class TestCaseSensitiveAgent extends Agent<Env> {
+  emailsReceived: AgentEmail[] = [];
+
+  async onEmail(email: AgentEmail) {
+    this.emailsReceived.push(email);
+  }
+
+  override onError(error: unknown): void {
+    throw error;
+  }
+}
+
+export class TestUserNotificationAgent extends Agent<Env> {
+  emailsReceived: AgentEmail[] = [];
+
+  async onEmail(email: AgentEmail) {
+    this.emailsReceived.push(email);
+  }
+
+  override onError(error: unknown): void {
+    throw error;
+  }
+}
+
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
@@ -59,5 +102,9 @@ export default {
     }
 
     return new Response("Not found", { status: 404 });
+  },
+
+  async email(_message: ForwardableEmailMessage, _env: Env, _ctx: ExecutionContext) {
+    // Bring this in when we write tests for the complete email handler flow
   }
 };
