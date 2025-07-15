@@ -104,7 +104,11 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 
-  async email(_message: ForwardableEmailMessage, _env: Env, _ctx: ExecutionContext) {
+  async email(
+    _message: ForwardableEmailMessage,
+    _env: Env,
+    _ctx: ExecutionContext
+  ) {
     // Bring this in when we write tests for the complete email handler flow
   }
 };

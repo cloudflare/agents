@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-Fix email routing to handle both CamelCase and kebab-case agent names
+Fix email routing to be case-insensitive for agent names

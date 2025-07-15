@@ -1742,14 +1742,17 @@ export async function routeAgentEmail<Env>(
   if (!namespace) {
     // Provide helpful error message listing available agents
     const availableAgents = Object.keys(agentMap)
-      .filter(key => !key.includes('-')) // Show only original names, not kebab-case duplicates
-      .join(', ');
+      .filter((key) => !key.includes("-")) // Show only original names, not kebab-case duplicates
+      .join(", ");
     throw new Error(
       `Agent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
     );
   }
 
-  const agent = await getAgentByName(namespace as unknown as AgentNamespace<Agent<Env>>, routingInfo.agentId);
+  const agent = await getAgentByName(
+    namespace as unknown as AgentNamespace<Agent<Env>>,
+    routingInfo.agentId
+  );
 
   // let's make a serialisable version of the email
   const serialisableEmail: AgentEmail = {

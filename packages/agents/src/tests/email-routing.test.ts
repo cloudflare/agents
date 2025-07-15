@@ -15,7 +15,9 @@ declare module "cloudflare:test" {
 }
 
 // Mock ForwardableEmailMessage
-function createMockEmail(overrides: Partial<ForwardableEmailMessage> = {}): ForwardableEmailMessage {
+function createMockEmail(
+  overrides: Partial<ForwardableEmailMessage> = {}
+): ForwardableEmailMessage {
   return {
     from: "sender@example.com",
     to: "recipient@example.com",
@@ -98,9 +100,18 @@ describe("Email Resolver Case Sensitivity", () => {
       const resolver = createHeaderBasedEmailResolver();
 
       const testCases = [
-        { messageId: "<agent123@EmailAgent.domain.com>", expectedName: "EmailAgent" },
-        { messageId: "<agent123@email-agent.domain.com>", expectedName: "email-agent" },
-        { messageId: "<agent123@CaseSensitiveAgent.domain.com>", expectedName: "CaseSensitiveAgent" }
+        {
+          messageId: "<agent123@EmailAgent.domain.com>",
+          expectedName: "EmailAgent"
+        },
+        {
+          messageId: "<agent123@email-agent.domain.com>",
+          expectedName: "email-agent"
+        },
+        {
+          messageId: "<agent123@CaseSensitiveAgent.domain.com>",
+          expectedName: "CaseSensitiveAgent"
+        }
       ];
 
       for (const { messageId, expectedName } of testCases) {
@@ -175,12 +186,15 @@ describe("Email Resolver Case Sensitivity", () => {
     });
 
     it("should throw helpful error when agent namespace not found", async () => {
-      const resolver = async () => ({ agentName: "NonExistentAgent", agentId: "test" });
+      const resolver = async () => ({
+        agentName: "NonExistentAgent",
+        agentId: "test"
+      });
       const email = createMockEmail();
 
-      await expect(
-        routeAgentEmail(email, env, { resolver })
-      ).rejects.toThrow(/Agent namespace 'NonExistentAgent' not found in environment/);
+      await expect(routeAgentEmail(email, env, { resolver })).rejects.toThrow(
+        /Agent namespace 'NonExistentAgent' not found in environment/
+      );
     });
 
     it("should handle real-world email routing scenario", async () => {
@@ -221,10 +235,10 @@ describe("Email Resolver Case Sensitivity", () => {
       // Now all these variations should work:
 
       const testEmails = [
-        "CaseSensitiveAgent+bug-test@domain.com",     // Original format that was required
-        "case-sensitive-agent+bug-test@domain.com",   // Kebab-case format now also works
-        "EmailAgent+bug-test@domain.com",             // CamelCase format
-        "email-agent+bug-test@domain.com"             // Kebab-case format
+        "CaseSensitiveAgent+bug-test@domain.com", // Original format that was required
+        "case-sensitive-agent+bug-test@domain.com", // Kebab-case format now also works
+        "EmailAgent+bug-test@domain.com", // CamelCase format
+        "email-agent+bug-test@domain.com" // Kebab-case format
       ];
 
       const resolver = createAddressBasedEmailResolver("default");

@@ -24,7 +24,12 @@
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["TestMcpAgent", "TestEmailAgent", "TestCaseSensitiveAgent", "TestUserNotificationAgent"],
+      "new_sqlite_classes": [
+        "TestMcpAgent",
+        "TestEmailAgent",
+        "TestCaseSensitiveAgent",
+        "TestUserNotificationAgent"
+      ],
       "tag": "v1"
     }
   ]
