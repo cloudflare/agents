@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.106
+
+### Patch Changes
+
+- [#359](https://github.com/cloudflare/agents/pull/359) [`14bb798`](https://github.com/cloudflare/agents/commit/14bb798a1f79ef4052a9134dc5f5a4baee042812) Thanks [@ghostwriternr](https://github.com/ghostwriternr)! - Fix email routing to be case-insensitive for agent names
+
 ## 0.0.105
 
 ### Patch Changes
