@@ -93,7 +93,6 @@
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "check": "npm run test",
     "check:test": "npm run check:test:workers && npm run check:test:react",
     "check:test:react": "vitest -r src/react-tests --watch false",
     "check:test:workers": "vitest -r src/tests --watch false",
