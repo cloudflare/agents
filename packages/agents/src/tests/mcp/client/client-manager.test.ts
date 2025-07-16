@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MCPClientManager } from "../../../mcp/client";
-import type { DurableObjectOAuthClientProvider } from "../../../mcp/do-oauth-client-provider";
+import { DurableObjectOAuthClientProvider } from "../../../mcp/do-oauth-client-provider";
 
 /**
  * Tests for MCP client-side functionality
@@ -127,7 +127,7 @@ describe("MCP Client Manager", () => {
             type: "streamable-http"
           }
         });
-      } catch (_error) {
+      } catch (error) {
         // Expected to fail, but connection should be created
       }
 

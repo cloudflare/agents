@@ -7,7 +7,7 @@ A minimal example showing an `Agent` as an MCP client with support for both SSE 
 The MCP client supports two transport types:
 
 - **HTTP Streamable** (recommended): Uses HTTP POST + SSE for better performance and reliability
-- **SSE (Server-Sent Events)**: Legacy transport for backwards compatibility
+- **SSE (Server-Sent Events)**
 
 ## Instructions
 
@@ -43,19 +43,3 @@ await mcpClient.connect(serverUrl, {
   }
 });
 ```
-
-### Transport Comparison
-
-| Feature            | HTTP Streamable           | SSE                  |
-| ------------------ | ------------------------- | -------------------- |
-| Performance        | Better (batch requests)   | Good                 |
-| Reconnection       | Automatic                 | Manual               |
-| Session Management | Built-in                  | Limited              |
-| Compatibility      | Modern servers            | Legacy servers       |
-| **Recommendation** | ✅ **Use for production** | Use for simple cases |
-
-## Troubleshooting
-
-### TypeError: Cannot read properties of undefined (reading 'connectionState')
-
-Clear the Local Storage cookies in your browser, then restart the client.
