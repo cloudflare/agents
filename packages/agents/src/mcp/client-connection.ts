@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   // type ClientCapabilities,
   type ListPromptsResult,
@@ -18,6 +19,15 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
+import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+
+export type MCPTransportOptions = (
+  | SSEClientTransportOptions
+  | StreamableHTTPClientTransportOptions
+) & {
+  authProvider?: AgentsOAuthProvider;
+  type?: "sse" | "streamable-http";
+};
 
 export class MCPClientConnection {
   client: Client;
@@ -38,9 +48,7 @@ export class MCPClientConnection {
     public url: URL,
     info: ConstructorParameters<typeof Client>[0],
     public options: {
-      transport: SSEClientTransportOptions & {
-        authProvider?: AgentsOAuthProvider;
-      };
+      transport: MCPTransportOptions;
       client: ConstructorParameters<typeof Client>[1];
     } = { client: {}, transport: {} }
   ) {
@@ -55,10 +63,17 @@ export class MCPClientConnection {
    */
   async init(code?: string) {
     try {
-      const transport = new SSEEdgeClientTransport(
-        this.url,
-        this.options.transport
-      );
+      const transportType = this.options.transport.type || "streamable-http";
+      const transport =
+        transportType === "streamable-http"
+          ? new StreamableHTTPEdgeClientTransport(
+              this.url,
+              this.options.transport as StreamableHTTPClientTransportOptions
+            )
+          : new SSEEdgeClientTransport(
+              this.url,
+              this.options.transport as SSEClientTransportOptions
+            );
 
       if (code) {
         await transport.finishAuth(code);

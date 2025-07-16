@@ -393,6 +393,76 @@ This creates:
 - Intuitive input handling
 - Easy conversation reset
 
+### 🔗 MCP (Model Context Protocol) Integration
+
+Agents can seamlessly integrate with the Model Context Protocol, allowing them to act as both MCP servers (providing tools to AI assistants) and MCP clients (using tools from other services).
+
+#### Creating an MCP Server
+
+```typescript
+import { Agent } from "agents";
+import { z } from "zod";
+
+export class WeatherAgent extends Agent {
+  getTools() {
+    return {
+      getWeather: {
+        description: "Get current weather for a location",
+        inputSchema: z.object({
+          location: z.string().describe("City name or coordinates")
+        }),
+        handler: async ({ location }) => {
+          // Weather API logic
+          return {
+            location,
+            temperature: "22°C",
+            conditions: "Sunny"
+          };
+        }
+      }
+    };
+  }
+}
+```
+
+#### Using MCP Tools
+
+```typescript
+import { MCPClientManager } from "agents/mcp";
+
+const client = new MCPClientManager("my-app", "1.0.0");
+
+// Connect to an MCP server
+await client.connect("https://weather-service.com/mcp", {
+  transport: { type: "streamable-http" }
+});
+
+// Use tools from the server
+const weather = await client.callTool({
+  serverId: "weather-service",
+  name: "getWeather",
+  arguments: { location: "San Francisco" }
+});
+```
+
+#### AI SDK Integration
+
+```typescript
+import { generateText } from "ai";
+
+// Convert MCP tools for AI use
+const result = await generateText({
+  model: openai("gpt-4"),
+  tools: client.unstable_getAITools(),
+  prompt: "What's the weather in Tokyo?"
+});
+```
+
+**Transport Options:**
+
+- **HTTP Streamable**: Best performance, batch requests, session management
+- **SSE**: Simple setup, legacy compatibility
+
 ### 💬 The Path Forward
 
 We're developing new dimensions of agent capability:

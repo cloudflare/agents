@@ -12,7 +12,7 @@ import {
   isJSONRPCResponse
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
-import { Agent } from "../";
+import { Agent } from "../index";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
@@ -1149,3 +1149,7 @@ export abstract class McpAgent<
     };
   }
 }
+
+// Export client transport classes
+export { SSEEdgeClientTransport } from "./sse-edge";
+export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";

@@ -1,6 +1,13 @@
 # MCP Client Demo Using Agents
 
-A minimal example showing an `Agent` as an MCP client.
+A minimal example showing an `Agent` as an MCP client with support for both SSE and HTTP Streamable transports.
+
+## Transport Options
+
+The MCP client supports two transport types:
+
+- **HTTP Streamable** (recommended): Uses HTTP POST + SSE for better performance and reliability
+- **SSE (Server-Sent Events)**: Legacy transport for backwards compatibility
 
 ## Instructions
 
@@ -14,6 +21,38 @@ Then, follow the steps below to setup the client:
 4. Run `npm start` from this directory.
 
 Tap "O + enter" to open the front end. It should list out all the tools, prompts, and resources available for each server added.
+
+## Transport Configuration
+
+The MCP client defaults to HTTP Streamable transport for better performance. You can specify transport type explicitly:
+
+```typescript
+// HTTP Streamable transport (default, recommended)
+await mcpClient.connect(serverUrl, {
+  transport: {
+    type: "streamable-http",
+    authProvider: myAuthProvider
+  }
+});
+
+// SSE transport (legacy compatibility)
+await mcpClient.connect(serverUrl, {
+  transport: {
+    type: "sse",
+    authProvider: myAuthProvider
+  }
+});
+```
+
+### Transport Comparison
+
+| Feature            | HTTP Streamable           | SSE                  |
+| ------------------ | ------------------------- | -------------------- |
+| Performance        | Better (batch requests)   | Good                 |
+| Reconnection       | Automatic                 | Manual               |
+| Session Management | Built-in                  | Limited              |
+| Compatibility      | Modern servers            | Legacy servers       |
+| **Recommendation** | ✅ **Use for production** | Use for simple cases |
 
 ## Troubleshooting
 
