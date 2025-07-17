@@ -1,8 +1,8 @@
 import { useAgent } from "agents/react";
-import { createRoot } from "react-dom/client";
 import { useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import "./styles.css";
-import type { State } from "./server";
+import type { MCPServersState } from "agents";
 import { agentFetch } from "agents/client";
 import { nanoid } from "nanoid";
 
@@ -15,22 +15,23 @@ if (!sessionId) {
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
-  const mcpInputRef = useRef<HTMLInputElement>(null);
-  const [mcpState, setMcpState] = useState<State>({
-    servers: {},
-    tools: [],
+  const mcpUrlInputRef = useRef<HTMLInputElement>(null);
+  const mcpNameInputRef = useRef<HTMLInputElement>(null);
+  const [mcpState, setMcpState] = useState<MCPServersState>({
     prompts: [],
     resources: [],
+    servers: {},
+    tools: []
   });
 
   const agent = useAgent({
     agent: "my-agent",
     name: sessionId!,
-    onOpen: () => setIsConnected(true),
     onClose: () => setIsConnected(false),
-    onStateUpdate: (state: State) => {
-      setMcpState(state);
+    onMcpUpdate: (mcpServers: MCPServersState) => {
+      setMcpState(mcpServers);
     },
+    onOpen: () => setIsConnected(true)
   });
 
   function openPopup(authUrl: string) {
@@ -43,19 +44,22 @@ function App() {
 
   const handleMcpSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!mcpInputRef.current || !mcpInputRef.current.value.trim()) return;
+    if (!mcpUrlInputRef.current || !mcpUrlInputRef.current.value.trim()) return;
+    const serverUrl = mcpUrlInputRef.current.value;
 
-    const serverUrl = mcpInputRef.current.value;
+    if (!mcpNameInputRef.current || !mcpNameInputRef.current.value.trim())
+      return;
+    const serverName = mcpNameInputRef.current.value;
     agentFetch(
       {
-        host: agent.host,
         agent: "my-agent",
+        host: agent.host,
         name: sessionId!,
-        path: "add-mcp",
+        path: "add-mcp"
       },
       {
-        method: "POST",
-        body: JSON.stringify({ url: serverUrl }),
+        body: JSON.stringify({ name: serverName, url: serverUrl }),
+        method: "POST"
       }
     );
     setMcpState({
@@ -63,10 +67,14 @@ function App() {
       servers: {
         ...mcpState.servers,
         placeholder: {
-          url: serverUrl,
-          state: "connecting",
-        },
-      },
+          auth_url: null,
+          capabilities: null,
+          instructions: null,
+          name: serverName,
+          server_url: serverUrl,
+          state: "connecting"
+        }
+      }
     });
   };
 
@@ -81,8 +89,14 @@ function App() {
         <form className="mcp-form" onSubmit={handleMcpSubmit}>
           <input
             type="text"
-            ref={mcpInputRef}
-            className="mcp-input"
+            ref={mcpNameInputRef}
+            className="mcp-input name"
+            placeholder="MCP Server Name"
+          />
+          <input
+            type="text"
+            ref={mcpUrlInputRef}
+            className="mcp-input url"
             placeholder="MCP Server URL"
           />
           <button type="submit">Add MCP Server</button>
@@ -94,7 +108,7 @@ function App() {
         {Object.entries(mcpState.servers).map(([id, server]) => (
           <div key={id} className={"mcp-server"}>
             <div>
-              <div>URL: {server.url}</div>
+              <b>{server.name}</b> <span>({server.server_url})</span>
               <div className="status-indicator">
                 <div
                   className={`status-dot ${server.state === "ready" ? "connected" : ""}`}
@@ -102,10 +116,10 @@ function App() {
                 {server.state} (id: {id})
               </div>
             </div>
-            {server.state === "authenticating" && server.authUrl && (
+            {server.state === "authenticating" && server.auth_url && (
               <button
                 type="button"
-                onClick={() => openPopup(server.authUrl as string)}
+                onClick={() => openPopup(server.auth_url as string)}
               >
                 Authorize
               </button>

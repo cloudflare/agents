@@ -55,9 +55,12 @@ Example outputs:
 export const unstable_scheduleSchema = z.object({
   description: z.string().describe("A description of the task"),
   when: z.object({
-    type: z
-      .enum(["scheduled", "delayed", "cron", "no-schedule"])
-      .describe("The type of scheduling details"),
+    cron: z
+      .string()
+      .optional()
+      .describe(
+        "execute task on a recurring interval specified as cron syntax (only use if the type is cron)"
+      ),
     date: z.coerce
       .date()
       .optional()
@@ -70,11 +73,8 @@ export const unstable_scheduleSchema = z.object({
       .describe(
         "execute task after a delay in seconds (only use if the type is delayed)"
       ),
-    cron: z
-      .string()
-      .optional()
-      .describe(
-        "execute task on a recurring interval specified as cron syntax (only use if the type is cron)"
-      ),
-  }),
+    type: z
+      .enum(["scheduled", "delayed", "cron", "no-schedule"])
+      .describe("The type of scheduling details")
+  })
 });

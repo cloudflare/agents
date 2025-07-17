@@ -1,20 +1,32 @@
-import {
-  Server,
-  routePartykitRequest,
-  type PartyServerOptions,
-  getServerByName,
-  type Connection,
-  type ConnectionContext,
-  type WSMessage,
-} from "partyserver";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
+import type {
+  Prompt,
+  Resource,
+  ServerCapabilities,
+  Tool
+} from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
-
-import { AsyncLocalStorage } from "node:async_hooks";
+import { EmailMessage } from "cloudflare:email";
+import {
+  type Connection,
+  type ConnectionContext,
+  type PartyServerOptions,
+  Server,
+  type WSMessage,
+  getServerByName,
+  routePartykitRequest
+} from "partyserver";
+import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager } from "./mcp/client";
+// import type { MCPClientConnection } from "./mcp/client-connection";
+import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
+import { genericObservability, type Observability } from "./observability";
 
-export type { Connection, WSMessage, ConnectionContext } from "partyserver";
+export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
 /**
  * RPC request message from client
@@ -98,7 +110,6 @@ export type CallableMetadata = {
   streaming?: boolean;
 };
 
-// biome-ignore lint/complexity/noBannedTypes: <explanation>
 const callableMetadata = new Map<Function, CallableMetadata>();
 
 /**
@@ -108,6 +119,7 @@ const callableMetadata = new Map<Function, CallableMetadata>();
 export function unstable_callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
     context: ClassMethodDecoratorContext
   ) {
     if (!callableMetadata.has(target)) {
@@ -117,6 +129,13 @@ export function unstable_callable(metadata: CallableMetadata = {}) {
     return target;
   };
 }
+
+export type QueueItem<T = string> = {
+  id: string;
+  payload: T;
+  callback: keyof Agent<unknown>;
+  created_at: number;
+};
 
 /**
  * Represents a scheduled task within an Agent
@@ -159,29 +178,74 @@ function getNextCronTime(cron: string) {
   return interval.getNextDate();
 }
 
+/**
+ * MCP Server state update message from server -> Client
+ */
+export type MCPServerMessage = {
+  type: "cf_agent_mcp_servers";
+  mcp: MCPServersState;
+};
+
+export type MCPServersState = {
+  servers: {
+    [id: string]: MCPServer;
+  };
+  tools: Tool[];
+  prompts: Prompt[];
+  resources: Resource[];
+};
+
+export type MCPServer = {
+  name: string;
+  server_url: string;
+  auth_url: string | null;
+  // This state is specifically about the temporary process of getting a token (if needed).
+  // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
+  // to communicate a change to a non-ready state.
+  state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
+  instructions: string | null;
+  capabilities: ServerCapabilities | null;
+};
+
+/**
+ * MCP Server data stored in DO SQL for resuming MCP Server connections
+ */
+type MCPServerRow = {
+  id: string;
+  name: string;
+  server_url: string;
+  client_id: string | null;
+  auth_url: string | null;
+  callback_url: string;
+  server_options: string;
+};
+
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
 const agentContext = new AsyncLocalStorage<{
-  agent: Agent<unknown>;
+  agent: Agent<unknown, unknown>;
   connection: Connection | undefined;
   request: Request | undefined;
+  email: AgentEmail | undefined;
 }>();
 
 export function getCurrentAgent<
-  T extends Agent<unknown, unknown> = Agent<unknown, unknown>,
+  T extends Agent<unknown, unknown> = Agent<unknown, unknown>
 >(): {
   agent: T | undefined;
   connection: Connection | undefined;
-  request: Request<unknown, CfProperties<unknown>> | undefined;
+  request: Request | undefined;
+  email: AgentEmail | undefined;
 } {
   const store = agentContext.getStore() as
     | {
         agent: T;
         connection: Connection | undefined;
-        request: Request<unknown, CfProperties<unknown>> | undefined;
+        request: Request | undefined;
+        email: AgentEmail | undefined;
       }
     | undefined;
   if (!store) {
@@ -189,9 +253,29 @@ export function getCurrentAgent<
       agent: undefined,
       connection: undefined,
       request: undefined,
+      email: undefined
     };
   }
   return store;
+}
+
+/**
+ * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
+ * @param agent The agent instance
+ * @param method The method to wrap
+ * @returns A wrapped method that runs within the agent context
+ */
+
+// biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+function withAgentContext<T extends (...args: any[]) => any>(
+  method: T
+): (this: Agent<unknown, unknown>, ...args: Parameters<T>) => ReturnType<T> {
+  return function (...args: Parameters<T>): ReturnType<T> {
+    const { connection, request, email } = getCurrentAgent();
+    return agentContext.run({ agent: this, connection, request, email }, () => {
+      return method.apply(this, args);
+    });
+  };
 }
 
 /**
@@ -200,12 +284,12 @@ export function getCurrentAgent<
  * @template State State type to store within the Agent
  */
 export class Agent<Env, State = unknown> extends Server<Env> {
-  #state = DEFAULT_STATE as State;
+  private _state = DEFAULT_STATE as State;
 
-  #ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  mcp: MCPClientManager = new MCPClientManager(this.#ParentClass.name, "0.0.1");
+  mcp: MCPClientManager = new MCPClientManager(this._ParentClass.name, "0.0.1");
 
   /**
    * Initial state for the Agent
@@ -217,9 +301,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * Current state of the Agent
    */
   get state(): State {
-    if (this.#state !== DEFAULT_STATE) {
+    if (this._state !== DEFAULT_STATE) {
       // state was previously set, and populated internal state
-      return this.#state;
+      return this._state;
     }
     // looks like this is the first time the state is being accessed
     // check if the state was set in a previous life
@@ -239,8 +323,8 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     ) {
       const state = result[0]?.state as string; // could be null?
 
-      this.#state = JSON.parse(state);
-      return this.#state;
+      this._state = JSON.parse(state);
+      return this._state;
     }
 
     // ok, this is the first time the state is being accessed
@@ -261,8 +345,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    */
   static options = {
     /** Whether the Agent should hibernate when inactive */
-    hibernate: true, // default to hibernate
+    hibernate: true // default to hibernate
   };
+
+  /**
+   * The observability implementation to use for the Agent
+   */
+  observability?: Observability = genericObservability;
 
   /**
    * Execute SQL queries against the Agent's database
@@ -293,6 +382,9 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    // Auto-wrap custom methods with agent context
+    this._autoWrapCustomMethods();
+
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
@@ -300,8 +392,17 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       )
     `;
 
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_queues (
+        id TEXT PRIMARY KEY NOT NULL,
+        payload TEXT,
+        callback TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
+
     void this.ctx.blockConcurrencyWhile(async () => {
-      return this.#tryCatch(async () => {
+      return this._tryCatch(async () => {
         // Create alarms table if it doesn't exist
         this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_schedules (
@@ -321,25 +422,65 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       });
     });
 
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        callback_url TEXT NOT NULL,
+        client_id TEXT,
+        auth_url TEXT,
+        server_options TEXT
+      )
+    `;
+
+    const _onRequest = this.onRequest.bind(this);
+    this.onRequest = (request: Request) => {
+      return agentContext.run(
+        { agent: this, connection: undefined, request, email: undefined },
+        async () => {
+          if (this.mcp.isCallbackRequest(request)) {
+            await this.mcp.handleCallbackRequest(request);
+
+            // after the MCP connection handshake, we can send updated mcp state
+            this.broadcast(
+              JSON.stringify({
+                mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers"
+              })
+            );
+
+            // We probably should let the user configure this response/redirect, but this is fine for now.
+            return new Response("<script>window.close();</script>", {
+              headers: { "content-type": "text/html" },
+              status: 200
+            });
+          }
+
+          return this._tryCatch(() => _onRequest(request));
+        }
+      );
+    };
+
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       return agentContext.run(
-        { agent: this, connection, request: undefined },
+        { agent: this, connection, request: undefined, email: undefined },
         async () => {
           if (typeof message !== "string") {
-            return this.#tryCatch(() => _onMessage(connection, message));
+            return this._tryCatch(() => _onMessage(connection, message));
           }
 
           let parsed: unknown;
           try {
             parsed = JSON.parse(message);
-          } catch (e) {
+          } catch (_e) {
             // silently fail and let the onMessage handler handle it
-            return this.#tryCatch(() => _onMessage(connection, message));
+            return this._tryCatch(() => _onMessage(connection, message));
           }
 
           if (isStateUpdateMessage(parsed)) {
-            this.#setStateInternal(parsed.state as State, connection);
+            this._setStateInternal(parsed.state as State, connection);
             return;
           }
 
@@ -353,11 +494,10 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                 throw new Error(`Method ${method} does not exist`);
               }
 
-              if (!this.#isCallable(method)) {
+              if (!this._isCallable(method)) {
                 throw new Error(`Method ${method} is not callable`);
               }
 
-              // biome-ignore lint/complexity/noBannedTypes: <explanation>
               const metadata = callableMetadata.get(methodFn as Function);
 
               // For streaming methods, pass a StreamingResponse object
@@ -369,22 +509,39 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
               // For regular methods, execute and send response
               const result = await methodFn.apply(this, args);
+
+              this.observability?.emit(
+                {
+                  displayMessage: `RPC call to ${method}`,
+                  id: nanoid(),
+                  payload: {
+                    args,
+                    method,
+                    streaming: metadata?.streaming,
+                    success: true
+                  },
+                  timestamp: Date.now(),
+                  type: "rpc"
+                },
+                this.ctx
+              );
+
               const response: RPCResponse = {
-                type: "rpc",
-                id,
-                success: true,
-                result,
                 done: true,
+                id,
+                result,
+                success: true,
+                type: "rpc"
               };
               connection.send(JSON.stringify(response));
             } catch (e) {
               // Send error response
               const response: RPCResponse = {
-                type: "rpc",
-                id: parsed.id,
-                success: false,
                 error:
                   e instanceof Error ? e.message : "Unknown error occurred",
+                id: parsed.id,
+                success: false,
+                type: "rpc"
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
@@ -392,7 +549,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
             return;
           }
 
-          return this.#tryCatch(() => _onMessage(connection, message));
+          return this._tryCatch(() => _onMessage(connection, message));
         }
       );
     };
@@ -402,26 +559,95 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
       return agentContext.run(
-        { agent: this, connection, request: ctx.request },
+        { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
           setTimeout(() => {
             if (this.state) {
               connection.send(
                 JSON.stringify({
-                  type: "cf_agent_state",
                   state: this.state,
+                  type: "cf_agent_state"
                 })
               );
             }
-            return this.#tryCatch(() => _onConnect(connection, ctx));
+
+            connection.send(
+              JSON.stringify({
+                mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers"
+              })
+            );
+
+            this.observability?.emit(
+              {
+                displayMessage: "Connection established",
+                id: nanoid(),
+                payload: {
+                  connectionId: connection.id
+                },
+                timestamp: Date.now(),
+                type: "connect"
+              },
+              this.ctx
+            );
+            return this._tryCatch(() => _onConnect(connection, ctx));
           }, 20);
+        }
+      );
+    };
+
+    const _onStart = this.onStart.bind(this);
+    this.onStart = async () => {
+      return agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        async () => {
+          const servers = this.sql<MCPServerRow>`
+            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
+          `;
+
+          // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
+          if (servers && Array.isArray(servers) && servers.length > 0) {
+            Promise.allSettled(
+              servers.map((server) => {
+                return this._connectToMcpServerInternal(
+                  server.name,
+                  server.server_url,
+                  server.callback_url,
+                  server.server_options
+                    ? JSON.parse(server.server_options)
+                    : undefined,
+                  {
+                    id: server.id,
+                    oauthClientId: server.client_id ?? undefined
+                  }
+                );
+              })
+            ).then((_results) => {
+              this.broadcast(
+                JSON.stringify({
+                  mcp: this.getMcpServers(),
+                  type: "cf_agent_mcp_servers"
+                })
+              );
+            });
+          }
+          await this._tryCatch(() => _onStart());
         }
       );
     };
   }
 
-  #setStateInternal(state: State, source: Connection | "server" = "server") {
-    this.#state = state;
+  private _setStateInternal(
+    state: State,
+    source: Connection | "server" = "server"
+  ) {
+    const previousState = this._state;
+    this._state = state;
     this.sql`
     INSERT OR REPLACE INTO cf_agents_state (id, state)
     VALUES (${STATE_ROW_ID}, ${JSON.stringify(state)})
@@ -432,16 +658,29 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   `;
     this.broadcast(
       JSON.stringify({
-        type: "cf_agent_state",
         state: state,
+        type: "cf_agent_state"
       }),
       source !== "server" ? [source.id] : []
     );
-    return this.#tryCatch(() => {
-      const { connection, request } = agentContext.getStore() || {};
+    return this._tryCatch(() => {
+      const { connection, request, email } = agentContext.getStore() || {};
       return agentContext.run(
-        { agent: this, connection, request },
+        { agent: this, connection, request, email },
         async () => {
+          this.observability?.emit(
+            {
+              displayMessage: "State updated",
+              id: nanoid(),
+              payload: {
+                previousState,
+                state
+              },
+              timestamp: Date.now(),
+              type: "state:update"
+            },
+            this.ctx
+          );
           return this.onStateUpdate(state, source);
         }
       );
@@ -453,7 +692,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param state New state to set
    */
   setState(state: State) {
-    this.#setStateInternal(state, "server");
+    this._setStateInternal(state, "server");
   }
 
   /**
@@ -461,28 +700,160 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
 
   /**
-   * Called when the Agent receives an email
+   * Called when the Agent receives an email via routeAgentEmail()
+   * Override this method to handle incoming emails
    * @param email Email message to process
    */
-  onEmail(email: ForwardableEmailMessage) {
+  async _onEmail(email: AgentEmail) {
+    // nb: we use this roundabout way of getting to onEmail
+    // because of https://github.com/cloudflare/workerd/issues/4499
     return agentContext.run(
-      { agent: this, connection: undefined, request: undefined },
+      { agent: this, connection: undefined, request: undefined, email: email },
       async () => {
-        console.error("onEmail not implemented");
+        if ("onEmail" in this && typeof this.onEmail === "function") {
+          return this._tryCatch(() =>
+            (this.onEmail as (email: AgentEmail) => Promise<void>)(email)
+          );
+        } else {
+          console.log("Received email from:", email.from, "to:", email.to);
+          console.log("Subject:", email.headers.get("subject"));
+          console.log(
+            "Implement onEmail(email: AgentEmail): Promise<void> in your agent to process emails"
+          );
+        }
       }
     );
   }
 
-  async #tryCatch<T>(fn: () => T | Promise<T>) {
+  /**
+   * Reply to an email
+   * @param email The email to reply to
+   * @param options Options for the reply
+   * @returns void
+   */
+  async replyToEmail(
+    email: AgentEmail,
+    options: {
+      fromName: string;
+      subject?: string | undefined;
+      body: string;
+      contentType?: string;
+      headers?: Record<string, string>;
+    }
+  ): Promise<void> {
+    return this._tryCatch(async () => {
+      const agentName = camelCaseToKebabCase(this._ParentClass.name);
+      const agentId = this.name;
+
+      const { createMimeMessage } = await import("mimetext");
+      const msg = createMimeMessage();
+      msg.setSender({ addr: email.to, name: options.fromName });
+      msg.setRecipient(email.from);
+      msg.setSubject(
+        options.subject || `Re: ${email.headers.get("subject")}` || "No subject"
+      );
+      msg.addMessage({
+        contentType: options.contentType || "text/plain",
+        data: options.body
+      });
+
+      const domain = email.from.split("@")[1];
+      const messageId = `<${agentId}@${domain}>`;
+      msg.setHeader("In-Reply-To", email.headers.get("Message-ID")!);
+      msg.setHeader("Message-ID", messageId);
+      msg.setHeader("X-Agent-Name", agentName);
+      msg.setHeader("X-Agent-ID", agentId);
+
+      if (options.headers) {
+        for (const [key, value] of Object.entries(options.headers)) {
+          msg.setHeader(key, value);
+        }
+      }
+      await email.reply({
+        from: email.to,
+        raw: msg.asRaw(),
+        to: email.from
+      });
+    });
+  }
+
+  private async _tryCatch<T>(fn: () => T | Promise<T>) {
     try {
       return await fn();
     } catch (e) {
       throw this.onError(e);
+    }
+  }
+
+  /**
+   * Automatically wrap custom methods with agent context
+   * This ensures getCurrentAgent() works in all custom methods without decorators
+   */
+  private _autoWrapCustomMethods() {
+    // Collect all methods from base prototypes (Agent and Server)
+    const basePrototypes = [Agent.prototype, Server.prototype];
+    const baseMethods = new Set<string>();
+    for (const baseProto of basePrototypes) {
+      let proto = baseProto;
+      while (proto && proto !== Object.prototype) {
+        const methodNames = Object.getOwnPropertyNames(proto);
+        for (const methodName of methodNames) {
+          baseMethods.add(methodName);
+        }
+        proto = Object.getPrototypeOf(proto);
+      }
+    }
+    // Get all methods from the current instance's prototype chain
+    let proto = Object.getPrototypeOf(this);
+    let depth = 0;
+    while (proto && proto !== Object.prototype && depth < 10) {
+      const methodNames = Object.getOwnPropertyNames(proto);
+      for (const methodName of methodNames) {
+        // Skip if it's a private method or not a function
+        if (
+          baseMethods.has(methodName) ||
+          methodName.startsWith("_") ||
+          typeof this[methodName as keyof this] !== "function"
+        ) {
+          continue;
+        }
+        // If the method doesn't exist in base prototypes, it's a custom method
+        if (!baseMethods.has(methodName)) {
+          const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
+          if (descriptor && typeof descriptor.value === "function") {
+            // Wrap the custom method with context
+
+            const wrappedFunction = withAgentContext(
+              // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+              this[methodName as keyof this] as (...args: any[]) => any
+              // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+            ) as any;
+
+            // if the method is callable, copy the metadata from the original method
+            if (this._isCallable(methodName)) {
+              callableMetadata.set(
+                wrappedFunction,
+                callableMetadata.get(
+                  this[methodName as keyof this] as Function
+                )!
+              );
+            }
+
+            // set the wrapped function on the prototype
+            this.constructor.prototype[methodName as keyof this] =
+              wrappedFunction;
+          }
+        }
+      }
+
+      proto = Object.getPrototypeOf(proto);
+      depth++;
     }
   }
 
@@ -521,6 +892,131 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   /**
+   * Queue a task to be executed in the future
+   * @param payload Payload to pass to the callback
+   * @param callback Name of the method to call
+   * @returns The ID of the queued task
+   */
+  async queue<T = unknown>(callback: keyof this, payload: T): Promise<string> {
+    const id = nanoid(9);
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+
+    if (typeof this[callback] !== "function") {
+      throw new Error(`this.${callback} is not a function`);
+    }
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback)
+      VALUES (${id}, ${JSON.stringify(payload)}, ${callback})
+    `;
+
+    void this._flushQueue().catch((e) => {
+      console.error("Error flushing queue:", e);
+    });
+
+    return id;
+  }
+
+  private _flushingQueue = false;
+
+  private async _flushQueue() {
+    if (this._flushingQueue) {
+      return;
+    }
+    this._flushingQueue = true;
+    while (true) {
+      const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues
+      ORDER BY created_at ASC
+    `;
+
+      if (!result || result.length === 0) {
+        break;
+      }
+
+      for (const row of result || []) {
+        const callback = this[row.callback as keyof Agent<Env>];
+        if (!callback) {
+          console.error(`callback ${row.callback} not found`);
+          continue;
+        }
+        const { connection, request, email } = agentContext.getStore() || {};
+        await agentContext.run(
+          {
+            agent: this,
+            connection,
+            request,
+            email
+          },
+          async () => {
+            // TODO: add retries and backoff
+            await (
+              callback as (
+                payload: unknown,
+                queueItem: QueueItem<string>
+              ) => Promise<void>
+            ).bind(this)(JSON.parse(row.payload as string), row);
+            await this.dequeue(row.id);
+          }
+        );
+      }
+    }
+    this._flushingQueue = false;
+  }
+
+  /**
+   * Dequeue a task by ID
+   * @param id ID of the task to dequeue
+   */
+  async dequeue(id: string) {
+    this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
+  }
+
+  /**
+   * Dequeue all tasks
+   */
+  async dequeueAll() {
+    this.sql`DELETE FROM cf_agents_queues`;
+  }
+
+  /**
+   * Dequeue all tasks by callback
+   * @param callback Name of the callback to dequeue
+   */
+  async dequeueAllByCallback(callback: string) {
+    this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
+  }
+
+  /**
+   * Get a queued task by ID
+   * @param id ID of the task to get
+   * @returns The task or undefined if not found
+   */
+  async getQueue(id: string): Promise<QueueItem<string> | undefined> {
+    const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues WHERE id = ${id}
+    `;
+    return result
+      ? { ...result[0], payload: JSON.parse(result[0].payload) }
+      : undefined;
+  }
+
+  /**
+   * Get all queues by key and value
+   * @param key Key to filter by
+   * @param value Value to filter by
+   * @returns Array of matching QueueItem objects
+   */
+  async getQueues(key: string, value: string): Promise<QueueItem<string>[]> {
+    const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues
+    `;
+    return result.filter((row) => JSON.parse(row.payload)[key] === value);
+  }
+
+  /**
    * Schedule a task to be executed in the future
    * @template T Type of the payload data
    * @param when When to execute the task (Date, seconds delay, or cron expression)
@@ -534,6 +1030,18 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     payload?: T
   ): Promise<Schedule<T>> {
     const id = nanoid(9);
+
+    const emitScheduleCreate = (schedule: Schedule<T>) =>
+      this.observability?.emit(
+        {
+          displayMessage: `Schedule ${schedule.id} created`,
+          id: nanoid(),
+          payload: schedule,
+          timestamp: Date.now(),
+          type: "schedule:create"
+        },
+        this.ctx
+      );
 
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
@@ -552,15 +1060,19 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'scheduled', ${timestamp})
       `;
 
-      await this.#scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
-      return {
-        id,
+      const schedule: Schedule<T> = {
         callback: callback,
+        id,
         payload: payload as T,
         time: timestamp,
-        type: "scheduled",
+        type: "scheduled"
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     if (typeof when === "number") {
       const time = new Date(Date.now() + when * 1000);
@@ -573,16 +1085,20 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'delayed', ${when}, ${timestamp})
       `;
 
-      await this.#scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
-      return {
-        id,
+      const schedule: Schedule<T> = {
         callback: callback,
-        payload: payload as T,
         delayInSeconds: when,
+        id,
+        payload: payload as T,
         time: timestamp,
-        type: "delayed",
+        type: "delayed"
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     if (typeof when === "string") {
       const nextExecutionTime = getNextCronTime(when);
@@ -595,16 +1111,20 @@ export class Agent<Env, State = unknown> extends Server<Env> {
         )}, 'cron', ${when}, ${timestamp})
       `;
 
-      await this.#scheduleNextAlarm();
+      await this._scheduleNextAlarm();
 
-      return {
-        id,
+      const schedule: Schedule<T> = {
         callback: callback,
-        payload: payload as T,
         cron: when,
+        id,
+        payload: payload as T,
         time: timestamp,
-        type: "cron",
+        type: "cron"
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     throw new Error("Invalid schedule type");
   }
@@ -668,7 +1188,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       .toArray()
       .map((row) => ({
         ...row,
-        payload: JSON.parse(row.payload as string) as T,
+        payload: JSON.parse(row.payload as string) as T
       })) as Schedule<T>[];
 
     return result;
@@ -680,18 +1200,31 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    * @returns true if the task was cancelled, false otherwise
    */
   async cancelSchedule(id: string): Promise<boolean> {
+    const schedule = await this.getSchedule(id);
+    if (schedule) {
+      this.observability?.emit(
+        {
+          displayMessage: `Schedule ${id} cancelled`,
+          id: nanoid(),
+          payload: schedule,
+          timestamp: Date.now(),
+          type: "schedule:cancel"
+        },
+        this.ctx
+      );
+    }
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
-    await this.#scheduleNextAlarm();
+    await this._scheduleNextAlarm();
     return true;
   }
 
-  async #scheduleNextAlarm() {
+  private async _scheduleNextAlarm() {
     // Find the next schedule that needs to be executed
     const result = this.sql`
-      SELECT time FROM cf_agents_schedules 
+      SELECT time FROM cf_agents_schedules
       WHERE time > ${Math.floor(Date.now() / 1000)}
-      ORDER BY time ASC 
+      ORDER BY time ASC
       LIMIT 1
     `;
     if (!result) return;
@@ -703,10 +1236,14 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   /**
-   * Method called when an alarm fires
-   * Executes any scheduled tasks that are due
+   * Method called when an alarm fires.
+   * Executes any scheduled tasks that are due.
+   *
+   * @remarks
+   * To schedule a task, please use the `this.schedule` method instead.
+   * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
-  async alarm() {
+  public readonly alarm = async () => {
     const now = Math.floor(Date.now() / 1000);
 
     // Get all schedules that should be executed now
@@ -714,46 +1251,64 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       SELECT * FROM cf_agents_schedules WHERE time <= ${now}
     `;
 
-    for (const row of result || []) {
-      const callback = this[row.callback as keyof Agent<Env>];
-      if (!callback) {
-        console.error(`callback ${row.callback} not found`);
-        continue;
-      }
-      await agentContext.run(
-        { agent: this, connection: undefined, request: undefined },
-        async () => {
-          try {
-            await (
-              callback as (
-                payload: unknown,
-                schedule: Schedule<unknown>
-              ) => Promise<void>
-            ).bind(this)(JSON.parse(row.payload as string), row);
-          } catch (e) {
-            console.error(`error executing callback "${row.callback}"`, e);
-          }
+    if (result && Array.isArray(result)) {
+      for (const row of result) {
+        const callback = this[row.callback as keyof Agent<Env>];
+        if (!callback) {
+          console.error(`callback ${row.callback} not found`);
+          continue;
         }
-      );
-      if (row.type === "cron") {
-        // Update next execution time for cron schedules
-        const nextExecutionTime = getNextCronTime(row.cron);
-        const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
+        await agentContext.run(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          async () => {
+            try {
+              this.observability?.emit(
+                {
+                  displayMessage: `Schedule ${row.id} executed`,
+                  id: nanoid(),
+                  payload: row,
+                  timestamp: Date.now(),
+                  type: "schedule:execute"
+                },
+                this.ctx
+              );
 
-        this.sql`
+              await (
+                callback as (
+                  payload: unknown,
+                  schedule: Schedule<unknown>
+                ) => Promise<void>
+              ).bind(this)(JSON.parse(row.payload as string), row);
+            } catch (e) {
+              console.error(`error executing callback "${row.callback}"`, e);
+            }
+          }
+        );
+        if (row.type === "cron") {
+          // Update next execution time for cron schedules
+          const nextExecutionTime = getNextCronTime(row.cron);
+          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
+
+          this.sql`
           UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
         `;
-      } else {
-        // Delete one-time schedules after execution
-        this.sql`
+        } else {
+          // Delete one-time schedules after execution
+          this.sql`
           DELETE FROM cf_agents_schedules WHERE id = ${row.id}
         `;
+        }
       }
     }
 
     // Schedule the next alarm
-    await this.#scheduleNextAlarm();
-  }
+    await this._scheduleNextAlarm();
+  };
 
   /**
    * Destroy the Agent, removing all state and scheduled tasks
@@ -762,19 +1317,202 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     // drop all tables
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    this.ctx.abort("destroyed"); // enforce that the agent is evicted
+
+    this.observability?.emit(
+      {
+        displayMessage: "Agent destroyed",
+        id: nanoid(),
+        payload: {},
+        timestamp: Date.now(),
+        type: "destroy"
+      },
+      this.ctx
+    );
   }
 
   /**
    * Get all methods marked as callable on this Agent
    * @returns A map of method names to their metadata
    */
-  #isCallable(method: string): boolean {
-    // biome-ignore lint/complexity/noBannedTypes: <explanation>
+  private _isCallable(method: string): boolean {
     return callableMetadata.has(this[method as keyof this] as Function);
+  }
+
+  /**
+   * Connect to a new MCP Server
+   *
+   * @param url MCP Server SSE URL
+   * @param callbackHost Base host for the agent, used for the redirect URI.
+   * @param agentsPrefix agents routing prefix if not using `agents`
+   * @param options MCP client and transport (header) options
+   * @returns authUrl
+   */
+  async addMcpServer(
+    serverName: string,
+    url: string,
+    callbackHost: string,
+    agentsPrefix = "agents",
+    options?: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport?: {
+        headers: HeadersInit;
+      };
+    }
+  ): Promise<{ id: string; authUrl: string | undefined }> {
+    const callbackUrl = `${callbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+
+    const result = await this._connectToMcpServerInternal(
+      serverName,
+      url,
+      callbackUrl,
+      options
+    );
+    this.sql`
+        INSERT
+        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${result.id},
+        ${serverName},
+        ${url},
+        ${result.clientId ?? null},
+        ${result.authUrl ?? null},
+        ${callbackUrl},
+        ${options ? JSON.stringify(options) : null}
+        );
+    `;
+
+    this.broadcast(
+      JSON.stringify({
+        mcp: this.getMcpServers(),
+        type: "cf_agent_mcp_servers"
+      })
+    );
+
+    return result;
+  }
+
+  async _connectToMcpServerInternal(
+    _serverName: string,
+    url: string,
+    callbackUrl: string,
+    // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
+    options?: {
+      client?: ConstructorParameters<typeof Client>[1];
+      /**
+       * We don't expose the normal set of transport options because:
+       * 1) we can't serialize things like the auth provider or a fetch function into the DB for reconnection purposes
+       * 2) We probably want these options to be agnostic to the transport type (SSE vs Streamable)
+       *
+       * This has the limitation that you can't override fetch, but I think headers should handle nearly all cases needed (i.e. non-standard bearer auth).
+       */
+      transport?: {
+        headers?: HeadersInit;
+      };
+    },
+    reconnect?: {
+      id: string;
+      oauthClientId?: string;
+    }
+  ): Promise<{
+    id: string;
+    authUrl: string | undefined;
+    clientId: string | undefined;
+  }> {
+    const authProvider = new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      callbackUrl
+    );
+
+    if (reconnect) {
+      authProvider.serverId = reconnect.id;
+      if (reconnect.oauthClientId) {
+        authProvider.clientId = reconnect.oauthClientId;
+      }
+    }
+
+    // allows passing through transport headers if necessary
+    // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
+    let headerTransportOpts: SSEClientTransportOptions = {};
+    if (options?.transport?.headers) {
+      headerTransportOpts = {
+        eventSourceInit: {
+          fetch: (url, init) =>
+            fetch(url, {
+              ...init,
+              headers: options?.transport?.headers
+            })
+        },
+        requestInit: {
+          headers: options?.transport?.headers
+        }
+      };
+    }
+
+    const { id, authUrl, clientId } = await this.mcp.connect(url, {
+      client: options?.client,
+      reconnect,
+      transport: {
+        ...headerTransportOpts,
+        authProvider
+      }
+    });
+
+    return {
+      authUrl,
+      clientId,
+      id
+    };
+  }
+
+  async removeMcpServer(id: string) {
+    this.mcp.closeConnection(id);
+    this.sql`
+      DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
+    `;
+    this.broadcast(
+      JSON.stringify({
+        mcp: this.getMcpServers(),
+        type: "cf_agent_mcp_servers"
+      })
+    );
+  }
+
+  getMcpServers(): MCPServersState {
+    const mcpState: MCPServersState = {
+      prompts: this.mcp.listPrompts(),
+      resources: this.mcp.listResources(),
+      servers: {},
+      tools: this.mcp.listTools()
+    };
+
+    const servers = this.sql<MCPServerRow>`
+      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
+    `;
+
+    if (servers && Array.isArray(servers) && servers.length > 0) {
+      for (const server of servers) {
+        const serverConn = this.mcp.mcpConnections[server.id];
+        mcpState.servers[server.id] = {
+          auth_url: server.auth_url,
+          capabilities: serverConn?.serverCapabilities ?? null,
+          instructions: serverConn?.instructions ?? null,
+          name: server.name,
+          server_url: server.server_url,
+          // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
+          state: serverConn?.connectionState ?? "authenticating"
+        };
+      }
+    }
+
+    return mcpState;
   }
 }
 
@@ -815,17 +1553,17 @@ export async function routeAgentRequest<Env>(
   const corsHeaders =
     options?.cors === true
       ? {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
           "Access-Control-Allow-Credentials": "true",
-          "Access-Control-Max-Age": "86400",
+          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Max-Age": "86400"
         }
       : options?.cors;
 
   if (request.method === "OPTIONS") {
     if (corsHeaders) {
       return new Response(null, {
-        headers: corsHeaders,
+        headers: corsHeaders
       });
     }
     console.warn(
@@ -838,7 +1576,7 @@ export async function routeAgentRequest<Env>(
     env as Record<string, unknown>,
     {
       prefix: "agents",
-      ...(options as PartyServerOptions<Record<string, unknown>>),
+      ...(options as PartyServerOptions<Record<string, unknown>>)
     }
   );
 
@@ -851,24 +1589,238 @@ export async function routeAgentRequest<Env>(
     response = new Response(response.body, {
       headers: {
         ...response.headers,
-        ...corsHeaders,
-      },
+        ...corsHeaders
+      }
     });
   }
   return response;
 }
 
+export type EmailResolver<Env> = (
+  email: ForwardableEmailMessage,
+  env: Env
+) => Promise<{
+  agentName: string;
+  agentId: string;
+} | null>;
+
+/**
+ * Create a resolver that uses the message-id header to determine the agent to route the email to
+ * @returns A function that resolves the agent to route the email to
+ */
+export function createHeaderBasedEmailResolver<Env>(): EmailResolver<Env> {
+  return async (email: ForwardableEmailMessage, _env: Env) => {
+    const messageId = email.headers.get("message-id");
+    if (messageId) {
+      const messageIdMatch = messageId.match(/<([^@]+)@([^>]+)>/);
+      if (messageIdMatch) {
+        const [, agentId, domain] = messageIdMatch;
+        const agentName = domain.split(".")[0];
+        return { agentName, agentId };
+      }
+    }
+
+    const references = email.headers.get("references");
+    if (references) {
+      const referencesMatch = references.match(
+        /<([A-Za-z0-9+/]{43}=)@([^>]+)>/
+      );
+      if (referencesMatch) {
+        const [, base64Id, domain] = referencesMatch;
+        const agentId = Buffer.from(base64Id, "base64").toString("hex");
+        const agentName = domain.split(".")[0];
+        return { agentName, agentId };
+      }
+    }
+
+    const agentName = email.headers.get("x-agent-name");
+    const agentId = email.headers.get("x-agent-id");
+    if (agentName && agentId) {
+      return { agentName, agentId };
+    }
+
+    return null;
+  };
+}
+
+/**
+ * Create a resolver that uses the email address to determine the agent to route the email to
+ * @param defaultAgentName The default agent name to use if the email address does not contain a sub-address
+ * @returns A function that resolves the agent to route the email to
+ */
+export function createAddressBasedEmailResolver<Env>(
+  defaultAgentName: string
+): EmailResolver<Env> {
+  return async (email: ForwardableEmailMessage, _env: Env) => {
+    const emailMatch = email.to.match(/^([^+@]+)(?:\+([^@]+))?@(.+)$/);
+    if (!emailMatch) {
+      return null;
+    }
+
+    const [, localPart, subAddress] = emailMatch;
+
+    if (subAddress) {
+      return {
+        agentName: localPart,
+        agentId: subAddress
+      };
+    }
+
+    // Option 2: Use defaultAgentName namespace, localPart as agentId
+    // Common for catch-all email routing to a single EmailAgent namespace
+    return {
+      agentName: defaultAgentName,
+      agentId: localPart
+    };
+  };
+}
+
+/**
+ * Create a resolver that uses the agentName and agentId to determine the agent to route the email to
+ * @param agentName The name of the agent to route the email to
+ * @param agentId The id of the agent to route the email to
+ * @returns A function that resolves the agent to route the email to
+ */
+export function createCatchAllEmailResolver<Env>(
+  agentName: string,
+  agentId: string
+): EmailResolver<Env> {
+  return async () => ({ agentName, agentId });
+}
+
+export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
+  resolver: EmailResolver<Env>;
+};
+
+// Cache the agent namespace map for email routing
+// This maps both kebab-case and original names to namespaces
+const agentMapCache = new WeakMap<
+  Record<string, unknown>,
+  Record<string, unknown>
+>();
+
 /**
  * Route an email to the appropriate Agent
- * @param email Email message to route
- * @param env Environment containing Agent bindings
- * @param options Routing options
+ * @param email The email to route
+ * @param env The environment containing the Agent bindings
+ * @param options The options for routing the email
+ * @returns A promise that resolves when the email has been routed
  */
 export async function routeAgentEmail<Env>(
   email: ForwardableEmailMessage,
   env: Env,
-  options?: AgentOptions<Env>
-): Promise<void> {}
+  options: EmailRoutingOptions<Env>
+): Promise<void> {
+  const routingInfo = await options.resolver(email, env);
+
+  if (!routingInfo) {
+    console.warn("No routing information found for email, dropping message");
+    return;
+  }
+
+  // Build a map that includes both original names and kebab-case versions
+  if (!agentMapCache.has(env as Record<string, unknown>)) {
+    const map: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "idFromName" in value &&
+        typeof value.idFromName === "function"
+      ) {
+        // Add both the original name and kebab-case version
+        map[key] = value;
+        map[camelCaseToKebabCase(key)] = value;
+      }
+    }
+    agentMapCache.set(env as Record<string, unknown>, map);
+  }
+
+  const agentMap = agentMapCache.get(env as Record<string, unknown>)!;
+  const namespace = agentMap[routingInfo.agentName];
+
+  if (!namespace) {
+    // Provide helpful error message listing available agents
+    const availableAgents = Object.keys(agentMap)
+      .filter((key) => !key.includes("-")) // Show only original names, not kebab-case duplicates
+      .join(", ");
+    throw new Error(
+      `Agent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
+    );
+  }
+
+  const agent = await getAgentByName(
+    namespace as unknown as AgentNamespace<Agent<Env>>,
+    routingInfo.agentId
+  );
+
+  // let's make a serialisable version of the email
+  const serialisableEmail: AgentEmail = {
+    getRaw: async () => {
+      const reader = email.raw.getReader();
+      const chunks: Uint8Array[] = [];
+
+      let done = false;
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        done = readerDone;
+        if (value) {
+          chunks.push(value);
+        }
+      }
+
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const combined = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      return combined;
+    },
+    headers: email.headers,
+    rawSize: email.rawSize,
+    setReject: (reason: string) => {
+      email.setReject(reason);
+    },
+    forward: (rcptTo: string, headers?: Headers) => {
+      return email.forward(rcptTo, headers);
+    },
+    reply: (options: { from: string; to: string; raw: string }) => {
+      return email.reply(
+        new EmailMessage(options.from, options.to, options.raw)
+      );
+    },
+    from: email.from,
+    to: email.to
+  };
+
+  await agent._onEmail(serialisableEmail);
+}
+
+export type AgentEmail = {
+  from: string;
+  to: string;
+  getRaw: () => Promise<Uint8Array>;
+  headers: Headers;
+  rawSize: number;
+  setReject: (reason: string) => void;
+  forward: (rcptTo: string, headers?: Headers) => Promise<void>;
+  reply: (options: { from: string; to: string; raw: string }) => Promise<void>;
+};
+
+export type EmailSendOptions = {
+  to: string;
+  subject: string;
+  body: string;
+  contentType?: string;
+  headers?: Record<string, string>;
+  includeRoutingHeaders?: boolean;
+  agentName?: string;
+  agentId?: string;
+  domain?: string;
+};
 
 /**
  * Get or create an Agent by name
@@ -894,13 +1846,13 @@ export async function getAgentByName<Env, T extends Agent<Env>>(
  * A wrapper for streaming responses in callable methods
  */
 export class StreamingResponse {
-  #connection: Connection;
-  #id: string;
-  #closed = false;
+  private _connection: Connection;
+  private _id: string;
+  private _closed = false;
 
   constructor(connection: Connection, id: string) {
-    this.#connection = connection;
-    this.#id = id;
+    this._connection = connection;
+    this._id = id;
   }
 
   /**
@@ -908,17 +1860,17 @@ export class StreamingResponse {
    * @param chunk The data to send
    */
   send(chunk: unknown) {
-    if (this.#closed) {
+    if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
     const response: RPCResponse = {
-      type: "rpc",
-      id: this.#id,
-      success: true,
-      result: chunk,
       done: false,
+      id: this._id,
+      result: chunk,
+      success: true,
+      type: "rpc"
     };
-    this.#connection.send(JSON.stringify(response));
+    this._connection.send(JSON.stringify(response));
   }
 
   /**
@@ -926,17 +1878,17 @@ export class StreamingResponse {
    * @param finalChunk Optional final chunk of data to send
    */
   end(finalChunk?: unknown) {
-    if (this.#closed) {
+    if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
-    this.#closed = true;
+    this._closed = true;
     const response: RPCResponse = {
-      type: "rpc",
-      id: this.#id,
-      success: true,
-      result: finalChunk,
       done: true,
+      id: this._id,
+      result: finalChunk,
+      success: true,
+      type: "rpc"
     };
-    this.#connection.send(JSON.stringify(response));
+    this._connection.send(JSON.stringify(response));
   }
 }

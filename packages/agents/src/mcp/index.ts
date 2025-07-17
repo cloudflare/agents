@@ -1,48 +1,55 @@
 import { DurableObject } from "cloudflare:workers";
-import { Agent } from "../";
-import type { WSMessage } from "../";
+import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Connection } from "../";
-import type {
-  JSONRPCError,
-  JSONRPCMessage,
-  JSONRPCNotification,
-  JSONRPCRequest,
-  JSONRPCResponse,
-} from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import {
   InitializeRequestSchema,
+  JSONRPCMessageSchema,
   isJSONRPCError,
   isJSONRPCNotification,
   isJSONRPCRequest,
-  isJSONRPCResponse,
-  JSONRPCErrorSchema,
-  JSONRPCMessageSchema,
-  JSONRPCNotificationSchema,
-  JSONRPCRequestSchema,
-  JSONRPCResponseSchema,
+  isJSONRPCResponse
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { Connection, WSMessage } from "../";
+import { Agent } from "../";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
-// CORS helper function
+// CORS helper functions
+function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
+  const origin = "*";
+  return {
+    "Access-Control-Allow-Headers":
+      corsOptions.headers ||
+      "Content-Type, mcp-session-id, mcp-protocol-version",
+    "Access-Control-Allow-Methods": corsOptions.methods || "GET, POST, OPTIONS",
+    "Access-Control-Allow-Origin": corsOptions.origin || origin,
+    "Access-Control-Expose-Headers":
+      corsOptions.exposeHeaders || "mcp-session-id",
+    "Access-Control-Max-Age": (corsOptions.maxAge || 86400).toString()
+  };
+}
+
+function isDurableObjectNamespace(
+  namespace: unknown
+): namespace is DurableObjectNamespace<McpAgent> {
+  return (
+    typeof namespace === "object" &&
+    namespace !== null &&
+    "newUniqueId" in namespace &&
+    typeof namespace.newUniqueId === "function" &&
+    "idFromName" in namespace &&
+    typeof namespace.idFromName === "function"
+  );
+}
+
 function handleCORS(
   request: Request,
   corsOptions?: CORSOptions
 ): Response | null {
-  const origin = request.headers.get("Origin") || "*";
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": corsOptions?.origin || origin,
-    "Access-Control-Allow-Methods":
-      corsOptions?.methods || "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": corsOptions?.headers || "Content-Type",
-    "Access-Control-Max-Age": (corsOptions?.maxAge || 86400).toString(),
-  };
-
   if (request.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+    return new Response(null, { headers: corsHeaders(request, corsOptions) });
   }
 
   return null;
@@ -53,6 +60,7 @@ interface CORSOptions {
   methods?: string;
   headers?: string;
   maxAge?: number;
+  exposeHeaders?: string;
 }
 
 class McpSSETransport implements Transport {
@@ -61,26 +69,26 @@ class McpSSETransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void;
   sessionId?: string;
 
-  #getWebSocket: () => WebSocket | null;
-  #started = false;
+  private _getWebSocket: () => WebSocket | null;
+  private _started = false;
   constructor(getWebSocket: () => WebSocket | null) {
-    this.#getWebSocket = getWebSocket;
+    this._getWebSocket = getWebSocket;
   }
 
   async start() {
     // The transport does not manage the WebSocket connection since it's terminated
     // by the Durable Object in order to allow hibernation. There's nothing to initialize.
-    if (this.#started) {
+    if (this._started) {
       throw new Error("Transport already started");
     }
-    this.#started = true;
+    this._started = true;
   }
 
   async send(message: JSONRPCMessage) {
-    if (!this.#started) {
+    if (!this._started) {
       throw new Error("Transport not started");
     }
-    const websocket = this.#getWebSocket();
+    const websocket = this._getWebSocket();
     if (!websocket) {
       throw new Error("WebSocket not connected");
     }
@@ -108,45 +116,45 @@ class McpStreamableHttpTransport implements Transport {
 
   // TODO: If there is an open connection to send server-initiated messages
   // back, we should use that connection
-  #getWebSocketForGetRequest: () => WebSocket | null;
+  private _getWebSocketForGetRequest: () => WebSocket | null;
 
   // Get the appropriate websocket connection for a given message id
-  #getWebSocketForMessageID: (id: string) => WebSocket | null;
+  private _getWebSocketForMessageID: (id: string) => WebSocket | null;
 
   // Notify the server that a response has been sent for a given message id
   // so that it may clean up it's mapping of message ids to connections
   // once they are no longer needed
-  #notifyResponseIdSent: (id: string) => void;
+  private _notifyResponseIdSent: (id: string) => void;
 
-  #started = false;
+  private _started = false;
   constructor(
     getWebSocketForMessageID: (id: string) => WebSocket | null,
     notifyResponseIdSent: (id: string | number) => void
   ) {
-    this.#getWebSocketForMessageID = getWebSocketForMessageID;
-    this.#notifyResponseIdSent = notifyResponseIdSent;
+    this._getWebSocketForMessageID = getWebSocketForMessageID;
+    this._notifyResponseIdSent = notifyResponseIdSent;
     // TODO
-    this.#getWebSocketForGetRequest = () => null;
+    this._getWebSocketForGetRequest = () => null;
   }
 
   async start() {
     // The transport does not manage the WebSocket connection since it's terminated
     // by the Durable Object in order to allow hibernation. There's nothing to initialize.
-    if (this.#started) {
+    if (this._started) {
       throw new Error("Transport already started");
     }
-    this.#started = true;
+    this._started = true;
   }
 
   async send(message: JSONRPCMessage) {
-    if (!this.#started) {
+    if (!this._started) {
       throw new Error("Transport not started");
     }
 
     let websocket: WebSocket | null = null;
 
     if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
-      websocket = this.#getWebSocketForMessageID(message.id.toString());
+      websocket = this._getWebSocketForMessageID(message.id.toString());
       if (!websocket) {
         throw new Error(
           `Could not find WebSocket for message id: ${message.id}`
@@ -155,7 +163,7 @@ class McpStreamableHttpTransport implements Transport {
     } else if (isJSONRPCRequest(message)) {
       // requests originating from the server must be sent over the
       // the connection created by a GET request
-      websocket = this.#getWebSocketForGetRequest();
+      websocket = this._getWebSocketForGetRequest();
     } else if (isJSONRPCNotification(message)) {
       // notifications do not have an id
       // but do have a relatedRequestId field
@@ -166,7 +174,7 @@ class McpStreamableHttpTransport implements Transport {
     try {
       websocket?.send(JSON.stringify(message));
       if (isJSONRPCResponse(message)) {
-        this.#notifyResponseIdSent(message.id.toString());
+        this._notifyResponseIdSent(message.id.toString());
       }
     } catch (error) {
       this.onerror?.(error as Error);
@@ -185,30 +193,30 @@ type MaybePromise<T> = T | Promise<T>;
 export abstract class McpAgent<
   Env = unknown,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>,
+  Props extends Record<string, unknown> = Record<string, unknown>
 > extends DurableObject<Env> {
-  #status: "zero" | "starting" | "started" = "zero";
-  #transport?: Transport;
-  #transportType: TransportType = "unset";
-  #requestIdToConnectionId: Map<string | number, string> = new Map();
+  private _status: "zero" | "starting" | "started" = "zero";
+  private _transport?: Transport;
+  private _transportType: TransportType = "unset";
+  private _requestIdToConnectionId: Map<string | number, string> = new Map();
 
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
    */
-  #agent: Agent<Env, State>;
+  private _agent: Agent<Env, State>;
 
   get mcp() {
-    return this.#agent.mcp;
+    return this._agent.mcp;
   }
 
   protected constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     const self = this;
 
-    this.#agent = new (class extends Agent<Env, State> {
+    this._agent = new (class extends Agent<Env, State> {
       static options = {
-        hibernate: true,
+        hibernate: true
       };
 
       onStateUpdate(state: State | undefined, source: Connection | "server") {
@@ -229,28 +237,29 @@ export abstract class McpAgent<
    */
   initialState!: State;
   get state() {
-    return this.#agent.state;
+    return this._agent.state;
   }
   sql<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
     ...values: (string | number | boolean | null)[]
   ) {
-    return this.#agent.sql<T>(strings, ...values);
+    return this._agent.sql<T>(strings, ...values);
   }
 
   setState(state: State) {
-    return this.#agent.setState(state);
+    return this._agent.setState(state);
   }
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
   async onStart() {
     const self = this;
 
-    this.#agent = new (class extends Agent<Env, State> {
+    this._agent = new (class extends Agent<Env, State> {
       initialState: State = self.initialState;
       static options = {
-        hibernate: true,
+        hibernate: true
       };
 
       onStateUpdate(state: State | undefined, source: Connection | "server") {
@@ -263,7 +272,7 @@ export abstract class McpAgent<
     })(this.ctx, this.env);
 
     this.props = (await this.ctx.storage.get("props")) as Props;
-    this.#transportType = (await this.ctx.storage.get(
+    this._transportType = (await this.ctx.storage.get(
       "transportType"
     )) as TransportType;
     await this._init(this.props);
@@ -271,15 +280,15 @@ export abstract class McpAgent<
     const server = await this.server;
 
     // Connect to the MCP server
-    if (this.#transportType === "sse") {
-      this.#transport = new McpSSETransport(() => this.getWebSocket());
-      await server.connect(this.#transport);
-    } else if (this.#transportType === "streamable-http") {
-      this.#transport = new McpStreamableHttpTransport(
+    if (this._transportType === "sse") {
+      this._transport = new McpSSETransport(() => this.getWebSocket());
+      await server.connect(this._transport);
+    } else if (this._transportType === "streamable-http") {
+      this._transport = new McpStreamableHttpTransport(
         (id) => this.getWebSocketForResponseID(id),
-        (id) => this.#requestIdToConnectionId.delete(id)
+        (id) => this._requestIdToConnectionId.delete(id)
       );
-      await server.connect(this.#transport);
+      await server.connect(this._transport);
     }
   }
 
@@ -312,26 +321,26 @@ export abstract class McpAgent<
     return (await this.ctx.storage.get("initialized")) === true;
   }
 
-  async #initialize(): Promise<void> {
+  private async _initialize(): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
-      this.#status = "starting";
+      this._status = "starting";
       await this.onStart();
-      this.#status = "started";
+      this._status = "started";
     });
   }
 
   // Allow the worker to fetch a websocket connection to the agent
   async fetch(request: Request): Promise<Response> {
-    if (this.#status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.#initialize();
+      await this._initialize();
     }
 
     // Only handle WebSocket upgrade requests
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected WebSocket Upgrade request", {
-        status: 400,
+        status: 400
       });
     }
 
@@ -354,36 +363,36 @@ export abstract class McpAgent<
 
         // This session must always use the SSE transporo
         await this.ctx.storage.put("transportType", "sse");
-        this.#transportType = "sse";
+        this._transportType = "sse";
 
-        if (!this.#transport) {
-          this.#transport = new McpSSETransport(() => this.getWebSocket());
-          await server.connect(this.#transport);
+        if (!this._transport) {
+          this._transport = new McpSSETransport(() => this.getWebSocket());
+          await server.connect(this._transport);
         }
 
         // Defer to the Agent's fetch method to handle the WebSocket connection
-        return this.#agent.fetch(request);
+        return this._agent.fetch(request);
       }
       case "/streamable-http": {
-        if (!this.#transport) {
-          this.#transport = new McpStreamableHttpTransport(
+        if (!this._transport) {
+          this._transport = new McpStreamableHttpTransport(
             (id) => this.getWebSocketForResponseID(id),
-            (id) => this.#requestIdToConnectionId.delete(id)
+            (id) => this._requestIdToConnectionId.delete(id)
           );
-          await server.connect(this.#transport);
+          await server.connect(this._transport);
         }
 
         // This session must always use the streamable-http transport
         await this.ctx.storage.put("transportType", "streamable-http");
-        this.#transportType = "streamable-http";
+        this._transportType = "streamable-http";
 
-        return this.#agent.fetch(request);
+        return this._agent.fetch(request);
       }
       default:
         return new Response(
           "Internal Server Error: Expected /sse or /streamable-http path",
           {
-            status: 500,
+            status: 500
           }
         );
     }
@@ -398,22 +407,22 @@ export abstract class McpAgent<
   }
 
   getWebSocketForResponseID(id: string): WebSocket | null {
-    const connectionId = this.#requestIdToConnectionId.get(id);
+    const connectionId = this._requestIdToConnectionId.get(id);
     if (connectionId === undefined) {
       return null;
     }
-    return this.#agent.getConnection(connectionId) ?? null;
+    return this._agent.getConnection(connectionId) ?? null;
   }
 
   // All messages received here. This is currently never called
   async onMessage(connection: Connection, event: WSMessage) {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
-    if (this.#transportType !== "streamable-http") {
+    if (this._transportType !== "streamable-http") {
       const err = new Error(
         "Internal Server Error: Expected streamable-http protocol"
       );
-      this.#transport?.onerror?.(err);
+      this._transport?.onerror?.(err);
       return;
     }
 
@@ -424,34 +433,34 @@ export abstract class McpAgent<
         typeof event === "string" ? event : new TextDecoder().decode(event);
       message = JSONRPCMessageSchema.parse(JSON.parse(data));
     } catch (error) {
-      this.#transport?.onerror?.(error as Error);
+      this._transport?.onerror?.(error as Error);
       return;
     }
 
     // We need to map every incoming message to the connection that it came in on
     // so that we can send relevant responses and notifications back on the same connection
     if (isJSONRPCRequest(message)) {
-      this.#requestIdToConnectionId.set(message.id.toString(), connection.id);
+      this._requestIdToConnectionId.set(message.id.toString(), connection.id);
     }
 
-    this.#transport?.onmessage?.(message);
+    this._transport?.onmessage?.(message);
   }
 
   // All messages received over SSE after the initial connection has been established
   // will be passed here
   async onSSEMcpMessage(
-    sessionId: string,
+    _sessionId: string,
     request: Request
   ): Promise<Error | null> {
-    if (this.#status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.#initialize();
+      await this._initialize();
     }
 
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
-    if (this.#transportType !== "sse") {
+    if (this._transportType !== "sse") {
       return new Error("Internal Server Error: Expected SSE protocol");
     }
 
@@ -461,14 +470,15 @@ export abstract class McpAgent<
       try {
         parsedMessage = JSONRPCMessageSchema.parse(message);
       } catch (error) {
-        this.#transport?.onerror?.(error as Error);
+        this._transport?.onerror?.(error as Error);
         throw error;
       }
 
-      this.#transport?.onmessage?.(parsedMessage);
+      this._transport?.onmessage?.(parsedMessage);
       return null;
     } catch (error) {
-      this.#transport?.onerror?.(error as Error);
+      console.error("Error forwarding message to SSE:", error);
+      this._transport?.onerror?.(error as Error);
       return error as Error;
     }
   }
@@ -478,22 +488,22 @@ export abstract class McpAgent<
     ws: WebSocket,
     event: ArrayBuffer | string
   ): Promise<void> {
-    if (this.#status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.#initialize();
+      await this._initialize();
     }
-    return await this.#agent.webSocketMessage(ws, event);
+    return await this._agent.webSocketMessage(ws, event);
   }
 
   // WebSocket event handlers for hibernation support
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
-    if (this.#status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.#initialize();
+      await this._initialize();
     }
-    return await this.#agent.webSocketError(ws, error);
+    return await this._agent.webSocketError(ws, error);
   }
 
   async webSocketClose(
@@ -502,19 +512,19 @@ export abstract class McpAgent<
     reason: string,
     wasClean: boolean
   ): Promise<void> {
-    if (this.#status !== "started") {
+    if (this._status !== "started") {
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
-      await this.#initialize();
+      await this._initialize();
     }
-    return await this.#agent.webSocketClose(ws, code, reason, wasClean);
+    return await this._agent.webSocketClose(ws, code, reason, wasClean);
   }
 
   static mount(
     path: string,
     {
       binding = "MCP_OBJECT",
-      corsOptions,
+      corsOptions
     }: {
       binding?: string;
       corsOptions?: CORSOptions;
@@ -527,7 +537,7 @@ export abstract class McpAgent<
     path: string,
     {
       binding = "MCP_OBJECT",
-      corsOptions,
+      corsOptions
     }: {
       binding?: string;
       corsOptions?: CORSOptions;
@@ -542,6 +552,7 @@ export abstract class McpAgent<
 
     return {
       async fetch<Env>(
+        this: void,
         request: Request,
         env: Env,
         ctx: ExecutionContext
@@ -561,12 +572,13 @@ export abstract class McpAgent<
           return new Response("Invalid binding", { status: 500 });
         }
 
-        // Ensure that the biding is to a DurableObject
-        if (bindingValue.toString() !== "[object DurableObjectNamespace]") {
+        // Ensure that the binding is to a DurableObject
+        if (!isDurableObjectNamespace(bindingValue)) {
           return new Response("Invalid binding", { status: 500 });
         }
 
-        const namespace = bindingValue as DurableObjectNamespace<McpAgent>;
+        const namespace =
+          bindingValue satisfies DurableObjectNamespace<McpAgent>;
 
         // Handle initial SSE connection
         if (request.method === "GET" && basePattern.test(url)) {
@@ -606,8 +618,8 @@ export abstract class McpAgent<
               headers: {
                 Upgrade: "websocket",
                 // Required by PartyServer
-                "x-partykit-room": sessionId,
-              },
+                "x-partykit-room": sessionId
+              }
             })
           );
 
@@ -617,7 +629,7 @@ export abstract class McpAgent<
             console.error("Failed to establish WebSocket connection");
             await writer.close();
             return new Response("Failed to establish WebSocket connection", {
-              status: 500,
+              status: 500
             });
           }
 
@@ -651,10 +663,10 @@ export abstract class McpAgent<
 
           // Handle WebSocket errors
           ws.addEventListener("error", (error) => {
-            async function onError(error: Event) {
+            async function onError(_error: Event) {
               try {
                 await writer.close();
-              } catch (e) {
+              } catch (_e) {
                 // Ignore errors when closing
               }
             }
@@ -676,11 +688,11 @@ export abstract class McpAgent<
           // Return the SSE response
           return new Response(readable, {
             headers: {
-              "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
-              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
-            },
+              "Content-Type": "text/event-stream",
+              ...corsHeaders(request, corsOptions)
+            }
           });
         }
 
@@ -699,7 +711,7 @@ export abstract class McpAgent<
           const contentType = request.headers.get("content-type") || "";
           if (!contentType.includes("application/json")) {
             return new Response(`Unsupported content-type: ${contentType}`, {
-              status: 400,
+              status: 400
             });
           }
 
@@ -712,7 +724,7 @@ export abstract class McpAgent<
             return new Response(
               `Request body too large: ${contentLength} bytes`,
               {
-                status: 400,
+                status: 400
               }
             );
           }
@@ -726,29 +738,29 @@ export abstract class McpAgent<
 
           if (error) {
             return new Response(error.message, {
-              status: 400,
               headers: {
-                "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
                 Connection: "keep-alive",
-                "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+                "Content-Type": "text/event-stream",
+                ...corsHeaders(request, corsOptions)
               },
+              status: 400
             });
           }
 
           return new Response("Accepted", {
-            status: 202,
             headers: {
-              "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
-              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+              "Content-Type": "text/event-stream",
+              ...corsHeaders(request, corsOptions)
             },
+            status: 202
           });
         }
 
         return new Response("Not Found", { status: 404 });
-      },
+      }
     };
   }
 
@@ -756,7 +768,7 @@ export abstract class McpAgent<
     path: string,
     {
       binding = "MCP_OBJECT",
-      corsOptions,
+      corsOptions
     }: { binding?: string; corsOptions?: CORSOptions } = {}
   ) {
     let pathname = path;
@@ -767,6 +779,7 @@ export abstract class McpAgent<
 
     return {
       async fetch<Env>(
+        this: void,
         request: Request,
         env: Env,
         ctx: ExecutionContext
@@ -788,12 +801,13 @@ export abstract class McpAgent<
           return new Response("Invalid binding", { status: 500 });
         }
 
-        // Ensure that the biding is to a DurableObject
-        if (bindingValue.toString() !== "[object DurableObjectNamespace]") {
+        // Ensure that the binding is to a DurableObject
+        if (!isDurableObjectNamespace(bindingValue)) {
           return new Response("Invalid binding", { status: 500 });
         }
 
-        const namespace = bindingValue as DurableObjectNamespace<McpAgent>;
+        const namespace =
+          bindingValue satisfies DurableObjectNamespace<McpAgent>;
 
         if (request.method === "POST" && basePattern.test(url)) {
           // validate the Accept header
@@ -804,13 +818,13 @@ export abstract class McpAgent<
             !acceptHeader.includes("text/event-stream")
           ) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
                 message:
-                  "Not Acceptable: Client must accept both application/json and text/event-stream",
+                  "Not Acceptable: Client must accept both application/json and text/event-stream"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 406 });
           }
@@ -818,13 +832,13 @@ export abstract class McpAgent<
           const ct = request.headers.get("content-type");
           if (!ct || !ct.includes("application/json")) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
                 message:
-                  "Unsupported Media Type: Content-Type must be application/json",
+                  "Unsupported Media Type: Content-Type must be application/json"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 415 });
           }
@@ -836,12 +850,12 @@ export abstract class McpAgent<
           );
           if (contentLength > MAXIMUM_MESSAGE_SIZE_BYTES) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
-                message: `Request body too large. Maximum size is ${MAXIMUM_MESSAGE_SIZE_BYTES} bytes`,
+                message: `Request body too large. Maximum size is ${MAXIMUM_MESSAGE_SIZE_BYTES} bytes`
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 413 });
           }
@@ -851,14 +865,14 @@ export abstract class McpAgent<
 
           try {
             rawMessage = await request.json();
-          } catch (error) {
+          } catch (_error) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32700,
-                message: "Parse error: Invalid JSON",
+                message: "Parse error: Invalid JSON"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 400 });
           }
@@ -877,12 +891,12 @@ export abstract class McpAgent<
           for (const msg of arrayMessage) {
             if (!JSONRPCMessageSchema.safeParse(msg).success) {
               const body = JSON.stringify({
-                jsonrpc: "2.0",
                 error: {
                   code: -32700,
-                  message: "Parse error: Invalid JSON-RPC message",
+                  message: "Parse error: Invalid JSON-RPC message"
                 },
                 id: null,
+                jsonrpc: "2.0"
               });
               return new Response(body, { status: 400 });
             }
@@ -899,13 +913,13 @@ export abstract class McpAgent<
 
           if (isInitializationRequest && sessionId) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32600,
                 message:
-                  "Invalid Request: Initialization requests must not include a sessionId",
+                  "Invalid Request: Initialization requests must not include a sessionId"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 400 });
           }
@@ -913,13 +927,13 @@ export abstract class McpAgent<
           // The initialization request must be the only request in the batch
           if (isInitializationRequest && messages.length > 1) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32600,
                 message:
-                  "Invalid Request: Only one initialization request is allowed",
+                  "Invalid Request: Only one initialization request is allowed"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 400 });
           }
@@ -929,12 +943,12 @@ export abstract class McpAgent<
           // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
           if (!isInitializationRequest && !sessionId) {
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32000,
-                message: "Bad Request: Mcp-Session-Id header is required",
+                message: "Bad Request: Mcp-Session-Id header is required"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 400 });
           }
@@ -949,17 +963,18 @@ export abstract class McpAgent<
           const isInitialized = await doStub.isInitialized();
 
           if (isInitializationRequest) {
+            await doStub._init(ctx.props);
             await doStub.setInitialized();
           } else if (!isInitialized) {
             // if we have gotten here, then a session id that was never initialized
             // was provided
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32001,
-                message: "Session not found",
+                message: "Session not found"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 404 });
           }
@@ -980,8 +995,8 @@ export abstract class McpAgent<
               headers: {
                 Upgrade: "websocket",
                 // Required by PartyServer
-                "x-partykit-room": sessionId,
-              },
+                "x-partykit-room": sessionId
+              }
             })
           );
 
@@ -992,12 +1007,12 @@ export abstract class McpAgent<
 
             await writer.close();
             const body = JSON.stringify({
-              jsonrpc: "2.0",
               error: {
                 code: -32001,
-                message: "Failed to establish WebSocket connection",
+                message: "Failed to establish WebSocket connection"
               },
               id: null,
+              jsonrpc: "2.0"
             });
             return new Response(body, { status: 500 });
           }
@@ -1055,10 +1070,10 @@ export abstract class McpAgent<
 
           // Handle WebSocket errors
           ws.addEventListener("error", (error) => {
-            async function onError(error: Event) {
+            async function onError(_error: Event) {
               try {
                 await writer.close();
-              } catch (e) {
+              } catch (_e) {
                 // Ignore errors when closing
               }
             }
@@ -1090,7 +1105,10 @@ export abstract class McpAgent<
             // closing the websocket will also close the SSE connection
             ws.close();
 
-            return new Response(null, { status: 202 });
+            return new Response(null, {
+              headers: corsHeaders(request, corsOptions),
+              status: 202
+            });
           }
 
           for (const message of messages) {
@@ -1107,27 +1125,27 @@ export abstract class McpAgent<
           // handler
           return new Response(readable, {
             headers: {
-              "Content-Type": "text/event-stream",
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
+              "Content-Type": "text/event-stream",
               "mcp-session-id": sessionId,
-              "Access-Control-Allow-Origin": corsOptions?.origin || "*",
+              ...corsHeaders(request, corsOptions)
             },
-            status: 200,
+            status: 200
           });
         }
 
         // We don't yet support GET or DELETE requests
         const body = JSON.stringify({
-          jsonrpc: "2.0",
           error: {
             code: -32000,
-            message: "Method not allowed",
+            message: "Method not allowed"
           },
           id: null,
+          jsonrpc: "2.0"
         });
         return new Response(body, { status: 405 });
-      },
+      }
     };
   }
 }

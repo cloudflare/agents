@@ -1,15 +1,14 @@
+/** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
 import "./app.css";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
 import { useAgent } from "agents/react";
-
+import { nanoid } from "nanoid";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import sequentialCode from "./flows/01 sequential.txt?raw";
 import routingCode from "./flows/02 routing.txt?raw";
 import parallelCode from "./flows/03 parallel.txt?raw";
 import orchestratorCode from "./flows/04 orchestrator.txt?raw";
 import evaluatorCode from "./flows/05 evaluator.txt?raw";
-
-import { nanoid } from "nanoid";
 
 type ToastType = "success" | "error" | "info";
 
@@ -49,16 +48,16 @@ type FormState = {
 };
 
 const LANGUAGES = [
-  { value: "french", label: "French" },
-  { value: "spanish", label: "Spanish" },
-  { value: "japanese", label: "Japanese" },
-  { value: "german", label: "German" },
-  { value: "mandarin", label: "Mandarin Chinese" },
-  { value: "arabic", label: "Arabic" },
-  { value: "russian", label: "Russian" },
-  { value: "italian", label: "Italian" },
-  { value: "klingon", label: "Klingon" },
-  { value: "portuguese", label: "Portuguese" },
+  { label: "French", value: "french" },
+  { label: "Spanish", value: "spanish" },
+  { label: "Japanese", value: "japanese" },
+  { label: "German", value: "german" },
+  { label: "Mandarin Chinese", value: "mandarin" },
+  { label: "Arabic", value: "arabic" },
+  { label: "Russian", value: "russian" },
+  { label: "Italian", value: "italian" },
+  { label: "Klingon", value: "klingon" },
+  { label: "Portuguese", value: "portuguese" }
 ] as const;
 
 function Toast({ toast, onClose }: { toast: Toast; onClose: () => void }) {
@@ -94,7 +93,7 @@ function Toast({ toast, onClose }: { toast: Toast; onClose: () => void }) {
 
 function ToastContainer({
   toasts,
-  onClose,
+  onClose
 }: {
   toasts: Toast[];
   onClose: (id: number) => void;
@@ -124,13 +123,12 @@ function PatternSection({
   image,
   code,
   index,
-  sessionId,
+  sessionId
 }: PatternProps & { sessionId: string }) {
   const [activeTab, setActiveTab] = useState<"diagram" | "code">("diagram");
   const [isCodeExpanded, setIsCodeExpanded] = useState(false);
 
   const socket = useAgent({
-    prefix: "agents",
     agent: type,
     name: sessionId,
     onMessage: (e) => {
@@ -142,20 +140,21 @@ function PatternSection({
         case "toast": {
           const event = new CustomEvent("showToast", {
             detail: {
-              type: data.toast.type as ToastType,
               message: data.toast.message,
-            },
+              type: data.toast.type as ToastType
+            }
           });
           window.dispatchEvent(event);
           break;
         }
       }
     },
+    prefix: "agents"
   });
 
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>({
     isRunning: false,
-    output: "",
+    output: ""
   });
 
   const [formState, setFormState] = useState<FormState[typeof type]>(() => {
@@ -170,17 +169,17 @@ function PatternSection({
   // TODO: Add validation
   database.save(data);
   return true;
-}`,
+}`
         };
       case "orchestrator":
         return {
           featureRequest:
-            "Add dark mode support to the dashboard, including theme persistence and system preference detection",
+            "Add dark mode support to the dashboard, including theme persistence and system preference detection"
         };
       case "evaluator":
         return {
-          text: "The early bird catches the worm",
           targetLanguage: LANGUAGES[0].value,
+          text: "The early bird catches the worm"
         };
     }
   });
@@ -342,19 +341,19 @@ function PatternSection({
     try {
       socket.send(
         JSON.stringify({
-          type: "run",
           input: formState,
+          type: "run"
         })
       );
       // Show success toast when workflow starts
       const event = new CustomEvent("showToast", {
-        detail: { type: "info", message: `Started ${title} workflow...` },
+        detail: { message: `Started ${title} workflow...`, type: "info" }
       });
       window.dispatchEvent(event);
-    } catch (error) {
+    } catch (_error) {
       // Show error toast if something goes wrong
       const event = new CustomEvent("showToast", {
-        detail: { type: "error", message: `Failed to start ${title} workflow` },
+        detail: { message: `Failed to start ${title} workflow`, type: "error" }
       });
       window.dispatchEvent(event);
     }
@@ -471,7 +470,7 @@ export default function App() {
 
   const addToast = useCallback((type: ToastType, message: string) => {
     const id = Date.now();
-    setToasts((prev) => [...prev, { id, type, message }]);
+    setToasts((prev) => [...prev, { id, message, type }]);
   }, []);
 
   const removeToast = (id: number) => {
@@ -510,41 +509,41 @@ export default function App() {
   };
 
   const patterns = {
-    sequential: {
-      title: "Prompt Chaining",
-      description:
-        "Decomposes tasks into a sequence of steps, where each LLM call processes the output of the previous one.",
-      image: "/flows/01 sequential.png",
-      code: sequentialCode,
-    },
-    routing: {
-      title: "Routing",
-      description:
-        "Classifies input and directs it to specialized followup tasks, allowing for separation of concerns.",
-      image: "/flows/02 routing.png",
-      code: routingCode,
-    },
-    parallel: {
-      title: "Parallelization",
-      description:
-        "Enables simultaneous task processing through sectioning or voting mechanisms.",
-      image: "/flows/03 parallel.png",
-      code: parallelCode,
-    },
-    orchestrator: {
-      title: "Orchestrator-Workers",
-      description:
-        "A central LLM dynamically breaks down tasks, delegates to worker LLMs, and synthesizes results.",
-      image: "/flows/04 orchestrator.png",
-      code: orchestratorCode,
-    },
     evaluator: {
-      title: "Evaluator-Optimizer",
+      code: evaluatorCode,
       description:
         "One LLM generates responses while another provides evaluation and feedback in a loop.",
       image: "/flows/05 evaluator.png",
-      code: evaluatorCode,
+      title: "Evaluator-Optimizer"
     },
+    orchestrator: {
+      code: orchestratorCode,
+      description:
+        "A central LLM dynamically breaks down tasks, delegates to worker LLMs, and synthesizes results.",
+      image: "/flows/04 orchestrator.png",
+      title: "Orchestrator-Workers"
+    },
+    parallel: {
+      code: parallelCode,
+      description:
+        "Enables simultaneous task processing through sectioning or voting mechanisms.",
+      image: "/flows/03 parallel.png",
+      title: "Parallelization"
+    },
+    routing: {
+      code: routingCode,
+      description:
+        "Classifies input and directs it to specialized followup tasks, allowing for separation of concerns.",
+      image: "/flows/02 routing.png",
+      title: "Routing"
+    },
+    sequential: {
+      code: sequentialCode,
+      description:
+        "Decomposes tasks into a sequence of steps, where each LLM call processes the output of the previous one.",
+      image: "/flows/01 sequential.png",
+      title: "Prompt Chaining"
+    }
   };
 
   return (
@@ -597,7 +596,7 @@ export default function App() {
         {(
           Object.entries(patterns) as [
             WorkflowType,
-            (typeof patterns)[keyof typeof patterns],
+            (typeof patterns)[keyof typeof patterns]
           ][]
         ).map(([type, pattern], index) => (
           <PatternSection

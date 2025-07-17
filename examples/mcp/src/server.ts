@@ -1,5 +1,5 @@
-import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
 type Env = {
@@ -8,21 +8,20 @@ type Env = {
 
 type State = { counter: number };
 
-// biome-ignore lint/complexity/noBannedTypes: <explanation>
 export class MyMCP extends McpAgent<Env, State, {}> {
   server = new McpServer({
     name: "Demo",
-    version: "1.0.0",
+    version: "1.0.0"
   });
 
   initialState: State = {
-    counter: 1,
+    counter: 1
   };
 
   async init() {
     this.server.resource("counter", "mcp://resource/counter", (uri) => {
       return {
-        contents: [{ uri: uri.href, text: String(this.state.counter) }],
+        contents: [{ text: String(this.state.counter), uri: uri.href }]
       };
     });
 
@@ -36,10 +35,10 @@ export class MyMCP extends McpAgent<Env, State, {}> {
         return {
           content: [
             {
-              type: "text",
               text: String(`Added ${a}, total is now ${this.state.counter}`),
-            },
-          ],
+              type: "text"
+            }
+          ]
         };
       }
     );
@@ -51,5 +50,5 @@ export class MyMCP extends McpAgent<Env, State, {}> {
 }
 
 export default MyMCP.mount("/sse", {
-  binding: "MyMCP",
+  binding: "MyMCP"
 });

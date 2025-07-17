@@ -1,0 +1,36 @@
+{
+  "compatibility_date": "2025-04-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TestMcpAgent",
+        "name": "MCP_OBJECT"
+      },
+      {
+        "class_name": "TestEmailAgent",
+        "name": "EmailAgent"
+      },
+      {
+        "class_name": "TestCaseSensitiveAgent",
+        "name": "CaseSensitiveAgent"
+      },
+      {
+        "class_name": "TestUserNotificationAgent",
+        "name": "UserNotificationAgent"
+      }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": [
+        "TestMcpAgent",
+        "TestEmailAgent",
+        "TestCaseSensitiveAgent",
+        "TestUserNotificationAgent"
+      ],
+      "tag": "v1"
+    }
+  ]
+}

@@ -1,31 +1,69 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
-  "vcs": {
-    "enabled": false,
-    "clientKind": "git",
-    "useIgnoreFile": false
+  "$schema": "https://biomejs.dev/schemas/2.0.6/schema.json",
+  "assist": {
+    "actions": {
+      "source": {
+        "useSortedKeys": "off",
+        "organizeImports": "off"
+      }
+    },
+    "enabled": true
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": ["node_modules", "dist", ".wrangler", "./tsconfig.base.json"]
+    "includes": [
+      "examples/**",
+      "openai-sdk/**",
+      "packages/**",
+      "guides/**",
+      "!node_modules",
+      "!**/node_modules",
+      "!dist",
+      "!**/dist",
+      "!.wrangler",
+      "!**/.wrangler",
+      "!wrangler.jsonc",
+      "!**/wrangler.jsonc",
+      "!./tsconfig.base.json",
+      "!**/tsconfig.base.json",
+      "!**/normalize.css",
+      "!package.json",
+      "!**/package.json",
+      "!package-lock.json"
+    ]
   },
   "formatter": {
     "enabled": false,
     "indentStyle": "tab"
   },
-  "organizeImports": {
-    "enabled": true
-  },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
-      "style": {
-        "noNonNullAssertion": "off"
-      },
       "a11y": {
         "useKeyWithClickEvents": "off"
+      },
+      "complexity": {
+        "noBannedTypes": "off"
+      },
+      "recommended": true,
+      "style": {
+        "noInferrableTypes": "error",
+        "noNonNullAssertion": "off",
+        "noParameterAssign": "error",
+        "noUnusedTemplateLiteral": "error",
+        "noUselessElse": "off",
+        "useAsConstAssertion": "error",
+        "useDefaultParameterLast": "error",
+        "useEnumInitializers": "error",
+        "useNumberNamespace": "error",
+        "useSelfClosingElements": "error",
+        "useSingleVarDeclarator": "error"
       }
     }
+  },
+  "vcs": {
+    "clientKind": "git",
+    "enabled": false,
+    "useIgnoreFile": false
   }
 }

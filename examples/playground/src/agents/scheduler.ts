@@ -1,41 +1,37 @@
+import type { Connection, ConnectionContext, Schedule } from "agents";
 import { Agent } from "agents";
-import type { Env } from "../server";
-import type { Schedule } from "agents";
 import {
-  unstable_scheduleSchema,
   unstable_getSchedulePrompt,
+  unstable_scheduleSchema
 } from "agents/schedule";
-
-import type {
-  ScheduledItem,
-  OutgoingMessage,
-  IncomingMessage,
-} from "../shared";
-
-import type { Connection, ConnectionContext } from "agents";
-
 import { generateObject } from "ai";
 import { model } from "../model";
+import type { Env } from "../server";
+import type {
+  IncomingMessage,
+  OutgoingMessage,
+  ScheduledItem
+} from "../shared";
 
 function convertScheduleToScheduledItem(schedule: Schedule): ScheduledItem {
   return {
+    description: schedule.payload,
     id: schedule.id,
+    nextTrigger: new Date(schedule.time * 1000).toISOString(),
     trigger:
       schedule.type === "delayed"
         ? `in ${schedule.delayInSeconds} seconds`
         : schedule.type === "cron"
           ? `at ${schedule.cron}`
           : `at ${new Date(schedule.time * 1000).toISOString()}`,
-    nextTrigger: new Date(schedule.time * 1000).toISOString(),
-    description: schedule.payload,
-    type: schedule.type,
+    type: schedule.type
   };
 }
 
 export class Scheduler extends Agent<Env> {
   onConnect(
     connection: Connection,
-    ctx: ConnectionContext
+    _ctx: ConnectionContext
   ): void | Promise<void> {
     connection.send(JSON.stringify(this.getSchedules()));
   }
@@ -43,23 +39,23 @@ export class Scheduler extends Agent<Env> {
     const event = JSON.parse(message) as IncomingMessage;
     if (event.type === "schedule") {
       const result = await generateObject({
-        model,
-        mode: "json",
-        schemaName: "task",
-        schemaDescription: "A task to be scheduled",
-        schema: unstable_scheduleSchema, // <- the shape of the object that the scheduler expects
         maxRetries: 5,
+        mode: "json",
+        model,
         prompt: `${unstable_getSchedulePrompt({
-          date: new Date(),
+          date: new Date()
         })} 
 Input to parse: "${event.input}"`,
+        schema: unstable_scheduleSchema, // <- the shape of the object that the scheduler expects
+        schemaDescription: "A task to be scheduled",
+        schemaName: "task"
       });
       const { when, description } = result.object;
       if (when.type === "no-schedule") {
         connection.send(
           JSON.stringify({
-            type: "error",
             data: `No schedule provided for ${event.input}`,
+            type: "error"
           } satisfies OutgoingMessage)
         );
         return;
@@ -76,8 +72,8 @@ Input to parse: "${event.input}"`,
 
       connection.send(
         JSON.stringify({
-          type: "schedule",
           data: convertScheduleToScheduledItem(schedule),
+          type: "schedule"
         } satisfies OutgoingMessage)
       );
     } else if (event.type === "delete-schedule") {
@@ -85,11 +81,11 @@ Input to parse: "${event.input}"`,
     }
   }
 
-  async onTask(payload: unknown, schedule: Schedule<string>) {
+  async onTask(_payload: unknown, schedule: Schedule<string>) {
     this.broadcast(
       JSON.stringify({
-        type: "run-schedule",
         data: convertScheduleToScheduledItem(schedule),
+        type: "run-schedule"
       } satisfies OutgoingMessage)
     );
   }

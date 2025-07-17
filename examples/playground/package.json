@@ -1,20 +1,18 @@
 {
+  "author": "",
+  "dependencies": {
+    "cronstrue": "^3.0.0",
+    "nanoid": "^5.1.5"
+  },
+  "description": "",
+  "keywords": [],
+  "license": "ISC",
   "name": "@cloudflare/agents-playground",
   "private": true,
-  "version": "0.0.0",
-  "type": "module",
   "scripts": {
-    "start": "vite dev",
-    "deploy": "vite build && wrangler deploy"
+    "deploy": "vite build && wrangler deploy",
+    "start": "vite dev"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
-  "dependencies": {
-    "cronstrue": "^2.59.0",
-    "mimetext": "^3.0.27",
-    "nanoid": "^5.1.5",
-    "postal-mime": "^2.4.3"
-  }
+  "type": "module",
+  "version": "0.0.0"
 }

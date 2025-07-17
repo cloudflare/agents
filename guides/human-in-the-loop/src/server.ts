@@ -1,20 +1,19 @@
 import { openai } from "@ai-sdk/openai";
-import {
-  createDataStreamResponse,
-  streamText,
-  type StreamTextOnFinishCallback,
-} from "ai";
-import { processToolCalls } from "./utils";
-import { tools } from "./tools";
 import { routeAgentRequest } from "agents";
 import { AIChatAgent } from "agents/ai-chat-agent";
+import {
+  type StreamTextOnFinishCallback,
+  createDataStreamResponse,
+  streamText
+} from "ai";
+import { tools } from "./tools";
+import { processToolCalls } from "./utils";
 
 type Env = {
   OPENAI_API_KEY: string;
 };
 
 export class HumanInTheLoop extends AIChatAgent<Env> {
-  // biome-ignore lint/complexity/noBannedTypes: vibes
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
     const dataStreamResponse = createDataStreamResponse({
       execute: async (dataStream) => {
@@ -22,9 +21,9 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
         // Checks for confirmation in last message and then runs associated tool
         const processedMessages = await processToolCalls(
           {
-            messages: this.messages,
             dataStream,
-            tools,
+            messages: this.messages,
+            tools
           },
           {
             // type-safe object for tools without an execute function
@@ -33,19 +32,19 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
               return `The weather in ${city} is ${
                 conditions[Math.floor(Math.random() * conditions.length)]
               }.`;
-            },
+            }
           }
         );
 
         const result = streamText({
-          model: openai("gpt-4o"),
           messages: processedMessages,
-          tools,
+          model: openai("gpt-4o"),
           onFinish,
+          tools
         });
 
         result.mergeIntoDataStream(dataStream);
-      },
+      }
     });
 
     return dataStreamResponse;
@@ -53,10 +52,10 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 } satisfies ExportedHandler<Env>;

@@ -1,9 +1,9 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
+import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import type { useAgent } from "./react";
-import { nanoid } from "nanoid";
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -51,13 +51,13 @@ export function useAgentChat<State = unknown>(
   const agentUrlString = agentUrl.toString();
 
   async function defaultGetInitialMessagesFetch({
-    url,
+    url
   }: GetInitialMessagesOptions) {
     const getMessagesUrl = new URL(url);
     getMessagesUrl.pathname += "/get-messages";
     const response = await fetch(getMessagesUrl.toString(), {
-      headers: options.headers,
       credentials: options.credentials,
+      headers: options.headers
     });
     return response.json<Message[]>();
   }
@@ -85,7 +85,7 @@ export function useAgentChat<State = unknown>(
       : doGetInitialMessages({
           agent: agent.agent,
           name: agent.name,
-          url: agentUrlString,
+          url: agentUrlString
         });
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
@@ -129,7 +129,7 @@ export function useAgentChat<State = unknown>(
       mode,
       referrer,
       referrerPolicy,
-      window,
+      window
       //  dispatcher, duplex
     } = options;
     const id = nanoid(8);
@@ -140,8 +140,8 @@ export function useAgentChat<State = unknown>(
       // We need to communciate cancellation as a websocket message, instead of a request signal
       agent.send(
         JSON.stringify({
-          type: "cf_agent_chat_request_cancel",
           id,
+          type: "cf_agent_chat_request_cancel"
         })
       );
 
@@ -155,6 +155,8 @@ export function useAgentChat<State = unknown>(
       // }))
 
       abortController.abort();
+      // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
+      controller.close();
     });
 
     agent.addEventListener(
@@ -163,7 +165,7 @@ export function useAgentChat<State = unknown>(
         let data: OutgoingMessage;
         try {
           data = JSON.parse(event.data) as OutgoingMessage;
-        } catch (error) {
+        } catch (_error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
           return;
@@ -186,39 +188,39 @@ export function useAgentChat<State = unknown>(
     const stream = new ReadableStream({
       start(c) {
         controller = c;
-      },
+      }
     });
 
     agent.send(
       JSON.stringify({
-        type: "cf_agent_use_chat_request",
         id,
-        url: request.toString(),
         init: {
-          method,
-          keepalive,
-          headers,
           body,
-          redirect,
-          integrity,
           credentials,
+          headers,
+          integrity,
+          keepalive,
+          method,
           mode,
+          redirect,
           referrer,
           referrerPolicy,
-          window,
+          window
           // dispatcher,
           // duplex
         },
+        type: "cf_agent_use_chat_request",
+        url: request.toString()
       })
     );
 
     return new Response(stream);
   }
   const useChatHelpers = useChat({
+    fetch: aiFetch,
     initialMessages,
     sendExtraMessageFields: true,
-    fetch: aiFetch,
-    ...rest,
+    ...rest
   });
 
   useEffect(() => {
@@ -229,7 +231,7 @@ export function useAgentChat<State = unknown>(
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (error) {
+      } catch (_error) {
         // silently ignore invalid messages for now
         // TODO: log errors with log levels
         return;
@@ -246,7 +248,7 @@ export function useAgentChat<State = unknown>(
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (error) {
+      } catch (_error) {
         // silently ignore invalid messages for now
         // TODO: log errors with log levels
         return;
@@ -268,6 +270,17 @@ export function useAgentChat<State = unknown>(
   return {
     ...useChatHelpers,
     /**
+     * Clear chat history on both client and Agent
+     */
+    clearHistory: () => {
+      useChatHelpers.setMessages([]);
+      agent.send(
+        JSON.stringify({
+          type: "cf_agent_chat_clear"
+        })
+      );
+    },
+    /**
      * Set the chat messages and synchronize with the Agent
      * @param messages New messages to set
      */
@@ -275,21 +288,10 @@ export function useAgentChat<State = unknown>(
       useChatHelpers.setMessages(messages);
       agent.send(
         JSON.stringify({
-          type: "cf_agent_chat_messages",
           messages,
+          type: "cf_agent_chat_messages"
         })
       );
-    },
-    /**
-     * Clear chat history on both client and Agent
-     */
-    clearHistory: () => {
-      useChatHelpers.setMessages([]);
-      agent.send(
-        JSON.stringify({
-          type: "cf_agent_chat_clear",
-        })
-      );
-    },
+    }
   };
 }

@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { type ExecException, execSync } from "node:child_process";
 import fg from "fast-glob";
 
 const tsconfigs: string[] = [];
@@ -10,14 +10,40 @@ for await (const file of await fg.glob("**/tsconfig.json")) {
 
 console.log(`Typechecking ${tsconfigs.length} projects...`);
 
-const failed = (
-  await Promise.allSettled(
-    tsconfigs.map((tsconfig) => execSync(`tsc -p ${tsconfig}`))
-  )
-).filter((r) => r.status === "rejected");
+type Result = {
+  tsconfig: string;
+  success: boolean;
+  output: string;
+};
+
+const results: Result[] = [];
+
+for (const tsconfig of tsconfigs) {
+  console.log(`Checking ${tsconfig}...`);
+  try {
+    const output = execSync(`tsc -p ${tsconfig}`, {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    results.push({ tsconfig, success: true, output });
+    console.log(`✅ ${tsconfig} - OK`);
+  } catch (rawError: unknown) {
+    const error = rawError as ExecException;
+
+    const output =
+      error.stdout?.toString() || `${error.stderr?.toString()}` || "";
+    results.push({ tsconfig, success: false, output });
+    console.error(`❌ ${tsconfig} - Failed:`);
+    console.error(output);
+  }
+}
+
+const failed = results.filter((r) => !r.success);
 
 if (failed.length > 0) {
-  console.error("Some projects failed to typecheck!");
+  console.error(
+    `\n${failed.length} of ${tsconfigs.length} projects failed to typecheck!`
+  );
   process.exit(1);
 }
 

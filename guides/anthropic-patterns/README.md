@@ -84,7 +84,7 @@ npm run deploy
 
 ### Durable Objects
 
-We have an `createAgent` factory function that creates a new Durable Object class for a given pattern/workflow. The template for the class includes basic state management and websocket communication. So by calling `createAgent(async () => {/* run the pattern */})` we get a new Durable Object class that can be used to create an instance. We create the 5 types of agents and export them from the worker, and wire them up as bindings in `wrangler.toml`.
+We have an `createAgent` factory function that creates a new Durable Object class for a given pattern/workflow. The template for the class includes basic state management and websocket communication. So by calling `createAgent(async () => {/* run the pattern */})` we get a new Durable Object class that can be used to create an instance. We create the 5 types of agents and export them from the worker, and wire them up as bindings in `wrangler.jsonc`.
 
 ### WebSocket Communication
 
@@ -101,7 +101,7 @@ const socket = usePartySocket({
         setWorkflowState(data.state);
         break;
     }
-  },
+  }
 });
 ```
 

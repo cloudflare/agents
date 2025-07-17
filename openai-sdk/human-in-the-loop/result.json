@@ -1,0 +1,417 @@
+{
+  "$schemaVersion": "1.0",
+  "context": {
+    "approvals": {},
+    "context": {},
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "requests": 2,
+      "totalTokens": 0
+    }
+  },
+  "currentAgent": {
+    "name": "Data agent"
+  },
+  "currentAgentSpan": {
+    "ended_at": null,
+    "error": null,
+    "id": "span_8b6c16b6607c4d3fa59e52c5",
+    "object": "trace.span",
+    "parent_id": null,
+    "span_data": {
+      "handoffs": [],
+      "name": "Data agent",
+      "output_type": "text",
+      "tools": ["get_weather"],
+      "type": "agent"
+    },
+    "started_at": "2025-06-04T12:31:38.853Z",
+    "trace_id": "trace_33d630f8912041e79d59bf57d12035f8"
+  },
+  "currentStep": {
+    "data": {
+      "interruptions": [
+        {
+          "agent": {
+            "name": "Data agent"
+          },
+          "rawItem": {
+            "arguments": "{\"location\":\"San Francisco\"}",
+            "callId": "call_cMYxGNPzuHxpVgl9Anqd5T7I",
+            "id": "fc_68403cac7a9c819d94200905cbdc893e005f32047124f0ee",
+            "name": "get_weather",
+            "providerData": {
+              "type": "function_call"
+            },
+            "status": "completed",
+            "type": "function_call"
+          },
+          "type": "tool_approval_item"
+        }
+      ]
+    },
+    "type": "next_step_interruption"
+  },
+  "currentTurn": 2,
+  "generatedItems": [
+    {
+      "agent": {
+        "name": "Basic test agent"
+      },
+      "rawItem": {
+        "arguments": "{}",
+        "callId": "call_1GIYtSGzdMXG1QjLBnIprFQV",
+        "id": "fc_68403caa5bec819d9f76cc599f1e328b005f32047124f0ee",
+        "name": "transfer_to_Data_agent",
+        "providerData": {
+          "type": "function_call"
+        },
+        "status": "completed",
+        "type": "function_call"
+      },
+      "type": "handoff_call_item"
+    },
+    {
+      "agent": {
+        "name": "Basic test agent"
+      },
+      "rawItem": {
+        "arguments": "{}",
+        "callId": "call_xta6cqWbMRhzbwsyannTa0Of",
+        "id": "fc_68403caabfcc819da5689bb1a0f7d1e7005f32047124f0ee",
+        "name": "transfer_to_Data_agent",
+        "providerData": {
+          "type": "function_call"
+        },
+        "status": "completed",
+        "type": "function_call"
+      },
+      "type": "handoff_call_item"
+    },
+    {
+      "agent": {
+        "name": "Basic test agent"
+      },
+      "output": "Multiple handoffs detected, ignorning this one.",
+      "rawItem": {
+        "callId": "call_xta6cqWbMRhzbwsyannTa0Of",
+        "name": "transfer_to_Data_agent",
+        "output": {
+          "text": "Multiple handoffs detected, ignorning this one.",
+          "type": "text"
+        },
+        "status": "completed",
+        "type": "function_call_result"
+      },
+      "type": "tool_call_output_item"
+    },
+    {
+      "rawItem": {
+        "callId": "call_1GIYtSGzdMXG1QjLBnIprFQV",
+        "name": "transfer_to_Data_agent",
+        "output": {
+          "text": "{'assistant': 'Data agent'}",
+          "type": "text"
+        },
+        "status": "completed",
+        "type": "function_call_result"
+      },
+      "sourceAgent": {
+        "name": "Basic test agent"
+      },
+      "targetAgent": {
+        "name": "Data agent"
+      },
+      "type": "handoff_output_item"
+    },
+    {
+      "agent": {
+        "name": "Data agent"
+      },
+      "rawItem": {
+        "arguments": "{\"location\":\"Oakland\"}",
+        "callId": "call_RB3NuljCB9rTHsa85LsdbuZx",
+        "id": "fc_68403cac36a0819d8549148c41ff31b9005f32047124f0ee",
+        "name": "get_weather",
+        "providerData": {
+          "type": "function_call"
+        },
+        "status": "completed",
+        "type": "function_call"
+      },
+      "type": "tool_call_item"
+    },
+    {
+      "agent": {
+        "name": "Data agent"
+      },
+      "rawItem": {
+        "arguments": "{\"location\":\"San Francisco\"}",
+        "callId": "call_cMYxGNPzuHxpVgl9Anqd5T7I",
+        "id": "fc_68403cac7a9c819d94200905cbdc893e005f32047124f0ee",
+        "name": "get_weather",
+        "providerData": {
+          "type": "function_call"
+        },
+        "status": "completed",
+        "type": "function_call"
+      },
+      "type": "tool_call_item"
+    },
+    {
+      "agent": {
+        "name": "Data agent"
+      },
+      "output": "The weather in Oakland is sunny",
+      "rawItem": {
+        "callId": "call_RB3NuljCB9rTHsa85LsdbuZx",
+        "name": "get_weather",
+        "output": {
+          "text": "The weather in Oakland is sunny",
+          "type": "text"
+        },
+        "status": "completed",
+        "type": "function_call_result"
+      },
+      "type": "tool_call_output_item"
+    },
+    {
+      "agent": {
+        "name": "Data agent"
+      },
+      "rawItem": {
+        "arguments": "{\"location\":\"San Francisco\"}",
+        "callId": "call_cMYxGNPzuHxpVgl9Anqd5T7I",
+        "id": "fc_68403cac7a9c819d94200905cbdc893e005f32047124f0ee",
+        "name": "get_weather",
+        "providerData": {
+          "type": "function_call"
+        },
+        "status": "completed",
+        "type": "function_call"
+      },
+      "type": "tool_approval_item"
+    }
+  ],
+  "inputGuardrailResults": [],
+  "lastModelResponse": {
+    "output": [
+      {
+        "arguments": "{\"location\":\"Oakland\"}",
+        "callId": "call_RB3NuljCB9rTHsa85LsdbuZx",
+        "id": "fc_68403cac36a0819d8549148c41ff31b9005f32047124f0ee",
+        "name": "get_weather",
+        "providerData": {
+          "type": "function_call"
+        },
+        "status": "completed",
+        "type": "function_call"
+      },
+      {
+        "arguments": "{\"location\":\"San Francisco\"}",
+        "callId": "call_cMYxGNPzuHxpVgl9Anqd5T7I",
+        "id": "fc_68403cac7a9c819d94200905cbdc893e005f32047124f0ee",
+        "name": "get_weather",
+        "providerData": {
+          "type": "function_call"
+        },
+        "status": "completed",
+        "type": "function_call"
+      }
+    ],
+    "responseId": "resp_68403cab1f78819d9efb245d73afeadb005f32047124f0ee",
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "requests": 1,
+      "totalTokens": 0
+    }
+  },
+  "lastProcessedResponse": {
+    "computerActions": [],
+    "functions": [
+      {
+        "tool": {
+          "description": "Get the weather for a given city",
+          "name": "get_weather",
+          "parameters": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            },
+            "required": ["location"],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "function"
+        },
+        "toolCall": {
+          "arguments": "{\"location\":\"Oakland\"}",
+          "callId": "call_RB3NuljCB9rTHsa85LsdbuZx",
+          "id": "fc_68403cac36a0819d8549148c41ff31b9005f32047124f0ee",
+          "name": "get_weather",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        }
+      },
+      {
+        "tool": {
+          "description": "Get the weather for a given city",
+          "name": "get_weather",
+          "parameters": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": {
+              "location": {
+                "type": "string"
+              }
+            },
+            "required": ["location"],
+            "type": "object"
+          },
+          "strict": true,
+          "type": "function"
+        },
+        "toolCall": {
+          "arguments": "{\"location\":\"San Francisco\"}",
+          "callId": "call_cMYxGNPzuHxpVgl9Anqd5T7I",
+          "id": "fc_68403cac7a9c819d94200905cbdc893e005f32047124f0ee",
+          "name": "get_weather",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        }
+      }
+    ],
+    "handoffs": [],
+    "newItems": [
+      {
+        "agent": {
+          "name": "Data agent"
+        },
+        "rawItem": {
+          "arguments": "{\"location\":\"Oakland\"}",
+          "callId": "call_RB3NuljCB9rTHsa85LsdbuZx",
+          "id": "fc_68403cac36a0819d8549148c41ff31b9005f32047124f0ee",
+          "name": "get_weather",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        },
+        "type": "tool_call_item"
+      },
+      {
+        "agent": {
+          "name": "Data agent"
+        },
+        "rawItem": {
+          "arguments": "{\"location\":\"San Francisco\"}",
+          "callId": "call_cMYxGNPzuHxpVgl9Anqd5T7I",
+          "id": "fc_68403cac7a9c819d94200905cbdc893e005f32047124f0ee",
+          "name": "get_weather",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        },
+        "type": "tool_call_item"
+      }
+    ],
+    "toolsUsed": ["get_weather", "get_weather"]
+  },
+  "maxTurns": 10,
+  "modelResponses": [
+    {
+      "output": [
+        {
+          "arguments": "{}",
+          "callId": "call_1GIYtSGzdMXG1QjLBnIprFQV",
+          "id": "fc_68403caa5bec819d9f76cc599f1e328b005f32047124f0ee",
+          "name": "transfer_to_Data_agent",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        },
+        {
+          "arguments": "{}",
+          "callId": "call_xta6cqWbMRhzbwsyannTa0Of",
+          "id": "fc_68403caabfcc819da5689bb1a0f7d1e7005f32047124f0ee",
+          "name": "transfer_to_Data_agent",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        }
+      ],
+      "responseId": "resp_68403ca96d08819d9ea186d53dd4f072005f32047124f0ee",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "requests": 1,
+        "totalTokens": 0
+      }
+    },
+    {
+      "output": [
+        {
+          "arguments": "{\"location\":\"Oakland\"}",
+          "callId": "call_RB3NuljCB9rTHsa85LsdbuZx",
+          "id": "fc_68403cac36a0819d8549148c41ff31b9005f32047124f0ee",
+          "name": "get_weather",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        },
+        {
+          "arguments": "{\"location\":\"San Francisco\"}",
+          "callId": "call_cMYxGNPzuHxpVgl9Anqd5T7I",
+          "id": "fc_68403cac7a9c819d94200905cbdc893e005f32047124f0ee",
+          "name": "get_weather",
+          "providerData": {
+            "type": "function_call"
+          },
+          "status": "completed",
+          "type": "function_call"
+        }
+      ],
+      "responseId": "resp_68403cab1f78819d9efb245d73afeadb005f32047124f0ee",
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "requests": 1,
+        "totalTokens": 0
+      }
+    }
+  ],
+  "noActiveAgentRun": false,
+  "originalInput": "What is the weather in Oakland and San Francisco?",
+  "outputGuardrailResults": [],
+  "toolUseTracker": {
+    "Basic test agent": ["transfer_to_Data_agent", "transfer_to_Data_agent"],
+    "Data agent": ["get_weather", "get_weather"]
+  },
+  "trace": {
+    "group_id": null,
+    "id": "trace_33d630f8912041e79d59bf57d12035f8",
+    "metadata": {},
+    "object": "trace",
+    "workflow_name": "Agent workflow"
+  }
+}

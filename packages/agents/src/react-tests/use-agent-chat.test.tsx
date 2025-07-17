@@ -1,4 +1,4 @@
-import { act, StrictMode, Suspense } from "react";
+import { StrictMode, Suspense, act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { useAgentChat } from "../ai-react";
@@ -8,8 +8,8 @@ import type { useAgent } from "../react";
 vi.mock("@ai-sdk/react", () => ({
   useChat: vi.fn((args) => ({
     messages: args.initialMessages,
-    setMessages: vi.fn(),
-  })),
+    setMessages: vi.fn()
+  }))
 }));
 
 /**
@@ -20,19 +20,19 @@ describe("useAgentChat", () => {
   it("should cache initial message responses across re-renders", async () => {
     // mocking the agent with a subset of fields used in useAgentChat
     const mockAgent: ReturnType<typeof useAgent> = {
+      _pkurl: "ws://localhost:3000",
+      _url: "ws://localhost:3000",
+      addEventListener: vi.fn(),
       id: "fake-agent",
       name: "fake-agent",
-      _url: "ws://localhost:3000",
-      _pkurl: "ws://localhost:3000",
-      addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
-      send: vi.fn(),
-      // biome-ignore lint/suspicious/noExplicitAny: <explanation>
+      send: vi.fn()
+      // biome-ignore lint/suspicious/noExplicitAny: tests
     } as any;
 
     const testMessages = [
-      { id: "1", role: "user" as const, content: "Hi" },
-      { id: "2", role: "assistant" as const, content: "Hello" },
+      { content: "Hi", id: "1", role: "user" as const },
+      { content: "Hello", id: "2", role: "assistant" as const }
     ];
     const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
 
@@ -40,13 +40,13 @@ describe("useAgentChat", () => {
     const suspenseRendered = vi.fn();
     const SuspenseObserver = () => {
       suspenseRendered();
-      return <>Suspended</>;
+      return "Suspended";
     };
 
     const TestComponent = () => {
       const chat = useAgentChat({
         agent: mockAgent,
-        getInitialMessages,
+        getInitialMessages
       });
 
       // NOTE: this only works because of how @ai-sdk/react is mocked to use
@@ -62,7 +62,7 @@ describe("useAgentChat", () => {
           <StrictMode>
             <Suspense fallback={<SuspenseObserver />}>{children}</Suspense>
           </StrictMode>
-        ),
+        )
       })
     );
 

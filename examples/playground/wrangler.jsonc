@@ -5,59 +5,35 @@
   "compatibility_date": "2025-02-19",
   "compatibility_flags": [
     "nodejs_compat",
-    "nodejs_compat_populate_process_env",
+    "nodejs_compat_populate_process_env"
   ],
-
   "assets": {
-    "binding": "ASSETS",
+    "binding": "ASSETS"
   },
-
   "durable_objects": {
     "bindings": [
       {
-        "name": "Scheduler",
         "class_name": "Scheduler",
+        "name": "Scheduler"
       },
       {
-        "name": "Stateful",
         "class_name": "Stateful",
+        "name": "Stateful"
       },
       {
-        "name": "EmailAgent",
-        "class_name": "EmailAgent",
-      },
-      {
-        "name": "MockEmailService",
-        "class_name": "MockEmailService",
-      },
-      {
-        "name": "Chat",
         "class_name": "Chat",
+        "name": "Chat"
       },
       {
-        "name": "Rpc",
         "class_name": "Rpc",
-      },
-    ],
+        "name": "Rpc"
+      }
+    ]
   },
-
   "migrations": [
     {
-      "tag": "v1",
-      "new_sqlite_classes": [
-        "Scheduler",
-        "Stateful",
-        "EmailAgent",
-        "MockEmailService",
-        "Chat",
-        "Rpc",
-      ],
-    },
-  ],
-
-  "send_email": [
-    {
-      "name": "SEND_EMAIL",
-    },
-  ],
+      "new_sqlite_classes": ["Scheduler", "Stateful", "Chat", "Rpc"],
+      "tag": "v1"
+    }
+  ]
 }

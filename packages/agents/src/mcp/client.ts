@@ -1,39 +1,37 @@
-import { MCPClientConnection } from "./client-connection";
-
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
-  ClientCapabilities,
   CallToolRequest,
   CallToolResultSchema,
   CompatibilityCallToolResultSchema,
-  ReadResourceRequest,
   GetPromptRequest,
-  Tool,
-  Resource,
   Prompt,
+  ReadResourceRequest,
+  Resource,
   ResourceTemplate,
+  Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
-import { jsonSchema, type ToolSet } from "ai";
+import { type ToolSet, jsonSchema } from "ai";
 import { nanoid } from "nanoid";
+import { MCPClientConnection } from "./client-connection";
+import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 
 /**
  * Utility class that aggregates multiple MCP clients into one
  */
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
-  private callbackUrls: string[] = [];
+  private _callbackUrls: string[] = [];
 
   /**
-   * @param name Name of the MCP client
-   * @param version Version of the MCP Client
+   * @param _name Name of the MCP client
+   * @param _version Version of the MCP Client
    * @param auth Auth paramters if being used to create a DurableObjectOAuthClientProvider
    */
   constructor(
-    private name: string,
-    private version: string
+    private _name: string,
+    private _version: string
   ) {}
 
   /**
@@ -46,9 +44,9 @@ export class MCPClientManager {
   async connect(
     url: string,
     options: {
-      // Allows you to reconnect to a server (in the case of a auth reconnect)
-      // Doesn't handle session reconnection
+      // Allows you to reconnect to a server (in the case of an auth reconnect)
       reconnect?: {
+        // server id
         id: string;
         oauthClientId?: string;
         oauthCode?: string;
@@ -58,9 +56,12 @@ export class MCPClientManager {
         authProvider?: AgentsOAuthProvider;
       };
       client?: ConstructorParameters<typeof Client>[1];
-      capabilities?: ClientCapabilities;
     } = {}
-  ): Promise<{ id: string; authUrl: string | undefined }> {
+  ): Promise<{
+    id: string;
+    authUrl?: string;
+    clientId?: string;
+  }> {
     const id = options.reconnect?.id ?? nanoid(8);
 
     if (!options.transport?.authProvider) {
@@ -69,43 +70,48 @@ export class MCPClientManager {
       );
     } else {
       options.transport.authProvider.serverId = id;
+      // reconnect with auth
+      if (options.reconnect?.oauthClientId) {
+        options.transport.authProvider.clientId =
+          options.reconnect?.oauthClientId;
+      }
     }
 
     this.mcpConnections[id] = new MCPClientConnection(
       new URL(url),
       {
-        name: this.name,
-        version: this.version,
+        name: this._name,
+        version: this._version
       },
       {
-        transport: options.transport ?? {},
         client: options.client ?? {},
-        capabilities: options.client ?? {},
+        transport: options.transport ?? {}
       }
     );
 
-    await this.mcpConnections[id].init(
-      options.reconnect?.oauthCode,
-      options.reconnect?.oauthClientId
-    );
+    await this.mcpConnections[id].init(options.reconnect?.oauthCode);
 
     const authUrl = options.transport?.authProvider?.authUrl;
     if (authUrl && options.transport?.authProvider?.redirectUrl) {
-      this.callbackUrls.push(
+      this._callbackUrls.push(
         options.transport.authProvider.redirectUrl.toString()
       );
+      return {
+        authUrl,
+        clientId: options.transport?.authProvider?.clientId,
+        id
+      };
     }
 
     return {
-      id,
-      authUrl,
+      id
     };
   }
 
   isCallbackRequest(req: Request): boolean {
     return (
       req.method === "GET" &&
-      !!this.callbackUrls.find((url) => {
+      !!this._callbackUrls.find((url) => {
         return req.url.startsWith(url);
       })
     );
@@ -113,7 +119,7 @@ export class MCPClientManager {
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
-    const urlMatch = this.callbackUrls.find((url) => {
+    const urlMatch = this._callbackUrls.find((url) => {
       return req.url.startsWith(url);
     });
     if (!urlMatch) {
@@ -158,9 +164,9 @@ export class MCPClientManager {
       reconnect: {
         id: serverId,
         oauthClientId: clientId,
-        oauthCode: code,
+        oauthCode: code
       },
-      ...conn.options,
+      ...conn.options
     });
 
     if (this.mcpConnections[serverId].connectionState === "authenticating") {
@@ -186,13 +192,12 @@ export class MCPClientManager {
         return [
           `${tool.serverId}_${tool.name}`,
           {
-            parameters: jsonSchema(tool.inputSchema),
             description: tool.description,
             execute: async (args) => {
               const result = await this.callTool({
-                name: tool.name,
                 arguments: args,
-                serverId: tool.serverId,
+                name: tool.name,
+                serverId: tool.serverId
               });
               if (result.isError) {
                 // @ts-expect-error TODO we should fix this
@@ -200,7 +205,8 @@ export class MCPClientManager {
               }
               return result;
             },
-          },
+            parameters: jsonSchema(tool.inputSchema)
+          }
         ];
       })
     );
@@ -226,6 +232,7 @@ export class MCPClientManager {
       throw new Error(`Connection with id "${id}" does not exist.`);
     }
     await this.mcpConnections[id].client.close();
+    delete this.mcpConnections[id];
   }
 
   /**
@@ -263,7 +270,7 @@ export class MCPClientManager {
     return this.mcpConnections[params.serverId].client.callTool(
       {
         ...params,
-        name: unqualifiedName,
+        name: unqualifiedName
       },
       resultSchema,
       options
@@ -309,7 +316,7 @@ export function getNamespacedData<T extends keyof NamespacedData>(
   type: T
 ): NamespacedData[T] {
   const sets = Object.entries(mcpClients).map(([name, conn]) => {
-    return { name, data: conn[type] };
+    return { data: conn[type], name };
   });
 
   const namespacedData = sets.flatMap(({ name: serverId, data }) => {
@@ -317,7 +324,7 @@ export function getNamespacedData<T extends keyof NamespacedData>(
       return {
         ...item,
         // we add a serverId so we can easily pull it out and send the tool call to the right server
-        serverId,
+        serverId
       };
     });
   });

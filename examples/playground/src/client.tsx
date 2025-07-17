@@ -1,12 +1,11 @@
 import "./styles.css";
+import { nanoid } from "nanoid";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { useState, useEffect } from "react";
-import { Scheduler } from "./components/Scheduler";
-import { Stateful } from "./components/Stateful";
-import Email from "./components/Email";
 import Chat from "./components/Chat";
 import RPC from "./components/RPC";
-import { nanoid } from "nanoid";
+import { Scheduler } from "./components/Scheduler";
+import { Stateful } from "./components/Stateful";
 
 interface Toast {
   id: string;
@@ -17,7 +16,7 @@ interface Toast {
 function Toast({
   message,
   type,
-  onClose,
+  onClose
 }: {
   message: string;
   type: "success" | "error" | "info";
@@ -43,7 +42,7 @@ function App() {
     const newToast: Toast = {
       id: nanoid(8),
       message,
-      type,
+      type
     };
     setToasts((prev) => [...prev, newToast]);
   };
@@ -73,10 +72,6 @@ function App() {
         <div className="col-span-1">
           <h2 className="text-xl font-bold mb-4">State Sync Demo</h2>
           <Stateful addToast={addToast} />
-        </div>
-        <div className="col-span-1">
-          <h2 className="text-xl font-bold mb-4">Email (wip)</h2>
-          <Email addToast={addToast} />
         </div>
         <div className="col-span-1">
           <h2 className="text-xl font-bold mb-4">Chat</h2>

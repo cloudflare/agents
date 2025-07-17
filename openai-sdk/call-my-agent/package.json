@@ -1,0 +1,15 @@
+{
+  "author": "",
+  "description": "A simple agent that can receive phone calls and respond to them.",
+  "keywords": [],
+  "license": "ISC",
+  "name": "@cloudflare/agents-openai-call-my-agent",
+  "private": true,
+  "scripts": {
+    "clean": "rm -rf dist .wrangler node_modules/.vite node_modules/.vite-temp",
+    "deploy": "vite build && wrangler deploy",
+    "start": "vite dev"
+  },
+  "type": "module",
+  "version": "0.0.0"
+}

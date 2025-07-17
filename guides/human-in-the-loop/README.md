@@ -30,9 +30,9 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
               execute: async ({ city }) => {
                 // Example tool implementation
                 return `The weather in ${city} is sunny.`;
-              },
-            },
-          },
+              }
+            }
+          }
         });
 
         // Stream response using the processed messages
@@ -40,9 +40,9 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
           model: openai("gpt-4o"),
           messages: processedMessages,
           tools,
-          onFinish,
+          onFinish
         }).mergeIntoDataStream(dataStream);
-      },
+      }
     });
   }
 }
@@ -101,16 +101,25 @@ function Chat() {
 npm install
 ```
 
-2. Configure your `wrangler.toml`:
+2. Add bindings to your `wrangler.jsonc`:
 
-```toml
-[[durable_objects.bindings]]
-binding = "HumanInTheLoop"
-class_name = "HumanInTheLoop"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["HumanInTheLoop"]
+```json
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HumanInTheLoop",
+        "class_name": "HumanInTheLoop"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["HumanInTheLoop"]
+    }
+  ]
+}
 ```
 
 3. Deploy your agent:

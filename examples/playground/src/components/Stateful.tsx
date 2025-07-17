@@ -1,5 +1,5 @@
-import { useState } from "react";
 import { useAgent } from "agents/react";
+import { useState } from "react";
 import "./State.css";
 
 interface StateProps {
@@ -13,19 +13,20 @@ interface State {
   initialState: boolean;
 }
 
+// biome-ignore lint/correctness/noUnusedFunctionParameters: todo
 export function Stateful({ addToast }: StateProps) {
   const [syncedState, setSyncedState] = useState<State>({
-    counter: 0,
-    text: "",
     color: "#3B82F6",
-    initialState: true, // this gets wiped out by the server message
+    counter: 0,
+    initialState: true,
+    text: "" // this gets wiped out by the server message
   });
 
   const agent = useAgent<State>({
     agent: "stateful",
-    onStateUpdate: (state, source: "server" | "client") => {
+    onStateUpdate: (state, _source: "server" | "client") => {
       setSyncedState(state);
-    },
+    }
   });
 
   const handleIncrement = () => {

@@ -1,23 +1,23 @@
-import { SSEEdgeClientTransport } from "./sse-edge";
-
-import {
-  ToolListChangedNotificationSchema,
-  type ClientCapabilities,
-  type Resource,
-  type Tool,
-  type Prompt,
-  ResourceListChangedNotificationSchema,
-  PromptListChangedNotificationSchema,
-  type ListToolsResult,
-  type ListResourcesResult,
-  type ListPromptsResult,
-  type ServerCapabilities,
-  type ResourceTemplate,
-  type ListResourceTemplatesResult,
-} from "@modelcontextprotocol/sdk/types.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import {
+  // type ClientCapabilities,
+  type ListPromptsResult,
+  type ListResourceTemplatesResult,
+  type ListResourcesResult,
+  type ListToolsResult,
+  // type Notification,
+  type Prompt,
+  PromptListChangedNotificationSchema,
+  type Resource,
+  ResourceListChangedNotificationSchema,
+  type ResourceTemplate,
+  type ServerCapabilities,
+  type Tool,
+  ToolListChangedNotificationSchema
+} from "@modelcontextprotocol/sdk/types.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import { SSEEdgeClientTransport } from "./sse-edge";
 
 export class MCPClientConnection {
   client: Client;
@@ -42,11 +42,9 @@ export class MCPClientConnection {
         authProvider?: AgentsOAuthProvider;
       };
       client: ConstructorParameters<typeof Client>[1];
-      capabilities: ClientCapabilities;
-    } = { transport: {}, client: {}, capabilities: {} }
+    } = { client: {}, transport: {} }
   ) {
     this.client = new Client(info, options.client);
-    this.client.registerCapabilities(options.capabilities);
   }
 
   /**
@@ -55,12 +53,13 @@ export class MCPClientConnection {
    * @param code Optional OAuth code to initialize the connection with if auth hasn't been initialized
    * @returns
    */
-  async init(code?: string, clientId?: string) {
+  async init(code?: string) {
     try {
       const transport = new SSEEdgeClientTransport(
         this.url,
         this.options.transport
       );
+
       if (code) {
         await transport.finishAuth(code);
       }
@@ -90,7 +89,7 @@ export class MCPClientConnection {
         this.registerTools(),
         this.registerResources(),
         this.registerPrompts(),
-        this.registerResourceTemplates(),
+        this.registerResourceTemplates()
       ]);
 
     this.instructions = instructions;
@@ -170,7 +169,7 @@ export class MCPClientConnection {
     do {
       toolsResult = await this.client
         .listTools({
-          cursor: toolsResult.nextCursor,
+          cursor: toolsResult.nextCursor
         })
         .catch(capabilityErrorHandler({ tools: [] }, "tools/list"));
       toolsAgg = toolsAgg.concat(toolsResult.tools);
@@ -184,7 +183,7 @@ export class MCPClientConnection {
     do {
       resourcesResult = await this.client
         .listResources({
-          cursor: resourcesResult.nextCursor,
+          cursor: resourcesResult.nextCursor
         })
         .catch(capabilityErrorHandler({ resources: [] }, "resources/list"));
       resourcesAgg = resourcesAgg.concat(resourcesResult.resources);
@@ -198,7 +197,7 @@ export class MCPClientConnection {
     do {
       promptsResult = await this.client
         .listPrompts({
-          cursor: promptsResult.nextCursor,
+          cursor: promptsResult.nextCursor
         })
         .catch(capabilityErrorHandler({ prompts: [] }, "prompts/list"));
       promptsAgg = promptsAgg.concat(promptsResult.prompts);
@@ -209,12 +208,12 @@ export class MCPClientConnection {
   async fetchResourceTemplates() {
     let templatesAgg: ResourceTemplate[] = [];
     let templatesResult: ListResourceTemplatesResult = {
-      resourceTemplates: [],
+      resourceTemplates: []
     };
     do {
       templatesResult = await this.client
         .listResourceTemplates({
-          cursor: templatesResult.nextCursor,
+          cursor: templatesResult.nextCursor
         })
         .catch(
           capabilityErrorHandler(

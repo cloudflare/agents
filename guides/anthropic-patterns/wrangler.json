@@ -1,55 +1,55 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "anthropic-agent-patterns",
-  "main": "src/server.tsx",
-  "compatibility_date": "2025-01-29",
-  "compatibility_flags": ["nodejs_compat"],
   "account_id": "85d0c02b57ed75faf9b18f92d5c01602",
 
   "assets": {
     "directory": "public"
   },
-
-  "vars": {
-    "AI_GATEWAY_ACCOUNT_ID": "85d0c02b57ed75faf9b18f92d5c01602",
-    "AI_GATEWAY_ID": "anthropic-agent-patterns"
-  },
+  "compatibility_date": "2025-01-29",
+  "compatibility_flags": ["nodejs_compat"],
 
   "durable_objects": {
     "bindings": [
       {
-        "name": "sequential",
-        "class_name": "Sequential"
+        "class_name": "Sequential",
+        "name": "sequential"
       },
       {
-        "name": "routing",
-        "class_name": "Routing"
+        "class_name": "Routing",
+        "name": "routing"
       },
       {
-        "name": "parallel",
-        "class_name": "Parallel"
+        "class_name": "Parallel",
+        "name": "parallel"
       },
       {
-        "name": "orchestrator",
-        "class_name": "Orchestrator"
+        "class_name": "Orchestrator",
+        "name": "orchestrator"
       },
       {
-        "name": "evaluator",
-        "class_name": "Evaluator"
+        "class_name": "Evaluator",
+        "name": "evaluator"
       }
     ]
   },
+  "main": "src/server.tsx",
 
   "migrations": [
     {
-      "tag": "v1",
       "new_sqlite_classes": [
         "Sequential",
         "Routing",
         "Parallel",
         "Orchestrator",
         "Evaluator"
-      ]
+      ],
+      "tag": "v1"
     }
-  ]
+  ],
+  "name": "anthropic-agent-patterns",
+
+  "vars": {
+    "AI_GATEWAY_ACCOUNT_ID": "85d0c02b57ed75faf9b18f92d5c01602",
+    "AI_GATEWAY_ID": "anthropic-agent-patterns"
+  }
 }

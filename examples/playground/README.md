@@ -4,6 +4,8 @@ A collection of interactive examples demonstrating core agent capabilities.
 
 ## Running the Examples
 
+Copy `.dev.vars.example` to `.dev.vars` and fill in your OpenAI API key.
+
 ```bash
 # Install dependencies
 npm install

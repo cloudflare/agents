@@ -1,8 +1,8 @@
 import {
   Agent,
-  routeAgentRequest,
   type AgentNamespace,
   type Connection,
+  routeAgentRequest
 } from "agents";
 
 type Env = {
@@ -35,14 +35,14 @@ export class MyAgent extends Agent<Env> {
     }
   }
 
-  onRequest(request: Request): Response | Promise<Response> {
+  onRequest(_request: Request): Response | Promise<Response> {
     const timestamp = new Date().toLocaleTimeString();
     return new Response(
       `Server time: ${timestamp} - Your request has been processed!`,
       {
         headers: {
-          "Content-Type": "text/plain",
-        },
+          "Content-Type": "text/plain"
+        }
       }
     );
   }
@@ -54,5 +54,5 @@ export default {
       (await routeAgentRequest(request, env, { cors: true })) ||
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 } satisfies ExportedHandler<Env>;

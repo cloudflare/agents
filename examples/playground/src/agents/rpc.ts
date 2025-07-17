@@ -1,7 +1,7 @@
 import {
-  unstable_callable as callable,
   Agent,
   type StreamingResponse,
+  unstable_callable as callable
 } from "agents";
 import type { Env } from "../server";
 
@@ -18,5 +18,10 @@ export class Rpc extends Agent<Env> {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     stream.end("Done");
+  }
+
+  @callable()
+  async destroyAgent() {
+    await this.destroy();
   }
 }

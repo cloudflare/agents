@@ -3,7 +3,7 @@ import { useState } from "react";
 import "./RPC.css";
 
 export default function RPC({
-  addToast,
+  addToast
 }: {
   addToast: (message: string, type: "success" | "error" | "info") => void;
 }) {
@@ -31,7 +31,7 @@ export default function RPC({
       await call("testStreaming", [], {
         onChunk: (chunk: unknown) => {
           setMessages((prev) => [...prev, chunk as string]);
-        },
+        }
       });
     } catch (error) {
       addToast(`Error: ${error}`, "error");
@@ -40,10 +40,23 @@ export default function RPC({
     }
   };
 
+  const handleDestroy = async () => {
+    await call("destroyAgent");
+    addToast("Agent destroyed", "success");
+  };
+
   return (
     <div className="rpc-container">
       <div className="rpc-content">
         <div className="button-container">
+          <button
+            type="button"
+            onClick={handleDestroy}
+            disabled={loading}
+            className="rpc-button button-destroy"
+          >
+            Destroy Agent
+          </button>
           <button
             type="button"
             onClick={handleRegularCall}
@@ -129,7 +142,7 @@ export default function RPC({
               {messages.map((message, messageId) => (
                 <div
                   key={`message-${
-                    // biome-ignore lint/suspicious/noArrayIndexKey: <explanation>
+                    // biome-ignore lint/suspicious/noArrayIndexKey: eh
                     messageId
                   }`}
                   className="message-item"

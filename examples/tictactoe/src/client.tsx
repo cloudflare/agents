@@ -1,6 +1,7 @@
+/** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
 import { useAgent } from "agents/react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { useState, useEffect } from "react";
 import type { TicTacToeState } from "./server";
 import "./styles.css";
 
@@ -17,24 +18,24 @@ function App() {
     board: [
       [null, null, null],
       [null, null, null],
-      [null, null, null],
+      [null, null, null]
     ],
     currentPlayer: "X",
-    winner: null,
+    winner: null
   });
   const [gamesPlayed, setGamesPlayed] = useState(0);
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
   const [stats, setStats] = useState({
-    xWins: 0,
-    oWins: 0,
     draws: 0,
+    oWins: 0,
+    xWins: 0
   });
   const agent = useAgent<TicTacToeState>({
     agent: "tic-tac-toe",
-    prefix: "some/prefix",
     onStateUpdate: (state) => {
       setState(state);
     },
+    prefix: "some/prefix"
   });
 
   // Make random move when new game starts
@@ -154,7 +155,7 @@ function App() {
         {getGameStatus()}
         <div className="board">
           {state.board.map((row, rowIndex) =>
-            row.map((cell, colIndex) => renderCell(rowIndex, colIndex))
+            row.map((_cell, colIndex) => renderCell(rowIndex, colIndex))
           )}
         </div>
         <div className="stats">

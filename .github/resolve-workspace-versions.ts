@@ -16,7 +16,7 @@ for await (const file of await fg.glob(
   const packageJson = JSON.parse(fs.readFileSync(file, "utf8"));
   packageJsons[packageJson.name] = {
     file,
-    packageJson,
+    packageJson
   };
 }
 
@@ -31,7 +31,7 @@ for (const [packageName, { file, packageJson }] of Object.entries(
     "dependencies",
     "devDependencies",
     "peerDependencies",
-    "optionalDependencies",
+    "optionalDependencies"
   ]) {
     for (const [dependencyName, dependencyVersion] of Object.entries(
       packageJson[field] || {}

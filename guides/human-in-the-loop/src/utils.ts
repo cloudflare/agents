@@ -1,16 +1,16 @@
-import { formatDataStreamPart, type Message } from "@ai-sdk/ui-utils";
+import { type Message, formatDataStreamPart } from "@ai-sdk/ui-utils";
 import {
-  convertToCoreMessages,
   type DataStreamWriter,
   type ToolExecutionOptions,
   type ToolSet,
+  convertToCoreMessages
 } from "ai";
 import type { z } from "zod";
 
 // Approval string to be shared across frontend and backend
 export const APPROVAL = {
-  YES: "Yes, confirmed.",
   NO: "No, denied.",
+  YES: "Yes, confirmed."
 } as const;
 
 function isValidToolName<K extends PropertyKey, T extends object>(
@@ -33,15 +33,14 @@ function isValidToolName<K extends PropertyKey, T extends object>(
 export async function processToolCalls<
   Tools extends ToolSet,
   ExecutableTools extends {
-    // biome-ignore lint/complexity/noBannedTypes: <explanation>
     [Tool in keyof Tools as Tools[Tool] extends { execute: Function }
       ? never
       : Tool]: Tools[Tool];
-  },
+  }
 >(
   {
     dataStream,
-    messages,
+    messages
   }: {
     tools: Tools; // used for type inference
     dataStream: DataStreamWriter;
@@ -87,7 +86,7 @@ export async function processToolCalls<
         if (toolInstance) {
           result = await toolInstance(toolInvocation.args, {
             messages: convertToCoreMessages(messages),
-            toolCallId: toolInvocation.toolCallId,
+            toolCallId: toolInvocation.toolCallId
           });
         } else {
           result = "Error: No execute function found on tool";
@@ -102,8 +101,8 @@ export async function processToolCalls<
       // Forward updated tool result to the client.
       dataStream.write(
         formatDataStreamPart("tool_result", {
-          toolCallId: toolInvocation.toolCallId,
           result,
+          toolCallId: toolInvocation.toolCallId
         })
       );
 
@@ -112,8 +111,8 @@ export async function processToolCalls<
         ...part,
         toolInvocation: {
           ...toolInvocation,
-          result,
-        },
+          result
+        }
       };
     })
   );
@@ -123,7 +122,7 @@ export async function processToolCalls<
 }
 
 export function getToolsRequiringConfirmation<
-  T extends ToolSet,
+  T extends ToolSet
   // E extends {
   //   [K in keyof T as T[K] extends { execute: Function } ? never : K]: T[K];
   // },
