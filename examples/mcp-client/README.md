@@ -27,6 +27,9 @@ Tap "O + enter" to open the front end. It should list out all the tools, prompts
 The MCP client defaults to HTTP Streamable transport for better performance. You can specify transport type explicitly:
 
 ```typescript
+// Using MCPClientManager directly
+const mcpClient = new MCPClientManager("my-app", "1.0.0");
+
 // HTTP Streamable transport (default, recommended)
 await mcpClient.connect(serverUrl, {
   transport: {
@@ -42,4 +45,13 @@ await mcpClient.connect(serverUrl, {
     authProvider: myAuthProvider
   }
 });
+
+// Or using Agent.addMcpServer() (as shown in the example)
+export class MyAgent extends Agent<Env, never> {
+  mcp = new MCPClientManager("my-agent", "1.0.0");
+  
+  async addServer(name: string, url: string, callbackHost: string) {
+    await this.addMcpServer(name, url, callbackHost);
+  }
+}
 ```
