@@ -400,29 +400,64 @@ Agents can seamlessly integrate with the Model Context Protocol, allowing them t
 #### Creating an MCP Server
 
 ```typescript
-import { Agent } from "agents";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 
-export class WeatherAgent extends Agent {
-  getTools() {
-    return {
-      getWeather: {
-        description: "Get current weather for a location",
-        inputSchema: z.object({
-          location: z.string().describe("City name or coordinates")
-        }),
-        handler: async ({ location }) => {
-          // Weather API logic
-          return {
-            location,
-            temperature: "22°C",
-            conditions: "Sunny"
-          };
-        }
+type Env = {
+  MyMCP: DurableObjectNamespace<MyMCP>;
+};
+
+type State = { counter: number };
+
+export class MyMCP extends McpAgent<Env, State, {}> {
+  server = new McpServer({
+    name: "Demo",
+    version: "1.0.0"
+  });
+
+  initialState: State = {
+    counter: 1
+  };
+
+  async init() {
+    this.server.resource("counter", "mcp://resource/counter", (uri) => {
+      return {
+        contents: [{ text: String(this.state.counter), uri: uri.href }]
+      };
+    });
+
+    this.server.tool(
+      "add",
+      "Add to the counter, stored in the MCP",
+      { a: z.number() },
+      async ({ a }) => {
+        this.setState({ ...this.state, counter: this.state.counter + a });
+
+        return {
+          content: [
+            {
+              text: String(`Added ${a}, total is now ${this.state.counter}`),
+              type: "text"
+            }
+          ]
+        };
       }
-    };
+    );
+  }
+
+  onStateUpdate(state: State) {
+    console.log({ stateUpdate: state });
   }
 }
+
+// HTTP Streamable transport (recommended)
+export default MyMCP.serve("/mcp", {
+  binding: "MyMCP"
+});
+
+// Or SSE transport for legacy compatibility
+// export default MyMCP.serveSSE("/mcp", { binding: "MyMCP" });
 ```
 
 #### Using MCP Tools

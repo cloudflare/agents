@@ -49,6 +49,6 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   }
 }
 
-export default MyMCP.mount("/sse", {
+export default MyMCP.serve("/mcp", {
   binding: "MyMCP"
 });
