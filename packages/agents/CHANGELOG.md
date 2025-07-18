@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.107
+
+### Patch Changes
+
+- [#364](https://github.com/cloudflare/agents/pull/364) [`885b3db`](https://github.com/cloudflare/agents/commit/885b3db8af3f482b2892764077c05afc491f0b35) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - add HTTP Streamable support
+
 ## 0.0.106
 
 ### Patch Changes
