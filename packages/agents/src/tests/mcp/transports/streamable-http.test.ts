@@ -34,20 +34,20 @@ describe("Streamable HTTP Transport", () => {
       expect(response.headers.get("mcp-session-id")).toBeDefined();
     });
 
-    it("should reject second initialization request", async () => {
+    it("should reject initialization request with session ID", async () => {
       const ctx = createExecutionContext();
-      const sessionId = await initializeStreamableHTTPServer(ctx);
 
-      const secondInitMessage = {
+      // Send an initialization request with a session ID - this should fail
+      const initWithSessionMessage = {
         ...TEST_MESSAGES.initialize,
-        id: "second-init"
+        id: "init-with-session"
       };
 
       const response = await sendPostRequest(
         ctx,
         baseUrl,
-        secondInitMessage,
-        sessionId
+        initWithSessionMessage,
+        "some-session-id"
       );
 
       expect(response.status).toBe(400);
@@ -56,6 +56,34 @@ describe("Streamable HTTP Transport", () => {
         errorData,
         -32600,
         /Initialization requests must not include a sessionId/
+      );
+    });
+
+    it("should reject batch with multiple initialization requests", async () => {
+      const ctx = createExecutionContext();
+
+      // Send multiple initialization requests in a batch - this should fail
+      const batchInitMessages: JSONRPCMessage[] = [
+        TEST_MESSAGES.initialize,
+        {
+          id: "init-2",
+          jsonrpc: "2.0",
+          method: "initialize",
+          params: {
+            clientInfo: { name: "test-client-2", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        }
+      ];
+
+      const response = await sendPostRequest(ctx, baseUrl, batchInitMessages);
+
+      expect(response.status).toBe(400);
+      const errorData = await response.json();
+      expectErrorResponse(
+        errorData,
+        -32600,
+        /Only one initialization request is allowed/
       );
     });
 

@@ -48,8 +48,6 @@ await mcpClient.connect(serverUrl, {
 
 // Or using Agent.addMcpServer() (as shown in the example)
 export class MyAgent extends Agent<Env, never> {
-  mcp = new MCPClientManager("my-agent", "1.0.0");
-
   async addServer(name: string, url: string, callbackHost: string) {
     await this.addMcpServer(name, url, callbackHost);
   }
