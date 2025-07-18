@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.108
+
+### Patch Changes
+
+- [#357](https://github.com/cloudflare/agents/pull/357) [`40bd73c`](https://github.com/cloudflare/agents/commit/40bd73cbb29e5fc4a2625ce7d895b9e8c70d76a3) Thanks [@davemurphysf](https://github.com/davemurphysf)! - Pass incoming headers to the DO fetch method
+
 ## 0.0.107
 
 ### Patch Changes
