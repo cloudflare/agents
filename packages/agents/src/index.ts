@@ -1,3 +1,4 @@
+import type { env } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -283,7 +284,7 @@ function withAgentContext<T extends (...args: any[]) => any>(
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
  */
-export class Agent<Env, State = unknown> extends Server<Env> {
+export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
   private _state = DEFAULT_STATE as State;
 
   private _ParentClass: typeof Agent<Env, State> =
