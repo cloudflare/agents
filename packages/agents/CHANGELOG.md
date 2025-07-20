@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.109
+
+### Patch Changes
+
+- [#372](https://github.com/cloudflare/agents/pull/372) [`a45f8f3`](https://github.com/cloudflare/agents/commit/a45f8f3cd8f4f392d585cc13c721570e263094d7) Thanks [@threepointone](https://github.com/threepointone)! - default Agent's Env to cloudflare's Env
+
 ## 0.0.108
 
 ### Patch Changes
