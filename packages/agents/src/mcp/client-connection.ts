@@ -98,20 +98,33 @@ export class MCPClientConnection {
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
-    const [instructions, tools, resources, prompts, resourceTemplates] =
-      await Promise.all([
-        this.client.getInstructions(),
-        this.registerTools(),
-        this.registerResources(),
-        this.registerPrompts(),
-        this.registerResourceTemplates()
-      ]);
+    const operations = [
+      { name: "instructions", promise: this.client.getInstructions(), fallback: undefined },
+      { name: "tools", promise: this.registerTools(), fallback: [] },
+      { name: "resources", promise: this.registerResources(), fallback: [] },
+      { name: "prompts", promise: this.registerPrompts(), fallback: [] },
+      { name: "resource templates", promise: this.registerResourceTemplates(), fallback: [] }
+    ];
 
-    this.instructions = instructions;
-    this.tools = tools;
-    this.resources = resources;
-    this.prompts = prompts;
-    this.resourceTemplates = resourceTemplates;
+    const results = await Promise.allSettled(operations.map(op => op.promise));
+
+    const extractValue = <T>(result: PromiseSettledResult<T>, fallback: T): T => {
+      return result.status === 'fulfilled' ? result.value : fallback;
+    };
+
+    for (const [index, result] of results.entries()) {
+      if (result.status === 'rejected') {
+        console.error(`Failed to initialize ${operations[index].name}:`, result.reason);
+      }
+    }
+
+    const [instructionsResult, toolsResult, resourcesResult, promptsResult, resourceTemplatesResult] = results;
+
+    this.instructions = extractValue(instructionsResult, operations[0].fallback);
+    this.tools = extractValue(toolsResult, operations[1].fallback);
+    this.resources = extractValue(resourcesResult, operations[2].fallback);
+    this.prompts = extractValue(promptsResult, operations[3].fallback);
+    this.resourceTemplates = extractValue(resourceTemplatesResult, operations[4].fallback);
 
     this.connectionState = "ready";
   }
