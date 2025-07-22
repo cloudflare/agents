@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
-  // type ClientCapabilities,
+  type ClientCapabilities,
   type ListPromptsResult,
   type ListResourceTemplatesResult,
   type ListResourcesResult,
@@ -15,7 +15,10 @@ import {
   type ResourceTemplate,
   type ServerCapabilities,
   type Tool,
-  ToolListChangedNotificationSchema
+  ToolListChangedNotificationSchema,
+  ElicitRequestSchema,
+  type ElicitRequest,
+  type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
@@ -52,7 +55,15 @@ export class MCPClientConnection {
       client: ConstructorParameters<typeof Client>[1];
     } = { client: {}, transport: {} }
   ) {
-    this.client = new Client(info, options.client);
+    const clientOptions = {
+      ...options.client,
+      capabilities: {
+        ...options.client?.capabilities,
+        elicitation: {}
+      } as ClientCapabilities
+    };
+
+    this.client = new Client(info, clientOptions);
   }
 
   /**
@@ -80,6 +91,15 @@ export class MCPClientConnection {
       }
 
       await this.client.connect(transport);
+
+      // Set up elicitation request handler
+      this.client.setRequestHandler(
+        ElicitRequestSchema,
+        async (request: ElicitRequest) => {
+          return await this.handleElicitationRequest(request);
+        }
+      );
+
       // biome-ignore lint/suspicious/noExplicitAny: allow for the error check here
     } catch (e: any) {
       if (e.toString().includes("Unauthorized")) {
@@ -239,6 +259,20 @@ export class MCPClientConnection {
       templatesAgg = templatesAgg.concat(templatesResult.resourceTemplates);
     } while (templatesResult.nextCursor);
     return templatesAgg;
+  }
+
+  /**
+   * Handle elicitation request from server
+   * This method should be overridden by subclasses to provide custom elicitation handling
+   */
+  async handleElicitationRequest(
+    request: ElicitRequest
+  ): Promise<ElicitResult> {
+    // Default implementation - can be overridden by users
+    // This is a placeholder that should be implemented based on the UI framework
+    throw new Error(
+      "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
+    );
   }
 }
 

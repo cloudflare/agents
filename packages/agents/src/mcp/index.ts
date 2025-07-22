@@ -9,7 +9,10 @@ import {
   isJSONRPCError,
   isJSONRPCNotification,
   isJSONRPCRequest,
-  isJSONRPCResponse
+  isJSONRPCResponse,
+  ElicitRequestSchema,
+  type ElicitRequest,
+  type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
 import { Agent } from "../index";
@@ -249,6 +252,21 @@ export abstract class McpAgent<
   setState(state: State) {
     return this._agent.setState(state);
   }
+
+  /**
+   * Elicit user input with a message and schema
+   */
+  async elicitInput(params: {
+    message: string;
+    requestedSchema: any;
+  }): Promise<ElicitResult> {
+    const server = await this.server;
+    if ("elicitInput" in server && typeof server.elicitInput === "function") {
+      return await server.elicitInput(params);
+    }
+    throw new Error("elicitInput is not supported by this server");
+  }
+
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
@@ -1163,3 +1181,10 @@ export abstract class McpAgent<
 // Export client transport classes
 export { SSEEdgeClientTransport } from "./sse-edge";
 export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+
+// Export elicitation types and schemas
+export {
+  ElicitRequestSchema,
+  type ElicitRequest,
+  type ElicitResult
+} from "@modelcontextprotocol/sdk/types.js";
