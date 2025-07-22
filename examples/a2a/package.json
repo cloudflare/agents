@@ -9,14 +9,11 @@
     "@a2a-js/sdk": "^0.2.2",
     "hono": "^4.8.3"
   },
-  "devDependencies": {
-    "esbuild": "^0.25.5"
-  },
   "keywords": [],
   "scripts": {
-    "build": "node build.js",
     "cli": "npx tsx src/cli.ts",
-    "start": "wrangler dev"
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy"
   },
   "type": "module"
 }

@@ -9,4 +9,4 @@ npm install
 npm start
 ```
 
-You should have the A2A agent running on http://localhost:8787. Navigate to http://localhost:8787/.well-known/agent.json to see the agent card.
+You should have the A2A agent running on http://localhost:5173. Navigate to http://localhost:5173/.well-known/agent.json to see the agent card.

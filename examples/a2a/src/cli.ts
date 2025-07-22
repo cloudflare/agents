@@ -45,7 +45,7 @@ function generateId(): string {
 // --- State ---
 let currentTaskId: string | undefined; // Initialize as undefined
 let currentContextId: string | undefined; // Initialize as undefined
-const serverUrl = process.argv[2] || "http://localhost:8787"; // Agent's base URL
+const serverUrl = process.argv[2] || "http://localhost:5173"; // Agent's base URL
 const client = new A2AClient(serverUrl);
 let agentName = "Agent"; // Default, try to get from agent card later
 

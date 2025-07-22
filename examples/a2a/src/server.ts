@@ -56,7 +56,7 @@ const agentCard: AgentCard = {
     }
   ],
   supportsAuthenticatedExtendedCard: false,
-  url: "http://localhost:8787/",
+  url: "http://localhost:5173/",
   version: "0.1.0"
 };
 
