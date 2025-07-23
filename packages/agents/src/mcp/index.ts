@@ -260,11 +260,106 @@ export abstract class McpAgent<
     message: string;
     requestedSchema: any;
   }): Promise<ElicitResult> {
-    const server = await this.server;
-    if ("elicitInput" in server && typeof server.elicitInput === "function") {
-      return await server.elicitInput(params);
-    }
-    throw new Error("elicitInput is not supported by this server");
+    // Send elicitation/create request following MCP specification
+    return new Promise((resolve, reject) => {
+      const requestId = `elicit_${Math.random().toString(36).substr(2, 9)}`;
+
+      const elicitRequest = {
+        jsonrpc: "2.0" as const,
+        id: requestId,
+        method: "elicitation/create",
+        params: {
+          message: params.message,
+          requestedSchema: params.requestedSchema
+        }
+      };
+
+      // Find active connections to send the request
+      const connections = this._agent?.getConnections();
+      if (!connections) {
+        reject(new Error("No active connections available for elicitation"));
+        return;
+      }
+
+      const connectionList = Array.from(connections);
+      if (connectionList.length === 0) {
+        reject(new Error("No active connections available for elicitation"));
+        return;
+      }
+
+      // Send to all active connections (typically just one)
+      console.log("Sending elicitation request:", elicitRequest);
+      for (const connection of connectionList) {
+        try {
+          connection.send(JSON.stringify(elicitRequest));
+          console.log("Sent elicitation request to connection");
+        } catch (error) {
+          console.error("Failed to send elicitation request:", error);
+        }
+      }
+
+      // Set up response handler with timeout
+      const timeout = setTimeout(() => {
+        reject(new Error("Elicitation request timed out"));
+      }, 60000); // 60 second timeout
+
+      // Store response handler
+      const handleResponse = (connection: any, event: any) => {
+        try {
+          // Handle different message formats
+          let messageData = event.data;
+          if (typeof messageData === "string") {
+            messageData = messageData;
+          } else if (event.data === undefined && typeof event === "string") {
+            messageData = event;
+          } else if (typeof event === "object" && event.data) {
+            messageData = event.data;
+          } else {
+            console.log("Unexpected message format:", {
+              event,
+              eventData: event.data
+            });
+            return false;
+          }
+
+          const data = JSON.parse(messageData);
+          console.log("McpAgent received message:", data);
+          if (data.id === requestId) {
+            console.log("Matched elicitation response for request:", requestId);
+            clearTimeout(timeout);
+
+            if (data.error) {
+              console.log("Elicitation error:", data.error);
+              reject(new Error(data.error.message || "Elicitation failed"));
+            } else if (data.result) {
+              console.log("Elicitation success:", data.result);
+              resolve(data.result);
+            } else {
+              console.log("Invalid elicitation response:", data);
+              reject(new Error("Invalid elicitation response"));
+            }
+            return true; // Indicate we handled this message
+          }
+        } catch (error) {
+          // Not JSON or not our response, ignore
+          console.log("Failed to parse message or not our response:", error, {
+            event
+          });
+        }
+        return false; // Let other handlers process this message
+      };
+
+      // Temporarily override onMessage to catch our response
+      const originalOnMessage = this.onMessage?.bind(this) || (() => {});
+      this.onMessage = async (connection: any, event: any) => {
+        if (!handleResponse(connection, event)) {
+          // Not our elicitation response, call original handler
+          return originalOnMessage(connection, event);
+        }
+        // Restore original handler after handling our response
+        this.onMessage = originalOnMessage;
+      };
+    });
   }
 
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later

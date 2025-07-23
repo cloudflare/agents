@@ -1,0 +1,19 @@
+{
+  "author": "",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.3",
+    "nanoid": "^5.1.5",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "zod": "^3.23.8"
+  },
+  "keywords": [],
+  "name": "@cloudflare/agents-mcp-elicitation-demo",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "deploy": "wrangler deploy",
+    "start": "vite dev"
+  },
+  "type": "module"
+}

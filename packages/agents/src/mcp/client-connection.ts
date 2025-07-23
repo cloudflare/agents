@@ -263,13 +263,13 @@ export class MCPClientConnection {
 
   /**
    * Handle elicitation request from server
-   * This method should be overridden by subclasses to provide custom elicitation handling
+   * Automatically uses the Agent's built-in elicitation handling if available
    */
   async handleElicitationRequest(
     request: ElicitRequest
   ): Promise<ElicitResult> {
-    // Default implementation - can be overridden by users
-    // This is a placeholder that should be implemented based on the UI framework
+    // Elicitation handling must be implemented by the platform
+    // For MCP servers, this should be handled by McpAgent.elicitInput()
     throw new Error(
       "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
     );

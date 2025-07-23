@@ -1,7 +1,7 @@
 import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
 import { nanoid } from "nanoid";
-import { use, useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import type { useAgent } from "./react";
 
@@ -79,35 +79,50 @@ export function useAgentChat<State = unknown>(
     return promise;
   }
 
-  const initialMessagesPromise =
-    getInitialMessages === null
-      ? null
-      : doGetInitialMessages({
-          agent: agent.agent,
-          name: agent.name,
-          url: agentUrlString
-        });
-  const initialMessages = initialMessagesPromise
-    ? use(initialMessagesPromise)
-    : (rest.initialMessages ?? []);
+  const [initialMessages, setInitialMessages] = useState<Message[]>(
+    rest.initialMessages ?? []
+  );
+  const [isLoadingInitialMessages, setIsLoadingInitialMessages] =
+    useState(false);
 
-  // manages adding and removing the promise from the cache
   useEffect(() => {
-    if (!initialMessagesPromise) {
+    if (getInitialMessages === null) {
+      setInitialMessages(rest.initialMessages ?? []);
       return;
     }
-    // this effect is responsible for removing the promise from the cache
-    // when the component unmounts or the promise changes,
-    // but that means it also must add the promise to the cache
-    // so that multiple arbitrary effect runs produce the expected state
-    // when resolved.
-    requestCache.set(agentUrlString, initialMessagesPromise!);
+
+    setIsLoadingInitialMessages(true);
+    const promise = doGetInitialMessages({
+      agent: agent.agent,
+      name: agent.name,
+      url: agentUrlString
+    });
+
+    promise
+      .then((messages) => {
+        setInitialMessages(messages);
+      })
+      .catch((error) => {
+        console.error("Failed to load initial messages:", error);
+        setInitialMessages(rest.initialMessages ?? []);
+      })
+      .finally(() => {
+        setIsLoadingInitialMessages(false);
+      });
+  }, [
+    agent.agent,
+    agent.name,
+    agentUrlString,
+    getInitialMessages,
+    rest.initialMessages
+  ]);
+
+  // Clean up cache on unmount
+  useEffect(() => {
     return () => {
-      if (requestCache.get(agentUrlString) === initialMessagesPromise) {
-        requestCache.delete(agentUrlString);
-      }
+      requestCache.delete(agentUrlString);
     };
-  }, [agentUrlString, initialMessagesPromise]);
+  }, [agentUrlString]);
 
   async function aiFetch(
     request: RequestInfo | URL,
