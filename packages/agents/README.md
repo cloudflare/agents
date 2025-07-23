@@ -495,6 +495,7 @@ const result = await generateText({
 
 **Transport Options:**
 
+- **Auto**: Automatically determine the correct transport
 - **HTTP Streamable**: Best performance, batch requests, session management
 - **SSE**: Simple setup, legacy compatibility
 
