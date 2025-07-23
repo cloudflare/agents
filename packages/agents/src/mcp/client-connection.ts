@@ -98,20 +98,47 @@ export class MCPClientConnection {
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
-    const [instructions, tools, resources, prompts, resourceTemplates] =
-      await Promise.all([
-        this.client.getInstructions(),
-        this.registerTools(),
-        this.registerResources(),
-        this.registerPrompts(),
-        this.registerResourceTemplates()
-      ]);
+    const [
+      instructionsResult,
+      toolsResult,
+      resourcesResult,
+      promptsResult,
+      resourceTemplatesResult
+    ] = await Promise.allSettled([
+      this.client.getInstructions(),
+      this.registerTools(),
+      this.registerResources(),
+      this.registerPrompts(),
+      this.registerResourceTemplates()
+    ]);
 
-    this.instructions = instructions;
-    this.tools = tools;
-    this.resources = resources;
-    this.prompts = prompts;
-    this.resourceTemplates = resourceTemplates;
+    const operations = [
+      { name: "instructions", result: instructionsResult },
+      { name: "tools", result: toolsResult },
+      { name: "resources", result: resourcesResult },
+      { name: "prompts", result: promptsResult },
+      { name: "resource templates", result: resourceTemplatesResult }
+    ];
+
+    for (const { name, result } of operations) {
+      if (result.status === "rejected") {
+        console.error(`Failed to initialize ${name}:`, result.reason);
+      }
+    }
+
+    this.instructions =
+      instructionsResult.status === "fulfilled"
+        ? instructionsResult.value
+        : undefined;
+    this.tools = toolsResult.status === "fulfilled" ? toolsResult.value : [];
+    this.resources =
+      resourcesResult.status === "fulfilled" ? resourcesResult.value : [];
+    this.prompts =
+      promptsResult.status === "fulfilled" ? promptsResult.value : [];
+    this.resourceTemplates =
+      resourceTemplatesResult.status === "fulfilled"
+        ? resourceTemplatesResult.value
+        : [];
 
     this.connectionState = "ready";
   }
