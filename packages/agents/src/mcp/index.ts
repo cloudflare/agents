@@ -10,8 +10,6 @@ import {
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResponse,
-  ElicitRequestSchema,
-  type ElicitRequest,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
@@ -258,7 +256,7 @@ export abstract class McpAgent<
    */
   async elicitInput(params: {
     message: string;
-    requestedSchema: any;
+    requestedSchema: Record<string, unknown>;
   }): Promise<ElicitResult> {
     // Send elicitation/create request following MCP specification
     return new Promise((resolve, reject) => {
@@ -304,21 +302,14 @@ export abstract class McpAgent<
       }, 60000); // 60 second timeout
 
       // Store response handler
-      const handleResponse = (connection: any, event: any) => {
+      const handleResponse = (_connection: Connection, event: WSMessage) => {
         try {
-          // Handle different message formats
-          let messageData = event.data;
-          if (typeof messageData === "string") {
-            messageData = messageData;
-          } else if (event.data === undefined && typeof event === "string") {
+          // Handle different message formats - WSMessage can be string or ArrayBuffer
+          let messageData: string;
+          if (typeof event === "string") {
             messageData = event;
-          } else if (typeof event === "object" && event.data) {
-            messageData = event.data;
           } else {
-            console.log("Unexpected message format:", {
-              event,
-              eventData: event.data
-            });
+            console.log("Unexpected message format:", { event });
             return false;
           }
 
@@ -351,7 +342,7 @@ export abstract class McpAgent<
 
       // Temporarily override onMessage to catch our response
       const originalOnMessage = this.onMessage?.bind(this) || (() => {});
-      this.onMessage = async (connection: any, event: any) => {
+      this.onMessage = async (connection: Connection, event: WSMessage) => {
         if (!handleResponse(connection, event)) {
           // Not our elicitation response, call original handler
           return originalOnMessage(connection, event);

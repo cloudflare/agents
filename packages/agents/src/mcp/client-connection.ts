@@ -266,7 +266,7 @@ export class MCPClientConnection {
    * Automatically uses the Agent's built-in elicitation handling if available
    */
   async handleElicitationRequest(
-    request: ElicitRequest
+    _request: ElicitRequest
   ): Promise<ElicitResult> {
     // Elicitation handling must be implemented by the platform
     // For MCP servers, this should be handled by McpAgent.elicitInput()

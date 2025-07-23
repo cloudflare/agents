@@ -6,7 +6,6 @@ import {
   routeAgentRequest,
   unstable_callable as callable
 } from "agents";
-import { MCPClientManager } from "agents/mcp/client";
 import { z } from "zod";
 
 type Env = {
@@ -19,7 +18,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
   server = new McpServer({
     name: "Elicitation Demo Server",
     version: "1.0.0"
-  }) as any;
+  }) as any; // TODO: Remove when MCP SDK types are fixed
 
   initialState = { counter: 0 };
 
@@ -172,8 +171,8 @@ export class MyAgent extends Agent<Env, never> {
   async callMcpTool(
     serverId: string,
     toolName: string,
-    args: any
-  ): Promise<any> {
+    args: Record<string, unknown>
+  ): Promise<unknown> {
     try {
       console.log(
         `Calling tool ${toolName} on server ${serverId} with args:`,
@@ -207,7 +206,8 @@ export default {
     // Route MCP server requests to the dedicated MCP server
     if (url.pathname.startsWith("/mcp-server")) {
       console.log("Routing to MCP server");
-      (ctx as any).props = {};
+      (ctx as ExecutionContext & { props?: Record<string, unknown> }).props =
+        {};
       return mcpServer.fetch(request, env, ctx);
     }
 

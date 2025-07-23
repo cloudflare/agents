@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { MCPServersState } from "agents";
 import { agentFetch } from "agents/client";
@@ -17,8 +17,18 @@ function App() {
     servers: {},
     tools: []
   });
-  const [elicitationRequest, setElicitationRequest] = useState<any>(null);
-  const [formData, setFormData] = useState<Record<string, any>>({});
+  const [elicitationRequest, setElicitationRequest] = useState<{
+    id: string;
+    message: string;
+    schema: {
+      properties?: Record<string, any>;
+      required?: string[];
+    };
+    resolve: (formData: Record<string, unknown>) => void;
+    reject: () => void;
+    cancel: () => void;
+  } | null>(null);
+  const [formData, setFormData] = useState<Record<string, unknown>>({});
   const [toolResults, setToolResults] = useState<
     Array<{ tool: string; result: string; timestamp: number }>
   >([]);
@@ -46,7 +56,7 @@ function App() {
             id: parsed.id,
             message: parsed.params.message,
             schema: parsed.params.requestedSchema,
-            resolve: (formData: any) => {
+            resolve: (formData: Record<string, unknown>) => {
               // Send elicitation response back to server following MCP spec
               const response = {
                 jsonrpc: "2.0",
@@ -91,7 +101,7 @@ function App() {
             }
           });
         }
-      } catch (error) {
+      } catch (_error) {
         // If parsing fails, let the default handler deal with it
         console.log("Non-elicitation message:", message.data);
       }
@@ -118,7 +128,7 @@ function App() {
 
   const callTool = async (toolName: string, serverId: string) => {
     try {
-      let args: any = {};
+      let args: Record<string, unknown> = {};
 
       // Set default arguments for tools
       if (toolName === "increment-counter") {
@@ -191,6 +201,7 @@ function App() {
             </div>
             {server.state === "authenticating" && server.auth_url && (
               <button
+                type="button"
                 onClick={() => window.open(server.auth_url as string, "_blank")}
                 className="auth-btn"
               >
@@ -209,6 +220,7 @@ function App() {
               <div className="tool-header">
                 <strong>{tool.name}</strong>
                 <button
+                  type="button"
                   onClick={() => callTool(tool.name, tool.serverId as string)}
                   className="call-tool-btn"
                 >
@@ -283,7 +295,7 @@ function App() {
                       <input
                         type="checkbox"
                         id={key}
-                        checked={formData[key] || false}
+                        checked={Boolean(formData[key])}
                         onChange={(e) =>
                           setFormData((prev) => ({
                             ...prev,
@@ -294,7 +306,7 @@ function App() {
                     ) : prop.enum ? (
                       <select
                         id={key}
-                        value={formData[key] || ""}
+                        value={String(formData[key] || "")}
                         onChange={(e) =>
                           setFormData((prev) => ({
                             ...prev,
@@ -316,7 +328,7 @@ function App() {
                       <input
                         type={prop.format === "email" ? "email" : "text"}
                         id={key}
-                        value={formData[key] || ""}
+                        value={String(formData[key] || "")}
                         onChange={(e) =>
                           setFormData((prev) => ({
                             ...prev,
