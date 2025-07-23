@@ -7,7 +7,6 @@ import {
   type ListResourceTemplatesResult,
   type ListResourcesResult,
   type ListToolsResult,
-  // type Notification,
   type Prompt,
   PromptListChangedNotificationSchema,
   type Resource,
@@ -29,8 +28,10 @@ export type MCPTransportOptions = (
   | StreamableHTTPClientTransportOptions
 ) & {
   authProvider?: AgentsOAuthProvider;
-  type?: "sse" | "streamable-http";
+  type?: "sse" | "streamable-http" | "auto";
 };
+
+type TransportType = Exclude<MCPTransportOptions["type"], "auto">;
 
 export class MCPClientConnection {
   client: Client;
@@ -75,31 +76,7 @@ export class MCPClientConnection {
   async init(code?: string) {
     try {
       const transportType = this.options.transport.type || "streamable-http";
-      const transport =
-        transportType === "streamable-http"
-          ? new StreamableHTTPEdgeClientTransport(
-              this.url,
-              this.options.transport as StreamableHTTPClientTransportOptions
-            )
-          : new SSEEdgeClientTransport(
-              this.url,
-              this.options.transport as SSEClientTransportOptions
-            );
-
-      if (code) {
-        await transport.finishAuth(code);
-      }
-
-      await this.client.connect(transport);
-
-      // Set up elicitation request handler
-      this.client.setRequestHandler(
-        ElicitRequestSchema,
-        async (request: ElicitRequest) => {
-          return await this.handleElicitationRequest(request);
-        }
-      );
-
+      await this.tryConnect(transportType, code);
       // biome-ignore lint/suspicious/noExplicitAny: allow for the error check here
     } catch (e: any) {
       if (e.toString().includes("Unauthorized")) {
@@ -299,6 +276,72 @@ export class MCPClientConnection {
     // For MCP servers, this should be handled by McpAgent.elicitInput()
     throw new Error(
       "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
+    );
+  }
+  /**
+   * Get the transport for the client
+   * @param transportType - The transport type to get
+   * @returns The transport for the client
+   */
+  getTransport(transportType: TransportType) {
+    switch (transportType) {
+      case "streamable-http":
+        return new StreamableHTTPEdgeClientTransport(
+          this.url,
+          this.options.transport as StreamableHTTPClientTransportOptions
+        );
+      case "sse":
+        return new SSEEdgeClientTransport(
+          this.url,
+          this.options.transport as SSEClientTransportOptions
+        );
+      default:
+        throw new Error(`Unsupported transport type: ${transportType}`);
+    }
+  }
+
+  async tryConnect(transportType: MCPTransportOptions["type"], code?: string) {
+    const transports: TransportType[] =
+      transportType === "auto" ? ["streamable-http", "sse"] : [transportType];
+
+    for (const currentTransportType of transports) {
+      const isLastTransport =
+        currentTransportType === transports[transports.length - 1];
+      const hasFallback =
+        transportType === "auto" &&
+        currentTransportType === "streamable-http" &&
+        !isLastTransport;
+
+      const transport = await this.getTransport(currentTransportType);
+
+      if (code) {
+        await transport.finishAuth(code);
+      }
+
+      try {
+        await this.client.connect(transport);
+        break;
+      } catch (e) {
+        const error = e instanceof Error ? e : new Error(String(e));
+
+        if (
+          hasFallback &&
+          (error.message.includes("404") || error.message.includes("405"))
+        ) {
+          // try the next transport if we have a fallback
+          continue;
+        }
+
+        throw e;
+      }
+    }
+
+    // Set up elicitation request handler
+    this.client.setRequestHandler(
+      ElicitRequestSchema,
+      async (request: ElicitRequest) => {
+        return await this.handleElicitationRequest(request);
+      }
     );
   }
 }
