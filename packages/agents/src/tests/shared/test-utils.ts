@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { expect } from "vitest";
 import worker, { type Env } from "../worker";
+import { MCPClientConnection } from "../../mcp/client-connection";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -134,6 +135,17 @@ export async function initializeStreamableHTTPServer(
   const sessionId = response.headers.get("mcp-session-id");
   expect(sessionId).toBeDefined();
   return sessionId as string;
+}
+
+export async function initializeMCPClientConnection(
+  baseUrl = "http://example.com/mcp",
+  transportType: "auto" | "streamable-http" | "sse" = "auto"
+) {
+  return new MCPClientConnection(
+    new URL(baseUrl),
+    { name: "test-client", version: "1.0.0" },
+    { transport: { type: transportType }, client: {} }
+  );
 }
 
 /**

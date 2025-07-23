@@ -101,6 +101,10 @@ export default {
       return TestMcpAgent.serve("/mcp").fetch(request, env, ctx);
     }
 
+    if (url.pathname === "/500") {
+      return new Response("Internal Server Error", { status: 500 });
+    }
+
     return new Response("Not found", { status: 404 });
   },
 

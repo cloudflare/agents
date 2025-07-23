@@ -450,7 +450,7 @@ export abstract class McpAgent<
   // will be passed here
   async onSSEMcpMessage(
     _sessionId: string,
-    request: Request
+    messageBody: unknown
   ): Promise<Error | null> {
     if (this._status !== "started") {
       // This means the server "woke up" after hibernation
@@ -465,10 +465,9 @@ export abstract class McpAgent<
     }
 
     try {
-      const message = await request.json();
       let parsedMessage: JSONRPCMessage;
       try {
-        parsedMessage = JSONRPCMessageSchema.parse(message);
+        parsedMessage = JSONRPCMessageSchema.parse(messageBody);
       } catch (error) {
         this._transport?.onerror?.(error as Error);
         throw error;
@@ -738,8 +737,8 @@ export abstract class McpAgent<
           const id = namespace.idFromName(`sse:${sessionId}`);
           const doStub = namespace.get(id);
 
-          // Forward the request to the Durable Object
-          const error = await doStub.onSSEMcpMessage(sessionId, request);
+          const messageBody = await request.json();
+          const error = await doStub.onSSEMcpMessage(sessionId, messageBody);
 
           if (error) {
             return new Response(error.message, {
