@@ -264,39 +264,29 @@ export abstract class McpAgent<
   }
 
   /**
-   * Elicit user input with a message and schema following MCP specification
-   *
-   * This method sends an elicitation/create request to connected clients and waits
-   * for a response. Uses event-based handling to avoid conflicts with existing
-   * onMessage functionality.
-   *
-   * @param params - Elicitation parameters
-   * @param params.message - Message to display to the user
-   * @param params.requestedSchema - JSON schema for the expected user input
-   * @returns Promise resolving to the user's response
-   * @throws Error if no connections available or request times out (60s)
+   * Elicit user input with a message and schema
    */
   async elicitInput(params: {
     message: string;
     requestedSchema: any;
   }): Promise<ElicitResult> {
+    // Send elicitation/create request following MCP specification
     return new Promise((resolve, reject) => {
       const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
 
-      // Set up timeout handler
+      // Set up response handler BEFORE sending request
       const timeout = setTimeout(() => {
         this._elicitationHandlers.delete(requestId);
-        reject(new Error("Elicitation request timed out after 60 seconds"));
-      }, 60000);
+        reject(new Error("Elicitation request timed out"));
+      }, 60000); // 60 second timeout
 
-      // Register response handler for this request
+      // Register handler for this specific request
       this._elicitationHandlers.set(requestId, {
         resolve,
         reject,
         timeout
       });
 
-      // Create MCP-compliant elicitation request
       const elicitRequest = {
         jsonrpc: "2.0" as const,
         id: requestId,
@@ -307,7 +297,7 @@ export abstract class McpAgent<
         }
       };
 
-      // Get active connections
+      // Find active connections to send the request
       const connections = this._agent?.getConnections();
       if (!connections) {
         this._elicitationHandlers.delete(requestId);
@@ -324,10 +314,12 @@ export abstract class McpAgent<
         return;
       }
 
-      // Send elicitation request to all active connections
+      // Send to all active connections (typically just one)
+      console.log("Sending elicitation request:", elicitRequest);
       for (const connection of connectionList) {
         try {
           connection.send(JSON.stringify(elicitRequest));
+          console.log("Sent elicitation request to connection");
         } catch (error) {
           console.error("Failed to send elicitation request:", error);
         }
@@ -335,10 +327,9 @@ export abstract class McpAgent<
     });
   }
 
-  // Override this method to handle state updates in your agent
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: base implementation
-  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
-    // Override this to handle state updates
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
+  onStateUpdate(state: State | undefined, source: Connection | "server") {
+    // override this to handle state updates
   }
   async onStart() {
     const self = this;
@@ -539,17 +530,11 @@ export abstract class McpAgent<
   }
 
   /**
-   * Handle incoming elicitation responses without interfering with normal message flow
-   *
-   * This method checks if an incoming message is a response to a pending elicitation
-   * request. If so, it resolves the corresponding Promise and prevents the message
-   * from being processed by the normal onMessage handler.
-   *
-   * @param message - Incoming JSON-RPC message
-   * @returns true if message was handled as elicitation response, false otherwise
+   * Handle elicitation responses
+   * Returns true if the message was handled as an elicitation response
    */
   private _handleElicitationResponse(message: JSONRPCMessage): boolean {
-    // Handle successful elicitation responses
+    // Check if this is a response to an elicitation request
     if (isJSONRPCResponse(message) && message.result) {
       const requestId = message.id?.toString();
       if (!requestId) return false;
@@ -557,14 +542,16 @@ export abstract class McpAgent<
       const handler = this._elicitationHandlers.get(requestId);
       if (!handler) return false;
 
-      // Clean up and resolve
+      // Clean up the handler
       this._elicitationHandlers.delete(requestId);
       clearTimeout(handler.timeout);
+
+      // Resolve with the elicitation result
       handler.resolve(message.result as ElicitResult);
       return true;
     }
 
-    // Handle elicitation error responses
+    // Check if this is an error response to an elicitation request
     if (isJSONRPCError(message)) {
       const requestId = message.id?.toString();
       if (!requestId) return false;
@@ -572,9 +559,11 @@ export abstract class McpAgent<
       const handler = this._elicitationHandlers.get(requestId);
       if (!handler) return false;
 
-      // Clean up and reject
+      // Clean up the handler
       this._elicitationHandlers.delete(requestId);
       clearTimeout(handler.timeout);
+
+      // Reject with the error
       const error = new Error(
         message.error.message || "Elicitation request failed"
       );
