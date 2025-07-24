@@ -4,7 +4,9 @@ import {
   Agent,
   type AgentNamespace,
   routeAgentRequest,
-  unstable_callable as callable
+  unstable_callable as callable,
+  type Connection,
+  type WSMessage
 } from "agents";
 import { z } from "zod";
 
@@ -36,7 +38,21 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
    */
   async elicitInput(params: {
     message: string;
-    requestedSchema: any;
+    requestedSchema: {
+      type: string;
+      properties?: Record<
+        string,
+        {
+          type: string;
+          title?: string;
+          description?: string;
+          format?: string;
+          enum?: string[];
+          enumNames?: string[];
+        }
+      >;
+      required?: string[];
+    };
   }): Promise<ElicitResult> {
     if (!this.activeSession) {
       throw new Error("No active client session found for elicitation");
@@ -301,7 +317,10 @@ export class MyAgent extends Agent<Env, never> {
       const elicitRequest = (await request.json()) as {
         id: string;
         method: string;
-        params: any;
+        params: {
+          message: string;
+          requestedSchema: Record<string, unknown>;
+        };
       };
 
       // Broadcast elicitation request to connected browser clients
@@ -343,7 +362,11 @@ export class MyAgent extends Agent<Env, never> {
         });
 
         // Make resolvers accessible to onMessage handler
-        (this as any)._elicitationResolvers = elicitationResolvers;
+        (
+          this as {
+            _elicitationResolvers?: Map<string, (result: ElicitResult) => void>;
+          }
+        )._elicitationResolvers = elicitationResolvers;
       });
     }
 
@@ -354,14 +377,13 @@ export class MyAgent extends Agent<Env, never> {
    * Handle incoming messages from browser clients
    * Primarily used to route elicitation responses back to waiting requests
    */
-  async onMessage(_connection: any, event: any): Promise<void> {
+  async onMessage(
+    _connection: Connection<unknown>,
+    message: WSMessage
+  ): Promise<void> {
     try {
       const messageData =
-        typeof event.data === "string"
-          ? event.data
-          : typeof event === "string"
-            ? event
-            : event.data || JSON.stringify(event);
+        typeof message === "string" ? message : message.toString();
 
       const data = JSON.parse(messageData) as {
         id?: string;
@@ -370,11 +392,12 @@ export class MyAgent extends Agent<Env, never> {
 
       // Check if this is an elicitation response
       if (data.id && data.result) {
-        const elicitationResolvers = (this as any)._elicitationResolvers as Map<
-          string,
-          (result: ElicitResult) => void
-        >;
-        if (elicitationResolvers && elicitationResolvers.has(data.id)) {
+        const elicitationResolvers = (
+          this as {
+            _elicitationResolvers?: Map<string, (result: ElicitResult) => void>;
+          }
+        )._elicitationResolvers;
+        if (elicitationResolvers?.has(data.id)) {
           const resolver = elicitationResolvers.get(data.id);
           if (resolver) {
             resolver(data.result);
@@ -382,7 +405,7 @@ export class MyAgent extends Agent<Env, never> {
           return;
         }
       }
-    } catch (error) {
+    } catch {
       // Not an elicitation response or parsing failed, ignore
     }
 
@@ -400,8 +423,8 @@ export class MyAgent extends Agent<Env, never> {
   async callMcpTool(
     serverId: string,
     toolName: string,
-    args: any
-  ): Promise<any> {
+    args: Record<string, unknown>
+  ): Promise<unknown> {
     try {
       // Inject session ID for cross-agent elicitation (demo-specific)
       const enhancedArgs = {
@@ -451,7 +474,7 @@ export default {
         return new Response("Ok", { status: 200 });
       }
 
-      (ctx as any).props = {};
+      (ctx as { props?: Record<string, unknown> }).props = {};
       return mcpServer.fetch(request, env, ctx);
     }
 
