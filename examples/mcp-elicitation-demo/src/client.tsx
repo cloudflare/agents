@@ -21,7 +21,18 @@ function App() {
     id: string;
     message: string;
     schema: {
-      properties?: Record<string, any>;
+      type: string;
+      properties?: Record<
+        string,
+        {
+          type: string;
+          title?: string;
+          description?: string;
+          format?: string;
+          enum?: string[];
+          enumNames?: string[];
+        }
+      >;
       required?: string[];
     };
     resolve: (formData: Record<string, unknown>) => void;
@@ -47,7 +58,7 @@ function App() {
     onMcpUpdate: (mcpServers: MCPServersState) => {
       setMcpState(mcpServers);
     },
-    onMessage: (message) => {
+    onMessage: (message: { data: string }) => {
       // Handle elicitation requests from MCP server following MCP specification
       try {
         const parsed = JSON.parse(message.data);
@@ -101,7 +112,7 @@ function App() {
             }
           });
         }
-      } catch (_error) {
+      } catch {
         // If parsing fails, let the default handler deal with it
         console.log("Non-elicitation message:", message.data);
       }
@@ -167,7 +178,11 @@ function App() {
       setToolResults((prev) => [
         {
           tool: toolName,
-          result: JSON.stringify({ error: (error as Error).message }, null, 2),
+          result: JSON.stringify(
+            { error: error instanceof Error ? error.message : String(error) },
+            null,
+            2
+          ),
           timestamp: Date.now()
         },
         ...prev.slice(0, 4)
@@ -284,7 +299,17 @@ function App() {
               }}
             >
               {Object.entries(elicitationRequest.schema.properties || {}).map(
-                ([key, prop]: [string, any]) => (
+                ([key, prop]: [
+                  string,
+                  {
+                    type: string;
+                    title?: string;
+                    description?: string;
+                    format?: string;
+                    enum?: string[];
+                    enumNames?: string[];
+                  }
+                ]) => (
                   <div key={key} className="form-field">
                     <label htmlFor={key}>{prop.title || key}</label>
                     {prop.description && (
@@ -318,7 +343,7 @@ function App() {
                         )}
                       >
                         <option value="">Select...</option>
-                        {prop.enum.map((option: string, idx: number) => (
+                        {prop.enum!.map((option: string, idx: number) => (
                           <option key={option} value={option}>
                             {prop.enumNames?.[idx] || option}
                           </option>

@@ -10,6 +10,8 @@ import {
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResponse,
+  ElicitRequestSchema,
+  type ElicitRequest,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
@@ -201,6 +203,16 @@ export abstract class McpAgent<
   private _transportType: TransportType = "unset";
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
 
+  // Event-based elicitation handling
+  private _elicitationHandlers = new Map<
+    string,
+    {
+      resolve: (value: ElicitResult) => void;
+      reject: (error: Error) => void;
+      timeout: NodeJS.Timeout;
+    }
+  >();
+
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
@@ -256,11 +268,24 @@ export abstract class McpAgent<
    */
   async elicitInput(params: {
     message: string;
-    requestedSchema: Record<string, unknown>;
+    requestedSchema: any;
   }): Promise<ElicitResult> {
     // Send elicitation/create request following MCP specification
     return new Promise((resolve, reject) => {
-      const requestId = `elicit_${Math.random().toString(36).substr(2, 9)}`;
+      const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+
+      // Set up response handler BEFORE sending request
+      const timeout = setTimeout(() => {
+        this._elicitationHandlers.delete(requestId);
+        reject(new Error("Elicitation request timed out"));
+      }, 60000); // 60 second timeout
+
+      // Register handler for this specific request
+      this._elicitationHandlers.set(requestId, {
+        resolve,
+        reject,
+        timeout
+      });
 
       const elicitRequest = {
         jsonrpc: "2.0" as const,
@@ -275,12 +300,16 @@ export abstract class McpAgent<
       // Find active connections to send the request
       const connections = this._agent?.getConnections();
       if (!connections) {
+        this._elicitationHandlers.delete(requestId);
+        clearTimeout(timeout);
         reject(new Error("No active connections available for elicitation"));
         return;
       }
 
       const connectionList = Array.from(connections);
       if (connectionList.length === 0) {
+        this._elicitationHandlers.delete(requestId);
+        clearTimeout(timeout);
         reject(new Error("No active connections available for elicitation"));
         return;
       }
@@ -295,61 +324,6 @@ export abstract class McpAgent<
           console.error("Failed to send elicitation request:", error);
         }
       }
-
-      // Set up response handler with timeout
-      const timeout = setTimeout(() => {
-        reject(new Error("Elicitation request timed out"));
-      }, 60000); // 60 second timeout
-
-      // Store response handler
-      const handleResponse = (_connection: Connection, event: WSMessage) => {
-        try {
-          // Handle different message formats - WSMessage can be string or ArrayBuffer
-          let messageData: string;
-          if (typeof event === "string") {
-            messageData = event;
-          } else {
-            console.log("Unexpected message format:", { event });
-            return false;
-          }
-
-          const data = JSON.parse(messageData);
-          console.log("McpAgent received message:", data);
-          if (data.id === requestId) {
-            console.log("Matched elicitation response for request:", requestId);
-            clearTimeout(timeout);
-
-            if (data.error) {
-              console.log("Elicitation error:", data.error);
-              reject(new Error(data.error.message || "Elicitation failed"));
-            } else if (data.result) {
-              console.log("Elicitation success:", data.result);
-              resolve(data.result);
-            } else {
-              console.log("Invalid elicitation response:", data);
-              reject(new Error("Invalid elicitation response"));
-            }
-            return true; // Indicate we handled this message
-          }
-        } catch (error) {
-          // Not JSON or not our response, ignore
-          console.log("Failed to parse message or not our response:", error, {
-            event
-          });
-        }
-        return false; // Let other handlers process this message
-      };
-
-      // Temporarily override onMessage to catch our response
-      const originalOnMessage = this.onMessage?.bind(this) || (() => {});
-      this.onMessage = async (connection: Connection, event: WSMessage) => {
-        if (!handleResponse(connection, event)) {
-          // Not our elicitation response, call original handler
-          return originalOnMessage(connection, event);
-        }
-        // Restore original handler after handling our response
-        this.onMessage = originalOnMessage;
-      };
     });
   }
 
@@ -541,6 +515,11 @@ export abstract class McpAgent<
       return;
     }
 
+    // Check if this is an elicitation response before passing to transport
+    if (this._handleElicitationResponse(message)) {
+      return; // Message was handled by elicitation system
+    }
+
     // We need to map every incoming message to the connection that it came in on
     // so that we can send relevant responses and notifications back on the same connection
     if (isJSONRPCRequest(message)) {
@@ -548,6 +527,51 @@ export abstract class McpAgent<
     }
 
     this._transport?.onmessage?.(message);
+  }
+
+  /**
+   * Handle elicitation responses
+   * Returns true if the message was handled as an elicitation response
+   */
+  private _handleElicitationResponse(message: JSONRPCMessage): boolean {
+    // Check if this is a response to an elicitation request
+    if (isJSONRPCResponse(message) && message.result) {
+      const requestId = message.id?.toString();
+      if (!requestId) return false;
+
+      const handler = this._elicitationHandlers.get(requestId);
+      if (!handler) return false;
+
+      // Clean up the handler
+      this._elicitationHandlers.delete(requestId);
+      clearTimeout(handler.timeout);
+
+      // Resolve with the elicitation result
+      handler.resolve(message.result as ElicitResult);
+      return true;
+    }
+
+    // Check if this is an error response to an elicitation request
+    if (isJSONRPCError(message)) {
+      const requestId = message.id?.toString();
+      if (!requestId) return false;
+
+      const handler = this._elicitationHandlers.get(requestId);
+      if (!handler) return false;
+
+      // Clean up the handler
+      this._elicitationHandlers.delete(requestId);
+      clearTimeout(handler.timeout);
+
+      // Reject with the error
+      const error = new Error(
+        message.error.message || "Elicitation request failed"
+      );
+      handler.reject(error);
+      return true;
+    }
+
+    return false;
   }
 
   // All messages received over SSE after the initial connection has been established
@@ -576,6 +600,11 @@ export abstract class McpAgent<
       } catch (error) {
         this._transport?.onerror?.(error as Error);
         throw error;
+      }
+
+      // Check if this is an elicitation response before passing to transport
+      if (this._handleElicitationResponse(parsedMessage)) {
+        return null; // Message was handled by elicitation system
       }
 
       this._transport?.onmessage?.(parsedMessage);
