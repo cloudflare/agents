@@ -203,15 +203,8 @@ export abstract class McpAgent<
   private _transportType: TransportType = "unset";
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
 
-  // Event-based elicitation handling
-  private _elicitationHandlers = new Map<
-    string,
-    {
-      resolve: (value: ElicitResult) => void;
-      reject: (error: Error) => void;
-      timeout: NodeJS.Timeout;
-    }
-  >();
+  // Hibernation-safe elicitation handling
+  // Uses durable storage instead of in-memory handlers
 
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
@@ -270,65 +263,51 @@ export abstract class McpAgent<
     message: string;
     requestedSchema: any;
   }): Promise<ElicitResult> {
-    // Send elicitation/create request following MCP specification
-    return new Promise((resolve, reject) => {
-      const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
 
-      // Set up response handler BEFORE sending request
-      const timeout = setTimeout(() => {
-        this._elicitationHandlers.delete(requestId);
-        reject(new Error("Elicitation request timed out"));
-      }, 60000); // 60 second timeout
+    // Store pending request in durable storage
+    await this.ctx.storage.put(`elicitation:${requestId}`, {
+      message: params.message,
+      requestedSchema: params.requestedSchema,
+      timestamp: Date.now()
+    });
 
-      // Register handler for this specific request
-      this._elicitationHandlers.set(requestId, {
-        resolve,
-        reject,
-        timeout
-      });
+    const elicitRequest = {
+      jsonrpc: "2.0" as const,
+      id: requestId,
+      method: "elicitation/create",
+      params: {
+        message: params.message,
+        requestedSchema: params.requestedSchema
+      }
+    };
 
-      const elicitRequest = {
-        jsonrpc: "2.0" as const,
-        id: requestId,
-        method: "elicitation/create",
-        params: {
-          message: params.message,
-          requestedSchema: params.requestedSchema
-        }
-      };
-
-      // Find active connections to send the request
+    // Send through MCP transport
+    if (this._transport) {
+      await this._transport.send(elicitRequest);
+    } else {
       const connections = this._agent?.getConnections();
-      if (!connections) {
-        this._elicitationHandlers.delete(requestId);
-        clearTimeout(timeout);
-        reject(new Error("No active connections available for elicitation"));
-        return;
+      if (!connections || Array.from(connections).length === 0) {
+        await this.ctx.storage.delete(`elicitation:${requestId}`);
+        throw new Error("No active connections available for elicitation");
       }
 
       const connectionList = Array.from(connections);
-      if (connectionList.length === 0) {
-        this._elicitationHandlers.delete(requestId);
-        clearTimeout(timeout);
-        reject(new Error("No active connections available for elicitation"));
-        return;
-      }
-
-      // Send to all active connections (typically just one)
-      console.log("Sending elicitation request:", elicitRequest);
       for (const connection of connectionList) {
         try {
           connection.send(JSON.stringify(elicitRequest));
-          console.log("Sent elicitation request to connection");
         } catch (error) {
           console.error("Failed to send elicitation request:", error);
         }
       }
-    });
+    }
+
+    // Wait for response through MCP
+    return this._waitForElicitationResponse(requestId);
   }
 
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
-  onStateUpdate(state: State | undefined, source: Connection | "server") {
+  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
     // override this to handle state updates
   }
   async onStart() {
@@ -516,7 +495,7 @@ export abstract class McpAgent<
     }
 
     // Check if this is an elicitation response before passing to transport
-    if (this._handleElicitationResponse(message)) {
+    if (await this._handleElicitationResponse(message)) {
       return; // Message was handled by elicitation system
     }
 
@@ -530,44 +509,85 @@ export abstract class McpAgent<
   }
 
   /**
-   * Handle elicitation responses
-   * Returns true if the message was handled as an elicitation response
+   * Wait for elicitation response through storage polling
    */
-  private _handleElicitationResponse(message: JSONRPCMessage): boolean {
+  private async _waitForElicitationResponse(
+    requestId: string
+  ): Promise<ElicitResult> {
+    const startTime = Date.now();
+    const timeout = 60000; // 60 second timeout
+
+    try {
+      while (Date.now() - startTime < timeout) {
+        // Check if response has been stored
+        const response = await this.ctx.storage.get<ElicitResult>(
+          `elicitation:response:${requestId}`
+        );
+        if (response) {
+          // Immediately clean up both request and response
+          await this.ctx.storage.delete(`elicitation:${requestId}`);
+          await this.ctx.storage.delete(`elicitation:response:${requestId}`);
+          return response;
+        }
+
+        // Sleep briefly before checking again
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      throw new Error("Elicitation request timed out");
+    } finally {
+      // Always clean up on timeout or error
+      await this.ctx.storage.delete(`elicitation:${requestId}`);
+      await this.ctx.storage.delete(`elicitation:response:${requestId}`);
+    }
+  }
+
+  /**
+   * Handle elicitation responses   */
+  private async _handleElicitationResponse(
+    message: JSONRPCMessage
+  ): Promise<boolean> {
     // Check if this is a response to an elicitation request
     if (isJSONRPCResponse(message) && message.result) {
       const requestId = message.id?.toString();
-      if (!requestId) return false;
+      if (!requestId || !requestId.startsWith("elicit_")) return false;
 
-      const handler = this._elicitationHandlers.get(requestId);
-      if (!handler) return false;
+      // Check if we have a pending request for this ID
+      const pendingRequest = await this.ctx.storage.get(
+        `elicitation:${requestId}`
+      );
+      if (!pendingRequest) return false;
 
-      // Clean up the handler
-      this._elicitationHandlers.delete(requestId);
-      clearTimeout(handler.timeout);
-
-      // Resolve with the elicitation result
-      handler.resolve(message.result as ElicitResult);
+      // Store the response in durable storage
+      await this.ctx.storage.put(
+        `elicitation:response:${requestId}`,
+        message.result as ElicitResult
+      );
       return true;
     }
 
     // Check if this is an error response to an elicitation request
     if (isJSONRPCError(message)) {
       const requestId = message.id?.toString();
-      if (!requestId) return false;
+      if (!requestId || !requestId.startsWith("elicit_")) return false;
 
-      const handler = this._elicitationHandlers.get(requestId);
-      if (!handler) return false;
-
-      // Clean up the handler
-      this._elicitationHandlers.delete(requestId);
-      clearTimeout(handler.timeout);
-
-      // Reject with the error
-      const error = new Error(
-        message.error.message || "Elicitation request failed"
+      // Check if we have a pending request for this ID
+      const pendingRequest = await this.ctx.storage.get(
+        `elicitation:${requestId}`
       );
-      handler.reject(error);
+      if (!pendingRequest) return false;
+
+      // Store error response
+      const errorResult: ElicitResult = {
+        action: "cancel",
+        content: {
+          error: message.error.message || "Elicitation request failed"
+        }
+      };
+      await this.ctx.storage.put(
+        `elicitation:response:${requestId}`,
+        errorResult
+      );
       return true;
     }
 
@@ -603,7 +623,7 @@ export abstract class McpAgent<
       }
 
       // Check if this is an elicitation response before passing to transport
-      if (this._handleElicitationResponse(parsedMessage)) {
+      if (await this._handleElicitationResponse(parsedMessage)) {
         return null; // Message was handled by elicitation system
       }
 
