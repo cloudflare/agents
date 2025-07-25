@@ -11,7 +11,21 @@ Here's the actual working code from our demo:
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent, type ElicitResult } from "agents/mcp";
+import {
+  Agent,
+  type AgentNamespace,
+  routeAgentRequest,
+  unstable_callable as callable,
+  type Connection,
+  type WSMessage
+} from "agents";
 import { z } from "zod";
+
+type Env = {
+  MyAgent: AgentNamespace<MyAgent>;
+  McpServerAgent: DurableObjectNamespace<McpServerAgent>;
+  HOST: string;
+};
 
 export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
   server = new McpServer({
@@ -21,8 +35,62 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
 
   initialState = { counter: 0 };
 
-  // Track active session for cross-agent elicitation (demo-specific pattern)
+  // Track active session for cross-agent elicitation
   private activeSession: string | null = null;
+
+  async elicitInput(params: {
+    message: string;
+    requestedSchema: {
+      type: string;
+      properties?: Record<
+        string,
+        {
+          type: string;
+          title?: string;
+          description?: string;
+          format?: string;
+          enum?: string[];
+          enumNames?: string[];
+        }
+      >;
+      required?: string[];
+    };
+  }): Promise<ElicitResult> {
+    if (!this.activeSession) {
+      throw new Error("No active client session found for elicitation");
+    }
+
+    // Get the MyAgent instance that handles browser communication
+    const myAgentId = this.env.MyAgent.idFromName(this.activeSession);
+    const myAgent = this.env.MyAgent.get(myAgentId);
+
+    // Create MCP-compliant elicitation request
+    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+    const elicitRequest = {
+      jsonrpc: "2.0" as const,
+      id: requestId,
+      method: "elicitation/create",
+      params: {
+        message: params.message,
+        requestedSchema: params.requestedSchema
+      }
+    };
+
+    // Forward request to MyAgent which communicates with browser
+    const response = await myAgent.fetch(
+      new Request("https://internal/elicit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(elicitRequest)
+      })
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to send elicitation request");
+    }
+
+    return (await response.json()) as ElicitResult;
+  }
 
   async init() {
     // Counter tool with user confirmation via elicitation
@@ -43,7 +111,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
         amount: number;
         __clientSession?: string;
       }) => {
-        // Store session for cross-agent elicitation (demo-specific)
+        // Store session for cross-agent elicitation
         if (__clientSession) {
           this.activeSession = __clientSession;
         }
@@ -111,12 +179,12 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
         username: string;
         __clientSession?: string;
       }) => {
-        // Store session for cross-agent elicitation (demo-specific)
+        // Store session for cross-agent elicitation
         if (__clientSession) {
           this.activeSession = __clientSession;
         }
 
-        // Request user details via form-based elicitation
+        // Request user details via elicitation
         const userInfo = await this.elicitInput({
           message: `Create user account for "${username}":`,
           requestedSchema: {
@@ -167,14 +235,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
       }
     );
   }
-}
 ```
-
-### We support all three actions
-
-- **Accept**: `{ "action": "accept", "content": { "email": "...", "role": "..." } }`
-- **Decline**: `{ "action": "decline" }`
-- **Cancel**: `{ "action": "cancel" }`
 
 ## Getting Started
 
@@ -201,7 +262,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
 ### In production, your MCP server typically connects directly to clients, making elicitation much simpler:
 
 ```typescript
-// Direct MCP connection - no session complexity
+// Direct MCP connection
 export class MyMcpServer extends McpAgent {
   async init() {
     this.server.tool(
@@ -209,7 +270,7 @@ export class MyMcpServer extends McpAgent {
       "My tool",
       { input: z.string() },
       async ({ input }) => {
-        // elicitInput() works directly - no session management needed
+        // elicitInput() works directly
         const result = await this.elicitInput({
           message: "Confirm this action?",
           requestedSchema: {
