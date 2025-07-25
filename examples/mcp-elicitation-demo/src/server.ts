@@ -24,18 +24,9 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
 
   initialState = { counter: 0 };
 
-  // Track active session for cross-agent elicitation (demo-specific pattern)
+  // Track active session for cross-agent elicitation
   private activeSession: string | null = null;
 
-  /**
-   * Cross-agent elicitation implementation for demo architecture
-   *
-   * In this demo, we have Browser ↔ MyAgent ↔ McpServerAgent
-   * This method forwards elicitation requests from McpServerAgent to MyAgent,
-   * which then communicates with the browser client.
-   *
-   * Note: In typical MCP setups, elicitation works directly without this complexity.
-   */
   async elicitInput(params: {
     message: string;
     requestedSchema: {
@@ -109,7 +100,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
         amount: number;
         __clientSession?: string;
       }) => {
-        // Store session for cross-agent elicitation (demo-specific)
+        // Store session for cross-agent elicitation
         if (__clientSession) {
           this.activeSession = __clientSession;
         }
@@ -177,12 +168,12 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
         username: string;
         __clientSession?: string;
       }) => {
-        // Store session for cross-agent elicitation (demo-specific)
+        // Store session for cross-agent elicitation
         if (__clientSession) {
           this.activeSession = __clientSession;
         }
 
-        // Request user details via form-based elicitation
+        // Request user details via elicitation
         const userInfo = await this.elicitInput({
           message: `Create user account for "${username}":`,
           requestedSchema: {
@@ -249,7 +240,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
   async onRequest(request: Request): Promise<Response> {
     const reqUrl = new URL(request.url);
 
-    // Handle session storage for cross-agent elicitation (demo-specific)
+    // Handle session storage for cross-agent elicitation
     if (
       (reqUrl.pathname.endsWith("store-session") ||
         reqUrl.hostname === "internal") &&
@@ -268,12 +259,6 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
   }
 }
 
-/**
- * Browser-facing agent that handles MCP client connections and elicitation forwarding
- *
- * This agent serves as a bridge between the browser client and MCP servers,
- * handling the cross-agent elicitation pattern required for this demo architecture.
- */
 export class MyAgent extends Agent<Env, never> {
   async onRequest(request: Request): Promise<Response> {
     const reqUrl = new URL(request.url);
@@ -288,28 +273,6 @@ export class MyAgent extends Agent<Env, never> {
     // Health check endpoint
     if (reqUrl.pathname.endsWith("ping") && request.method === "GET") {
       return new Response("pong", { status: 200 });
-    }
-
-    // Session status check (for debugging)
-    if (
-      reqUrl.pathname.endsWith("check-active-session") &&
-      request.method === "GET"
-    ) {
-      const storedSession = await this.ctx.storage.get<string>(
-        "currentActiveSession"
-      );
-      const isActive = storedSession === this.name;
-      return new Response(
-        JSON.stringify({
-          sessionId: this.name,
-          storedSession,
-          isActive
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        }
-      );
     }
 
     // Handle elicitation forwarding from McpServerAgent to browser
@@ -338,7 +301,7 @@ export class MyAgent extends Agent<Env, never> {
           resolve(
             new Response(
               JSON.stringify({
-                action: "reject",
+                action: "cancel",
                 content: {}
               } as ElicitResult),
               {
@@ -375,7 +338,6 @@ export class MyAgent extends Agent<Env, never> {
 
   /**
    * Handle incoming messages from browser clients
-   * Primarily used to route elicitation responses back to waiting requests
    */
   async onMessage(
     _connection: Connection<unknown>,
@@ -408,16 +370,10 @@ export class MyAgent extends Agent<Env, never> {
     } catch {
       // Not an elicitation response or parsing failed, ignore
     }
-
-    // Call parent handler for other message types if it exists
-    // Note: Agent base class may not have onMessage method
   }
 
   /**
    * RPC method to call MCP tools with session tracking
-   *
-   * This method automatically injects the current session ID into tool arguments
-   * to enable cross-agent elicitation in this demo architecture.
    */
   @callable()
   async callMcpTool(
@@ -426,10 +382,10 @@ export class MyAgent extends Agent<Env, never> {
     args: Record<string, unknown>
   ): Promise<unknown> {
     try {
-      // Inject session ID for cross-agent elicitation (demo-specific)
+      // Inject session ID for cross-agent elicitation
       const enhancedArgs = {
         ...args,
-        __clientSession: this.name // Used by McpServerAgent for elicitation routing
+        __clientSession: this.name
       };
 
       const result = await this.mcp.callTool({
@@ -457,7 +413,7 @@ export default {
 
     // Route MCP server requests to the dedicated MCP server
     if (url.pathname.startsWith("/mcp-server")) {
-      // Handle session setting for cross-agent elicitation (demo-specific)
+      // Handle session setting for cross-agent elicitation
       if (url.pathname.endsWith("/set-session") && request.method === "POST") {
         const { sessionId } = (await request.json()) as { sessionId: string };
         const mcpServerAgentId = env.McpServerAgent.idFromName("default");
