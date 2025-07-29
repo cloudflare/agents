@@ -190,8 +190,8 @@ This EmailAgent example supports:
 
 1. **Unified Email Processing**: All emails route to the EmailAgent with different IDs based on address
 2. **Auto-Responders**: Automatically acknowledge receipt of emails
-3. **Email Parsing**: Extract and process email content using PostalMime
-4. **hread Management**: Maintain email conversation state
+3. **Email Parsing**: Email Processing: Parse and extract data from emails
+4. **Thread Management**: Maintain email conversation state
 5. **Multi-Instance Routing**: Route emails to different EmailAgent instances using email addresses
 
 ## Next Steps
