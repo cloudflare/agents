@@ -10,8 +10,6 @@ import {
   isJSONRPCNotification,
   isJSONRPCRequest,
   isJSONRPCResponse,
-  ElicitRequestSchema,
-  type ElicitRequest,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
@@ -261,7 +259,7 @@ export abstract class McpAgent<
    */
   async elicitInput(params: {
     message: string;
-    requestedSchema: any;
+    requestedSchema: unknown;
   }): Promise<ElicitResult> {
     const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
 
@@ -306,8 +304,9 @@ export abstract class McpAgent<
     return this._waitForElicitationResponse(requestId);
   }
 
+  // we leave the variables as unused for autocomplete purposes
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
-  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
+  onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
   async onStart() {
