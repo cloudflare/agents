@@ -27,7 +27,7 @@ async function testEmail() {
       console.log("✅ Success:", result);
     } else {
       console.error("❌ Error:", response.status, response.statusText);
-      const errorText = await response.text();
+      const errorText = await response.text.text();
       console.error("Error details:", errorText);
     }
   } catch (error) {

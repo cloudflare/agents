@@ -55,7 +55,7 @@ function App() {
         agent: "my-agent",
         host: "http://localhost:8787"
       });
-      const data = await response.text();
+      const data = await response.text.text();
       const newMessage: Message = {
         id: Math.random().toString(36).substring(7),
         text: `Server Response: ${data}`,

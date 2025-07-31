@@ -1,13 +1,83 @@
 import type {
-  Message as ChatMessage,
+  UIMessage as ChatMessage,
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { appendResponseMessages } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import type { IncomingMessage, OutgoingMessage } from "./ai-types";
 
 const decoder = new TextDecoder();
+
+// Helper function to replace the removed appendResponseMessages
+// In v5, response.messages returns ResponseMessage[] (model messages), not UIMessage[]
+// This helper converts and appends them properly using v5 patterns
+function appendResponseMessages({
+  messages,
+  responseMessages
+}: {
+  messages: ChatMessage[];
+  responseMessages: any[]; // ResponseMessage[] from the AI SDK
+}): ChatMessage[] {
+  // Convert ResponseMessage[] to UIMessage[] format using v5 structure
+  const convertedMessages: ChatMessage[] = responseMessages.map(
+    (msg, index) => {
+      const parts: any[] = [];
+
+      if (msg.role === "assistant") {
+        // Handle different content types in v5 format
+        if (msg.content && typeof msg.content === "string") {
+          parts.push({ type: "text", text: msg.content });
+        } else if (Array.isArray(msg.content)) {
+          msg.content.forEach((content: any) => {
+            switch (content.type) {
+              case "text":
+                parts.push({ type: "text", text: content.text });
+                break;
+              case "tool-call":
+                // Use v5 tool part naming: tool-${toolName}
+                parts.push({
+                  type: `tool-${content.toolName}`,
+                  toolCallId: content.toolCallId,
+                  toolName: content.toolName,
+                  input: content.args, // v5 uses 'input' instead of 'args'
+                  state: "input-available"
+                });
+                break;
+              default:
+                // Handle other content types
+                parts.push(content);
+            }
+          });
+        }
+
+        // Handle reasoning if present (v5 feature)
+        if (msg.reasoning) {
+          parts.unshift({
+            type: "reasoning",
+            text: msg.reasoning
+          });
+        }
+      } else {
+        // For non-assistant messages, handle as text
+        const text =
+          typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content) && msg.content[0]?.text
+              ? msg.content[0].text
+              : JSON.stringify(msg.content);
+        parts.push({ type: "text", text });
+      }
+
+      return {
+        id: `msg-${Date.now()}-${index}`,
+        role: msg.role,
+        parts
+      };
+    }
+  );
+
+  return [...messages, ...convertedMessages];
+}
 
 /**
  * Extension of Agent with built-in chat capabilities

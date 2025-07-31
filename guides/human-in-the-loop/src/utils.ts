@@ -1,9 +1,9 @@
-import { type Message, formatDataStreamPart } from "@ai-sdk/ui-utils";
+import { type Message, formatDataStreamPart } from "ai";
 import {
   type DataStreamWriter,
   type ToolExecutionOptions,
   type ToolSet,
-  convertToCoreMessages
+  convertToModelMessages
 } from "ai";
 import type { z } from "zod";
 
@@ -85,7 +85,7 @@ export async function processToolCalls<
         const toolInstance = executeFunctions[toolName];
         if (toolInstance) {
           result = await toolInstance(toolInvocation.args, {
-            messages: convertToCoreMessages(messages),
+            messages: convertToModelMessages(messages),
             toolCallId: toolInvocation.toolCallId
           });
         } else {
@@ -99,12 +99,14 @@ export async function processToolCalls<
       }
 
       // Forward updated tool result to the client.
-      dataStream.write(
-        formatDataStreamPart("tool_result", {
+      dataStream.write({
+        type: "tool-result",
+
+        value: {
           result,
           toolCallId: toolInvocation.toolCallId
-        })
-      );
+        }
+      });
 
       // Return updated toolInvocation with the actual result.
       return {

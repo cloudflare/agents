@@ -11,7 +11,7 @@ import type {
   ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import { type ToolSet, jsonSchema } from "ai";
+import { type ToolSet, jsonSchema, dynamicTool } from "ai";
 import { nanoid } from "nanoid";
 import {
   MCPClientConnection,
@@ -190,11 +190,12 @@ export class MCPClientManager {
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
           `${tool.serverId}_${tool.name}`,
-          {
+          dynamicTool({
             description: tool.description,
-            execute: async (args) => {
+            inputSchema: jsonSchema(tool.inputSchema),
+            execute: async (args: unknown) => {
               const result = await this.callTool({
-                arguments: args,
+                arguments: args as Record<string, unknown>,
                 name: tool.name,
                 serverId: tool.serverId
               });
@@ -203,9 +204,8 @@ export class MCPClientManager {
                 throw new Error(result.content[0].text);
               }
               return result;
-            },
-            parameters: jsonSchema(tool.inputSchema)
-          }
+            }
+          })
         ];
       })
     );

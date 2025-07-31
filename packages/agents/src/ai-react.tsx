@@ -1,5 +1,6 @@
 import { useChat } from "@ai-sdk/react";
-import type { Message } from "ai";
+import type { UIMessage } from "ai";
+import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
@@ -22,12 +23,16 @@ type UseAgentChatOptions<State> = Omit<
       | undefined
       | null
       // | (() => Message[])
-      | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
+      | ((options: GetInitialMessagesOptions) => Promise<UIMessage[]>);
+    /** HTTP request credentials */
+    credentials?: RequestCredentials;
+    /** HTTP request headers */
+    headers?: HeadersInit;
   },
-  "fetch"
+  "fetch" | "transport" | "messages"
 >;
 
-const requestCache = new Map<string, Promise<Message[]>>();
+const requestCache = new Map<string, Promise<UIMessage[]>>();
 
 /**
  * React hook for building AI chat interfaces using an Agent
@@ -59,7 +64,7 @@ export function useAgentChat<State = unknown>(
       credentials: options.credentials,
       headers: options.headers
     });
-    return response.json<Message[]>();
+    return response.json<UIMessage[]>();
   }
 
   const getInitialMessagesFetch =
@@ -89,7 +94,7 @@ export function useAgentChat<State = unknown>(
         });
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
-    : (rest.initialMessages ?? []);
+    : [];
 
   // manages adding and removing the promise from the cache
   useEffect(() => {
@@ -161,7 +166,7 @@ export function useAgentChat<State = unknown>(
 
     agent.addEventListener(
       "message",
-      (event) => {
+      (event: MessageEvent) => {
         let data: OutgoingMessage;
         try {
           data = JSON.parse(event.data) as OutgoingMessage;
@@ -217,9 +222,8 @@ export function useAgentChat<State = unknown>(
     return new Response(stream);
   }
   const useChatHelpers = useChat({
-    fetch: aiFetch,
-    initialMessages,
-    sendExtraMessageFields: true,
+    transport: new DefaultChatTransport({ fetch: aiFetch }),
+    messages: initialMessages,
     ...rest
   });
 
@@ -284,7 +288,7 @@ export function useAgentChat<State = unknown>(
      * Set the chat messages and synchronize with the Agent
      * @param messages New messages to set
      */
-    setMessages: (messages: Message[]) => {
+    setMessages: (messages: UIMessage[]) => {
       useChatHelpers.setMessages(messages);
       agent.send(
         JSON.stringify({

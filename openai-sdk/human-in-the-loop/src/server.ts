@@ -28,7 +28,7 @@ const getWeatherTool = tool({
     console.log(`[getWeatherTool] Approval needed: ${needsApproval}`);
     return needsApproval;
   },
-  parameters: z.object({
+  inputSchema: z.object({
     location: z.string()
   })
 });

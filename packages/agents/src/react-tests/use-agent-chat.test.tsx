@@ -7,7 +7,7 @@ import type { useAgent } from "../react";
 // mock the @ai-sdk/react package
 vi.mock("@ai-sdk/react", () => ({
   useChat: vi.fn((args) => ({
-    messages: args.initialMessages,
+    messages: args.messages,
     setMessages: vi.fn()
   }))
 }));
@@ -31,8 +31,16 @@ describe("useAgentChat", () => {
     } as any;
 
     const testMessages = [
-      { content: "Hi", id: "1", role: "user" as const },
-      { content: "Hello", id: "2", role: "assistant" as const }
+      {
+        id: "1",
+        role: "user" as const,
+        parts: [{ type: "text", text: "Hi" }]
+      },
+      {
+        id: "2",
+        role: "assistant" as const,
+        parts: [{ type: "text", text: "Hello" }]
+      }
     ];
     const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
 
