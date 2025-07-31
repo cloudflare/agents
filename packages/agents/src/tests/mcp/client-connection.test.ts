@@ -41,17 +41,9 @@ class MockMcpServer {
       }
     );
 
-    this.server.resource(
-      "test://resource",
-      {
-        name: "test-resource",
-        description: "A test resource",
-        mimeType: "text/plain"
-      },
-      async () => ({
-        contents: [{ text: "Test resource content", type: "text" }]
-      })
-    );
+    this.server.resource("test-resource", "test://resource", async (uri) => ({
+      contents: [{ text: "Test resource content", uri: uri.href }]
+    }));
 
     this.server.prompt("test-prompt", "A test prompt", async () => ({
       messages: [
@@ -60,7 +52,7 @@ class MockMcpServer {
     }));
   }
 
-  async startServer(port: number = 3000): Promise<string> {
+  async startServer(port = 3000): Promise<string> {
     // In a real implementation, this would start an HTTP server
     // For testing, we'll return a mock URL
     return `http://localhost:${port}`;
@@ -77,7 +69,7 @@ class MockMcpServer {
 describe("MCP Client Connection Integration", () => {
   let mockServer: MockMcpServer;
   let serverUrl: string;
-  let consoleSpy: any;
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
     mockServer = new MockMcpServer();
@@ -533,6 +525,12 @@ describe("MCP Client Connection Integration", () => {
               authUrl: undefined,
               clientId: undefined,
               serverId: undefined,
+              redirectUrl: "http://localhost:3000/callback",
+              clientMetadata: {
+                client_name: "test-client",
+                client_uri: "http://localhost:3000",
+                redirect_uris: ["http://localhost:3000/callback"]
+              },
               tokens: vi.fn().mockResolvedValue({ access_token: "test-token" }),
               saveTokens: vi.fn(),
               clientInformation: vi.fn(),
@@ -547,7 +545,7 @@ describe("MCP Client Connection Integration", () => {
       );
 
       // Mock the init method to test the auth code path without real network calls
-      const originalInit = connection.init.bind(connection);
+      const _originalInit = connection.init.bind(connection);
       connection.init = vi.fn().mockImplementation(async (code?: string) => {
         // Simulate the auth code being passed through
         if (code) {
