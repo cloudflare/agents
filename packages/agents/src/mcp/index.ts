@@ -888,6 +888,7 @@ export abstract class McpAgent<
           // Get the Durable Object
           const id = namespace.idFromName(`sse:${sessionId}`);
           const doStub = namespace.get(id);
+          await doStub._init(ctx.props);
 
           const messageBody = await request.json();
           const error = await doStub.onSSEMcpMessage(sessionId, messageBody);
