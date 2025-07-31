@@ -2,10 +2,13 @@
   "author": "",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.13.3",
-    "nanoid": "^5.1.5"
+    "nanoid": "^5.1.5",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.67"
   },
   "keywords": [],
-  "name": "@cloudflare/agents-mcp-client-example",
+  "name": "@cloudflare/agents-mcp-elicitation-demo",
   "private": true,
   "scripts": {
     "build": "vite build",

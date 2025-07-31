@@ -9,7 +9,8 @@ import {
   isJSONRPCError,
   isJSONRPCNotification,
   isJSONRPCRequest,
-  isJSONRPCResponse
+  isJSONRPCResponse,
+  type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
 import { Agent } from "../index";
@@ -200,6 +201,9 @@ export abstract class McpAgent<
   private _transportType: TransportType = "unset";
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
 
+  // Hibernation-safe elicitation handling
+  // Uses durable storage instead of in-memory handlers
+
   /**
    * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
    * to the outer class: initialState/state/setState/onStateUpdate/sql
@@ -249,6 +253,58 @@ export abstract class McpAgent<
   setState(state: State) {
     return this._agent.setState(state);
   }
+
+  /**
+   * Elicit user input with a message and schema
+   */
+  async elicitInput(params: {
+    message: string;
+    requestedSchema: unknown;
+  }): Promise<ElicitResult> {
+    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+
+    // Store pending request in durable storage
+    await this.ctx.storage.put(`elicitation:${requestId}`, {
+      message: params.message,
+      requestedSchema: params.requestedSchema,
+      timestamp: Date.now()
+    });
+
+    const elicitRequest = {
+      jsonrpc: "2.0" as const,
+      id: requestId,
+      method: "elicitation/create",
+      params: {
+        message: params.message,
+        requestedSchema: params.requestedSchema
+      }
+    };
+
+    // Send through MCP transport
+    if (this._transport) {
+      await this._transport.send(elicitRequest);
+    } else {
+      const connections = this._agent?.getConnections();
+      if (!connections || Array.from(connections).length === 0) {
+        await this.ctx.storage.delete(`elicitation:${requestId}`);
+        throw new Error("No active connections available for elicitation");
+      }
+
+      const connectionList = Array.from(connections);
+      for (const connection of connectionList) {
+        try {
+          connection.send(JSON.stringify(elicitRequest));
+        } catch (error) {
+          console.error("Failed to send elicitation request:", error);
+        }
+      }
+    }
+
+    // Wait for response through MCP
+    return this._waitForElicitationResponse(requestId);
+  }
+
+  // we leave the variables as unused for autocomplete purposes
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
@@ -437,6 +493,11 @@ export abstract class McpAgent<
       return;
     }
 
+    // Check if this is an elicitation response before passing to transport
+    if (await this._handleElicitationResponse(message)) {
+      return; // Message was handled by elicitation system
+    }
+
     // We need to map every incoming message to the connection that it came in on
     // so that we can send relevant responses and notifications back on the same connection
     if (isJSONRPCRequest(message)) {
@@ -446,11 +507,97 @@ export abstract class McpAgent<
     this._transport?.onmessage?.(message);
   }
 
+  /**
+   * Wait for elicitation response through storage polling
+   */
+  private async _waitForElicitationResponse(
+    requestId: string
+  ): Promise<ElicitResult> {
+    const startTime = Date.now();
+    const timeout = 60000; // 60 second timeout
+
+    try {
+      while (Date.now() - startTime < timeout) {
+        // Check if response has been stored
+        const response = await this.ctx.storage.get<ElicitResult>(
+          `elicitation:response:${requestId}`
+        );
+        if (response) {
+          // Immediately clean up both request and response
+          await this.ctx.storage.delete(`elicitation:${requestId}`);
+          await this.ctx.storage.delete(`elicitation:response:${requestId}`);
+          return response;
+        }
+
+        // Sleep briefly before checking again
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      throw new Error("Elicitation request timed out");
+    } finally {
+      // Always clean up on timeout or error
+      await this.ctx.storage.delete(`elicitation:${requestId}`);
+      await this.ctx.storage.delete(`elicitation:response:${requestId}`);
+    }
+  }
+
+  /**
+   * Handle elicitation responses   */
+  private async _handleElicitationResponse(
+    message: JSONRPCMessage
+  ): Promise<boolean> {
+    // Check if this is a response to an elicitation request
+    if (isJSONRPCResponse(message) && message.result) {
+      const requestId = message.id?.toString();
+      if (!requestId || !requestId.startsWith("elicit_")) return false;
+
+      // Check if we have a pending request for this ID
+      const pendingRequest = await this.ctx.storage.get(
+        `elicitation:${requestId}`
+      );
+      if (!pendingRequest) return false;
+
+      // Store the response in durable storage
+      await this.ctx.storage.put(
+        `elicitation:response:${requestId}`,
+        message.result as ElicitResult
+      );
+      return true;
+    }
+
+    // Check if this is an error response to an elicitation request
+    if (isJSONRPCError(message)) {
+      const requestId = message.id?.toString();
+      if (!requestId || !requestId.startsWith("elicit_")) return false;
+
+      // Check if we have a pending request for this ID
+      const pendingRequest = await this.ctx.storage.get(
+        `elicitation:${requestId}`
+      );
+      if (!pendingRequest) return false;
+
+      // Store error response
+      const errorResult: ElicitResult = {
+        action: "cancel",
+        content: {
+          error: message.error.message || "Elicitation request failed"
+        }
+      };
+      await this.ctx.storage.put(
+        `elicitation:response:${requestId}`,
+        errorResult
+      );
+      return true;
+    }
+
+    return false;
+  }
+
   // All messages received over SSE after the initial connection has been established
   // will be passed here
   async onSSEMcpMessage(
     _sessionId: string,
-    request: Request
+    messageBody: unknown
   ): Promise<Error | null> {
     if (this._status !== "started") {
       // This means the server "woke up" after hibernation
@@ -465,13 +612,17 @@ export abstract class McpAgent<
     }
 
     try {
-      const message = await request.json();
       let parsedMessage: JSONRPCMessage;
       try {
-        parsedMessage = JSONRPCMessageSchema.parse(message);
+        parsedMessage = JSONRPCMessageSchema.parse(messageBody);
       } catch (error) {
         this._transport?.onerror?.(error as Error);
         throw error;
+      }
+
+      // Check if this is an elicitation response before passing to transport
+      if (await this._handleElicitationResponse(parsedMessage)) {
+        return null; // Message was handled by elicitation system
       }
 
       this._transport?.onmessage?.(parsedMessage);
@@ -738,8 +889,8 @@ export abstract class McpAgent<
           const id = namespace.idFromName(`sse:${sessionId}`);
           const doStub = namespace.get(id);
 
-          // Forward the request to the Durable Object
-          const error = await doStub.onSSEMcpMessage(sessionId, request);
+          const messageBody = await request.json();
+          const error = await doStub.onSSEMcpMessage(sessionId, messageBody);
 
           if (error) {
             return new Response(error.message, {
@@ -1163,3 +1314,10 @@ export abstract class McpAgent<
 // Export client transport classes
 export { SSEEdgeClientTransport } from "./sse-edge";
 export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+
+// Export elicitation types and schemas
+export {
+  ElicitRequestSchema,
+  type ElicitRequest,
+  type ElicitResult
+} from "@modelcontextprotocol/sdk/types.js";

@@ -14,9 +14,16 @@ This example demonstrates how to build an email-processing agent using the email
 
 The agent supports multiple routing strategies:
 
-1. **Address-based routing**: `agent+agentid@domain.com` → routes to agent "agent" with ID "agentid"
+1. **Address-based routing**: Routes based on email address patterns
 2. **Header-based routing**: Uses `X-Agent-Name` and `X-Agent-ID` headers
 3. **Catch-all routing**: Routes all emails to a single agent
+
+### Case Sensitivity Handling
+
+The routing system automatically handles both CamelCase and kebab-case agent names:
+
+- Agent class `EmailAgent` is accessible as both `EmailAgent` and `email-agent`
+- This allows flexible email address formats while maintaining consistent routing
 
 ## Setup
 
@@ -93,8 +100,8 @@ To test with real emails:
 - go to `https://dash.cloudflare.com/<account id>/<domain>/email/routing/routes`
 
 3. Send emails to addresses like:
-   - `agent@yourdomain.com` (routes to agent "agent" with ID "default")
-   - `support+urgent@yourdomain.com` (routes to agent "support" with ID "urgent")
+   - `support@yourdomain.com` (routes to EmailAgent with ID "support")
+   - `EmailAgent+urgent@yourdomain.com` (routes to EmailAgent with ID "urgent")
 
 ## Email Routing Strategies
 
@@ -102,27 +109,48 @@ To test with real emails:
 
 ```typescript
 // Routes based on email address patterns
-const resolver = createEmailAddressResolver("default");
+const resolver = createAddressBasedEmailResolver("EmailAgent");
 
-// agent+id@domain.com → { agentName: "agent", agentId: "id" }
-// support@domain.com → { agentName: "support", agentId: "default" }
+// How it works with the current EmailAgent implementation:
+// EmailAgent+user123@domain.com → { agentName: "EmailAgent", agentId: "user123" } ✅
+// john.doe@domain.com → { agentName: "EmailAgent", agentId: "john.doe" } ✅
+// support+urgent@domain.com → { agentName: "support", agentId: "urgent" } ❌ (no SupportAgent)
 ```
+
+#### Address-Based Routing Rules
+
+For emails with **sub-addresses** (using `+`):
+
+- `localpart+subaddress@domain.com` → `{ agentName: "localpart", agentId: "subaddress" }`
+- Example: `EmailAgent+customer123@example.com` routes to agent `EmailAgent` with ID `customer123`
+
+For emails **without sub-addresses**:
+
+- `localpart@domain.com` → `{ agentName: defaultAgentName, agentId: "localpart" }`
+- Example: `support@example.com` with `createAddressBasedEmailResolver("EmailAgent")` routes to agent `EmailAgent` with ID `support`
+
+````
 
 ### 2. Header-Based Routing
 
 ```typescript
-// Routes based on custom headers
+// Routes based on custom header
 // Email with headers:
 //   X-Agent-Name: EmailAgent
 //   X-Agent-ID: customer-123
 // → routes to EmailAgent:customer-123
-```
+````
 
 ### 3. Catch-All Routing
 
 ```typescript
-// Routes all emails to a single agent
-const resolver = createCatchAllResolver("EmailAgent", "main");
+// Routes all emails to a single agent regardless of address
+const resolver = createCatchAllEmailResolver("EmailAgent", "main");
+
+// All emails route to EmailAgent:main
+// user@domain.com → EmailAgent:main
+// support@domain.com → EmailAgent:main
+// anything+test@domain.com → EmailAgent:main
 ```
 
 ## Agent Implementation
@@ -158,13 +186,13 @@ class EmailAgent extends Agent<Env, EmailAgentState> {
 
 ## Use Cases
 
-This example supports:
+This EmailAgent example supports:
 
-1. **Customer Support**: Route support emails to different agents based on priority/category
+1. **Unified Email Processing**: All emails route to the EmailAgent with different IDs based on address
 2. **Auto-Responders**: Automatically acknowledge receipt of emails
-3. **Email Processing**: Parse and extract data from emails
+3. **Email Parsing**: Email Processing: Parse and extract data from emails
 4. **Thread Management**: Maintain email conversation state
-5. **Multi-tenant Systems**: Route emails to different customer/tenant agents
+5. **Multi-Instance Routing**: Route emails to different EmailAgent instances using email addresses
 
 ## Next Steps
 

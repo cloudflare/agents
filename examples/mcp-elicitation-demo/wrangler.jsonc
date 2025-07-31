@@ -1,0 +1,35 @@
+{
+  "assets": {
+    "directory": "dist/client"
+  },
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "MyAgent",
+        "name": "MyAgent"
+      },
+      {
+        "class_name": "McpServerAgent",
+        "name": "McpServerAgent"
+      }
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["MyAgent", "McpServerAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "mcp-elicitation-demo",
+  "observability": {
+    "logs": {
+      "enabled": true
+    }
+  },
+  "vars": {
+    "HOST": "<DEPLOYED_HOSTNAME>"
+  }
+}
