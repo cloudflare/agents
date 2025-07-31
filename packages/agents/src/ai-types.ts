@@ -1,4 +1,4 @@
-import type { UIMessage as ChatMessage } from "ai";
+import type { AgentUIMessage } from "./types";
 
 /**
  * Types of messages sent from the Agent to clients
@@ -8,7 +8,7 @@ export type OutgoingMessage =
       /** Indicates this message contains updated chat messages */
       type: "cf_agent_chat_messages";
       /** Array of chat messages */
-      messages: ChatMessage[];
+      messages: AgentUIMessage[];
     }
   | {
       /** Indicates this message is a response to a chat request */
@@ -24,7 +24,7 @@ export type OutgoingMessage =
       /** Indicates this message contains updated chat messages */
       type: "cf_agent_chat_messages";
       /** Array of chat messages */
-      messages: ChatMessage[];
+      messages: AgentUIMessage[];
     }
   | {
       /** Indicates this message is a command to clear chat history */
@@ -64,7 +64,7 @@ export type IncomingMessage =
       /** Indicates this message contains updated chat messages */
       type: "cf_agent_chat_messages";
       /** Array of chat messages */
-      messages: ChatMessage[];
+      messages: AgentUIMessage[];
     }
   | {
       /** Indicates the user wants to stop generation of this message */

@@ -1,6 +1,6 @@
 import { useChat } from "@ai-sdk/react";
-import type { UIMessage } from "ai";
 import { DefaultChatTransport } from "ai";
+import type { AgentUIMessage } from "./types";
 import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
@@ -23,7 +23,7 @@ type UseAgentChatOptions<State> = Omit<
       | undefined
       | null
       // | (() => Message[])
-      | ((options: GetInitialMessagesOptions) => Promise<UIMessage[]>);
+      | ((options: GetInitialMessagesOptions) => Promise<AgentUIMessage[]>);
     /** HTTP request credentials */
     credentials?: RequestCredentials;
     /** HTTP request headers */
@@ -32,7 +32,7 @@ type UseAgentChatOptions<State> = Omit<
   "fetch" | "transport" | "messages"
 >;
 
-const requestCache = new Map<string, Promise<UIMessage[]>>();
+const requestCache = new Map<string, Promise<AgentUIMessage[]>>();
 
 /**
  * React hook for building AI chat interfaces using an Agent
@@ -64,7 +64,7 @@ export function useAgentChat<State = unknown>(
       credentials: options.credentials,
       headers: options.headers
     });
-    return response.json<UIMessage[]>();
+    return response.json<AgentUIMessage[]>();
   }
 
   const getInitialMessagesFetch =
@@ -288,7 +288,7 @@ export function useAgentChat<State = unknown>(
      * Set the chat messages and synchronize with the Agent
      * @param messages New messages to set
      */
-    setMessages: (messages: UIMessage[]) => {
+    setMessages: (messages: AgentUIMessage[]) => {
       useChatHelpers.setMessages(messages);
       agent.send(
         JSON.stringify({

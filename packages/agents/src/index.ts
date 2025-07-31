@@ -28,6 +28,14 @@ import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider
 import { genericObservability, type Observability } from "./observability";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
+export type {
+  AgentUIMessage,
+  AgentConnectionData,
+  AgentDataTypes,
+  AgentTools,
+  MCPToolData,
+  ObservabilityData
+} from "./types";
 
 /**
  * RPC request message from client

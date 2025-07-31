@@ -1,8 +1,5 @@
-import type {
-  UIMessage as ChatMessage,
-  StreamTextOnFinishCallback,
-  ToolSet
-} from "ai";
+import type { StreamTextOnFinishCallback, ToolSet } from "ai";
+import type { AgentUIMessage } from "./types";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import type { IncomingMessage, OutgoingMessage } from "./ai-types";
 
@@ -15,11 +12,11 @@ function appendResponseMessages({
   messages,
   responseMessages
 }: {
-  messages: ChatMessage[];
+  messages: AgentUIMessage[];
   responseMessages: any[]; // ResponseMessage[] from the AI SDK
-}): ChatMessage[] {
+}): AgentUIMessage[] {
   // Convert ResponseMessage[] to UIMessage[] format using v5 structure
-  const convertedMessages: ChatMessage[] = responseMessages.map(
+  const convertedMessages: AgentUIMessage[] = responseMessages.map(
     (msg, index) => {
       const parts: any[] = [];
 
@@ -93,7 +90,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   private _chatMessageAbortControllers: Map<string, AbortController>;
   /** Array of chat messages for the current conversation */
-  messages: ChatMessage[];
+  messages: AgentUIMessage[];
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.sql`create table if not exists cf_ai_chat_agent_messages (
@@ -279,7 +276,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * Save messages on the server side and trigger AI response
    * @param messages Chat messages to save
    */
-  async saveMessages(messages: ChatMessage[]) {
+  async saveMessages(messages: AgentUIMessage[]) {
     await this.persistMessages(messages);
     const response = await this.onChatMessage(async ({ response }) => {
       const finalMessages = appendResponseMessages({
@@ -300,7 +297,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   async persistMessages(
-    messages: ChatMessage[],
+    messages: AgentUIMessage[],
     excludeBroadcastIds: string[] = []
   ) {
     this.sql`delete from cf_ai_chat_agent_messages`;
@@ -319,7 +316,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     );
   }
 
-  private _messagesNotAlreadyInAgent(messages: ChatMessage[]) {
+  private _messagesNotAlreadyInAgent(messages: AgentUIMessage[]) {
     const existingIds = new Set(this.messages.map((message) => message.id));
     return messages.filter((message) => !existingIds.has(message.id));
   }
