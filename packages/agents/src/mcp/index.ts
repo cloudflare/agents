@@ -250,7 +250,7 @@ export abstract class McpAgent<
     return this._agent.setState(state);
   }
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
-  onStateUpdate(_state: State | undefined, _source: Connection | "server") {
+  onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
   async onStart() {
