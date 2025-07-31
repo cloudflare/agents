@@ -47,6 +47,34 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   onStateUpdate(state: State) {
     console.log({ stateUpdate: state });
   }
+
+  onError(error: Error): { status: number; message: string } {
+    console.error("MyMCP initialization error:", error);
+
+    // Provide more specific error messages based on error type
+    if (error.message.includes("counter")) {
+      return {
+        status: 500,
+        message:
+          "Failed to initialize counter resource. Please check the counter configuration."
+      };
+    }
+
+    if (error.message.includes("tool")) {
+      return {
+        status: 500,
+        message:
+          "Failed to register MCP tools. Please verify tool configurations."
+      };
+    }
+
+    // Fall back to default error handling
+    return {
+      status: 500,
+      message:
+        error.message || "An unexpected error occurred during initialization"
+    };
+  }
 }
 
 export default MyMCP.serve("/mcp", {
