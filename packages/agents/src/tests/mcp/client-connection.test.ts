@@ -1,10 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult, ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  CallToolResult,
+  ServerCapabilities
+} from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
-
-
 
 /**
  * Mock MCP server for testing different scenarios
@@ -12,14 +13,13 @@ import { MCPClientConnection } from "../../mcp/client-connection";
 class MockMcpServer {
   private server: McpServer;
 
-
   constructor(
     name = "test-server",
     capabilities: Partial<ServerCapabilities> = {}
   ) {
     this.server = new McpServer(
       { name, version: "1.0.0" },
-      { 
+      {
         capabilities: {
           tools: { listChanged: true },
           resources: { listChanged: true },
@@ -43,20 +43,22 @@ class MockMcpServer {
 
     this.server.resource(
       "test://resource",
-      { name: "test-resource", description: "A test resource", mimeType: "text/plain" },
-      async () => ({ contents: [{ text: "Test resource content", type: "text" }] })
-    );
-
-    this.server.prompt(
-      "test-prompt",
-      "A test prompt",
+      {
+        name: "test-resource",
+        description: "A test resource",
+        mimeType: "text/plain"
+      },
       async () => ({
-        messages: [{ role: "user", content: { type: "text", text: "Test prompt" } }]
+        contents: [{ text: "Test resource content", type: "text" }]
       })
     );
+
+    this.server.prompt("test-prompt", "A test prompt", async () => ({
+      messages: [
+        { role: "user", content: { type: "text", text: "Test prompt" } }
+      ]
+    }));
   }
-
-
 
   async startServer(port: number = 3000): Promise<string> {
     // In a real implementation, this would start an HTTP server
@@ -80,7 +82,7 @@ describe("MCP Client Connection Integration", () => {
   beforeEach(async () => {
     mockServer = new MockMcpServer();
     serverUrl = await mockServer.startServer();
-    consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(async () => {
@@ -106,11 +108,19 @@ describe("MCP Client Connection Integration", () => {
         resources: { listChanged: true },
         prompts: { listChanged: true }
       });
-      connection.client.getInstructions = vi.fn().mockResolvedValue("Test instructions");
+      connection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Test instructions");
       connection.client.listTools = vi.fn().mockResolvedValue({ tools: [] });
-      connection.client.listResources = vi.fn().mockResolvedValue({ resources: [] });
-      connection.client.listPrompts = vi.fn().mockResolvedValue({ prompts: [] });
-      connection.client.listResourceTemplates = vi.fn().mockResolvedValue({ resourceTemplates: [] });
+      connection.client.listResources = vi
+        .fn()
+        .mockResolvedValue({ resources: [] });
+      connection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
@@ -153,7 +163,9 @@ describe("MCP Client Connection Integration", () => {
       );
 
       // Mock the client.connect to throw a non-auth error
-      const mockConnect = vi.fn().mockRejectedValue(new Error("Connection failed"));
+      const mockConnect = vi
+        .fn()
+        .mockRejectedValue(new Error("Connection failed"));
       connection.client.connect = mockConnect;
 
       await expect(connection.init()).rejects.toThrow("Connection failed");
@@ -197,13 +209,27 @@ describe("MCP Client Connection Integration", () => {
       connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
         tools: { listChanged: true }
       });
-      connection.client.getInstructions = vi.fn().mockResolvedValue("Test instructions");
+      connection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Test instructions");
       connection.client.listTools = vi.fn().mockResolvedValue({
-        tools: [{ name: "test-tool", description: "A test tool", inputSchema: { type: "object" } }]
+        tools: [
+          {
+            name: "test-tool",
+            description: "A test tool",
+            inputSchema: { type: "object" }
+          }
+        ]
       });
-      connection.client.listResources = vi.fn().mockResolvedValue({ resources: [] });
-      connection.client.listPrompts = vi.fn().mockResolvedValue({ prompts: [] });
-      connection.client.listResourceTemplates = vi.fn().mockResolvedValue({ resourceTemplates: [] });
+      connection.client.listResources = vi
+        .fn()
+        .mockResolvedValue({ resources: [] });
+      connection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
@@ -229,10 +255,18 @@ describe("MCP Client Connection Integration", () => {
         resources: { listChanged: true },
         prompts: { listChanged: true }
       });
-      connection.client.getInstructions = vi.fn().mockResolvedValue("Test instructions");
-      connection.client.listResources = vi.fn().mockResolvedValue({ resources: [] });
-      connection.client.listPrompts = vi.fn().mockResolvedValue({ prompts: [] });
-      connection.client.listResourceTemplates = vi.fn().mockResolvedValue({ resourceTemplates: [] });
+      connection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Test instructions");
+      connection.client.listResources = vi
+        .fn()
+        .mockResolvedValue({ resources: [] });
+      connection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
@@ -259,11 +293,21 @@ describe("MCP Client Connection Integration", () => {
       connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
         tools: { listChanged: true }
       });
-      connection.client.getInstructions = vi.fn().mockResolvedValue("Test instructions");
-      connection.client.listTools = vi.fn().mockRejectedValue(methodNotFoundError);
-      connection.client.listResources = vi.fn().mockResolvedValue({ resources: [] });
-      connection.client.listPrompts = vi.fn().mockResolvedValue({ prompts: [] });
-      connection.client.listResourceTemplates = vi.fn().mockResolvedValue({ resourceTemplates: [] });
+      connection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Test instructions");
+      connection.client.listTools = vi
+        .fn()
+        .mockRejectedValue(methodNotFoundError);
+      connection.client.listResources = vi
+        .fn()
+        .mockResolvedValue({ resources: [] });
+      connection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
@@ -271,7 +315,9 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toEqual([]);
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("The server advertised support for the capability tools")
+        expect.stringContaining(
+          "The server advertised support for the capability tools"
+        )
       );
     });
   });
@@ -294,36 +340,48 @@ describe("MCP Client Connection Integration", () => {
         resources: { listChanged: true },
         prompts: { listChanged: true }
       });
-      
+
       // Instructions fails
-      connection.client.getInstructions = vi.fn().mockRejectedValue(new Error("Instructions service down"));
-      
+      connection.client.getInstructions = vi
+        .fn()
+        .mockRejectedValue(new Error("Instructions service down"));
+
       // Tools succeeds
       connection.client.listTools = vi.fn().mockResolvedValue({
-        tools: [{ name: "working-tool", description: "A working tool", inputSchema: { type: "object" } }]
+        tools: [
+          {
+            name: "working-tool",
+            description: "A working tool",
+            inputSchema: { type: "object" }
+          }
+        ]
       });
       connection.client.setNotificationHandler = vi.fn();
-      
+
       // Resources fails
-      connection.client.listResources = vi.fn().mockRejectedValue(new Error("Resources service down"));
-      
+      connection.client.listResources = vi
+        .fn()
+        .mockRejectedValue(new Error("Resources service down"));
+
       // Prompts succeeds
       connection.client.listPrompts = vi.fn().mockResolvedValue({
         prompts: [{ name: "working-prompt", description: "A working prompt" }]
       });
-      
+
       // Resource templates succeeds
-      connection.client.listResourceTemplates = vi.fn().mockResolvedValue({ resourceTemplates: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
 
       await connection.init();
 
       // Connection should still be ready despite partial failures
       expect(connection.connectionState).toBe("ready");
-      
+
       // Failed capabilities should have fallback values
       expect(connection.instructions).toBeUndefined();
       expect(connection.resources).toEqual([]);
-      
+
       // Successful capabilities should be populated
       expect(connection.tools).toHaveLength(1);
       expect(connection.tools[0].name).toBe("working-tool");
@@ -360,13 +418,17 @@ describe("MCP Client Connection Integration", () => {
         resources: { listChanged: true },
         prompts: { listChanged: true }
       });
-      
+
       const serviceError = new Error("All services down");
-      connection.client.getInstructions = vi.fn().mockRejectedValue(serviceError);
+      connection.client.getInstructions = vi
+        .fn()
+        .mockRejectedValue(serviceError);
       connection.client.listTools = vi.fn().mockRejectedValue(serviceError);
       connection.client.listResources = vi.fn().mockRejectedValue(serviceError);
       connection.client.listPrompts = vi.fn().mockRejectedValue(serviceError);
-      connection.client.listResourceTemplates = vi.fn().mockRejectedValue(serviceError);
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockRejectedValue(serviceError);
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
@@ -381,11 +443,26 @@ describe("MCP Client Connection Integration", () => {
 
       // Should log all failures
       expect(consoleSpy).toHaveBeenCalledTimes(5);
-      expect(consoleSpy).toHaveBeenCalledWith("Failed to initialize instructions:", serviceError);
-      expect(consoleSpy).toHaveBeenCalledWith("Failed to initialize tools:", serviceError);
-      expect(consoleSpy).toHaveBeenCalledWith("Failed to initialize resources:", serviceError);
-      expect(consoleSpy).toHaveBeenCalledWith("Failed to initialize prompts:", serviceError);
-      expect(consoleSpy).toHaveBeenCalledWith("Failed to initialize resource templates:", serviceError);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to initialize instructions:",
+        serviceError
+      );
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to initialize tools:",
+        serviceError
+      );
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to initialize resources:",
+        serviceError
+      );
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to initialize prompts:",
+        serviceError
+      );
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to initialize resource templates:",
+        serviceError
+      );
     });
 
     it("should handle mixed error types gracefully", async () => {
@@ -403,13 +480,23 @@ describe("MCP Client Connection Integration", () => {
         tools: { listChanged: true },
         resources: { listChanged: true }
       });
-      
+
       // Different types of errors
-      connection.client.getInstructions = vi.fn().mockResolvedValue("Working instructions");
-      connection.client.listTools = vi.fn().mockRejectedValue({ code: -32601, message: "Method not found" });
-      connection.client.listResources = vi.fn().mockRejectedValue(new Error("Network timeout"));
-      connection.client.listPrompts = vi.fn().mockResolvedValue({ prompts: [] });
-      connection.client.listResourceTemplates = vi.fn().mockResolvedValue({ resourceTemplates: [] });
+      connection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Working instructions");
+      connection.client.listTools = vi
+        .fn()
+        .mockRejectedValue({ code: -32601, message: "Method not found" });
+      connection.client.listResources = vi
+        .fn()
+        .mockRejectedValue(new Error("Network timeout"));
+      connection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
@@ -423,9 +510,14 @@ describe("MCP Client Connection Integration", () => {
       // Should log both types of errors
       // Note: Method not found errors are handled by capabilityErrorHandler and logged differently
       expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("The server advertised support for the capability tools")
+        expect.stringContaining(
+          "The server advertised support for the capability tools"
+        )
       );
-      expect(consoleSpy).toHaveBeenCalledWith("Failed to initialize resources:", expect.any(Error));
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "Failed to initialize resources:",
+        expect.any(Error)
+      );
     });
   });
 
@@ -435,7 +527,7 @@ describe("MCP Client Connection Integration", () => {
         new URL(serverUrl),
         { name: "test-client", version: "1.0.0" },
         {
-          transport: { 
+          transport: {
             type: "streamable-http",
             authProvider: {
               authUrl: undefined,
@@ -461,7 +553,7 @@ describe("MCP Client Connection Integration", () => {
         if (code) {
           expect(code).toBe("test-auth-code");
         }
-        
+
         // Set up successful state
         connection.connectionState = "ready";
         connection.serverCapabilities = {};
