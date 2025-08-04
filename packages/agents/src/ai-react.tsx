@@ -214,11 +214,45 @@ export function useAgentChat<State = unknown>(
 
     return new Response(stream);
   }
+  const customTransport = {
+    sendMessages: async ({
+      trigger,
+      chatId,
+      messageId,
+      messages,
+      abortSignal,
+      ...options
+    }: {
+      trigger: "submit-message" | "regenerate-message";
+      chatId: string;
+      messageId: string | undefined;
+      messages: Message[];
+      abortSignal: AbortSignal | undefined;
+    } & Parameters<typeof useChat>[0]) => {
+      // Map the new trigger values to the old ones expected by DefaultChatTransport
+      const mappedTrigger = trigger === "submit-message" 
+        ? "submit-user-message" 
+        : "regenerate-assistant-message";
+      
+      const transport = new DefaultChatTransport({
+        api: agentUrlString,
+        fetch: aiFetch,
+      });
+      
+      return transport.sendMessages({
+        trigger: mappedTrigger as any,
+        chatId,
+        messageId,
+        messages,
+        abortSignal,
+        ...options,
+      });
+    },
+  };
+
   const useChatHelpers = useChat({
     messages: initialMessages,
-    transport: new DefaultChatTransport({
-      api: agentUrlString,
-    }),
+    transport: customTransport as any,
     ...rest,
   });
 
