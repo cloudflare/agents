@@ -37,7 +37,9 @@ const requestCache = new Map<string, Promise<Message[]>>();
  */
 export function useAgentChat<State = unknown>(
   options: UseAgentChatOptions<State>
-) {
+): ReturnType<typeof useChat> & {
+  clearHistory: () => void;
+} {
   const { agent, getInitialMessages, ...rest } = options;
 
   const agentUrl = new URL(
@@ -317,11 +319,13 @@ export function useAgentChat<State = unknown>(
      * Set the chat messages and synchronize with the Agent
      * @param messages New messages to set
      */
-    setMessages: (messages: Message[]) => {
+    setMessages: (
+      messages: Parameters<typeof useChatHelpers.setMessages>[0]
+    ) => {
       useChatHelpers.setMessages(messages);
       agent.send(
         JSON.stringify({
-          messages,
+          messages: Array.isArray(messages) ? messages : [],
           type: MessageType.CF_AGENT_CHAT_MESSAGES
         })
       );
