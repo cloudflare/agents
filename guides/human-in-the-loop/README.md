@@ -1,7 +1,5 @@
 ## Human in the Loop with Cloudflare Agents
 
-> **⚠️ NOTICE**: This guide is currently incompatible with AI SDK v5 beta and is temporarily broken. Please do not use this example until the compatibility issues are resolved in future versions. The main agents library and other examples continue to work normally.
-
 This example demonstrates how to implement human-in-the-loop functionality using Cloudflare Agents, allowing AI agents to request human approval before executing certain actions. This pattern is crucial for scenarios where human oversight and confirmation are required before taking important actions.
 
 ### Overview

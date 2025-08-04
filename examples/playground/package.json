@@ -1,7 +1,6 @@
 {
   "author": "",
   "dependencies": {
-    "chalk": "^5.4.1",
     "cronstrue": "^3.0.0",
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.5",
