@@ -13,7 +13,7 @@ type Env = {
 const EvaluationFeedback = z.object({
   feedback: z.string(),
   score: z.enum(["pass", "needs_improvement", "fail"])
-});
+}) as any;
 
 export type Attempt = {
   description: string;
@@ -82,11 +82,13 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
         inputItems = sloganResult.history;
         const evaluationResult = await run(this.evaluator, inputItems);
         const attempts = this.state.attempts;
-        const evaluation = evaluationResult.finalOutput;
+        const evaluation = evaluationResult.finalOutput as
+          | { feedback: string; score: "pass" | "needs_improvement" | "fail" }
+          | undefined;
         attempts.push({
           description,
           slogan,
-          feedback: evaluation?.feedback as string,
+          feedback: evaluation?.feedback || "",
           score: evaluation?.score || "fail"
         });
         // Updating state syncs to all connected clients

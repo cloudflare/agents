@@ -12,14 +12,14 @@ type Env = {
 
 const getWeatherTool = tool({
   description: "Get the weather for a given city",
-  execute: async ({ location }) => {
+  execute: async ({ location }: { location: string }) => {
     console.log(`[getWeatherTool] Executing weather lookup for: ${location}`);
     const result = `The weather in ${location} is sunny`;
     console.log(`[getWeatherTool] Returning result: ${result}`);
     return result;
   },
   name: "get_weather",
-  needsApproval: async (_context, { location }) => {
+  needsApproval: async (_context: any, { location }: { location: string }) => {
     console.log(
       `[getWeatherTool] Checking if approval needed for location: ${location}`
     );
@@ -30,7 +30,7 @@ const getWeatherTool = tool({
   },
   parameters: z.object({
     location: z.string()
-  })
+  }) as any
 });
 
 export type AgentState = {
