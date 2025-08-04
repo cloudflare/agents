@@ -43,7 +43,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "@vitest/browser": "^3.2.4",
     "@vitest/runner": "^3.2.4",
-    "ai": "5.0.0",
+    "ai": "5.0.1",
     "autoevals": "^0.0.130",
     "concurrently": "^9.2.0",
     "evalite": "^0.11.4",

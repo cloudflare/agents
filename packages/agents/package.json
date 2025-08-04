@@ -5,7 +5,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.13.3",
-    "ai": "5.0.0-beta.12",
+    "ai": "5.0.1",
     "cron-schedule": "^5.0.4",
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.5",
