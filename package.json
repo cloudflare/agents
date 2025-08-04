@@ -29,6 +29,7 @@
     "@ai-sdk/google": "2.0.0",
     "@ai-sdk/openai": "2.0.0",
     "@ai-sdk/react": "2.0.0",
+    "@ai-sdk/ui-utils": "^1.2.11",
     "@biomejs/biome": "2.0.6",
     "@changesets/changelog-github": "^0.5.1",
     "@changesets/cli": "^2.29.5",
@@ -84,7 +85,7 @@
       "prettier --write --ignore-unknown"
     ]
   },
-  "packageManager": "npm@11.4.2",
+  "packageManager": "npm@11.5.1",
   "dependencies": {
     "@ai-sdk/ui-utils": "^1.2.11"
   }

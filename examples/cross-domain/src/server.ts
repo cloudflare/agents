@@ -1,7 +1,7 @@
 import { Agent, type Connection, routeAgentRequest } from "agents";
 import { env } from "cloudflare:workers";
 
-export class MyAgent extends Agent {
+export class MyAgent extends Agent<typeof env> {
   onConnect(connection: Connection) {
     console.log("Client connected:", connection.id);
     connection.send(`Welcome! You are connected with ID: ${connection.id}`);

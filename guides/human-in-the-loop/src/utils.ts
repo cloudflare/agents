@@ -1,5 +1,5 @@
 import type { UIMessage } from "@ai-sdk/react";
-import { type UIMessageStreamWriter, type ToolSet } from "ai";
+import type { UIMessageStreamWriter, ToolSet } from "ai";
 import type { z } from "zod";
 
 
@@ -54,9 +54,13 @@ export async function processToolCalls<
     messages: UIMessage[];
   },
   executeFunctions: {
-    [K in keyof Tools & keyof ExecutableTools]?: (
-      args: z.infer<ExecutableTools[K]["inputSchema"]>
-    ) => Promise<any>;
+    [K in keyof ExecutableTools]?: (
+      args: ExecutableTools[K] extends { inputSchema: infer S }
+        ? S extends z.ZodType<any, any, any>
+          ? z.infer<S>
+          : any
+        : any
+    ) => Promise<string>;
   }
 ): Promise<UIMessage[]> {
   const lastMessage = messages[messages.length - 1];
@@ -66,31 +70,21 @@ export async function processToolCalls<
   const processedParts = await Promise.all(
     parts.map(async (part) => {
       // Look for tool parts with output (confirmations) - v5 format
-      if (part.type?.startsWith('tool-') && 'output' in part) {
-        const toolName = part.type.replace('tool-', '');
-        const output = (part as any).output;
-        
+      if (part.type?.startsWith("tool-") && "output" in part) {
+        const toolName = part.type.replace("tool-", "");
+        const output = (part as { output: string }).output;
         // Only process if we have an execute function for this tool
         if (!(toolName in executeFunctions)) {
           return part;
         }
 
-<<<<<<< HEAD
-        const toolInstance = executeFunctions[toolName];
-        if (toolInstance) {
-          result = await toolInstance(toolInvocation.args, {
-            messages: convertToCoreMessages(messages),
-            toolCallId: toolInvocation.toolCallId
-          });
-        } else {
-          result = "Error: No execute function found on tool";
-=======
-        let result: any;
+        let result: string;
 
         if (output === APPROVAL.YES) {
           const toolInstance = executeFunctions[toolName as keyof typeof executeFunctions];
           if (toolInstance) {
-            const toolInput = 'input' in part ? (part as any).input : {};
+            const toolInput =
+              "input" in part ? (part as { input: any }).input : {};
             result = await toolInstance(toolInput);
             
             // Stream the result directly using writer

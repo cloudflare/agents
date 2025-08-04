@@ -7,7 +7,7 @@ export class Chat extends AIChatAgent<Env> {
   async onChatMessage() {
     const result = await streamText({
       messages: convertToCoreMessages(this.messages),
-      model,
+      model
     });
 
     return result.toTextStreamResponse();
