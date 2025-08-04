@@ -20,7 +20,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
   server = new McpServer({
     name: "Elicitation Demo Server",
     version: "1.0.0"
-  }) as any;
+  });
 
   initialState = { counter: 0 };
 

@@ -26,28 +26,6 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
   }
 
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
-<<<<<<< HEAD
-    const dataStreamResponse = createDataStreamResponse({
-      execute: async (dataStream) => {
-        // Utility function to handle tools that require human confirmation
-        // Checks for confirmation in last message and then runs associated tool
-        const processedMessages = await processToolCalls(
-          {
-            dataStream,
-            messages: this.messages,
-            tools
-          },
-          {
-            // type-safe object for tools without an execute function
-            getWeatherInformation: async ({ city }) => {
-              const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-              return `The weather in ${city} is ${
-                conditions[Math.floor(Math.random() * conditions.length)]
-              }.`;
-            }
-          }
-        );
-=======
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const lastMessage = this.messages[this.messages.length - 1];
@@ -60,7 +38,6 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
           );
           return;
         }
->>>>>>> 869706b (fixed human in the loop)
 
         const result = streamText({
           messages: convertToModelMessages(this.messages),
@@ -69,11 +46,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
           tools
         });
 
-<<<<<<< HEAD
-        result.mergeIntoDataStream(dataStream);
-=======
         writer.merge(result.toUIMessageStream());
->>>>>>> 869706b (fixed human in the loop)
       }
     });
 
@@ -83,18 +56,10 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
-<<<<<<< HEAD
-    return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
-    );
-  }
-=======
     const response = await routeAgentRequest(request, env, {
       cors: true,
     });
     
     return response || new Response("Not found", { status: 404 });
-  },
->>>>>>> 869706b (fixed human in the loop)
+  }
 } satisfies ExportedHandler<Env>;

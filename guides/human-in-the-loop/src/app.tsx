@@ -135,14 +135,6 @@ export default function Chat() {
                             <button
                               type="button"
                               className="button-approve"
-<<<<<<< HEAD
-                              onClick={() =>
-                                addToolResult({
-                                  result: APPROVAL.YES,
-                                  toolCallId
-                                })
-                              }
-=======
                               onClick={async () => {
                                 await addToolResult({
                                   tool: toolName,
@@ -151,21 +143,12 @@ export default function Chat() {
                                 });
                                 sendMessage();
                               }}
->>>>>>> 869706b (fixed human in the loop)
                             >
                               Yes
                             </button>
                             <button
                               type="button"
                               className="button-reject"
-<<<<<<< HEAD
-                              onClick={() =>
-                                addToolResult({
-                                  result: APPROVAL.NO,
-                                  toolCallId
-                                })
-                              }
-=======
                               onClick={async () => {
                                 await addToolResult({
                                   tool: toolName,
@@ -174,7 +157,6 @@ export default function Chat() {
                                 });
                                 sendMessage();
                               }}
->>>>>>> 869706b (fixed human in the loop)
                             >
                               No
                             </button>

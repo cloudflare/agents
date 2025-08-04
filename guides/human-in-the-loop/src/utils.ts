@@ -41,13 +41,9 @@ export async function processToolCalls<
   }
 >(
   {
-<<<<<<< HEAD
-    dataStream,
-    messages
-=======
     writer,
     messages,
->>>>>>> 869706b (fixed human in the loop)
+    tools
   }: {
     tools: Tools; // used for type inference
     writer: UIMessageStreamWriter;
@@ -114,49 +110,14 @@ export async function processToolCalls<
           }
         } else if (output === APPROVAL.NO) {
           result = "Error: User denied access to tool execution";
->>>>>>> 869706b (fixed human in the loop)
         }
 
         return part; // Return the original part
       }
 
-<<<<<<< HEAD
-      // Forward updated tool result to the client.
-      dataStream.write(
-        formatDataStreamPart("tool_result", {
-          result,
-          toolCallId: toolInvocation.toolCallId
-        })
-      );
-
-      // Return updated toolInvocation with the actual result.
-      return {
-        ...part,
-        toolInvocation: {
-          ...toolInvocation,
-          result
-        }
-      };
-=======
       return part;
->>>>>>> 869706b (fixed human in the loop)
     })
   );
 
   return [...messages.slice(0, -1), { ...lastMessage, parts: processedParts }];
 }
-<<<<<<< HEAD
-
-export function getToolsRequiringConfirmation<
-  T extends ToolSet
-  // E extends {
-  //   [K in keyof T as T[K] extends { execute: Function } ? never : K]: T[K];
-  // },
->(tools: T): string[] {
-  return (Object.keys(tools) as (keyof T)[]).filter((key) => {
-    const maybeTool = tools[key];
-    return typeof maybeTool.execute !== "function";
-  }) as string[];
-}
-=======
->>>>>>> 869706b (fixed human in the loop)

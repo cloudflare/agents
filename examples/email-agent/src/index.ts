@@ -71,14 +71,9 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
       this.setState(newState);
 
       if (this.state.autoReplyEnabled && !this.isAutoReply(parsed)) {
-        await email.reply({
-          from: email.to,
-          to: email.from,
-          raw: `From: ${email.to}
-To: ${email.from}
-Subject: Re: ${email.headers.get("subject") || "No Subject"}
-
-Thank you for your email! 
+        await this.replyToEmail(email, {
+          fromName: "My Email Agent",
+          body: `Thank you for your email! 
 
 I received your message with subject: "${email.headers.get("subject")}"
 
