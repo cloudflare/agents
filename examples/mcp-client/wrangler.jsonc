@@ -1,9 +1,12 @@
 {
-  "assets": {
-    "directory": "dist/client"
-  },
+  "name": "mcp-client",
+  "main": "src/server.ts",
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "not_found_handling": "single-page-application"
+  },
   "durable_objects": {
     "bindings": [
       {
@@ -12,14 +15,14 @@
       }
     ]
   },
-  "main": "src/server.ts",
+
   "migrations": [
     {
       "new_sqlite_classes": ["MyAgent"],
       "tag": "v1"
     }
   ],
-  "name": "mcp-client",
+
   "observability": {
     "logs": {
       "enabled": true

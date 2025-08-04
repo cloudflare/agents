@@ -4,8 +4,8 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.13.3",
-    "ai": "^4.3.16",
+    "@modelcontextprotocol/sdk": "^1.17.1",
+    "ai": "^4.3.19",
     "cron-schedule": "^5.0.4",
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.5",
@@ -16,7 +16,7 @@
   "description": "A home for your AI agents",
   "devDependencies": {
     "react": "*",
-    "vitest-browser-react": "^1.0.0"
+    "vitest-browser-react": "^1.0.1"
   },
   "exports": {
     ".": {
