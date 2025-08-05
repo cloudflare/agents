@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.111
+
+### Patch Changes
+
+- [`0cf8e80`](https://github.com/cloudflare/agents/commit/0cf8e802b29fed4d83d7ff2c55fdfb72a1fa5a0f) Thanks [@threepointone](https://github.com/threepointone)! - trigegr a release
+
 ## 0.0.110
 
 ### Patch Changes

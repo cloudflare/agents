@@ -1,5 +1,14 @@
 # hono-agents
 
+## 0.0.101
+
+### Patch Changes
+
+- [`0cf8e80`](https://github.com/cloudflare/agents/commit/0cf8e802b29fed4d83d7ff2c55fdfb72a1fa5a0f) Thanks [@threepointone](https://github.com/threepointone)! - trigegr a release
+
+- Updated dependencies [[`0cf8e80`](https://github.com/cloudflare/agents/commit/0cf8e802b29fed4d83d7ff2c55fdfb72a1fa5a0f)]:
+  - agents@0.0.111
+
 ## 0.0.100
 
 ### Patch Changes
