@@ -1,0 +1,29 @@
+name: Publish to pkg.pr.new
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build packages
+        run: npm run build
+
+      - name: Publish agents package to pkg.pr.new
+        run: npx pkg-pr-new publish ./packages/agents
