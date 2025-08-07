@@ -1,4 +1,4 @@
-import type { Message as ChatMessage } from "ai";
+import type { UIMessage as ChatMessage } from "ai";
 
 /**
  * Types of messages sent from the Agent to clients

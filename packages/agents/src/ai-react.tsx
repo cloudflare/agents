@@ -1,7 +1,7 @@
-import { useChat } from "@ai-sdk/react";
-import type { Message } from "ai";
+import { useChat, type Message } from "@ai-sdk/react";
+import type { UIMessage } from "ai";
 import { nanoid } from "nanoid";
-import { use, useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import type { useAgent } from "./react";
 
@@ -87,9 +87,14 @@ export function useAgentChat<State = unknown>(
           name: agent.name,
           url: agentUrlString
         });
-  const initialMessages = initialMessagesPromise
-    ? use(initialMessagesPromise)
-    : (rest.initialMessages ?? []);
+  const [initialMessages, setInitialMessages] = useState<Message[]>([]);
+
+  // Load initial messages from promise
+  useEffect(() => {
+    if (initialMessagesPromise) {
+      initialMessagesPromise.then(setInitialMessages);
+    }
+  }, [initialMessagesPromise]);
 
   // manages adding and removing the promise from the cache
   useEffect(() => {
@@ -218,8 +223,7 @@ export function useAgentChat<State = unknown>(
   }
   const useChatHelpers = useChat({
     fetch: aiFetch,
-    initialMessages,
-    sendExtraMessageFields: true,
+    initialMessages: initialMessages,
     ...rest
   });
 
@@ -254,7 +258,7 @@ export function useAgentChat<State = unknown>(
         return;
       }
       if (data.type === "cf_agent_chat_messages") {
-        useChatHelpers.setMessages(data.messages);
+        useChatHelpers.setMessages(data.messages as Message[]);
       }
     }
 

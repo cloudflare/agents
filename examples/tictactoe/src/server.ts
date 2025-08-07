@@ -69,7 +69,7 @@ export class TicTacToe extends Agent<Env, TicTacToeState> {
 
     // now use AI to make a move
     const { object } = await generateObject({
-      model: openai("gpt-4o"),
+      model: openai("gpt-4o") as any,
       prompt: `You are playing Tic-tac-toe as player ${player === "X" ? "O" : "X"}. Here's the current board state:
 
 ${JSON.stringify(board, null, 2)}
