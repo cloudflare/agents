@@ -41,7 +41,7 @@ export class Scheduler extends Agent<Env> {
       const result = await generateObject({
         maxRetries: 5,
         mode: "json",
-        model: model as unknown as LanguageModel,
+        model,
         prompt: `${unstable_getSchedulePrompt({
           date: new Date()
         })} 

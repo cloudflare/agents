@@ -16,7 +16,7 @@ export class Chat extends AIChatAgent<Env> {
   ) {
     const result = streamText({
       messages: convertToModelMessages(this.messages),
-      model: model as unknown as LanguageModel,
+      model,
       onFinish,
       abortSignal: options?.abortSignal
     });

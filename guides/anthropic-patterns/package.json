@@ -1,6 +1,8 @@
 {
   "author": "",
   "dependencies": {
+    "@openai/agents": "^0.0.15",
+    "@openai/agents-extensions": "^0.0.15",
     "nanoid": "^5.1.5"
   },
   "description": "The anthropic patterns, implemented with cloudflare agents",
