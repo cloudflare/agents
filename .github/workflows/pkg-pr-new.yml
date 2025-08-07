@@ -2,9 +2,6 @@ name: Publish to pkg.pr.new for pre-release
 
 on:
   pull_request: {}
-  push:
-    branches:
-      - "**"
 
 jobs:
   publish:
