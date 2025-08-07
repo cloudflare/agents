@@ -8,7 +8,7 @@ import {
   type WSMessage,
   routeAgentRequest
 } from "agents";
-import { generateObject, generateText, type LanguageModel } from "ai";
+import { generateObject, generateText } from "ai";
 import { z } from "zod";
 
 type Env = {
@@ -129,7 +129,7 @@ export const Sequential = createAgent<{ input: string }, { copy: string }>(
     console.log("Sequential", props);
     // This agent uses a prompt chaining workflow, ideal for tasks that can be decomposed into fixed subtasks.
     // It trades off latency for higher accuracy by making each LLM call an easier task.
-    const model = ctx.openai("gpt-4o") as unknown as LanguageModel;
+    const model = ctx.openai("gpt-4o");
 
     // First step: Generate marketing copy
     const { text: copy } = await generateText({
@@ -191,7 +191,7 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
   ) => {
     // This agent uses a routing workflow, which classifies input and directs it to specialized follow-up tasks.
     // It is effective for complex tasks with distinct categories that are better handled separately.
-    const model = ctx.openai("gpt-4o") as unknown as LanguageModel;
+    const model = ctx.openai("gpt-4o");
 
     // First step: Classify the query type
     const { object: classification } = await generateObject({
@@ -215,8 +215,8 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
     const { text: response } = await generateText({
       model:
         classification.complexity === "simple"
-          ? (ctx.openai("gpt-4o-mini") as unknown as LanguageModel)
-          : (ctx.openai("o1-mini") as unknown as LanguageModel),
+          ? ctx.openai("gpt-4o-mini")
+          : ctx.openai("o1-mini"),
       prompt: props.query,
       system: {
         general:
@@ -244,7 +244,7 @@ export const Parallel = createAgent<
   ) => {
     // This agent uses a parallelization workflow, effective for tasks that can be divided into independent subtasks.
     // It allows for speed and multiple perspectives, improving confidence in results.
-    const model = ctx.openai("gpt-4o") as unknown as LanguageModel;
+    const model = ctx.openai("gpt-4o");
 
     // Run parallel reviews
     const [securityReview, performanceReview, maintainabilityReview] =
@@ -336,7 +336,7 @@ export const Orchestrator = createAgent<
     // This agent uses an orchestrator-workers workflow, suitable for complex tasks where subtasks aren't pre-defined.
     // It dynamically breaks down tasks and delegates them to worker LLMs, synthesizing their results.
     const { object: implementationPlan } = await generateObject({
-      model: ctx.openai("o1") as unknown as LanguageModel,
+      model: ctx.openai("o1"),
       prompt: `Analyze this feature request and create an implementation plan:
       ${props.featureRequest}`,
       schema: z.object({
@@ -367,7 +367,7 @@ export const Orchestrator = createAgent<
         }[file.changeType];
 
         const { object: change } = await generateObject({
-          model: ctx.openai("gpt-4o") as unknown as LanguageModel,
+          model: ctx.openai("gpt-4o"),
           prompt: `Implement the changes for ${file.filePath} to support:
           ${file.purpose}
   
@@ -402,7 +402,7 @@ export const Evaluator = createAgent(
     props: { text: string; targetLanguage: string },
     ctx: { toast: (message: string) => void; openai: OpenAIProvider }
   ) => {
-    const model = ctx.openai("gpt-4o") as unknown as LanguageModel;
+    const model = ctx.openai("gpt-4o");
 
     let currentTranslation = "";
     let iterations = 0;
@@ -410,7 +410,7 @@ export const Evaluator = createAgent(
 
     // Initial translation
     const { text: translation } = await generateText({
-      model: ctx.openai("gpt-4o-mini") as unknown as LanguageModel, // use small model for first attempt
+      model: ctx.openai("gpt-4o-mini"), // use small model for first attempt
       prompt: `Translate this text to ${props.targetLanguage}, preserving tone and cultural nuances:
       ${props.text}`,
       system: "You are an expert literary translator."
@@ -460,7 +460,7 @@ export const Evaluator = createAgent(
 
       // Generate improved translation based on feedback
       const { text: improvedTranslation } = await generateText({
-        model: ctx.openai("gpt-4o") as unknown as LanguageModel, // use a larger model
+        model: ctx.openai("gpt-4o"), // use a larger model
         prompt: `Improve this translation based on the following feedback:
         ${evaluation.specificIssues.join("\n")}
         ${evaluation.improvementSuggestions.join("\n")}

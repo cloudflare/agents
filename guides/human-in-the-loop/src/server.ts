@@ -40,7 +40,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 
     const result = streamText({
       messages: convertToModelMessages(processedMessages),
-      model: openai("gpt-4o") as any,
+      model: openai("gpt-4o"),
       onFinish,
       tools,
       abortSignal: options?.abortSignal

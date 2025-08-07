@@ -1,9 +1,8 @@
 import { type UIMessage, type ToolSet, convertToModelMessages } from "ai";
-import type { z } from "zod";
-
-// Type aliases for v5 compatibility
-type DataStreamWriter = any;
-type ToolExecutionOptions = any;
+type ToolExecutionOptions = {
+  messages: ReturnType<typeof convertToModelMessages>;
+  toolCallId: string;
+};
 
 // Approval string to be shared across frontend and backend
 export const APPROVAL = {
@@ -38,17 +37,16 @@ export async function processToolCalls<
 >(
   {
     messages,
-    tools
+    tools: _tools
   }: {
     tools: Tools; // used for type inference
     messages: UIMessage[];
   },
   executeFunctions: {
     [K in keyof Tools & keyof ExecutableTools]?: (
-      args: any, // Type cast for v5 compatibility
+      args: Record<string, unknown>,
       context: ToolExecutionOptions
-      // biome-ignore lint/suspicious/noExplicitAny: vibes
-    ) => Promise<any>;
+    ) => Promise<unknown>;
   }
 ): Promise<UIMessage[]> {
   const lastMessage = messages[messages.length - 1];
@@ -60,15 +58,16 @@ export async function processToolCalls<
       // Only process tool invocations parts
       if (part.type !== "tool-invocation") return part;
 
-      const toolInvocation = (part as any).toolInvocation || part; // v5 compatibility
+      // For AI SDK v5, we need to handle the tool invocation structure properly
+      // The part structure may vary, so we'll use type assertions for now
+      const toolInvocation = part as any;
       const toolName = toolInvocation.toolName;
 
       // Only continue if we have an execute function for the tool (meaning it requires confirmation) and it's in a 'result' state
       if (!(toolName in executeFunctions) || toolInvocation.state !== "result")
         return part;
 
-      // biome-ignore lint/suspicious/noExplicitAny: vibes
-      let result: any;
+      let result: unknown;
 
       if (toolInvocation.result === APPROVAL.YES) {
         // Get the tool and check if the tool has an execute function.
@@ -95,16 +94,6 @@ export async function processToolCalls<
         // For any unhandled responses, return the original part.
         return part;
       }
-
-      // Forward updated tool result to the client.
-      // Note: dataStream parameter removed in v5 - this would need to be handled by caller
-      // dataStream.write({
-      //   type: "tool-result",
-      //   value: {
-      //     result,
-      //     toolCallId: toolInvocation.toolCallId
-      //   }
-      // });
 
       // Return updated toolInvocation with the actual result.
       return {

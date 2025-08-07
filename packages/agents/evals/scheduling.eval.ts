@@ -329,7 +329,7 @@ evalite<string, Schedule>("Evals for scheduling", {
     try {
       const result = await generateObject({
         maxRetries: 5,
-        model: model as unknown as LanguageModel, // <- type cast for v5 compatibility
+        model,
         prompt: `${unstable_getSchedulePrompt({ date: new Date() })}
       
 Input to parse: "${input}"`,
