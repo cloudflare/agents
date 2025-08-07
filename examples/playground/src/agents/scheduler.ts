@@ -4,7 +4,7 @@ import {
   unstable_getSchedulePrompt,
   unstable_scheduleSchema
 } from "agents/schedule";
-import { generateObject } from "ai";
+import { generateObject, type LanguageModel } from "ai";
 import { model } from "../model";
 import type { Env } from "../server";
 import type {
@@ -41,7 +41,7 @@ export class Scheduler extends Agent<Env> {
       const result = await generateObject({
         maxRetries: 5,
         mode: "json",
-        model,
+        model: model as unknown as LanguageModel,
         prompt: `${unstable_getSchedulePrompt({
           date: new Date()
         })} 

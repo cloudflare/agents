@@ -1,9 +1,8 @@
 import type {
-  Message as ChatMessage,
+  UIMessage as ChatMessage,
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { appendResponseMessages } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import type { IncomingMessage, OutgoingMessage } from "./ai-types";
 
@@ -97,32 +96,36 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         const abortSignal = this._getAbortSignal(chatMessageId);
 
         return this._tryCatchChat(async () => {
-          const response = await this.onChatMessage(
-            async ({ response }) => {
-              const finalMessages = appendResponseMessages({
-                messages,
-                responseMessages: response.messages
-              });
+          const uiMessageOnFinish = async (finalMessages: ChatMessage[]) => {
+            const outgoingMessages =
+              this._messagesNotAlreadyInAgent(finalMessages);
+            await this.persistMessages(finalMessages, [connection.id]);
+            this._removeAbortController(chatMessageId);
 
-              const outgoingMessages =
-                this._messagesNotAlreadyInAgent(finalMessages);
-              await this.persistMessages(finalMessages, [connection.id]);
-              this._removeAbortController(chatMessageId);
-
-              this.observability?.emit(
-                {
-                  displayMessage: "Chat message response",
-                  id: data.id,
-                  payload: {
-                    message: outgoingMessages
-                  },
-                  timestamp: Date.now(),
-                  type: "message:response"
+            this.observability?.emit(
+              {
+                displayMessage: "Chat message response",
+                id: data.id,
+                payload: {
+                  message: outgoingMessages
                 },
-                this.ctx
-              );
-            },
-            abortSignal ? { abortSignal } : undefined
+                timestamp: Date.now(),
+                type: "message:response"
+              },
+              this.ctx
+            );
+          };
+
+          const onFinish: StreamTextOnFinishCallback<ToolSet> = async ({
+            response
+          }) => {
+            // This is called when streamText completes
+          };
+
+          const response = await this.onChatMessage(
+            onFinish,
+            abortSignal ? { abortSignal } : undefined,
+            uiMessageOnFinish
           );
 
           if (response) {
@@ -192,13 +195,16 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
    * @param options.signal A signal to pass to any child requests which can be used to cancel them
+   * @param uiMessageOnFinish Callback to be called when UI message stream is finished
    * @returns Response to send to the client or undefined
    */
   async onChatMessage(
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
-    options?: { abortSignal: AbortSignal | undefined }
+    options?: { abortSignal: AbortSignal | undefined },
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+    uiMessageOnFinish?: (messages: ChatMessage[]) => Promise<void>
   ): Promise<Response | undefined> {
     throw new Error(
       "recieved a chat message, override onChatMessage and return a Response to send to the client"
@@ -211,14 +217,19 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
-    const response = await this.onChatMessage(async ({ response }) => {
-      const finalMessages = appendResponseMessages({
-        messages,
-        responseMessages: response.messages
-      });
-
+    const uiMessageOnFinish = async (finalMessages: ChatMessage[]) => {
       await this.persistMessages(finalMessages, []);
-    });
+    };
+    const onFinish: StreamTextOnFinishCallback<ToolSet> = async ({
+      response
+    }) => {
+      // This is called when streamText completes
+    };
+    const response = await this.onChatMessage(
+      onFinish,
+      undefined,
+      uiMessageOnFinish
+    );
     if (response) {
       // we're just going to drain the body
       // @ts-ignore TODO: fix this type error

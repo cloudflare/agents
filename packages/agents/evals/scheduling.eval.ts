@@ -1,7 +1,7 @@
 // import { anthropic } from "@ai-sdk/anthropic";
 // import { google } from "@ai-sdk/google";
 import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
+import { generateObject, type LanguageModel } from "ai";
 import { createScorer, evalite } from "evalite";
 import {
   type Schedule,
@@ -329,7 +329,7 @@ evalite<string, Schedule>("Evals for scheduling", {
     try {
       const result = await generateObject({
         maxRetries: 5,
-        model, // <- the shape of the object that the scheduler expects
+        model: model as unknown as LanguageModel, // <- type cast for v5 compatibility
         prompt: `${unstable_getSchedulePrompt({ date: new Date() })}
       
 Input to parse: "${input}"`,
