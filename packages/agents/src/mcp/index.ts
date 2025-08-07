@@ -357,15 +357,34 @@ export abstract class McpAgent<
 
   abstract init(): Promise<void>;
 
+  /**
+   * Handle errors that occur during initialization or operation.
+   * Override this method to provide custom error handling.
+   * @param error - The error that occurred
+   * @returns An error response object with status code and message
+   */
+  onError(error: Error): { status: number; message: string } {
+    console.error("McpAgent error:", error);
+    return {
+      status: 500,
+      message:
+        error.message || "An unexpected error occurred during initialization"
+    };
+  }
+
   async _init(props: Props) {
-    await this.ctx.storage.put("props", props ?? {});
+    await this.updateProps(props);
     if (!this.ctx.storage.get("transportType")) {
       await this.ctx.storage.put("transportType", "unset");
     }
-    this.props = props;
     if (!this.initRun) {
       this.initRun = true;
-      await this.init();
+      try {
+        await this.init();
+      } catch (error) {
+        const errorResponse = this.onError(error as Error);
+        throw new Error(`Initialization failed: ${errorResponse.message}`);
+      }
     }
   }
 
@@ -375,6 +394,11 @@ export abstract class McpAgent<
 
   async isInitialized() {
     return (await this.ctx.storage.get("initialized")) === true;
+  }
+
+  async updateProps(props: Props) {
+    await this.ctx.storage.put("props", props ?? {});
+    this.props = props;
   }
 
   private async _initialize(): Promise<void> {
@@ -758,7 +782,17 @@ export abstract class McpAgent<
           const doStub = namespace.get(id);
 
           // Initialize the object
-          await doStub._init(ctx.props);
+          try {
+            await doStub._init(ctx.props);
+          } catch (error) {
+            console.error("Failed to initialize McpAgent:", error);
+            await writer.close();
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            return new Response(`Initialization failed: ${errorMessage}`, {
+              status: 500
+            });
+          }
 
           // Connect to the Durable Object via WebSocket
           const upgradeUrl = new URL(request.url);
@@ -890,6 +924,8 @@ export abstract class McpAgent<
           const doStub = namespace.get(id);
 
           const messageBody = await request.json();
+          // Update props with fresh values before processing message
+          await doStub.updateProps(ctx.props);
           const error = await doStub.onSSEMcpMessage(sessionId, messageBody);
 
           if (error) {
@@ -1119,8 +1155,23 @@ export abstract class McpAgent<
           const isInitialized = await doStub.isInitialized();
 
           if (isInitializationRequest) {
-            await doStub._init(ctx.props);
-            await doStub.setInitialized();
+            try {
+              await doStub._init(ctx.props);
+              await doStub.setInitialized();
+            } catch (error) {
+              console.error("Failed to initialize McpAgent:", error);
+              const errorMessage =
+                error instanceof Error ? error.message : String(error);
+              const body = JSON.stringify({
+                error: {
+                  code: -32001,
+                  message: `Initialization failed: ${errorMessage}`
+                },
+                id: null,
+                jsonrpc: "2.0"
+              });
+              return new Response(body, { status: 500 });
+            }
           } else if (!isInitialized) {
             // if we have gotten here, then a session id that was never initialized
             // was provided
@@ -1133,6 +1184,9 @@ export abstract class McpAgent<
               jsonrpc: "2.0"
             });
             return new Response(body, { status: 404 });
+          } else {
+            // Update props for existing sessions
+            await doStub.updateProps(ctx.props);
           }
 
           // We've evaluated all the error conditions! Now it's time to establish

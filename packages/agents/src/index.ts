@@ -607,15 +607,22 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
           email: undefined
         },
         async () => {
-          const servers = this.sql<MCPServerRow>`
+          await this._tryCatch(() => {
+            const servers = this.sql<MCPServerRow>`
             SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
           `;
 
-          // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-          if (servers && Array.isArray(servers) && servers.length > 0) {
-            Promise.allSettled(
-              servers.map((server) => {
-                return this._connectToMcpServerInternal(
+            this.broadcast(
+              JSON.stringify({
+                mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers"
+              })
+            );
+
+            // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
+            if (servers && Array.isArray(servers) && servers.length > 0) {
+              servers.forEach((server) => {
+                this._connectToMcpServerInternal(
                   server.name,
                   server.server_url,
                   server.callback_url,
@@ -626,18 +633,33 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                     id: server.id,
                     oauthClientId: server.client_id ?? undefined
                   }
-                );
-              })
-            ).then((_results) => {
-              this.broadcast(
-                JSON.stringify({
-                  mcp: this.getMcpServers(),
-                  type: "cf_agent_mcp_servers"
-                })
-              );
-            });
-          }
-          await this._tryCatch(() => _onStart());
+                )
+                  .then(() => {
+                    // Broadcast updated MCP servers state after each server connects
+                    this.broadcast(
+                      JSON.stringify({
+                        mcp: this.getMcpServers(),
+                        type: "cf_agent_mcp_servers"
+                      })
+                    );
+                  })
+                  .catch((error) => {
+                    console.error(
+                      `Error connecting to MCP server: ${server.name} (${server.server_url})`,
+                      error
+                    );
+                    // Still broadcast even if connection fails, so clients know about the failure
+                    this.broadcast(
+                      JSON.stringify({
+                        mcp: this.getMcpServers(),
+                        type: "cf_agent_mcp_servers"
+                      })
+                    );
+                  });
+              });
+            }
+            return _onStart();
+          });
         }
       );
     };

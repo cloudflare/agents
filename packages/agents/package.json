@@ -10,8 +10,11 @@
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.72",
-    "partysocket": "1.1.4",
-    "zod": "^3.25.76"
+    "partysocket": "1.1.5",
+    "zod": "^3.25.67"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "description": "A home for your AI agents",
   "devDependencies": {
@@ -102,5 +105,5 @@
   },
   "type": "module",
   "types": "dist/index.d.ts",
-  "version": "0.0.109"
+  "version": "0.0.111"
 }
