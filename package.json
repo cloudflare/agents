@@ -52,6 +52,7 @@
     "partyserver": "^0.0.72",
     "partysocket": "1.1.4",
     "patch-package": "^8.0.0",
+    "pkg-pr-new": "^0.0.54",
     "playwright": "^1.54.2",
     "prettier": "^3.6.2",
     "react": "^19.1.1",
