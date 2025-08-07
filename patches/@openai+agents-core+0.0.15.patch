@@ -1,0 +1,26 @@
+diff --git a/node_modules/@openai/agents-core/dist/shims/shims-workerd.js b/node_modules/@openai/agents-core/dist/shims/shims-workerd.js
+index 8086c9a..fed26fb 100644
+--- a/node_modules/@openai/agents-core/dist/shims/shims-workerd.js
++++ b/node_modules/@openai/agents-core/dist/shims/shims-workerd.js
+@@ -32,7 +32,7 @@ export function isTracingLoopRunningByDefault() {
+     // request context. So we don't run the trace export loop by default.
+     return false;
+ }
+-export { MCPServerStdio, MCPServerStreamableHttp } from "./mcp-server/browser.js";
++export { MCPServerStdio, MCPServerStreamableHttp, MCPServerSSE } from "./mcp-server/browser.js";
+ export { clearTimeout, setTimeout } from 'node:timers';
+ class NodeTimer {
+     constructor() { }
+diff --git a/node_modules/@openai/agents-core/dist/shims/shims-workerd.mjs b/node_modules/@openai/agents-core/dist/shims/shims-workerd.mjs
+index 9931a7b..c872d9d 100644
+--- a/node_modules/@openai/agents-core/dist/shims/shims-workerd.mjs
++++ b/node_modules/@openai/agents-core/dist/shims/shims-workerd.mjs
+@@ -32,7 +32,7 @@ export function isTracingLoopRunningByDefault() {
+     // request context. So we don't run the trace export loop by default.
+     return false;
+ }
+-export { MCPServerStdio, MCPServerStreamableHttp } from "./mcp-server/browser.mjs";
++export { MCPServerStdio, MCPServerStreamableHttp, MCPServerSSE } from "./mcp-server/browser.mjs";
+ export { clearTimeout, setTimeout } from 'node:timers';
+ class NodeTimer {
+     constructor() { }
