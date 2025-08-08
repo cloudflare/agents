@@ -12,12 +12,35 @@ const decoder = new TextDecoder();
 // Union type for messages that could be legacy or current format
 type MessageInput = Message | ChatMessage;
 
+// Extended v4 message interface to handle complex structures
+interface V4MessageExtended extends Message {
+  content: string;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: {
+      name: string;
+      arguments: string;
+    };
+  }>;
+  function_call?: {
+    name: string;
+    arguments: string;
+  };
+  reasoning?: string;
+  attachments?: Array<{
+    url: string;
+    mimeType: string;
+    name?: string;
+  }>;
+}
+
 /**
  * Helper function to detect v4 messages (with 'content' property)
  * @param message - Message to check
  * @returns true if message is in v4 format
  */
-function isV4Message(message: MessageInput): message is Message {
+function isV4Message(message: MessageInput): message is V4MessageExtended {
   return (
     "content" in message &&
     typeof message.content === "string" &&
@@ -26,21 +49,124 @@ function isV4Message(message: MessageInput): message is Message {
 }
 
 /**
- * Convert v4 message format to UIMessage format
+ * Convert v4 message format to UIMessage format with comprehensive part type mapping
  * @param message - Message in v4 or v5 format
  * @returns Message in UIMessage format
  */
 function convertToUIMessage(message: MessageInput): ChatMessage {
   if (isV4Message(message)) {
-    const { content, ...rest } = message;
+    const {
+      content,
+      tool_calls,
+      function_call,
+      reasoning,
+      attachments,
+      ...rest
+    } = message;
+    const parts: Array<{
+      type: string;
+      text?: string;
+      toolCallId?: string;
+      toolName?: string;
+      args?: Record<string, unknown>;
+      state?: string;
+      result?: unknown;
+      url?: string;
+      mediaType?: string;
+      name?: string;
+    }> = [];
+
+    // Add text content part
+    if (content) {
+      parts.push({
+        type: "text",
+        text: content
+      });
+    }
+
+    // Convert tool_calls to v5 tool invocation parts
+    if (tool_calls && Array.isArray(tool_calls)) {
+      for (const toolCall of tool_calls) {
+        try {
+          const args = JSON.parse(toolCall.function.arguments);
+          parts.push({
+            type: `tool-${toolCall.function.name}`,
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            args,
+            state: "call",
+            result: undefined
+          });
+        } catch (error) {
+          // If arguments parsing fails, store as string
+          parts.push({
+            type: `tool-${toolCall.function.name}`,
+            toolCallId: toolCall.id,
+            toolName: toolCall.function.name,
+            args: { arguments: toolCall.function.arguments },
+            state: "call",
+            result: undefined
+          });
+        }
+      }
+    }
+
+    // Convert legacy function_call to v5 tool invocation part
+    if (function_call) {
+      try {
+        const args = JSON.parse(function_call.arguments);
+        parts.push({
+          type: `tool-${function_call.name}`,
+          toolCallId: `fc_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
+          toolName: function_call.name,
+          args,
+          state: "call",
+          result: undefined
+        });
+      } catch (error) {
+        // If arguments parsing fails, store as string
+        parts.push({
+          type: `tool-${function_call.name}`,
+          toolCallId: `fc_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
+          toolName: function_call.name,
+          args: { arguments: function_call.arguments },
+          state: "call",
+          result: undefined
+        });
+      }
+    }
+
+    // Convert reasoning to reasoning part
+    if (reasoning) {
+      parts.push({
+        type: "reasoning",
+        text: reasoning
+      });
+    }
+
+    // Convert attachments to file parts (mimeType → mediaType)
+    if (attachments && Array.isArray(attachments)) {
+      for (const attachment of attachments) {
+        parts.push({
+          type: "file",
+          url: attachment.url,
+          mediaType: attachment.mimeType, // v4 mimeType → v5 mediaType
+          name: attachment.name
+        });
+      }
+    }
+
+    // Ensure we have at least one part (fallback to empty text)
+    if (parts.length === 0) {
+      parts.push({
+        type: "text",
+        text: ""
+      });
+    }
+
     return {
       ...rest,
-      parts: [
-        {
-          type: "text",
-          text: content
-        }
-      ]
+      parts
     } as ChatMessage;
   }
   return message as ChatMessage;
