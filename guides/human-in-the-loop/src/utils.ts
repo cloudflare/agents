@@ -7,12 +7,30 @@ type ToolExecutionOptions = {
 
 // Interface for tool invocation parts in AI SDK v5
 interface ToolInvocationPart {
-  type: "tool-invocation";
-  toolName: string;
+  type: `tool-${string}`;
   toolCallId: string;
+  toolName: string;
   args: Record<string, unknown>;
   result: string;
-  state: "result" | "call" | "partial";
+  state: string;
+  [key: string]: unknown;
+}
+
+// Type guard for tool invocation parts with required properties
+function isToolInvocationWithExecute(
+  part: unknown
+): part is ToolInvocationPart {
+  return (
+    typeof part === "object" &&
+    part !== null &&
+    "toolName" in part &&
+    "args" in part &&
+    "result" in part &&
+    "state" in part &&
+    "toolCallId" in part &&
+    typeof (part as any).toolName === "string" &&
+    (part as any).state === "result"
+  );
 }
 
 // Approval string to be shared across frontend and backend
@@ -70,21 +88,20 @@ export async function processToolCalls<
       if (part.type !== "tool-invocation") return part;
 
       // For AI SDK v5, we need to handle the tool invocation structure properly
-      const toolInvocation = part as ToolInvocationPart;
+      // Only continue if this is a tool invocation with all required properties
+      if (!isToolInvocationWithExecute(part)) return part;
+
+      const toolInvocation = part;
       const toolName = toolInvocation.toolName;
 
-      // Only continue if we have an execute function for the tool (meaning it requires confirmation) and it's in a 'result' state
-      if (!(toolName in executeFunctions) || toolInvocation.state !== "result")
-        return part;
+      // Only continue if we have an execute function for the tool
+      if (!(toolName in executeFunctions)) return part;
 
       let result: unknown;
 
       if (toolInvocation.result === APPROVAL.YES) {
         // Get the tool and check if the tool has an execute function.
-        if (
-          !isValidToolName(toolName, executeFunctions) ||
-          toolInvocation.state !== "result"
-        ) {
+        if (!isValidToolName(toolName, executeFunctions)) {
           return part;
         }
 
