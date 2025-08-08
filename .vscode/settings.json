@@ -36,5 +36,7 @@
   },
   "[html]": {
     "editor.defaultFormatter": "esbenp.prettier-vscode"
-  }
+  },
+  "codepal-vscode.api.CloudflareAccountID": "cfdae208bee4e8456d242878e4e66dfc",
+  "codepal-vscode.api.CloudflareApiToken": "v2CkK5yNZGBhwxg4E-KNRq7iHpHunHXsaJjyq0ki"
 }
