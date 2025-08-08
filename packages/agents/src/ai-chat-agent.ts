@@ -49,7 +49,7 @@ function isV4Message(message: MessageInput): message is V4MessageExtended {
 }
 
 /**
- * Convert v4 message format to UIMessage format with comprehensive part type mapping
+ * Convert v4 message format to UIMessage format with part type mapping
  * @param message - Message in v4 or v5 format
  * @returns Message in UIMessage format
  */
@@ -97,7 +97,7 @@ function convertToUIMessage(message: MessageInput): ChatMessage {
             state: "call",
             result: undefined
           });
-        } catch (error) {
+        } catch (_error) {
           // If arguments parsing fails, store as string
           parts.push({
             type: `tool-${toolCall.function.name}`,
@@ -123,7 +123,7 @@ function convertToUIMessage(message: MessageInput): ChatMessage {
           state: "call",
           result: undefined
         });
-      } catch (error) {
+      } catch (_error) {
         // If arguments parsing fails, store as string
         parts.push({
           type: `tool-${function_call.name}`,
