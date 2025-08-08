@@ -18,19 +18,16 @@ interface ToolInvocationPart {
 
 // Type guard for tool invocation parts with required properties
 function isToolInvocationWithExecute(
-  part: unknown
+  part: Record<string, unknown>
 ): part is ToolInvocationPart {
-  if (typeof part !== "object" || part === null) return false;
-
-  const obj = part as Record<string, unknown>;
   return (
-    "toolName" in obj &&
-    "args" in obj &&
-    "result" in obj &&
-    "state" in obj &&
-    "toolCallId" in obj &&
-    typeof obj.toolName === "string" &&
-    obj.state === "result"
+    "toolName" in part &&
+    "args" in part &&
+    "result" in part &&
+    "state" in part &&
+    "toolCallId" in part &&
+    typeof part.toolName === "string" &&
+    part.state === "result"
   );
 }
 
@@ -90,7 +87,12 @@ export async function processToolCalls<
 
       // For AI SDK v5, we need to handle the tool invocation structure properly
       // Only continue if this is a tool invocation with all required properties
-      if (!isToolInvocationWithExecute(part)) return part;
+      if (
+        typeof part !== "object" ||
+        part === null ||
+        !isToolInvocationWithExecute(part)
+      )
+        return part;
 
       const toolInvocation = part;
       const toolName = toolInvocation.toolName;
