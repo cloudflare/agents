@@ -1,11 +1,35 @@
-import { type Message, formatDataStreamPart } from "@ai-sdk/ui-utils";
-import {
-  type DataStreamWriter,
-  type ToolExecutionOptions,
-  type ToolSet,
-  convertToCoreMessages
-} from "ai";
-import type { z } from "zod";
+import { type UIMessage, type ToolSet, convertToModelMessages } from "ai";
+
+type ToolExecutionOptions = {
+  messages: ReturnType<typeof convertToModelMessages>;
+  toolCallId: string;
+};
+
+// Interface for tool invocation parts in AI SDK v5
+interface ToolInvocationPart {
+  type: `tool-${string}`;
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result: string;
+  state: string;
+  [key: string]: unknown;
+}
+
+// Type guard for tool invocation parts with required properties
+function isToolInvocationWithExecute(
+  part: Record<string, unknown>
+): part is ToolInvocationPart {
+  return (
+    "toolName" in part &&
+    "args" in part &&
+    "result" in part &&
+    "state" in part &&
+    "toolCallId" in part &&
+    typeof part.toolName === "string" &&
+    part.state === "result"
+  );
+}
 
 // Approval string to be shared across frontend and backend
 export const APPROVAL = {
@@ -39,21 +63,19 @@ export async function processToolCalls<
   }
 >(
   {
-    dataStream,
-    messages
+    messages,
+    tools: _tools
   }: {
     tools: Tools; // used for type inference
-    dataStream: DataStreamWriter;
-    messages: Message[];
+    messages: UIMessage[];
   },
   executeFunctions: {
     [K in keyof Tools & keyof ExecutableTools]?: (
-      args: z.infer<ExecutableTools[K]["parameters"]>,
+      args: Record<string, unknown>,
       context: ToolExecutionOptions
-      // biome-ignore lint/suspicious/noExplicitAny: vibes
-    ) => Promise<any>;
+    ) => Promise<unknown>;
   }
-): Promise<Message[]> {
+): Promise<UIMessage[]> {
   const lastMessage = messages[messages.length - 1];
   const parts = lastMessage.parts;
   if (!parts) return messages;
@@ -63,29 +85,34 @@ export async function processToolCalls<
       // Only process tool invocations parts
       if (part.type !== "tool-invocation") return part;
 
-      const { toolInvocation } = part;
-      const toolName = toolInvocation.toolName;
-
-      // Only continue if we have an execute function for the tool (meaning it requires confirmation) and it's in a 'result' state
-      if (!(toolName in executeFunctions) || toolInvocation.state !== "result")
+      // For AI SDK v5, we need to handle the tool invocation structure properly
+      // Only continue if this is a tool invocation with all required properties
+      if (
+        typeof part !== "object" ||
+        part === null ||
+        !isToolInvocationWithExecute(part)
+      )
         return part;
 
-      // biome-ignore lint/suspicious/noExplicitAny: vibes
-      let result: any;
+      const toolInvocation = part;
+      const toolName = toolInvocation.toolName;
+
+      // Only continue if we have an execute function for the tool
+      if (!(toolName in executeFunctions)) return part;
+
+      let result: unknown;
 
       if (toolInvocation.result === APPROVAL.YES) {
         // Get the tool and check if the tool has an execute function.
-        if (
-          !isValidToolName(toolName, executeFunctions) ||
-          toolInvocation.state !== "result"
-        ) {
+        if (!isValidToolName(toolName, executeFunctions)) {
           return part;
         }
 
-        const toolInstance = executeFunctions[toolName];
+        const toolInstance =
+          executeFunctions[toolName as keyof typeof executeFunctions];
         if (toolInstance) {
           result = await toolInstance(toolInvocation.args, {
-            messages: convertToCoreMessages(messages),
+            messages: convertToModelMessages(messages),
             toolCallId: toolInvocation.toolCallId
           });
         } else {
@@ -97,14 +124,6 @@ export async function processToolCalls<
         // For any unhandled responses, return the original part.
         return part;
       }
-
-      // Forward updated tool result to the client.
-      dataStream.write(
-        formatDataStreamPart("tool_result", {
-          result,
-          toolCallId: toolInvocation.toolCallId
-        })
-      );
 
       // Return updated toolInvocation with the actual result.
       return {

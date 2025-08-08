@@ -31,8 +31,16 @@ describe("useAgentChat", () => {
     } as any;
 
     const testMessages = [
-      { content: "Hi", id: "1", role: "user" as const },
-      { content: "Hello", id: "2", role: "assistant" as const }
+      {
+        content: "Hi",
+        id: "1",
+        role: "user" as const
+      },
+      {
+        content: "Hello",
+        id: "2",
+        role: "assistant" as const
+      }
     ];
     const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
 

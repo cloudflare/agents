@@ -1,4 +1,4 @@
-import type { Message } from "ai";
+import type { UIMessage } from "ai";
 import type { Schedule } from "../index";
 import { getCurrentAgent } from "../index";
 
@@ -49,7 +49,7 @@ export type ObservabilityEvent =
   | BaseEvent<
       "message:request" | "message:response",
       {
-        message: Message[];
+        message: UIMessage[];
       }
     >
   | BaseEvent<"message:clear">

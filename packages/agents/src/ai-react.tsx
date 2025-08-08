@@ -1,5 +1,4 @@
-import { useChat } from "@ai-sdk/react";
-import type { Message } from "ai";
+import { useChat, type Message } from "@ai-sdk/react";
 import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
@@ -218,8 +217,7 @@ export function useAgentChat<State = unknown>(
   }
   const useChatHelpers = useChat({
     fetch: aiFetch,
-    initialMessages,
-    sendExtraMessageFields: true,
+    initialMessages: initialMessages,
     ...rest
   });
 
@@ -254,7 +252,7 @@ export function useAgentChat<State = unknown>(
         return;
       }
       if (data.type === "cf_agent_chat_messages") {
-        useChatHelpers.setMessages(data.messages);
+        useChatHelpers.setMessages(data.messages as Message[]);
       }
     }
 

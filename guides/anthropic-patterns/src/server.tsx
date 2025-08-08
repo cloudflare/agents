@@ -205,7 +205,7 @@ export const Routing = createAgent<{ query: string }, { response: string }>(
       3. Brief reasoning for classification`,
       schema: z.object({
         complexity: z.enum(["simple", "complex"]),
-        reasoning: z.string(),
+        reasoningText: z.string(),
         type: z.enum(["general", "refund", "technical"])
       })
     });

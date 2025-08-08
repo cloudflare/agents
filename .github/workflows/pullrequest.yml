@@ -23,7 +23,7 @@ jobs:
           node-version: 20
           cache: "npm"
 
-      - run: npm install
+      - run: npm ci
       - run: npm run build
       - run: npm run check
       - run: CI=true npm run test
