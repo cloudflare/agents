@@ -9,6 +9,44 @@ import type { IncomingMessage, OutgoingMessage } from "./ai-types";
 const decoder = new TextDecoder();
 
 /**
+ * Helper function to detect v4 messages (with 'content' property)
+ * @param message - Message to check
+ * @returns true if message is in v4 format
+ */
+function isV4Message(message: any): boolean {
+  return message && typeof message.content === "string" && !message.parts;
+}
+
+/**
+ * Convert v4 message format to UIMessage format
+ * @param v4Message - Message in v4 format
+ * @returns Message in UIMessage format
+ */
+function convertToUIMessage(v4Message: any): ChatMessage {
+  if (isV4Message(v4Message)) {
+    return {
+      ...v4Message,
+      parts: [
+        {
+          type: "text",
+          text: v4Message.content
+        }
+      ]
+    };
+  }
+  return v4Message;
+}
+
+/**
+ * Convert array of messages to UIMessage format
+ * @param messages - Array of messages potentially in old format
+ * @returns Array of messages in UIMessage format
+ */
+function convertMessagesToUIFormat(messages: any[]): ChatMessage[] {
+  return messages.map(convertToUIMessage);
+}
+
+/**
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
@@ -30,11 +68,27 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       message text not null,
       created_at datetime default current_timestamp
     )`;
-    this.messages = (
+    // Load messages and check/convert format
+    const rawMessages = (
       this.sql`select * from cf_ai_chat_agent_messages` || []
     ).map((row) => {
       return JSON.parse(row.message as string);
     });
+
+    // Detect and convert v4 messages to UIMessage format
+    this.messages = convertMessagesToUIFormat(rawMessages);
+
+    // If any messages were converted, persist the updated format
+    const hasV4Messages = rawMessages.some(isV4Message);
+    if (hasV4Messages && this.messages.length > 0) {
+      // Re-persist messages in correct format
+      this.sql`delete from cf_ai_chat_agent_messages`;
+      for (const message of this.messages) {
+        this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
+          message.id
+        },${JSON.stringify(message)})`;
+      }
+    }
 
     this._chatMessageAbortControllers = new Map();
   }
@@ -67,7 +121,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           // dispatcher,
           // duplex
         } = data.init;
-        const { messages } = JSON.parse(body as string);
+        const { messages: rawMessages } = JSON.parse(body as string);
+        // Convert messages to UIMessage format if needed
+        const messages = convertMessagesToUIFormat(rawMessages);
+
         this._broadcastChatMessage(
           {
             messages,
@@ -159,8 +216,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           [connection.id]
         );
       } else if (data.type === "cf_agent_chat_messages") {
-        // replace the messages with the new ones
-        await this.persistMessages(data.messages, [connection.id]);
+        // Convert and replace the messages with the new ones
+        const convertedMessages = convertMessagesToUIFormat(data.messages);
+        await this.persistMessages(convertedMessages, [connection.id]);
       } else if (data.type === "cf_agent_chat_request_cancel") {
         // propagate an abort signal for the associated request
         this._cancelChatRequest(data.id);
@@ -172,11 +230,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     return this._tryCatchChat(() => {
       const url = new URL(request.url);
       if (url.pathname.endsWith("/get-messages")) {
-        const messages = (
+        const rawMessages = (
           this.sql`select * from cf_ai_chat_agent_messages` || []
         ).map((row) => {
           return JSON.parse(row.message as string);
         });
+        // Ensure messages are in UIMessage format
+        const messages = convertMessagesToUIFormat(rawMessages);
         return Response.json(messages);
       }
       return super.onRequest(request);
