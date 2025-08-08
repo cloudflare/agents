@@ -1,9 +1,5 @@
 import { AIChatAgent } from "agents/ai-chat-agent";
-import type {
-  StreamTextOnFinishCallback,
-  UIMessage as ChatMessage,
-  LanguageModel
-} from "ai";
+import type { StreamTextOnFinishCallback, UIMessage as ChatMessage } from "ai";
 import { streamText, convertToModelMessages } from "ai";
 import { model } from "../model";
 import type { Env } from "../server";

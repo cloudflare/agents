@@ -1,7 +1,7 @@
 // import { anthropic } from "@ai-sdk/anthropic";
 // import { google } from "@ai-sdk/google";
 import { openai } from "@ai-sdk/openai";
-import { generateObject, type LanguageModel } from "ai";
+import { generateObject } from "ai";
 import { createScorer, evalite } from "evalite";
 import {
   type Schedule,

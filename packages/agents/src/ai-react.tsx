@@ -1,7 +1,6 @@
 import { useChat, type Message } from "@ai-sdk/react";
-import type { UIMessage } from "ai";
 import { nanoid } from "nanoid";
-import { use, useEffect, useState } from "react";
+import { use, useEffect } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import type { useAgent } from "./react";
 

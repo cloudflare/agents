@@ -4,7 +4,7 @@ import {
   unstable_getSchedulePrompt,
   unstable_scheduleSchema
 } from "agents/schedule";
-import { generateObject, type LanguageModel } from "ai";
+import { generateObject } from "ai";
 import { model } from "../model";
 import type { Env } from "../server";
 import type {

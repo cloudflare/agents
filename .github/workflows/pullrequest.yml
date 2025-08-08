@@ -23,9 +23,7 @@ jobs:
           node-version: 20
           cache: "npm"
 
-      - run: npm install
-      - name: Ensure Rollup native dependencies
-        run: npm install --no-save @rollup/rollup-linux-x64-gnu@4.46.2
+      - run: npm ci
       - run: npm run build
       - run: npm run check
       - run: CI=true npm run test
