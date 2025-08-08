@@ -1,8 +1,19 @@
 import { type UIMessage, type ToolSet, convertToModelMessages } from "ai";
+
 type ToolExecutionOptions = {
   messages: ReturnType<typeof convertToModelMessages>;
   toolCallId: string;
 };
+
+// Interface for tool invocation parts in AI SDK v5
+interface ToolInvocationPart {
+  type: "tool-invocation";
+  toolName: string;
+  toolCallId: string;
+  args: Record<string, unknown>;
+  result: string;
+  state: "result" | "call" | "partial";
+}
 
 // Approval string to be shared across frontend and backend
 export const APPROVAL = {
@@ -59,8 +70,7 @@ export async function processToolCalls<
       if (part.type !== "tool-invocation") return part;
 
       // For AI SDK v5, we need to handle the tool invocation structure properly
-      // The part structure may vary, so we'll use type assertions for now
-      const toolInvocation = part as any;
+      const toolInvocation = part as ToolInvocationPart;
       const toolName = toolInvocation.toolName;
 
       // Only continue if we have an execute function for the tool (meaning it requires confirmation) and it's in a 'result' state

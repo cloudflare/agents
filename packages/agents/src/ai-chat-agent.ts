@@ -3,46 +3,55 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
+import type { Message } from "@ai-sdk/react";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import type { IncomingMessage, OutgoingMessage } from "./ai-types";
 
 const decoder = new TextDecoder();
+
+// Union type for messages that could be legacy or current format
+type MessageInput = Message | ChatMessage;
 
 /**
  * Helper function to detect v4 messages (with 'content' property)
  * @param message - Message to check
  * @returns true if message is in v4 format
  */
-function isV4Message(message: any): boolean {
-  return message && typeof message.content === "string" && !message.parts;
+function isV4Message(message: MessageInput): message is Message {
+  return (
+    "content" in message &&
+    typeof message.content === "string" &&
+    !("parts" in message)
+  );
 }
 
 /**
  * Convert v4 message format to UIMessage format
- * @param v4Message - Message in v4 format
+ * @param message - Message in v4 or v5 format
  * @returns Message in UIMessage format
  */
-function convertToUIMessage(v4Message: any): ChatMessage {
-  if (isV4Message(v4Message)) {
+function convertToUIMessage(message: MessageInput): ChatMessage {
+  if (isV4Message(message)) {
+    const { content, ...rest } = message;
     return {
-      ...v4Message,
+      ...rest,
       parts: [
         {
           type: "text",
-          text: v4Message.content
+          text: content
         }
       ]
-    };
+    } as ChatMessage;
   }
-  return v4Message;
+  return message as ChatMessage;
 }
 
 /**
  * Convert array of messages to UIMessage format
- * @param messages - Array of messages potentially in old format
+ * @param messages - Array of messages potentially in v4 format
  * @returns Array of messages in UIMessage format
  */
-function convertMessagesToUIFormat(messages: any[]): ChatMessage[] {
+function convertMessagesToUIFormat(messages: MessageInput[]): ChatMessage[] {
   return messages.map(convertToUIMessage);
 }
 
@@ -173,9 +182,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             );
           };
 
-          const onFinish: StreamTextOnFinishCallback<ToolSet> = async ({
-            response
-          }) => {
+          const onFinish: StreamTextOnFinishCallback<ToolSet> = async () => {
             // This is called when streamText completes
           };
 
@@ -280,9 +287,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     const uiMessageOnFinish = async (finalMessages: ChatMessage[]) => {
       await this.persistMessages(finalMessages, []);
     };
-    const onFinish: StreamTextOnFinishCallback<ToolSet> = async ({
-      response
-    }) => {
+    const onFinish: StreamTextOnFinishCallback<ToolSet> = async () => {
       // This is called when streamText completes
     };
     const response = await this.onChatMessage(
