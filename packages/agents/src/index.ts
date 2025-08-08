@@ -290,6 +290,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
+  // Connection state management for race condition fix
+  private _connectionStates = new Map<string, 'connecting' | 'ready'>();
+  private _messageQueues = new Map<string, Array<{connection: Connection, message: WSMessage}>>();
+
   mcp: MCPClientManager = new MCPClientManager(this._ParentClass.name, "0.0.1");
 
   /**
@@ -353,6 +357,44 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
    * The observability implementation to use for the Agent
    */
   observability?: Observability = genericObservability;
+
+  /**
+   * Clean up connection state and message queue for a given connection
+   * @param connectionId The connection ID to clean up
+   */
+  private _cleanupConnection(connectionId: string) {
+    this._connectionStates.delete(connectionId);
+    this._messageQueues.delete(connectionId);
+  }
+
+  /**
+   * Process all queued messages for a connection once it's ready
+   * @param connectionId The connection ID to process messages for
+   */
+  private async _processQueuedMessages(connectionId: string) {
+    const queue = this._messageQueues.get(connectionId);
+    if (!queue || queue.length === 0) {
+      return;
+    }
+
+    // Process each queued message in order
+    for (const { connection, message } of queue) {
+      try {
+        await this._originalOnMessage(connection, message);
+      } catch (error) {
+        console.error(`Error processing queued message for connection ${connectionId}:`, error);
+      }
+    }
+
+    // Clear the queue after processing
+    this._messageQueues.set(connectionId, []);
+  }
+
+  /**
+   * The original onMessage handler that processes messages normally
+   * This will be set during constructor to preserve the original logic
+   */
+  private _originalOnMessage!: (connection: Connection, message: WSMessage) => Promise<void>;
 
   /**
    * Execute SQL queries against the Agent's database
@@ -464,7 +506,9 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     };
 
     const _onMessage = this.onMessage.bind(this);
-    this.onMessage = async (connection: Connection, message: WSMessage) => {
+    
+    // Store the original message handler for processing queued messages
+    this._originalOnMessage = async (connection: Connection, message: WSMessage) => {
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
@@ -555,14 +599,33 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
       );
     };
 
+    // New onMessage handler with race condition protection
+    this.onMessage = async (connection: Connection, message: WSMessage) => {
+      // Check if connection is still in connecting state
+      if (this._connectionStates.get(connection.id) === 'connecting') {
+        // Queue the message for later processing
+        const queue = this._messageQueues.get(connection.id);
+        if (queue) {
+          queue.push({ connection, message });
+        }
+        return;
+      }
+
+      // Process message normally if connection is ready
+      return this._originalOnMessage(connection, message);
+    };
+
     const _onConnect = this.onConnect.bind(this);
-    this.onConnect = (connection: Connection, ctx: ConnectionContext) => {
-      // TODO: This is a hack to ensure the state is sent after the connection is established
-      // must fix this
+    this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
+      // Initialize connection state and message queue
+      this._connectionStates.set(connection.id, 'connecting');
+      this._messageQueues.set(connection.id, []);
+
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
-          setTimeout(() => {
+          try {
+            // Send initial state immediately (no setTimeout needed)
             if (this.state) {
               connection.send(
                 JSON.stringify({
@@ -572,6 +635,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
               );
             }
 
+            // Send MCP servers state
             connection.send(
               JSON.stringify({
                 mcp: this.getMcpServers(),
@@ -579,6 +643,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
               })
             );
 
+            // Emit observability event
             this.observability?.emit(
               {
                 displayMessage: "Connection established",
@@ -591,8 +656,17 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
               },
               this.ctx
             );
-            return this._tryCatch(() => _onConnect(connection, ctx));
-          }, 20);
+
+            // Call user's onConnect handler and wait for completion
+            await this._tryCatch(() => _onConnect(connection, ctx));
+
+            // Process any queued messages that arrived during setup
+            await this._processQueuedMessages(connection.id);
+
+          } finally {
+            // Mark connection as ready
+            this._connectionStates.set(connection.id, 'ready');
+          }
         }
       );
     };
@@ -890,9 +964,14 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     if (connectionOrError && error) {
       theError = error;
       // this is a websocket connection error
+      const connection = connectionOrError as Connection;
+      
+      // Clean up connection state on error
+      this._cleanupConnection(connection.id);
+      
       console.error(
         "Error on websocket connection:",
-        (connectionOrError as Connection).id,
+        connection.id,
         theError
       );
       console.error(
@@ -1337,6 +1416,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
    * Destroy the Agent, removing all state and scheduled tasks
    */
   async destroy() {
+    // Clean up all connection states and message queues
+    this._connectionStates.clear();
+    this._messageQueues.clear();
+
     // drop all tables
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
