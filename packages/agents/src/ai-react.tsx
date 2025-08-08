@@ -27,6 +27,15 @@ type UseAgentChatOptions<State> = Omit<
   "fetch"
 >;
 
+export const prepareRequestBody: UseAgentChatOptions<any>["experimental_prepareRequestBody"] =
+  (body) => {
+    // we only send the new message because previous messages have already been persisted to the Agent
+    return {
+      ...body,
+      messages: body?.messages?.length ? [body.messages.at(-1)] : []
+    };
+  };
+
 const requestCache = new Map<string, Promise<Message[]>>();
 
 /**
@@ -220,6 +229,7 @@ export function useAgentChat<State = unknown>(
     fetch: aiFetch,
     initialMessages,
     sendExtraMessageFields: true,
+    experimental_prepareRequestBody: prepareRequestBody,
     ...rest
   });
 
