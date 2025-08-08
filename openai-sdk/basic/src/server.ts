@@ -1,15 +1,21 @@
 import { Agent, run } from "@openai/agents";
 import { Agent as CFAgent, routeAgentRequest } from "agents";
 
-type Env = {
-  MyAgent: DurableObjectNamespace<MyAgent>;
-};
+// // uncomment to use workers-ai-provider
+// import { env } from "cloudflare:workers";
+// import { aisdk } from "@openai/agents-extensions";
+// import { createWorkersAI } from "workers-ai-provider";
+// const model = aisdk(
+//   createWorkersAI({ binding: env.AI })("@cf/meta/llama-3.2-3b-instruct")
+// );
 
 export class MyAgent extends CFAgent<Env> {
   async onRequest() {
     const agent = new Agent({
       instructions: "You are a helpful assistant.",
       name: "Assistant"
+      // // uncomment to use workers-ai-provider
+      // model
     });
 
     const result = await run(

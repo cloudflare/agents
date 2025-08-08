@@ -1,5 +1,49 @@
 # @cloudflare/agents
 
+## 0.0.111
+
+### Patch Changes
+
+- [`0cf8e80`](https://github.com/cloudflare/agents/commit/0cf8e802b29fed4d83d7ff2c55fdfb72a1fa5a0f) Thanks [@threepointone](https://github.com/threepointone)! - trigegr a release
+
+## 0.0.110
+
+### Patch Changes
+
+- [#392](https://github.com/cloudflare/agents/pull/392) [`669a2b0`](https://github.com/cloudflare/agents/commit/669a2b0d75844495da7fcefed2127d5bd820c551) Thanks [@Maximo-Guk](https://github.com/Maximo-Guk)! - fix: Ensure McpAgent props stay current
+
+- [#394](https://github.com/cloudflare/agents/pull/394) [`e4a2352`](https://github.com/cloudflare/agents/commit/e4a2352b04a588f3e593ebe8bbf78df9cb2ecff8) Thanks [@threepointone](https://github.com/threepointone)! - update state incrementally as mcp servers connect
+
+- [#390](https://github.com/cloudflare/agents/pull/390) [`b123357`](https://github.com/cloudflare/agents/commit/b123357202884e2610cbcdb5857e38b94944fca9) Thanks [@threepointone](https://github.com/threepointone)! - update (most) dependencies
+
+- [#376](https://github.com/cloudflare/agents/pull/376) [`1eac06e`](https://github.com/cloudflare/agents/commit/1eac06e1f3ad61a91227ef54351521435762182d) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - add elicitation support and examples
+
+- [`3bcb134`](https://github.com/cloudflare/agents/commit/3bcb134710d6e7db7830281e29c91c504e6841b9) Thanks [@threepointone](https://github.com/threepointone)! - update partysocket
+
+- [#374](https://github.com/cloudflare/agents/pull/374) [`b63b4a6`](https://github.com/cloudflare/agents/commit/b63b4a6740a8d437109a138d7bea64615afdc1c6) Thanks [@laulauland](https://github.com/laulauland)! - Improve MCP client connection resilience with Promise.allSettled
+
+- [#378](https://github.com/cloudflare/agents/pull/378) [`c69f616`](https://github.com/cloudflare/agents/commit/c69f616c15db81c09916cbd68eb6d07abe023a0b) Thanks [@amorriscode](https://github.com/amorriscode)! - add auto transport option
+
+- [#387](https://github.com/cloudflare/agents/pull/387) [`8c2713f`](https://github.com/cloudflare/agents/commit/8c2713f59f5ba04af7ae06e2f6c28f6fcf6d6d37) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix/mcp agent error handling
+
+## 0.0.109
+
+### Patch Changes
+
+- [#372](https://github.com/cloudflare/agents/pull/372) [`a45f8f3`](https://github.com/cloudflare/agents/commit/a45f8f3cd8f4f392d585cc13c721570e263094d7) Thanks [@threepointone](https://github.com/threepointone)! - default Agent's Env to cloudflare's Env
+
+## 0.0.108
+
+### Patch Changes
+
+- [#357](https://github.com/cloudflare/agents/pull/357) [`40bd73c`](https://github.com/cloudflare/agents/commit/40bd73cbb29e5fc4a2625ce7d895b9e8c70d76a3) Thanks [@davemurphysf](https://github.com/davemurphysf)! - Pass incoming headers to the DO fetch method
+
+## 0.0.107
+
+### Patch Changes
+
+- [#364](https://github.com/cloudflare/agents/pull/364) [`885b3db`](https://github.com/cloudflare/agents/commit/885b3db8af3f482b2892764077c05afc491f0b35) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - add HTTP Streamable support
+
 ## 0.0.106
 
 ### Patch Changes

@@ -1,0 +1,26 @@
+diff --git a/node_modules/@openai/agents-extensions/dist/aiSdk.js b/node_modules/@openai/agents-extensions/dist/aiSdk.js
+index 4500989..4bed4ae 100644
+--- a/node_modules/@openai/agents-extensions/dist/aiSdk.js
++++ b/node_modules/@openai/agents-extensions/dist/aiSdk.js
+@@ -380,7 +380,7 @@ export class AiSdkModel {
+                 // Putting a text message here will let the agent loop to complete,
+                 // so adding this item only when the tool calls are empty.
+                 // Note that the same support is not available for streaming mode.
+-                if (!result.toolCalls && result.text) {
++                if ((!result.toolCalls || result.toolCalls.length === 0) && result.text) {
+                     output.push({
+                         type: 'message',
+                         content: [{ type: 'output_text', text: result.text }],
+diff --git a/node_modules/@openai/agents-extensions/dist/aiSdk.mjs b/node_modules/@openai/agents-extensions/dist/aiSdk.mjs
+index 2c89ac2..1fd67ea 100644
+--- a/node_modules/@openai/agents-extensions/dist/aiSdk.mjs
++++ b/node_modules/@openai/agents-extensions/dist/aiSdk.mjs
+@@ -380,7 +380,7 @@ export class AiSdkModel {
+                 // Putting a text message here will let the agent loop to complete,
+                 // so adding this item only when the tool calls are empty.
+                 // Note that the same support is not available for streaming mode.
+-                if (!result.toolCalls && result.text) {
++                if ((!result.toolCalls || result.toolCalls.length === 0) && result.text) {
+                     output.push({
+                         type: 'message',
+                         content: [{ type: 'output_text', text: result.text }],

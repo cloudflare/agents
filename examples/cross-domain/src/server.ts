@@ -1,15 +1,7 @@
-import {
-  Agent,
-  type AgentNamespace,
-  type Connection,
-  routeAgentRequest
-} from "agents";
+import { Agent, type Connection, routeAgentRequest } from "agents";
+import { env } from "cloudflare:workers";
 
-type Env = {
-  MyAgent: AgentNamespace<MyAgent>;
-};
-
-export class MyAgent extends Agent<Env> {
+export class MyAgent extends Agent {
   onConnect(connection: Connection) {
     console.log("Client connected:", connection.id);
     connection.send(`Welcome! You are connected with ID: ${connection.id}`);
@@ -49,10 +41,10 @@ export class MyAgent extends Agent<Env> {
 }
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request) {
     return (
       (await routeAgentRequest(request, env, { cors: true })) ||
       new Response("Not found", { status: 404 })
     );
   }
-} satisfies ExportedHandler<Env>;
+};

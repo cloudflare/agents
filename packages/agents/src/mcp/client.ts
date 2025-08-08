@@ -1,5 +1,4 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
@@ -14,8 +13,10 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { type ToolSet, jsonSchema } from "ai";
 import { nanoid } from "nanoid";
-import { MCPClientConnection } from "./client-connection";
-import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import {
+  MCPClientConnection,
+  type MCPTransportOptions
+} from "./client-connection";
 
 /**
  * Utility class that aggregates multiple MCP clients into one
@@ -52,9 +53,7 @@ export class MCPClientManager {
         oauthCode?: string;
       };
       // we're overriding authProvider here because we want to be able to access the auth URL
-      transport?: SSEClientTransportOptions & {
-        authProvider?: AgentsOAuthProvider;
-      };
+      transport?: MCPTransportOptions;
       client?: ConstructorParameters<typeof Client>[1];
     } = {}
   ): Promise<{

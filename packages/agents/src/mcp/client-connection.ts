@@ -1,12 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
-  // type ClientCapabilities,
+  type ClientCapabilities,
   type ListPromptsResult,
   type ListResourceTemplatesResult,
   type ListResourcesResult,
   type ListToolsResult,
-  // type Notification,
   type Prompt,
   PromptListChangedNotificationSchema,
   type Resource,
@@ -14,10 +14,24 @@ import {
   type ResourceTemplate,
   type ServerCapabilities,
   type Tool,
-  ToolListChangedNotificationSchema
+  ToolListChangedNotificationSchema,
+  ElicitRequestSchema,
+  type ElicitRequest,
+  type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
+import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+
+export type MCPTransportOptions = (
+  | SSEClientTransportOptions
+  | StreamableHTTPClientTransportOptions
+) & {
+  authProvider?: AgentsOAuthProvider;
+  type?: "sse" | "streamable-http" | "auto";
+};
+
+type TransportType = Exclude<MCPTransportOptions["type"], "auto">;
 
 export class MCPClientConnection {
   client: Client;
@@ -38,13 +52,19 @@ export class MCPClientConnection {
     public url: URL,
     info: ConstructorParameters<typeof Client>[0],
     public options: {
-      transport: SSEClientTransportOptions & {
-        authProvider?: AgentsOAuthProvider;
-      };
+      transport: MCPTransportOptions;
       client: ConstructorParameters<typeof Client>[1];
     } = { client: {}, transport: {} }
   ) {
-    this.client = new Client(info, options.client);
+    const clientOptions = {
+      ...options.client,
+      capabilities: {
+        ...options.client?.capabilities,
+        elicitation: {}
+      } as ClientCapabilities
+    };
+
+    this.client = new Client(info, clientOptions);
   }
 
   /**
@@ -55,16 +75,8 @@ export class MCPClientConnection {
    */
   async init(code?: string) {
     try {
-      const transport = new SSEEdgeClientTransport(
-        this.url,
-        this.options.transport
-      );
-
-      if (code) {
-        await transport.finishAuth(code);
-      }
-
-      await this.client.connect(transport);
+      const transportType = this.options.transport.type || "streamable-http";
+      await this.tryConnect(transportType, code);
       // biome-ignore lint/suspicious/noExplicitAny: allow for the error check here
     } catch (e: any) {
       if (e.toString().includes("Unauthorized")) {
@@ -83,20 +95,47 @@ export class MCPClientConnection {
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
-    const [instructions, tools, resources, prompts, resourceTemplates] =
-      await Promise.all([
-        this.client.getInstructions(),
-        this.registerTools(),
-        this.registerResources(),
-        this.registerPrompts(),
-        this.registerResourceTemplates()
-      ]);
+    const [
+      instructionsResult,
+      toolsResult,
+      resourcesResult,
+      promptsResult,
+      resourceTemplatesResult
+    ] = await Promise.allSettled([
+      this.client.getInstructions(),
+      this.registerTools(),
+      this.registerResources(),
+      this.registerPrompts(),
+      this.registerResourceTemplates()
+    ]);
 
-    this.instructions = instructions;
-    this.tools = tools;
-    this.resources = resources;
-    this.prompts = prompts;
-    this.resourceTemplates = resourceTemplates;
+    const operations = [
+      { name: "instructions", result: instructionsResult },
+      { name: "tools", result: toolsResult },
+      { name: "resources", result: resourcesResult },
+      { name: "prompts", result: promptsResult },
+      { name: "resource templates", result: resourceTemplatesResult }
+    ];
+
+    for (const { name, result } of operations) {
+      if (result.status === "rejected") {
+        console.error(`Failed to initialize ${name}:`, result.reason);
+      }
+    }
+
+    this.instructions =
+      instructionsResult.status === "fulfilled"
+        ? instructionsResult.value
+        : undefined;
+    this.tools = toolsResult.status === "fulfilled" ? toolsResult.value : [];
+    this.resources =
+      resourcesResult.status === "fulfilled" ? resourcesResult.value : [];
+    this.prompts =
+      promptsResult.status === "fulfilled" ? promptsResult.value : [];
+    this.resourceTemplates =
+      resourceTemplatesResult.status === "fulfilled"
+        ? resourceTemplatesResult.value
+        : [];
 
     this.connectionState = "ready";
   }
@@ -224,6 +263,86 @@ export class MCPClientConnection {
       templatesAgg = templatesAgg.concat(templatesResult.resourceTemplates);
     } while (templatesResult.nextCursor);
     return templatesAgg;
+  }
+
+  /**
+   * Handle elicitation request from server
+   * Automatically uses the Agent's built-in elicitation handling if available
+   */
+  async handleElicitationRequest(
+    _request: ElicitRequest
+  ): Promise<ElicitResult> {
+    // Elicitation handling must be implemented by the platform
+    // For MCP servers, this should be handled by McpAgent.elicitInput()
+    throw new Error(
+      "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
+    );
+  }
+  /**
+   * Get the transport for the client
+   * @param transportType - The transport type to get
+   * @returns The transport for the client
+   */
+  getTransport(transportType: TransportType) {
+    switch (transportType) {
+      case "streamable-http":
+        return new StreamableHTTPEdgeClientTransport(
+          this.url,
+          this.options.transport as StreamableHTTPClientTransportOptions
+        );
+      case "sse":
+        return new SSEEdgeClientTransport(
+          this.url,
+          this.options.transport as SSEClientTransportOptions
+        );
+      default:
+        throw new Error(`Unsupported transport type: ${transportType}`);
+    }
+  }
+
+  async tryConnect(transportType: MCPTransportOptions["type"], code?: string) {
+    const transports: TransportType[] =
+      transportType === "auto" ? ["streamable-http", "sse"] : [transportType];
+
+    for (const currentTransportType of transports) {
+      const isLastTransport =
+        currentTransportType === transports[transports.length - 1];
+      const hasFallback =
+        transportType === "auto" &&
+        currentTransportType === "streamable-http" &&
+        !isLastTransport;
+
+      const transport = await this.getTransport(currentTransportType);
+
+      if (code) {
+        await transport.finishAuth(code);
+      }
+
+      try {
+        await this.client.connect(transport);
+        break;
+      } catch (e) {
+        const error = e instanceof Error ? e : new Error(String(e));
+
+        if (
+          hasFallback &&
+          (error.message.includes("404") || error.message.includes("405"))
+        ) {
+          // try the next transport if we have a fallback
+          continue;
+        }
+
+        throw e;
+      }
+    }
+
+    // Set up elicitation request handler
+    this.client.setRequestHandler(
+      ElicitRequestSchema,
+      async (request: ElicitRequest) => {
+        return await this.handleElicitationRequest(request);
+      }
+    );
   }
 }
 

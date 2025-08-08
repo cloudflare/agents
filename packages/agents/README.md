@@ -393,6 +393,112 @@ This creates:
 - Intuitive input handling
 - Easy conversation reset
 
+### 🔗 MCP (Model Context Protocol) Integration
+
+Agents can seamlessly integrate with the Model Context Protocol, allowing them to act as both MCP servers (providing tools to AI assistants) and MCP clients (using tools from other services).
+
+#### Creating an MCP Server
+
+```typescript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpAgent } from "agents/mcp";
+import { z } from "zod";
+
+type Env = {
+  MyMCP: DurableObjectNamespace<MyMCP>;
+};
+
+type State = { counter: number };
+
+export class MyMCP extends McpAgent<Env, State, {}> {
+  server = new McpServer({
+    name: "Demo",
+    version: "1.0.0"
+  });
+
+  initialState: State = {
+    counter: 1
+  };
+
+  async init() {
+    this.server.resource("counter", "mcp://resource/counter", (uri) => {
+      return {
+        contents: [{ text: String(this.state.counter), uri: uri.href }]
+      };
+    });
+
+    this.server.tool(
+      "add",
+      "Add to the counter, stored in the MCP",
+      { a: z.number() },
+      async ({ a }) => {
+        this.setState({ ...this.state, counter: this.state.counter + a });
+
+        return {
+          content: [
+            {
+              text: String(`Added ${a}, total is now ${this.state.counter}`),
+              type: "text"
+            }
+          ]
+        };
+      }
+    );
+  }
+
+  onStateUpdate(state: State) {
+    console.log({ stateUpdate: state });
+  }
+}
+
+// HTTP Streamable transport (recommended)
+export default MyMCP.serve("/mcp", {
+  binding: "MyMCP"
+});
+
+// Or SSE transport for legacy compatibility
+// export default MyMCP.serveSSE("/mcp", { binding: "MyMCP" });
+```
+
+#### Using MCP Tools
+
+```typescript
+import { MCPClientManager } from "agents/mcp";
+
+const client = new MCPClientManager("my-app", "1.0.0");
+
+// Connect to an MCP server
+await client.connect("https://weather-service.com/mcp", {
+  transport: { type: "streamable-http" }
+});
+
+// Use tools from the server
+const weather = await client.callTool({
+  serverId: "weather-service",
+  name: "getWeather",
+  arguments: { location: "San Francisco" }
+});
+```
+
+#### AI SDK Integration
+
+```typescript
+import { generateText } from "ai";
+
+// Convert MCP tools for AI use
+const result = await generateText({
+  model: openai("gpt-4"),
+  tools: client.unstable_getAITools(),
+  prompt: "What's the weather in Tokyo?"
+});
+```
+
+**Transport Options:**
+
+- **Auto**: Automatically determine the correct transport
+- **HTTP Streamable**: Best performance, batch requests, session management
+- **SSE**: Simple setup, legacy compatibility
+
 ### 💬 The Path Forward
 
 We're developing new dimensions of agent capability:

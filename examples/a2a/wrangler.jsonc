@@ -1,12 +1,10 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "a2a-agent-demo",
-  "main": "dist/server.js",
+  "main": "src/server.ts",
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
-  "build": {
-    "command": "npm run build"
-  },
+
   "durable_objects": {
     "bindings": [
       {
