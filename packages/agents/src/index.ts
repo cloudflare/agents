@@ -516,10 +516,8 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   displayMessage: `RPC call to ${method}`,
                   id: nanoid(),
                   payload: {
-                    args,
                     method,
-                    streaming: metadata?.streaming,
-                    success: true
+                    streaming: metadata?.streaming
                   },
                   timestamp: Date.now(),
                   type: "rpc"
@@ -669,7 +667,6 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     state: State,
     source: Connection | "server" = "server"
   ) {
-    const previousState = this._state;
     this._state = state;
     this.sql`
     INSERT OR REPLACE INTO cf_agents_state (id, state)
@@ -695,10 +692,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
             {
               displayMessage: "State updated",
               id: nanoid(),
-              payload: {
-                previousState,
-                state
-              },
+              payload: {},
               timestamp: Date.now(),
               type: "state:update"
             },
@@ -1059,7 +1053,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
         {
           displayMessage: `Schedule ${schedule.id} created`,
           id: nanoid(),
-          payload: schedule,
+          payload: {
+            callback: callback as string,
+            id: id
+          },
           timestamp: Date.now(),
           type: "schedule:create"
         },
@@ -1229,7 +1226,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
         {
           displayMessage: `Schedule ${id} cancelled`,
           id: nanoid(),
-          payload: schedule,
+          payload: {
+            callback: schedule.callback,
+            id: schedule.id
+          },
           timestamp: Date.now(),
           type: "schedule:cancel"
         },
@@ -1294,7 +1294,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                 {
                   displayMessage: `Schedule ${row.id} executed`,
                   id: nanoid(),
-                  payload: row,
+                  payload: {
+                    callback: row.callback,
+                    id: row.id
+                  },
                   timestamp: Date.now(),
                   type: "schedule:execute"
                 },

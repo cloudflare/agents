@@ -17,12 +17,10 @@ declare class A extends Agent<typeof env, {}> {
 }
 
 // @ts-expect-error state doesn't match type A state
-// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const _a2 = useAgent<A, { foo: "bar" }>({
   agent: "test"
 });
 
-// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const a1 = useAgent<A, {}>({
   agent: "test"
 });

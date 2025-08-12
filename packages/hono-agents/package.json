@@ -6,7 +6,7 @@
   "description": "Add Cloudflare Agents to your Hono app",
   "devDependencies": {
     "agents": "^0.0.111",
-    "hono": "^4.8.12"
+    "hono": "^4.9.1"
   },
   "publishConfig": {
     "access": "public"
