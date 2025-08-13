@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.113
+
+### Patch Changes
+
+- [`fd59ae2`](https://github.com/cloudflare/agents/commit/fd59ae225019ed8f3b20aa23f853d70d6d36b5db) Thanks [@threepointone](https://github.com/threepointone)! - fix: prefix mcp tool names with tool\_
+
 ## 0.0.112
 
 ### Patch Changes
