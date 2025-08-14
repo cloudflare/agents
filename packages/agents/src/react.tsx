@@ -250,7 +250,7 @@ export function useAgent<State>(
           args,
           id,
           method,
-          type: "rpc"
+          type: MessageType.RPC
         };
 
         agent.send(JSON.stringify(request));

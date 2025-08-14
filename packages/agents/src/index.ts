@@ -531,7 +531,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                 id,
                 result,
                 success: true,
-                type: "rpc"
+                type: MessageType.RPC
               };
               connection.send(JSON.stringify(response));
             } catch (e) {
@@ -541,7 +541,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   e instanceof Error ? e.message : "Unknown error occurred",
                 id: parsed.id,
                 success: false,
-                type: "rpc"
+                type: MessageType.RPC
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
@@ -1895,7 +1895,7 @@ export class StreamingResponse {
       id: this._id,
       result: chunk,
       success: true,
-      type: "rpc"
+      type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
   }
@@ -1914,7 +1914,7 @@ export class StreamingResponse {
       id: this._id,
       result: finalChunk,
       success: true,
-      type: "rpc"
+      type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
   }
