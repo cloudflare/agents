@@ -8,6 +8,7 @@ import type {
   SerializableReturnValue,
   SerializableValue
 } from "./serializable";
+import { MessageType } from "./ai-types";
 
 /**
  * Options for creating an AgentClient
@@ -117,11 +118,11 @@ export class AgentClient<State = unknown> extends PartySocket {
           // TODO: log errors with log levels
           return;
         }
-        if (parsedMessage.type === "cf_agent_state") {
+        if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           this.options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
-        if (parsedMessage.type === "rpc") {
+        if (parsedMessage.type === MessageType.RPC) {
           const response = parsedMessage as RPCResponse;
           const pending = this._pendingCalls.get(response.id);
           if (!pending) return;
@@ -153,7 +154,7 @@ export class AgentClient<State = unknown> extends PartySocket {
   }
 
   setState(state: State) {
-    this.send(JSON.stringify({ state, type: "cf_agent_state" }));
+    this.send(JSON.stringify({ state, type: MessageType.CF_AGENT_STATE }));
     this.options.onStateUpdate?.(state, "client");
   }
 
@@ -192,7 +193,7 @@ export class AgentClient<State = unknown> extends PartySocket {
         args,
         id,
         method,
-        type: "rpc"
+        type: MessageType.RPC
       };
 
       this.send(JSON.stringify(request));
