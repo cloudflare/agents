@@ -166,7 +166,7 @@ export class DialogueAgent extends Agent {
 }
 ```
 
-#### Client Communion
+#### Client Communication
 
 For direct connection to your agent:
 
@@ -524,8 +524,8 @@ Welcome to the future of intelligent agents. Create something meaningful. 🌟
 Contributions are welcome, but are especially welcome when:
 
 - You have opened an issue as a Request for Comment (RFC) to discuss your proposal, show your thinking, and iterate together.
-- Is not "AI slop": LLMs are powerful tools, but contributions entirely authored by vibe coding are unlikely to meet the quality bar, and will be rejected.
-- You're willing to accept feedback and make sure the changes fit the goals of the `agents` sdk. Not everything will, and that's OK.
+- Not "AI slop": LLMs are powerful tools, but contributions entirely authored by vibe coding are unlikely to meet the quality bar, and will be rejected.
+- You're willing to accept feedback and make sure the changes fit the goals of the `agents` SDK. Not everything will, and that's OK.
 
 Small fixes, type bugs, and documentation improvements can be raised directly as PRs.
 
