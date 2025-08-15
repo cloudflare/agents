@@ -1,0 +1,25 @@
+name: Publish to pkg.pr.new for pre-release
+
+on:
+  pull_request: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build packages
+        run: npm run build
+
+      - name: Publish agents package to pkg.pr.new
+        run: npx pkg-pr-new publish ./packages/agents

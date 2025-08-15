@@ -516,10 +516,8 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   displayMessage: `RPC call to ${method}`,
                   id: nanoid(),
                   payload: {
-                    args,
                     method,
-                    streaming: metadata?.streaming,
-                    success: true
+                    streaming: metadata?.streaming
                   },
                   timestamp: Date.now(),
                   type: "rpc"
@@ -607,15 +605,22 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
           email: undefined
         },
         async () => {
-          const servers = this.sql<MCPServerRow>`
+          await this._tryCatch(() => {
+            const servers = this.sql<MCPServerRow>`
             SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
           `;
 
-          // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-          if (servers && Array.isArray(servers) && servers.length > 0) {
-            Promise.allSettled(
-              servers.map((server) => {
-                return this._connectToMcpServerInternal(
+            this.broadcast(
+              JSON.stringify({
+                mcp: this.getMcpServers(),
+                type: "cf_agent_mcp_servers"
+              })
+            );
+
+            // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
+            if (servers && Array.isArray(servers) && servers.length > 0) {
+              servers.forEach((server) => {
+                this._connectToMcpServerInternal(
                   server.name,
                   server.server_url,
                   server.callback_url,
@@ -626,18 +631,33 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                     id: server.id,
                     oauthClientId: server.client_id ?? undefined
                   }
-                );
-              })
-            ).then((_results) => {
-              this.broadcast(
-                JSON.stringify({
-                  mcp: this.getMcpServers(),
-                  type: "cf_agent_mcp_servers"
-                })
-              );
-            });
-          }
-          await this._tryCatch(() => _onStart());
+                )
+                  .then(() => {
+                    // Broadcast updated MCP servers state after each server connects
+                    this.broadcast(
+                      JSON.stringify({
+                        mcp: this.getMcpServers(),
+                        type: "cf_agent_mcp_servers"
+                      })
+                    );
+                  })
+                  .catch((error) => {
+                    console.error(
+                      `Error connecting to MCP server: ${server.name} (${server.server_url})`,
+                      error
+                    );
+                    // Still broadcast even if connection fails, so clients know about the failure
+                    this.broadcast(
+                      JSON.stringify({
+                        mcp: this.getMcpServers(),
+                        type: "cf_agent_mcp_servers"
+                      })
+                    );
+                  });
+              });
+            }
+            return _onStart();
+          });
         }
       );
     };
@@ -647,7 +667,6 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     state: State,
     source: Connection | "server" = "server"
   ) {
-    const previousState = this._state;
     this._state = state;
     this.sql`
     INSERT OR REPLACE INTO cf_agents_state (id, state)
@@ -673,10 +692,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
             {
               displayMessage: "State updated",
               id: nanoid(),
-              payload: {
-                previousState,
-                state
-              },
+              payload: {},
               timestamp: Date.now(),
               type: "state:update"
             },
@@ -1037,7 +1053,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
         {
           displayMessage: `Schedule ${schedule.id} created`,
           id: nanoid(),
-          payload: schedule,
+          payload: {
+            callback: callback as string,
+            id: id
+          },
           timestamp: Date.now(),
           type: "schedule:create"
         },
@@ -1207,7 +1226,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
         {
           displayMessage: `Schedule ${id} cancelled`,
           id: nanoid(),
-          payload: schedule,
+          payload: {
+            callback: schedule.callback,
+            id: schedule.id
+          },
           timestamp: Date.now(),
           type: "schedule:cancel"
         },
@@ -1272,7 +1294,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                 {
                   displayMessage: `Schedule ${row.id} executed`,
                   id: nanoid(),
-                  payload: row,
+                  payload: {
+                    callback: row.callback,
+                    id: row.id
+                  },
                   timestamp: Date.now(),
                   type: "schedule:execute"
                 },

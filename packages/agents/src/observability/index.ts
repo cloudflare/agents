@@ -1,5 +1,3 @@
-import type { Message } from "ai";
-import type { Schedule } from "../index";
 import { getCurrentAgent } from "../index";
 
 type BaseEvent<
@@ -30,32 +28,22 @@ type BaseEvent<
  * The type of events that can be emitted by an Agent
  */
 export type ObservabilityEvent =
-  | BaseEvent<
-      "state:update",
-      {
-        state: unknown;
-        previousState: unknown;
-      }
-    >
+  | BaseEvent<"state:update", {}>
   | BaseEvent<
       "rpc",
       {
         method: string;
-        args: unknown[];
         streaming?: boolean;
-        success: boolean;
       }
     >
-  | BaseEvent<
-      "message:request" | "message:response",
-      {
-        message: Message[];
-      }
-    >
+  | BaseEvent<"message:request" | "message:response", {}>
   | BaseEvent<"message:clear">
   | BaseEvent<
       "schedule:create" | "schedule:execute" | "schedule:cancel",
-      Schedule<unknown>
+      {
+        callback: string;
+        id: string;
+      }
     >
   | BaseEvent<"destroy">
   | BaseEvent<
