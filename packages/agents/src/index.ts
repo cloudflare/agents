@@ -26,6 +26,7 @@ import { MCPClientManager } from "./mcp/client";
 // import type { MCPClientConnection } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import { genericObservability, type Observability } from "./observability";
+import { MessageType } from "./ai-types";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -43,7 +44,7 @@ export type RPCRequest = {
  * State update message from client
  */
 export type StateUpdateMessage = {
-  type: "cf_agent_state";
+  type: MessageType.CF_AGENT_STATE;
   state: unknown;
 };
 
@@ -51,7 +52,7 @@ export type StateUpdateMessage = {
  * RPC response message to client
  */
 export type RPCResponse = {
-  type: "rpc";
+  type: MessageType.RPC;
   id: string;
 } & (
   | {
@@ -78,7 +79,7 @@ function isRPCRequest(msg: unknown): msg is RPCRequest {
     typeof msg === "object" &&
     msg !== null &&
     "type" in msg &&
-    msg.type === "rpc" &&
+    msg.type === MessageType.RPC &&
     "id" in msg &&
     typeof msg.id === "string" &&
     "method" in msg &&
@@ -96,7 +97,7 @@ function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
     typeof msg === "object" &&
     msg !== null &&
     "type" in msg &&
-    msg.type === "cf_agent_state" &&
+    msg.type === MessageType.CF_AGENT_STATE &&
     "state" in msg
   );
 }
@@ -183,7 +184,7 @@ function getNextCronTime(cron: string) {
  * MCP Server state update message from server -> Client
  */
 export type MCPServerMessage = {
-  type: "cf_agent_mcp_servers";
+  type: MessageType.CF_AGENT_MCP_SERVERS;
   mcp: MCPServersState;
 };
 
@@ -447,7 +448,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
             this.broadcast(
               JSON.stringify({
                 mcp: this.getMcpServers(),
-                type: "cf_agent_mcp_servers"
+                type: MessageType.CF_AGENT_MCP_SERVERS
               })
             );
 
@@ -530,7 +531,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                 id,
                 result,
                 success: true,
-                type: "rpc"
+                type: MessageType.RPC
               };
               connection.send(JSON.stringify(response));
             } catch (e) {
@@ -540,7 +541,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   e instanceof Error ? e.message : "Unknown error occurred",
                 id: parsed.id,
                 success: false,
-                type: "rpc"
+                type: MessageType.RPC
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
@@ -565,7 +566,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
               connection.send(
                 JSON.stringify({
                   state: this.state,
-                  type: "cf_agent_state"
+                  type: MessageType.CF_AGENT_STATE
                 })
               );
             }
@@ -573,7 +574,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
             connection.send(
               JSON.stringify({
                 mcp: this.getMcpServers(),
-                type: "cf_agent_mcp_servers"
+                type: MessageType.CF_AGENT_MCP_SERVERS
               })
             );
 
@@ -613,7 +614,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
             this.broadcast(
               JSON.stringify({
                 mcp: this.getMcpServers(),
-                type: "cf_agent_mcp_servers"
+                type: MessageType.CF_AGENT_MCP_SERVERS
               })
             );
 
@@ -637,7 +638,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                     this.broadcast(
                       JSON.stringify({
                         mcp: this.getMcpServers(),
-                        type: "cf_agent_mcp_servers"
+                        type: MessageType.CF_AGENT_MCP_SERVERS
                       })
                     );
                   })
@@ -650,7 +651,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                     this.broadcast(
                       JSON.stringify({
                         mcp: this.getMcpServers(),
-                        type: "cf_agent_mcp_servers"
+                        type: MessageType.CF_AGENT_MCP_SERVERS
                       })
                     );
                   });
@@ -679,7 +680,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         state: state,
-        type: "cf_agent_state"
+        type: MessageType.CF_AGENT_STATE
       }),
       source !== "server" ? [source.id] : []
     );
@@ -1417,7 +1418,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         mcp: this.getMcpServers(),
-        type: "cf_agent_mcp_servers"
+        type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );
 
@@ -1506,7 +1507,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     this.broadcast(
       JSON.stringify({
         mcp: this.getMcpServers(),
-        type: "cf_agent_mcp_servers"
+        type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );
   }
@@ -1894,7 +1895,7 @@ export class StreamingResponse {
       id: this._id,
       result: chunk,
       success: true,
-      type: "rpc"
+      type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
   }
@@ -1913,7 +1914,7 @@ export class StreamingResponse {
       id: this._id,
       result: finalChunk,
       success: true,
-      type: "rpc"
+      type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
   }

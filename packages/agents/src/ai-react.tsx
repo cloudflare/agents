@@ -2,7 +2,7 @@ import { useChat } from "@ai-sdk/react";
 import type { Message } from "ai";
 import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
-import type { OutgoingMessage } from "./ai-types";
+import { MessageType, type OutgoingMessage } from "./ai-types";
 import type { useAgent } from "./react";
 
 type GetInitialMessagesOptions = {
@@ -141,7 +141,7 @@ export function useAgentChat<State = unknown>(
       agent.send(
         JSON.stringify({
           id,
-          type: "cf_agent_chat_request_cancel"
+          type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
         })
       );
 
@@ -170,7 +170,7 @@ export function useAgentChat<State = unknown>(
           // TODO: log errors with log levels
           return;
         }
-        if (data.type === "cf_agent_use_chat_response") {
+        if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
           if (data.id === id) {
             controller.enqueue(new TextEncoder().encode(data.body));
             if (data.done) {
@@ -209,7 +209,7 @@ export function useAgentChat<State = unknown>(
           // dispatcher,
           // duplex
         },
-        type: "cf_agent_use_chat_request",
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
         url: request.toString()
       })
     );
@@ -236,7 +236,7 @@ export function useAgentChat<State = unknown>(
         // TODO: log errors with log levels
         return;
       }
-      if (data.type === "cf_agent_chat_clear") {
+      if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
         useChatHelpers.setMessages([]);
       }
     }
@@ -253,7 +253,7 @@ export function useAgentChat<State = unknown>(
         // TODO: log errors with log levels
         return;
       }
-      if (data.type === "cf_agent_chat_messages") {
+      if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
         useChatHelpers.setMessages(data.messages);
       }
     }
@@ -276,7 +276,7 @@ export function useAgentChat<State = unknown>(
       useChatHelpers.setMessages([]);
       agent.send(
         JSON.stringify({
-          type: "cf_agent_chat_clear"
+          type: MessageType.CF_AGENT_CHAT_CLEAR
         })
       );
     },
@@ -289,7 +289,7 @@ export function useAgentChat<State = unknown>(
       agent.send(
         JSON.stringify({
           messages,
-          type: "cf_agent_chat_messages"
+          type: MessageType.CF_AGENT_CHAT_MESSAGES
         })
       );
     }

@@ -4,6 +4,7 @@ import { useCallback, useRef } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
+import { MessageType } from "./ai-types";
 
 /**
  * Convert a camelCase string to a kebab-case string
@@ -184,15 +185,15 @@ export function useAgent<State>(
           // TODO: log errors with log levels
           return options.onMessage?.(message);
         }
-        if (parsedMessage.type === "cf_agent_state") {
+        if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
-        if (parsedMessage.type === "cf_agent_mcp_servers") {
+        if (parsedMessage.type === MessageType.CF_AGENT_MCP_SERVERS) {
           options.onMcpUpdate?.(parsedMessage.mcp as MCPServersState);
           return;
         }
-        if (parsedMessage.type === "rpc") {
+        if (parsedMessage.type === MessageType.RPC) {
           const response = parsedMessage as RPCResponse;
           const pending = pendingCallsRef.current.get(response.id);
           if (!pending) return;
@@ -249,7 +250,7 @@ export function useAgent<State>(
           args,
           id,
           method,
-          type: "rpc"
+          type: MessageType.RPC
         };
 
         agent.send(JSON.stringify(request));
@@ -259,7 +260,7 @@ export function useAgent<State>(
   );
 
   agent.setState = (state: State) => {
-    agent.send(JSON.stringify({ state, type: "cf_agent_state" }));
+    agent.send(JSON.stringify({ state, type: MessageType.CF_AGENT_STATE }));
     options.onStateUpdate?.(state, "client");
   };
 
