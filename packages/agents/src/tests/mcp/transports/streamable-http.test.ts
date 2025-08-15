@@ -331,4 +331,71 @@ describe("Streamable HTTP Transport", () => {
       expect(text2).toContain("Hello, Connection2");
     });
   });
+
+  describe("GET /mcp", () => {
+    it("returns 200 + SSE when Accept: text/event-stream is sent", async () => {
+      const ctx = createExecutionContext();
+
+      const res = await worker.fetch(
+        new Request(baseUrl, {
+          method: "GET",
+          headers: { Accept: "text/event-stream" }
+        }),
+        env,
+        ctx
+      );
+
+      expect(res.status).not.toBe(405); // regression guard
+      expect(res.status).toBe(200); // success
+      expect(res.headers.get("content-type")).toMatch(/^text\/event-stream/);
+
+      // read just the first SSE event, then stop
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        if (buf.includes("\n\n")) break; // end of first event
+      }
+      await reader.cancel(); // release worker & DO
+
+      // minimal SSE sanity check
+      expect(buf).toMatch(/^event: endpoint\ndata: \/mcp\?sessionId=/m);
+    });
+
+    it("returns 405 when Accept header is missing 'text/event-stream'", async () => {
+      const ctx = createExecutionContext();
+
+      const response = await worker.fetch(
+        new Request(baseUrl, {
+          method: "GET",
+          headers: { Accept: "application/json" }
+        }),
+        env,
+        ctx
+      );
+
+      expect(response.status).toBe(405);
+      const body = await response.json();
+      expectErrorResponse(body, -32000, /Method not allowed/);
+    });
+
+    it("returns 405 when Accept header is missing", async () => {
+      const ctx = createExecutionContext();
+
+      const response = await worker.fetch(
+        new Request(baseUrl, {
+          method: "GET"
+        }),
+        env,
+        ctx
+      );
+
+      expect(response.status).toBe(405);
+      const body = await response.json();
+      expectErrorResponse(body, -32000, /Method not allowed/);
+    });
+  });
 });

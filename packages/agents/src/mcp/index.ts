@@ -1000,6 +1000,129 @@ export abstract class McpAgent<
 
         const namespace =
           bindingValue satisfies DurableObjectNamespace<McpAgent>;
+        if (request.method === "GET" && basePattern.test(url)) {
+          // Per MCP spec: The client MUST include an Accept header
+          const acceptHeader = request.headers.get("accept");
+          console.log("GET request to MCP endpoint:", {
+            acceptHeader,
+            url: url.pathname
+          });
+          if (!acceptHeader?.includes("text/event-stream")) {
+            const body = JSON.stringify({
+              error: {
+                code: -32000,
+                message: "Method not allowed"
+              },
+              id: null,
+              jsonrpc: "2.0"
+            });
+            return new Response(body, { status: 405 });
+          }
+          const sessionId =
+            url.searchParams.get("sessionId") ||
+            namespace.newUniqueId().toString();
+
+          const { readable, writable } = new TransformStream();
+          const writer = writable.getWriter();
+          const encoder = new TextEncoder();
+
+          const endpointUrl = new URL(request.url);
+          endpointUrl.searchParams.set("sessionId", sessionId);
+          const relativeUrlWithSession =
+            endpointUrl.pathname + endpointUrl.search + endpointUrl.hash;
+          const endpointMessage = `event: endpoint\ndata: ${relativeUrlWithSession}\n\n`;
+          writer.write(encoder.encode(endpointMessage));
+
+          const id = namespace.idFromName(`sse:${sessionId}`);
+          const doStub = namespace.get(id);
+
+          try {
+            await doStub._init(ctx.props);
+          } catch (error) {
+            console.error("Failed to initialize McpAgent:", error);
+            await writer.close();
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            return new Response(`Initialization failed: ${errorMessage}`, {
+              status: 500
+            });
+          }
+
+          const upgradeUrl = new URL(request.url);
+          upgradeUrl.pathname = "/sse";
+          const existingHeaders: Record<string, string> = {};
+          request.headers.forEach((value, key) => {
+            existingHeaders[key] = value;
+          });
+          const response = await doStub.fetch(
+            new Request(upgradeUrl, {
+              headers: {
+                ...existingHeaders,
+                Upgrade: "websocket",
+                "x-partykit-room": sessionId
+              }
+            })
+          );
+
+          const ws = response.webSocket;
+          if (!ws) {
+            console.error("Failed to establish WebSocket connection");
+            await writer.close();
+            return new Response("Failed to establish WebSocket connection", {
+              status: 500
+            });
+          }
+
+          ws.accept();
+
+          ws.addEventListener("message", (event) => {
+            async function onMessage(event: MessageEvent) {
+              try {
+                const message = JSON.parse(event.data);
+
+                const result = JSONRPCMessageSchema.safeParse(message);
+                if (!result.success) {
+                  return;
+                }
+
+                const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
+                await writer.write(encoder.encode(messageText));
+              } catch (error) {
+                console.error("Error forwarding message to SSE:", error);
+              }
+            }
+            onMessage(event).catch(console.error);
+          });
+
+          ws.addEventListener("error", (error) => {
+            async function onError(_error: Event) {
+              try {
+                await writer.close();
+              } catch (_e) {}
+            }
+            onError(error).catch(console.error);
+          });
+
+          ws.addEventListener("close", () => {
+            async function onClose() {
+              try {
+                await writer.close();
+              } catch (error) {
+                console.error("Error closing SSE connection:", error);
+              }
+            }
+            onClose().catch(console.error);
+          });
+
+          return new Response(readable, {
+            headers: {
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Content-Type": "text/event-stream",
+              ...corsHeaders(request, corsOptions)
+            }
+          });
+        }
 
         if (request.method === "POST" && basePattern.test(url)) {
           // validate the Accept header
@@ -1350,7 +1473,7 @@ export abstract class McpAgent<
           });
         }
 
-        // We don't yet support GET or DELETE requests
+        // Fallback for unsupported HTTP methods
         const body = JSON.stringify({
           error: {
             code: -32000,
