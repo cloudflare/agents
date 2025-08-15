@@ -226,12 +226,21 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
-    this.sql`delete from cf_ai_chat_agent_messages`;
-    for (const message of messages) {
+    const existingMessages = new Set(
+      this.sql<{
+        id: string;
+      }>`select id from cf_ai_chat_agent_messages`.map((row) => row.id)
+    );
+    const messagesToAdd = messages.filter(
+      (message) => !existingMessages.has(message.id)
+    );
+
+    for (const message of messagesToAdd) {
       this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
         message.id
       },${JSON.stringify(message)})`;
     }
+
     this.messages = messages;
     this._broadcastChatMessage(
       {
