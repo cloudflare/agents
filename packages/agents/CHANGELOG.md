@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.0.114
+
+### Patch Changes
+
+- [#410](https://github.com/cloudflare/agents/pull/410) [`25b261e`](https://github.com/cloudflare/agents/commit/25b261e6d7ac2e5cb1b1b7df7dcc9fdef84e9931) Thanks [@amorriscode](https://github.com/amorriscode)! - docs: minor fixes
+
 ## 0.0.113
 
 ### Patch Changes
