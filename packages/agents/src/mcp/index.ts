@@ -1,4 +1,3 @@
-import { DurableObject } from "cloudflare:workers";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -13,7 +12,7 @@ import {
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
-import { Agent } from "../index";
+import { Agent, getAgentByName } from "../index";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
@@ -703,12 +702,11 @@ export abstract class McpAgent<
           writer.write(encoder.encode(endpointMessage));
 
           // Get the Durable Object
-          const id = namespace.idFromName(`sse:${sessionId}`);
-          const doStub = namespace.get(id);
+          const agent = await getAgentByName(namespace, `sse:${sessionId}`);
 
           // Initialize the object
           try {
-            await doStub._init(ctx.props);
+            await agent._init(ctx.props);
           } catch (error) {
             console.error("Failed to initialize McpAgent:", error);
             await writer.close();
@@ -727,7 +725,7 @@ export abstract class McpAgent<
           request.headers.forEach((value, key) => {
             existingHeaders[key] = value;
           });
-          const response = await doStub.fetch(
+          const response = await agent.fetch(
             new Request(upgradeUrl, {
               headers: {
                 ...existingHeaders,
@@ -845,13 +843,12 @@ export abstract class McpAgent<
           }
 
           // Get the Durable Object
-          const id = namespace.idFromName(`sse:${sessionId}`);
-          const doStub = namespace.get(id);
+          const agent = await getAgentByName(namespace, `sse:${sessionId}`);
 
           const messageBody = await request.json();
           // Update props with fresh values before processing message
-          await doStub.updateProps(ctx.props);
-          const error = await doStub.onSSEMcpMessage(sessionId, messageBody);
+          await agent.updateProps(ctx.props);
+          const error = await agent.onSSEMcpMessage(sessionId, messageBody);
 
           if (error) {
             return new Response(error.message, {
@@ -1075,14 +1072,16 @@ export abstract class McpAgent<
           sessionId = sessionId ?? namespace.newUniqueId().toString();
 
           // fetch the agent DO
-          const id = namespace.idFromName(`streamable-http:${sessionId}`);
-          const doStub = namespace.get(id);
-          const isInitialized = await doStub.isInitialized();
+          const agent = await getAgentByName(
+            namespace,
+            `streamable-http:${sessionId}`
+          );
+          const isInitialized = await agent.isInitialized();
 
           if (isInitializationRequest) {
             try {
-              await doStub._init(ctx.props);
-              await doStub.setInitialized();
+              await agent._init(ctx.props);
+              await agent.setInitialized();
             } catch (error) {
               console.error("Failed to initialize McpAgent:", error);
               const errorMessage =
@@ -1111,7 +1110,7 @@ export abstract class McpAgent<
             return new Response(body, { status: 404 });
           } else {
             // Update props for existing sessions
-            await doStub.updateProps(ctx.props);
+            await agent.updateProps(ctx.props);
           }
 
           // We've evaluated all the error conditions! Now it's time to establish
@@ -1129,7 +1128,7 @@ export abstract class McpAgent<
           request.headers.forEach((value, key) => {
             existingHeaders[key] = value;
           });
-          const response = await doStub.fetch(
+          const response = await agent.fetch(
             new Request(upgradeUrl, {
               headers: {
                 ...existingHeaders,
