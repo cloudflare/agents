@@ -1,7 +1,10 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  JSONRPCMessage,
+  RequestId
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   InitializeRequestSchema,
   JSONRPCMessageSchema,
@@ -15,6 +18,7 @@ import type { Connection, WSMessage } from "../";
 import { Agent, getAgentByName } from "../index";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
+const STANDALONE_SSE_METHOD = "cf_standalone_sse";
 
 // CORS helper functions
 function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
@@ -114,9 +118,8 @@ class McpStreamableHttpTransport implements Transport {
   onmessage?: (message: JSONRPCMessage) => void;
   sessionId?: string;
 
-  // TODO: If there is an open connection to send server-initiated messages
-  // back, we should use that connection
-  private _getWebSocketForGetRequest: () => WebSocket | null;
+  // The server MAY use a standalone SSE stream to send requests/notifications.
+  private _getWebSocketForStandaloneSse: () => WebSocket | null;
 
   // Get the appropriate websocket connection for a given message id
   private _getWebSocketForMessageID: (id: string) => WebSocket | null;
@@ -129,12 +132,12 @@ class McpStreamableHttpTransport implements Transport {
   private _started = false;
   constructor(
     getWebSocketForMessageID: (id: string) => WebSocket | null,
-    notifyResponseIdSent: (id: string | number) => void
+    notifyResponseIdSent: (id: string) => void,
+    getWebSocketForStandaloneSse: () => WebSocket | null
   ) {
     this._getWebSocketForMessageID = getWebSocketForMessageID;
     this._notifyResponseIdSent = notifyResponseIdSent;
-    // TODO
-    this._getWebSocketForGetRequest = () => null;
+    this._getWebSocketForStandaloneSse = getWebSocketForStandaloneSse;
   }
 
   async start() {
@@ -146,34 +149,53 @@ class McpStreamableHttpTransport implements Transport {
     this._started = true;
   }
 
-  async send(message: JSONRPCMessage) {
+  async send(
+    message: JSONRPCMessage,
+    options?: { relatedRequestId?: RequestId }
+  ) {
     if (!this._started) {
       throw new Error("Transport not started");
     }
-
-    let websocket: WebSocket | null = null;
+    let requestId = options?.relatedRequestId;
 
     if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
-      websocket = this._getWebSocketForMessageID(message.id.toString());
-      if (!websocket) {
+      // If the message is a response, use the request ID from the message
+      requestId = message.id;
+    }
+
+    // Check if this message should be sent on the standalone SSE stream (no request ID)
+    // Ignore notifications from tools (which have relatedRequestId set)
+    // Those will be sent via dedicated response SSE streams
+    if (requestId === undefined) {
+      // For standalone SSE streams, we can only send requests and notifications
+      if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
         throw new Error(
-          `Could not find WebSocket for message id: ${message.id}`
+          "Cannot send a response on a standalone SSE stream unless resuming a previous client request"
         );
       }
-    } else if (isJSONRPCRequest(message)) {
-      // requests originating from the server must be sent over the
-      // the connection created by a GET request
-      websocket = this._getWebSocketForGetRequest();
-    } else if (isJSONRPCNotification(message)) {
-      // notifications do not have an id
-      // but do have a relatedRequestId field
-      // so that they can be sent to the correct connection
-      websocket = null;
+      const standaloneSseSocket = this._getWebSocketForStandaloneSse();
+      if (!standaloneSseSocket) {
+        // The spec says the server MAY send messages on the stream, so it's ok to discard if no stream
+        return;
+      }
+      try {
+        standaloneSseSocket?.send(JSON.stringify(message));
+      } catch (error) {
+        this.onerror?.(error as Error);
+        throw error;
+      }
+      return;
+    }
+
+    const websocket = this._getWebSocketForMessageID(requestId.toString());
+    if (!websocket) {
+      throw new Error(`Could not find WebSocket for message id: ${requestId}`);
     }
 
     try {
       websocket?.send(JSON.stringify(message));
-      if (isJSONRPCResponse(message)) {
+      // Cleanup on response/error
+      if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
         this._notifyResponseIdSent(message.id.toString());
       }
     } catch (error) {
@@ -199,7 +221,15 @@ export abstract class McpAgent<
   private _transport?: Transport;
   private _transportType: TransportType = "unset";
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
+  // The connection ID for server-sent requests/notifications
+  private _standaloneSseConnectionId?: string;
+  initRun = false;
+  props!: Props;
+
   static options = { hibernate: true };
+
+  abstract server: MaybePromise<McpServer | Server>;
+  abstract init(): Promise<void>;
 
   // Hibernation-safe elicitation handling
   // Uses durable storage instead of in-memory handlers
@@ -254,6 +284,11 @@ export abstract class McpAgent<
     return this._waitForElicitationResponse(requestId);
   }
 
+  private getWebSocketForStandaloneSse(): WebSocket | null {
+    if (!this._standaloneSseConnectionId) return null;
+    return this.getConnection(this._standaloneSseConnectionId) ?? null;
+  }
+
   async onStart() {
     this.props = (await this.ctx.storage.get("props")) as Props;
     this._transportType = (await this.ctx.storage.get(
@@ -270,20 +305,12 @@ export abstract class McpAgent<
     } else if (this._transportType === "streamable-http") {
       this._transport = new McpStreamableHttpTransport(
         (id) => this.getWebSocketForResponseID(id),
-        (id) => this._requestIdToConnectionId.delete(id)
+        (id) => this._requestIdToConnectionId.delete(id),
+        () => this.getWebSocketForStandaloneSse()
       );
       await server.connect(this._transport);
     }
   }
-
-  /**
-   * McpAgent API
-   */
-  abstract server: MaybePromise<McpServer | Server>;
-  props!: Props;
-  initRun = false;
-
-  abstract init(): Promise<void>;
 
   /**
    * Handle errors that occur during initialization or operation.
@@ -383,7 +410,8 @@ export abstract class McpAgent<
         if (!this._transport) {
           this._transport = new McpStreamableHttpTransport(
             (id) => this.getWebSocketForResponseID(id),
-            (id) => this._requestIdToConnectionId.delete(id)
+            (id) => this._requestIdToConnectionId.delete(id),
+            () => this.getWebSocketForStandaloneSse()
           );
           await server.connect(this._transport);
         }
@@ -438,6 +466,28 @@ export abstract class McpAgent<
       message = JSONRPCMessageSchema.parse(JSON.parse(data));
     } catch (error) {
       this._transport?.onerror?.(error as Error);
+      return;
+    }
+
+    // Check if message is our control frame for the standalone SSE stream.
+    if (
+      isJSONRPCNotification(message) &&
+      message.method === STANDALONE_SSE_METHOD
+    ) {
+      if (
+        this._standaloneSseConnectionId &&
+        this._standaloneSseConnectionId !== connection.id
+      ) {
+        // If the standalone SSE was already set, we close the old
+        // socket to avoid dangling connections.
+        const standaloneSseSocket = this.getConnection(
+          this._standaloneSseConnectionId
+        );
+        standaloneSseSocket?.close(1000, "replaced");
+      }
+
+      this._standaloneSseConnectionId = connection.id;
+      // This is internal, so we don't forward the message to the server.
       return;
     }
 
@@ -615,6 +665,21 @@ export abstract class McpAgent<
       // This means the server "woke up" after hibernation
       // so we need to hydrate it again
       await this._initialize();
+    }
+
+    // Remove the connection/socket mapping for the socket that just closed
+    const active = new Set(Array.from(this.getConnections()).map((c) => c.id));
+
+    for (const [reqId, connId] of this._requestIdToConnectionId) {
+      if (!active.has(connId)) this._requestIdToConnectionId.delete(reqId);
+    }
+
+    // Clear the standalone SSE it just closed
+    if (
+      this._standaloneSseConnectionId &&
+      !active.has(this._standaloneSseConnectionId)
+    ) {
+      this._standaloneSseConnectionId = undefined;
     }
     return await super.webSocketClose(ws, code, reason, wasClean);
   }
@@ -1262,6 +1327,120 @@ export abstract class McpAgent<
 
           // Return the SSE response. We handle closing the stream in the ws "message"
           // handler
+          return new Response(readable, {
+            headers: {
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Content-Type": "text/event-stream",
+              "mcp-session-id": sessionId,
+              ...corsHeaders(request, corsOptions)
+            },
+            status: 200
+          });
+        } else if (request.method === "GET" && basePattern.test(url)) {
+          // Validate the Accept header
+          const acceptHeader = request.headers.get("accept");
+          // The client MUST include an Accept header, listing both application/json and text/event-stream as supported content types.
+          if (
+            !acceptHeader?.includes("application/json") ||
+            !acceptHeader.includes("text/event-stream")
+          ) {
+            const body = JSON.stringify({
+              jsonrpc: "2.0",
+              error: {
+                code: -32000,
+                message:
+                  "Not Acceptable: Client must accept both application/json and text/event-stream"
+              },
+              id: null
+            });
+            return new Response(body, { status: 406 });
+          }
+
+          // Require sessionId
+          const sessionId = url.searchParams.get("sessionId");
+          if (!sessionId)
+            return new Response("Missing sessionId", { status: 400 });
+
+          // Create SSE stream
+          const { readable, writable } = new TransformStream();
+          const writer = writable.getWriter();
+          const encoder = new TextEncoder();
+
+          const agent = await getAgentByName(
+            namespace,
+            `streamable-http:${sessionId}`
+          );
+          if (!(await agent.isInitialized())) {
+            return new Response(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                error: { code: -32001, message: "Session not found" },
+                id: null
+              }),
+              { status: 404 }
+            );
+          }
+
+          const upgradeUrl = new URL(request.url);
+          upgradeUrl.pathname = "/streamable-http";
+          const existingHeaders: Record<string, string> = {};
+          request.headers.forEach((v, k) => (existingHeaders[k] = v));
+
+          const response = await agent.fetch(
+            new Request(upgradeUrl, {
+              headers: {
+                ...existingHeaders,
+                Upgrade: "websocket",
+                "x-partykit-room": sessionId
+              }
+            })
+          );
+
+          const ws = response.webSocket;
+          if (!ws) {
+            await writer.close();
+            return new Response("Failed to establish WS to DO", {
+              status: 500
+            });
+          }
+          ws.accept();
+
+          // Signal the DO to use this connection as the standalone SSE stream
+          ws.send(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: STANDALONE_SSE_METHOD,
+              params: {}
+            })
+          );
+
+          // Forward DO messages as SSE
+          ws.addEventListener("message", (event) => {
+            try {
+              async function onMessage(ev: MessageEvent) {
+                const data =
+                  typeof ev.data === "string"
+                    ? ev.data
+                    : new TextDecoder().decode(ev.data);
+                const parsed = JSONRPCMessageSchema.safeParse(JSON.parse(data));
+                if (!parsed.success) return;
+                const frame = `event: message\ndata: ${JSON.stringify(parsed.data)}\n\n`;
+                await writer.write(encoder.encode(frame));
+              }
+              onMessage(event).catch(console.error);
+            } catch (e) {
+              console.error("Error forwarding message to SSE:", e);
+            }
+          });
+
+          ws.addEventListener("error", () => {
+            writer.close().catch(() => {});
+          });
+          ws.addEventListener("close", () => {
+            writer.close().catch(() => {});
+          });
+
           return new Response(readable, {
             headers: {
               "Cache-Control": "no-cache",
