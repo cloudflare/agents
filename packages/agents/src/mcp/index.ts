@@ -195,64 +195,15 @@ export abstract class McpAgent<
   Env = unknown,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
-> extends DurableObject<Env> {
+> extends Agent<Env, State> {
   private _status: "zero" | "starting" | "started" = "zero";
   private _transport?: Transport;
   private _transportType: TransportType = "unset";
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
+  static options = { hibernate: true };
 
   // Hibernation-safe elicitation handling
   // Uses durable storage instead of in-memory handlers
-
-  /**
-   * Since McpAgent's _aren't_ yet real "Agents", let's only expose a couple of the methods
-   * to the outer class: initialState/state/setState/onStateUpdate/sql
-   */
-  private _agent: Agent<Env, State>;
-
-  get mcp() {
-    return this._agent.mcp;
-  }
-
-  protected constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    const self = this;
-
-    this._agent = new (class extends Agent<Env, State> {
-      static options = {
-        hibernate: true
-      };
-
-      onStateUpdate(state: State | undefined, source: Connection | "server") {
-        return self.onStateUpdate(state, source);
-      }
-
-      async onMessage(
-        connection: Connection,
-        message: WSMessage
-      ): Promise<void> {
-        return self.onMessage(connection, message);
-      }
-    })(ctx, env);
-  }
-
-  /**
-   * Agents API allowlist
-   */
-  initialState!: State;
-  get state() {
-    return this._agent.state;
-  }
-  sql<T = Record<string, string | number | boolean | null>>(
-    strings: TemplateStringsArray,
-    ...values: (string | number | boolean | null)[]
-  ) {
-    return this._agent.sql<T>(strings, ...values);
-  }
-
-  setState(state: State) {
-    return this._agent.setState(state);
-  }
 
   /**
    * Elicit user input with a message and schema
@@ -284,7 +235,7 @@ export abstract class McpAgent<
     if (this._transport) {
       await this._transport.send(elicitRequest);
     } else {
-      const connections = this._agent?.getConnections();
+      const connections = this.getConnections();
       if (!connections || Array.from(connections).length === 0) {
         await this.ctx.storage.delete(`elicitation:${requestId}`);
         throw new Error("No active connections available for elicitation");
@@ -304,29 +255,7 @@ export abstract class McpAgent<
     return this._waitForElicitationResponse(requestId);
   }
 
-  // we leave the variables as unused for autocomplete purposes
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overriden later
-  onStateUpdate(state: State | undefined, source: Connection | "server") {
-    // override this to handle state updates
-  }
   async onStart() {
-    const self = this;
-
-    this._agent = new (class extends Agent<Env, State> {
-      initialState: State = self.initialState;
-      static options = {
-        hibernate: true
-      };
-
-      onStateUpdate(state: State | undefined, source: Connection | "server") {
-        return self.onStateUpdate(state, source);
-      }
-
-      async onMessage(connection: Connection, event: WSMessage) {
-        return self.onMessage(connection, event);
-      }
-    })(this.ctx, this.env);
-
     this.props = (await this.ctx.storage.get("props")) as Props;
     this._transportType = (await this.ctx.storage.get(
       "transportType"
@@ -363,7 +292,7 @@ export abstract class McpAgent<
    * @param error - The error that occurred
    * @returns An error response object with status code and message
    */
-  onError(error: Error): { status: number; message: string } {
+  onMcpError(error: Error): { status: number; message: string } {
     console.error("McpAgent error:", error);
     return {
       status: 500,
@@ -382,7 +311,7 @@ export abstract class McpAgent<
       try {
         await this.init();
       } catch (error) {
-        const errorResponse = this.onError(error as Error);
+        const errorResponse = this.onMcpError(error as Error);
         throw new Error(`Initialization failed: ${errorResponse.message}`);
       }
     }
@@ -441,7 +370,7 @@ export abstract class McpAgent<
           return new Response("Websocket already connected", { status: 400 });
         }
 
-        // This session must always use the SSE transporo
+        // This session must always use the SSE transport
         await this.ctx.storage.put("transportType", "sse");
         this._transportType = "sse";
 
@@ -449,9 +378,7 @@ export abstract class McpAgent<
           this._transport = new McpSSETransport(() => this.getWebSocket());
           await server.connect(this._transport);
         }
-
-        // Defer to the Agent's fetch method to handle the WebSocket connection
-        return this._agent.fetch(request);
+        break;
       }
       case "/streamable-http": {
         if (!this._transport) {
@@ -465,17 +392,15 @@ export abstract class McpAgent<
         // This session must always use the streamable-http transport
         await this.ctx.storage.put("transportType", "streamable-http");
         this._transportType = "streamable-http";
-
-        return this._agent.fetch(request);
+        break;
       }
       default:
-        return new Response(
-          "Internal Server Error: Expected /sse or /streamable-http path",
-          {
-            status: 500
-          }
-        );
+        return new Response("Expected /sse or /streamable-http path", {
+          status: 500
+        });
     }
+    // Defer to the base Agent fetch
+    return super.fetch(request);
   }
 
   getWebSocket() {
@@ -491,7 +416,7 @@ export abstract class McpAgent<
     if (connectionId === undefined) {
       return null;
     }
-    return this._agent.getConnection(connectionId) ?? null;
+    return this.getConnection(connectionId) ?? null;
   }
 
   // All messages received here. This is currently never called
@@ -668,7 +593,7 @@ export abstract class McpAgent<
       // so we need to hydrate it again
       await this._initialize();
     }
-    return await this._agent.webSocketMessage(ws, event);
+    return await super.webSocketMessage(ws, event);
   }
 
   // WebSocket event handlers for hibernation support
@@ -678,7 +603,7 @@ export abstract class McpAgent<
       // so we need to hydrate it again
       await this._initialize();
     }
-    return await this._agent.webSocketError(ws, error);
+    return await super.webSocketError(ws, error);
   }
 
   async webSocketClose(
@@ -692,7 +617,7 @@ export abstract class McpAgent<
       // so we need to hydrate it again
       await this._initialize();
     }
-    return await this._agent.webSocketClose(ws, code, reason, wasClean);
+    return await super.webSocketClose(ws, code, reason, wasClean);
   }
 
   static mount(
