@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.0.114
+
+### Patch Changes
+
+- [#410](https://github.com/cloudflare/agents/pull/410) [`25b261e`](https://github.com/cloudflare/agents/commit/25b261e6d7ac2e5cb1b1b7df7dcc9fdef84e9931) Thanks [@amorriscode](https://github.com/amorriscode)! - docs: minor fixes
+
+- [#409](https://github.com/cloudflare/agents/pull/409) [`352d62c`](https://github.com/cloudflare/agents/commit/352d62c6383797512be112ff3efcb462c0e44395) Thanks [@MrgSub](https://github.com/MrgSub)! - Refactor message types to use enum in AIChatAgent and related files
+
 ## 0.0.113
 
 ### Patch Changes
