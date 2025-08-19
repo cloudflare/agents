@@ -18,7 +18,7 @@ import type { Connection, WSMessage } from "../";
 import { Agent, getAgentByName } from "../index";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
-const STANDALONE_SSE_METHOD = "cf_standalone_sse";
+const STANDALONE_SSE_METHOD = "cf/standalone_sse/attach";
 
 // CORS helper functions
 function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
