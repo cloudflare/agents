@@ -613,56 +613,21 @@ export abstract class McpAgent<
     }
   }
 
-  // Delegate all websocket events to the underlying agent
-  async webSocketMessage(
-    ws: WebSocket,
-    event: ArrayBuffer | string
+  async onClose(
+    conn: Connection,
+    _code: number,
+    _reason: string,
+    _wasClean: boolean
   ): Promise<void> {
-    if (this._status !== "started") {
-      // This means the server "woke up" after hibernation
-      // so we need to hydrate it again
-      await this._initialize();
-    }
-    return await super.webSocketMessage(ws, event);
-  }
-
-  // WebSocket event handlers for hibernation support
-  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
-    if (this._status !== "started") {
-      // This means the server "woke up" after hibernation
-      // so we need to hydrate it again
-      await this._initialize();
-    }
-    return await super.webSocketError(ws, error);
-  }
-
-  async webSocketClose(
-    ws: WebSocket,
-    code: number,
-    reason: string,
-    wasClean: boolean
-  ): Promise<void> {
-    if (this._status !== "started") {
-      // This means the server "woke up" after hibernation
-      // so we need to hydrate it again
-      await this._initialize();
-    }
-
     // Remove the connection/socket mapping for the socket that just closed
-    const active = new Set(Array.from(this.getConnections()).map((c) => c.id));
-
     for (const [reqId, connId] of this._requestIdToConnectionId) {
-      if (!active.has(connId)) this._requestIdToConnectionId.delete(reqId);
+      if (connId === conn.id) this._requestIdToConnectionId.delete(reqId);
     }
 
-    // Clear the standalone SSE it just closed
-    if (
-      this._standaloneSseConnectionId &&
-      !active.has(this._standaloneSseConnectionId)
-    ) {
+    // Clear the standalone SSE if it just closed
+    if (this._standaloneSseConnectionId === conn.id) {
       this._standaloneSseConnectionId = undefined;
     }
-    return await super.webSocketClose(ws, code, reason, wasClean);
   }
 
   static mount(
