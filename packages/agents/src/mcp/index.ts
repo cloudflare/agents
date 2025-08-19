@@ -14,11 +14,12 @@ import {
   isJSONRPCResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
-import type { Connection, WSMessage } from "../";
+import type { AgentContext, Connection, WSMessage } from "../";
 import { Agent, getAgentByName } from "../index";
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 const STANDALONE_SSE_METHOD = "cf/standalone_sse/attach";
+const STANDALONE_SSE_MARKER = "standalone-sse";
 
 // CORS helper functions
 function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
@@ -230,6 +231,20 @@ export abstract class McpAgent<
 
   abstract server: MaybePromise<McpServer | Server>;
   abstract init(): Promise<void>;
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+
+    // Re-set the standalone SSE connection ID if
+    // coming out of hibernation
+    for (const ws of this.getConnections()) {
+      const meta = ws.deserializeAttachment();
+      if (meta?.role === STANDALONE_SSE_MARKER) {
+        this._standaloneSseConnectionId = meta?.connectionId;
+        return;
+      }
+    }
+  }
 
   // Hibernation-safe elicitation handling
   // Uses durable storage instead of in-memory handlers
@@ -466,6 +481,10 @@ export abstract class McpAgent<
         );
         standaloneSseSocket?.close(1000, "replaced");
       }
+      connection.serializeAttachment({
+        role: STANDALONE_SSE_MARKER,
+        connectionId: connection.id
+      });
 
       this._standaloneSseConnectionId = connection.id;
       // This is internal, so we don't forward the message to the server.
