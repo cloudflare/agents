@@ -1,5 +1,11 @@
 import { createExecutionContext, env } from "cloudflare:test";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  CallToolResult,
+  JSONRPCMessage,
+  ListToolsResult,
+  JSONRPCNotification,
+  JSONRPCResponse
+} from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import worker, { type Env } from "../../worker";
 import {
@@ -415,13 +421,14 @@ describe("Streamable HTTP Transport", () => {
 
       // Read the POST SSE response for the tool return value
       const postFrame = await readSSEEvent(postRes);
-      const postJson = parseSSEData(postFrame) as any;
+      const postJson = parseSSEData(postFrame) as JSONRPCResponse;
       expect(postJson.id).toBe("emit-log-1");
-      expect(postJson.result?.content?.[0]?.text).toBe("logged:info");
+      const result = postJson.result as CallToolResult;
+      expect(result.content?.[0]?.text).toBe("logged:info");
 
       // Read the standalone SSE for the logging notification
       const pushFrame = await readOneFrame(standaloneReader);
-      const pushJson = parseSSEData(pushFrame) as any;
+      const pushJson = parseSSEData(pushFrame) as JSONRPCNotification;
 
       expect(pushJson).toMatchObject({
         jsonrpc: "2.0",
@@ -459,15 +466,14 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(installRes.status).toBe(200);
       const installFrame = await readSSEEvent(installRes);
-      const installJson = parseSSEData(installFrame) as any;
+      const installJson = parseSSEData(installFrame) as JSONRPCResponse;
       expect(installJson.id).toBe("install-1");
-      expect(installJson.result?.content?.[0]?.text).toBe(
-        "temp tool installed"
-      );
+      let result = installJson.result as CallToolResult;
+      expect(result?.content?.[0]?.text).toBe("temp tool installed");
 
       // Expect a tools/list_changed notification on the standalone stream
       let listChanged = await readOneFrame(standaloneReader);
-      let listChangedJson = parseSSEData(listChanged) as any;
+      let listChangedJson = parseSSEData(listChanged) as JSONRPCNotification;
       expect(listChangedJson.method).toBe("notifications/tools/list_changed");
 
       // Verify the tool we just installed appears in tools/list
@@ -480,9 +486,9 @@ describe("Streamable HTTP Transport", () => {
       let listRes = await sendPostRequest(ctx, baseUrl, listReq, sessionId);
       expect(listRes.status).toBe(200);
       let listFrame = await readSSEEvent(listRes);
-      let listJson = parseSSEData(listFrame) as any;
-      let tools = listJson.result?.tools ?? [];
-      expect(tools.some((t: any) => t.name === "temp-echo")).toBe(true);
+      let listJson = parseSSEData(listFrame) as JSONRPCResponse;
+      let tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
+      expect(tools.some((t) => t.name === "temp-echo")).toBe(true);
 
       // Check that we can call the tool too
       const runTempToolMsg = {
@@ -499,9 +505,10 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(installRes.status).toBe(200);
       const runTempFrame = await readSSEEvent(runTempRes);
-      const runTempJson = parseSSEData(runTempFrame) as any;
+      const runTempJson = parseSSEData(runTempFrame) as JSONRPCResponse;
       expect(runTempJson.id).toBe("run-temp-1");
-      expect(runTempJson.result?.content?.[0]?.text).toBe("echo:test");
+      result = runTempJson.result as CallToolResult;
+      expect(result?.content?.[0]?.text).toBe("echo:test");
 
       // Uninstall temp tool so we get another list_changed on standalone stream
       const uninstallMsg = {
@@ -518,11 +525,11 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(uninstallRes.status).toBe(200);
       const uninstallFrame = await readSSEEvent(uninstallRes);
-      const uninstallJson = parseSSEData(uninstallFrame) as any;
+      const uninstallJson = parseSSEData(uninstallFrame) as JSONRPCResponse;
       expect(uninstallJson.id).toBe("uninstall-1");
 
       listChanged = await readOneFrame(standaloneReader);
-      listChangedJson = parseSSEData(listChanged) as any;
+      listChangedJson = parseSSEData(listChanged) as JSONRPCNotification;
       expect(listChangedJson.method).toBe("notifications/tools/list_changed");
 
       // Check temp tool is gone
@@ -535,9 +542,9 @@ describe("Streamable HTTP Transport", () => {
       listRes = await sendPostRequest(ctx, baseUrl, listReq, sessionId);
       expect(listRes.status).toBe(200);
       listFrame = await readSSEEvent(listRes);
-      listJson = parseSSEData(listFrame);
-      tools = listJson.result?.tools ?? [];
-      expect(tools.some((t: any) => t.name === "temp-echo")).toBe(false);
+      listJson = parseSSEData(listFrame) as JSONRPCResponse;
+      tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
+      expect(tools.some((t) => t.name === "temp-echo")).toBe(false);
     });
   });
 });

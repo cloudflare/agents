@@ -1385,7 +1385,9 @@ export abstract class McpAgent<
           const upgradeUrl = new URL(request.url);
           upgradeUrl.pathname = "/streamable-http";
           const existingHeaders: Record<string, string> = {};
-          request.headers.forEach((v, k) => (existingHeaders[k] = v));
+          request.headers.forEach((v, k) => {
+            existingHeaders[k] = v;
+          });
 
           const response = await agent.fetch(
             new Request(upgradeUrl, {
