@@ -312,21 +312,6 @@ export abstract class McpAgent<
     }
   }
 
-  /**
-   * Handle errors that occur during initialization or operation.
-   * Override this method to provide custom error handling.
-   * @param error - The error that occurred
-   * @returns An error response object with status code and message
-   */
-  onMcpError(error: Error): { status: number; message: string } {
-    console.error("McpAgent error:", error);
-    return {
-      status: 500,
-      message:
-        error.message || "An unexpected error occurred during initialization"
-    };
-  }
-
   async _init(props: Props) {
     await this.updateProps(props);
     if (!this.ctx.storage.get("transportType")) {
@@ -334,12 +319,8 @@ export abstract class McpAgent<
     }
     if (!this.initRun) {
       this.initRun = true;
-      try {
-        await this.init();
-      } catch (error) {
-        const errorResponse = this.onMcpError(error as Error);
-        throw new Error(`Initialization failed: ${errorResponse.message}`);
-      }
+      // If this throws it will get caught by the base Agent's `onError`
+      await this.init();
     }
   }
 
