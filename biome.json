@@ -45,6 +45,9 @@
       "complexity": {
         "noBannedTypes": "off"
       },
+      "suspicious": {
+        "noExplicitAny": "warn"
+      },
       "recommended": true,
       "style": {
         "noInferrableTypes": "error",
