@@ -227,8 +227,6 @@ export abstract class McpAgent<
   initRun = false;
   props!: Props;
 
-  static options = { hibernate: true };
-
   abstract server: MaybePromise<McpServer | Server>;
   abstract init(): Promise<void>;
 
@@ -387,7 +385,7 @@ export abstract class McpAgent<
       case "/sse": {
         // For SSE connections, we can only have one open connection per session
         // If we get an upgrade while already connected, we should error
-        const websockets = this.ctx.getWebSockets();
+        const websockets = Array.from(this.getConnections());
         if (websockets.length > 0) {
           return new Response("Websocket already connected", { status: 400 });
         }
@@ -427,7 +425,7 @@ export abstract class McpAgent<
   }
 
   getWebSocket() {
-    const websockets = this.ctx.getWebSockets();
+    const websockets = Array.from(this.getConnections());
     if (websockets.length === 0) {
       return null;
     }
