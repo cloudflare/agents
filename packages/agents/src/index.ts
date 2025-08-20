@@ -518,7 +518,8 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   id: nanoid(),
                   payload: {
                     method,
-                    streaming: metadata?.streaming
+                    streaming: metadata?.streaming,
+                    success: true
                   },
                   timestamp: Date.now(),
                   type: "rpc"
