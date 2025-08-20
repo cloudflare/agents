@@ -3,7 +3,8 @@ import type { UIMessage as Message } from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
-import { MessageType, type OutgoingMessage } from "./ai-types";
+import type { OutgoingMessage } from "./ai-types";
+import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
 
 type GetInitialMessagesOptions = {
@@ -150,7 +151,7 @@ export function useAgentChat<State = unknown>(
       //        Reasoning: This code could be subject to collisions, as it "force saves" the messages we have locally
       //
       // agent.send(JSON.stringify({
-      //   type: "cf_agent_chat_messages",
+      //   type: MessageType.CF_AGENT_CHAT_MESSAGES,
       //   messages: ... /* some way of getting current messages ref? */
       // }))
 
@@ -232,30 +233,31 @@ export function useAgentChat<State = unknown>(
       abortSignal: AbortSignal | undefined;
     } & Parameters<typeof useChat>[0]) => {
       // Map the new trigger values to the old ones expected by DefaultChatTransport
-      const mappedTrigger = trigger === "submit-message" 
-        ? "submit-user-message" 
-        : "regenerate-assistant-message";
-      
+      const mappedTrigger =
+        trigger === "submit-message"
+          ? "submit-user-message"
+          : "regenerate-assistant-message";
+
       const transport = new DefaultChatTransport({
         api: agentUrlString,
-        fetch: aiFetch,
+        fetch: aiFetch
       });
-      
+
       return transport.sendMessages({
         trigger: mappedTrigger as any,
         chatId,
         messageId,
         messages,
         abortSignal,
-        ...options,
+        ...options
       });
-    },
+    }
   };
 
   const useChatHelpers = useChat({
     messages: initialMessages,
     transport: customTransport as any,
-    ...rest,
+    ...rest
   });
 
   useEffect(() => {

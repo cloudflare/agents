@@ -4,11 +4,8 @@ import type {
   ToolSet
 } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
-import {
-  MessageType,
-  type IncomingMessage,
-  type OutgoingMessage
-} from "./ai-types";
+import type { IncomingMessage, OutgoingMessage } from "./ai-types";
+import { MessageType } from "./ai-types";
 
 const decoder = new TextDecoder();
 
@@ -180,18 +177,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
-  private async _drainStream(stream: ReadableStream<Uint8Array>) {
-    const reader = stream.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        decoder.decode(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  }
 
   /**
    * Handle incoming chat messages and generate a response
@@ -220,10 +205,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       // AI SDK v5: onFinish callback - simplified for now
       // Message persistence is handled by the specific agent implementation
     });
-    if (response?.body) {
-      // we're just going to drain the body
-      await this._drainStream(response.body!);
-      response.body.cancel();
+    if (response) {
+      // Properly drain the response stream
+      await this._drainStream(response.body);
     }
   }
 
@@ -250,9 +234,16 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   private async _reply(id: string, response: Response) {
     // now take chunks out from dataStreamResponse and send them to the client
     return this._tryCatchChat(async () => {
-      if (response.body) {
-        await this._drainStream(response.body);
-        response.body.cancel();
+      // @ts-expect-error TODO: fix this type error
+      for await (const chunk of response.body!) {
+        const body = decoder.decode(chunk);
+
+        this._broadcastChatMessage({
+          body,
+          done: false,
+          id,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        });
       }
 
       this._broadcastChatMessage({
@@ -308,6 +299,28 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       controller?.abort();
     }
     this._chatMessageAbortControllers.clear();
+  }
+
+  /**
+   * Properly drains and cancels a ReadableStream
+   */
+  private async _drainStream(stream: ReadableStream<Uint8Array> | null) {
+    if (!stream) return;
+
+    const reader = stream.getReader();
+    try {
+      // Read all chunks to drain the stream
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    } finally {
+      // Always release the reader lock
+      reader.releaseLock();
+      // Cancel the stream to free resources
+      await stream.cancel();
+    }
   }
 
   /**
