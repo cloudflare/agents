@@ -31,26 +31,26 @@ function ChatRoom({ roomId }: ChatProps) {
   });
 
   const { messages, clearHistory, sendMessage } = useAgentChat({
-    agent,
+    agent
   });
 
   const [input, setInput] = useState("");
-  
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setInput(e.target.value);
   };
-  
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
-    
+
     const message = input;
     setInput("");
-    
+
     // Send message to agent
     await sendMessage({
       role: "user",
-      parts: [{ type: "text", text: message }],
+      parts: [{ type: "text", text: message }]
     });
   };
 

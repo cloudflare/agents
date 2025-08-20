@@ -95,9 +95,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
         return this._tryCatchChat(async () => {
           const response = await this.onChatMessage(
-            async (finishResult) => {
-              // AI SDK v5: onFinish callback - simplified for now
-              // Message persistence is handled by the specific agent implementation
+            async (_finishResult) => {
+              // each agent that extends AIChatAgent handles persistence in their own onChatMessage method
               this._removeAbortController(chatMessageId);
 
               this.observability?.emit(
@@ -201,9 +200,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
-    const response = await this.onChatMessage(async (finishResult) => {
-      // AI SDK v5: onFinish callback - simplified for now
-      // Message persistence is handled by the specific agent implementation
+    const response = await this.onChatMessage(async (_finishResult) => {
+      //  each agent that extends AIChatAgent handles persistence in their own onChatMessage method
     });
     if (response) {
       // Properly drain the response stream

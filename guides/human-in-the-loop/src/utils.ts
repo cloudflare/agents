@@ -2,7 +2,6 @@ import type { UIMessage } from "@ai-sdk/react";
 import type { UIMessageStreamWriter, ToolSet } from "ai";
 import type { z } from "zod";
 
-
 export const APPROVAL = {
   NO: "No, denied.",
   YES: "Yes, confirmed."
@@ -12,9 +11,11 @@ export const APPROVAL = {
  * Check if a message contains tool confirmations
  */
 export function hasToolConfirmation(message: UIMessage): boolean {
-  return message?.parts?.some(part => 
-    part.type?.startsWith('tool-') && 'output' in part
-  ) || false;
+  return (
+    message?.parts?.some(
+      (part) => part.type?.startsWith("tool-") && "output" in part
+    ) || false
+  );
 }
 
 /**
@@ -43,7 +44,7 @@ export async function processToolCalls<
   {
     writer,
     messages,
-    tools
+    tools: _tools
   }: {
     tools: Tools; // used for type inference
     writer: UIMessageStreamWriter;
@@ -52,10 +53,19 @@ export async function processToolCalls<
   executeFunctions: {
     [K in keyof ExecutableTools]?: (
       args: ExecutableTools[K] extends { inputSchema: infer S }
-        ? S extends z.ZodType<any, any, any>
+        ? S extends z.ZodType<
+            // biome-ignore lint/suspicious/noExplicitAny: Complex Zod type inference
+            any,
+            // biome-ignore lint/suspicious/noExplicitAny: Complex Zod type inference
+            any,
+            // biome-ignore lint/suspicious/noExplicitAny: Complex Zod type inference
+            any
+          >
           ? z.infer<S>
-          : any
-        : any
+          : // biome-ignore lint/suspicious/noExplicitAny: Complex type inference fallback
+            any
+        : // biome-ignore lint/suspicious/noExplicitAny: Complex type inference fallback
+          any
     ) => Promise<string>;
   }
 ): Promise<UIMessage[]> {
@@ -77,33 +87,37 @@ export async function processToolCalls<
         let result: string;
 
         if (output === APPROVAL.YES) {
-          const toolInstance = executeFunctions[toolName as keyof typeof executeFunctions];
+          const toolInstance =
+            executeFunctions[toolName as keyof typeof executeFunctions];
           if (toolInstance) {
             const toolInput =
-              "input" in part ? (part as { input: any }).input : {};
+              "input" in part
+                ? // biome-ignore lint/suspicious/noExplicitAny: Dynamic tool input parsing
+                  (part as { input: any }).input
+                : {};
             result = await toolInstance(toolInput);
-            
+
             // Stream the result directly using writer
             const messageId = crypto.randomUUID();
             const textStream = new ReadableStream({
               start(controller) {
                 controller.enqueue({
-                  type: 'text-start',
-                  id: messageId,
+                  type: "text-start",
+                  id: messageId
                 });
                 controller.enqueue({
-                  type: 'text-delta', 
+                  type: "text-delta",
                   id: messageId,
-                  delta: result,
+                  delta: result
                 });
                 controller.enqueue({
-                  type: 'text-end',
-                  id: messageId,
+                  type: "text-end",
+                  id: messageId
                 });
                 controller.close();
               }
             });
-            
+
             writer.merge(textStream);
           } else {
             result = "Error: No execute function found on tool";
@@ -114,10 +128,12 @@ export async function processToolCalls<
 
         return part; // Return the original part
       }
-
-      return part;
+      return part; // Return unprocessed parts
     })
   );
 
-  return [...messages.slice(0, -1), { ...lastMessage, parts: processedParts }];
+  return [
+    ...messages.slice(0, -1),
+    { ...lastMessage, parts: processedParts.filter(Boolean) }
+  ];
 }

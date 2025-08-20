@@ -244,6 +244,7 @@ export function useAgentChat<State = unknown>(
       });
 
       return transport.sendMessages({
+        // biome-ignore lint/suspicious/noExplicitAny: AI SDK type compatibility
         trigger: mappedTrigger as any,
         chatId,
         messageId,
@@ -256,6 +257,7 @@ export function useAgentChat<State = unknown>(
 
   const useChatHelpers = useChat({
     messages: initialMessages,
+    // biome-ignore lint/suspicious/noExplicitAny: AI SDK type compatibility
     transport: customTransport as any,
     ...rest
   });

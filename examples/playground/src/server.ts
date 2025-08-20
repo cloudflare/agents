@@ -1,7 +1,5 @@
 import { routeAgentRequest } from "agents";
 import { Chat } from "./agents/chat";
-import { EmailAgent } from "./agents/email";
-import { MockEmailService } from "./agents/mock-email";
 import { Rpc } from "./agents/rpc";
 import { Scheduler } from "./agents/scheduler";
 import { Stateful } from "./agents/stateful";

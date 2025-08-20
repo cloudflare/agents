@@ -13,6 +13,7 @@ type Env = {
 const EvaluationFeedback = z.object({
   feedback: z.string(),
   score: z.enum(["pass", "needs_improvement", "fail"])
+  // biome-ignore lint/suspicious/noExplicitAny: OpenAI SDK type compatibility
 }) as any;
 
 export type Attempt = {

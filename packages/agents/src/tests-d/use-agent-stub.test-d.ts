@@ -14,6 +14,7 @@ declare class A extends Agent<typeof env, {}> {
   nonSerializableReturn: (a: string) => Date;
 }
 
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const { stub } = useAgent<A, {}>({
   agent: "test"
 });

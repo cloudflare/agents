@@ -85,8 +85,5 @@
       "prettier --write --ignore-unknown"
     ]
   },
-  "packageManager": "npm@11.5.1",
-  "dependencies": {
-    "@ai-sdk/ui-utils": "^1.2.11"
-  }
+  "packageManager": "npm@11.5.1"
 }

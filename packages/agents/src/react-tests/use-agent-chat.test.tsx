@@ -31,16 +31,16 @@ describe("useAgentChat", () => {
     } as any;
 
     const testMessages = [
-      { 
-        id: "1", 
+      {
+        id: "1",
         role: "user" as const,
         parts: [{ type: "text" as const, text: "Hi" }]
       },
-      { 
-        id: "2", 
+      {
+        id: "2",
         role: "assistant" as const,
         parts: [{ type: "text" as const, text: "Hello" }]
-      },
+      }
     ];
     const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
 

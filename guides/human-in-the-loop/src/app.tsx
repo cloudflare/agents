@@ -1,4 +1,3 @@
-import type { UIMessage} from "@ai-sdk/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { tools } from "./tools";
 import { APPROVAL } from "./utils";
@@ -36,20 +35,15 @@ export default function Chat() {
     agent: "human-in-the-loop"
   });
 
-  const {
-    messages,
-    sendMessage,
-    addToolResult,
-    clearHistory
-  } = useAgentChat({
-    agent,
+  const { messages, sendMessage, addToolResult, clearHistory } = useAgentChat({
+    agent
   });
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!input.trim()) return;
-      
+
       await sendMessage({ text: input });
       setInput("");
     },
@@ -66,13 +60,15 @@ export default function Chat() {
     "getWeatherInformation"
   ];
 
-   const pendingToolCallConfirmation = messages.some(m =>
+  const pendingToolCallConfirmation = messages.some((m) =>
     m.parts?.some(
-      part =>
+      (part) =>
         isToolUIPart(part) &&
-        part.state === 'input-available' &&
-        toolsRequiringConfirmation.includes(getToolName(part) as keyof typeof tools),
-    ),
+        part.state === "input-available" &&
+        toolsRequiringConfirmation.includes(
+          getToolName(part) as keyof typeof tools
+        )
+    )
   );
 
   return (
@@ -110,26 +106,23 @@ export default function Chat() {
                     if (!isToolUIPart(part)) {
                       return null;
                     }
-                    
+
                     const toolCallId = part.toolCallId;
                     const toolName = getToolName(part);
 
                     // render confirmation tool (client-side tool with user interaction)
                     if (
-                      part.state === 'input-available' &&
+                      part.state === "input-available" &&
                       toolsRequiringConfirmation.includes(
                         toolName as keyof typeof tools
                       )
                     ) {
                       return (
                         <div key={toolCallId} className="tool-invocation">
-                          Run{" "}
-                          <span className="dynamic-info">
-                            {toolName}
-                          </span>{" "}
+                          Run <span className="dynamic-info">{toolName}</span>{" "}
                           with args:{" "}
                           <span className="dynamic-info">
-                            {JSON.stringify('input' in part ? part.input : {})}
+                            {JSON.stringify("input" in part ? part.input : {})}
                           </span>
                           <div className="button-container">
                             <button
@@ -139,7 +132,7 @@ export default function Chat() {
                                 await addToolResult({
                                   tool: toolName,
                                   output: APPROVAL.YES,
-                                  toolCallId,
+                                  toolCallId
                                 });
                                 sendMessage();
                               }}
@@ -153,7 +146,7 @@ export default function Chat() {
                                 await addToolResult({
                                   tool: toolName,
                                   output: APPROVAL.NO,
-                                  toolCallId,
+                                  toolCallId
                                 });
                                 sendMessage();
                               }}

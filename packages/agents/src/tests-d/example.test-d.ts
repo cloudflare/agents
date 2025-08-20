@@ -19,6 +19,7 @@ class MyAgent extends Agent<typeof env, {}> {
   }
 }
 
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const agent = useAgent<MyAgent, {}>({ agent: "my-agent" });
 // return type is promisified
 agent.call("sayHello") satisfies Promise<string>;
@@ -38,6 +39,7 @@ await agent.call("nonRpc");
 // @ts-expect-error nonSerializable is not serializable
 await agent.call("nonSerializable", ["hello", new Date()]);
 
+// biome-ignore lint/correctness/useHookAtTopLevel: tests
 const agent2 = useAgent<Omit<MyAgent, "nonRpc">, {}>({ agent: "my-agent" });
 agent2.call("sayHello");
 // @ts-expect-error nonRpc excluded from useAgent

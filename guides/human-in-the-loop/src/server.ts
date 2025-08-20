@@ -6,11 +6,14 @@ import {
   createUIMessageStream,
   createUIMessageStreamResponse,
   type StreamTextOnFinishCallback,
-  createDataStreamResponse,
   streamText
 } from "ai";
 import { tools } from "./tools";
-import { processToolCalls, hasToolConfirmation, getWeatherInformation } from "./utils";
+import {
+  processToolCalls,
+  hasToolConfirmation,
+  getWeatherInformation
+} from "./utils";
 
 type Env = {
   OPENAI_API_KEY: string;
@@ -21,7 +24,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
     if (request.method === "POST") {
       return new Response("", { status: 200 });
     }
-    
+
     return super.onRequest(request);
   }
 
@@ -29,7 +32,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const lastMessage = this.messages[this.messages.length - 1];
-        
+
         if (hasToolConfirmation(lastMessage)) {
           // Process tool confirmations and return early if any tool was executed
           await processToolCalls(
@@ -57,9 +60,9 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
     const response = await routeAgentRequest(request, env, {
-      cors: true,
+      cors: true
     });
-    
+
     return response || new Response("Not found", { status: 404 });
   }
 } satisfies ExportedHandler<Env>;
