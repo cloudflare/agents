@@ -30,7 +30,7 @@
     "@ai-sdk/openai": "2.0.0",
     "@ai-sdk/react": "2.0.0",
     "@ai-sdk/ui-utils": "^1.2.11",
-    "@biomejs/biome": "2.0.6",
+    "@biomejs/biome": "2.1.4",
     "@changesets/changelog-github": "^0.5.1",
     "@changesets/cli": "^2.29.5",
     "@cloudflare/vite-plugin": "^1.11.4",

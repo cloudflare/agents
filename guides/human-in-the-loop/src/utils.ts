@@ -2,6 +2,29 @@ import type { UIMessage } from "@ai-sdk/react";
 import type { UIMessageStreamWriter, ToolSet } from "ai";
 import type { z } from "zod";
 
+// Helper type to infer tool arguments from Zod schema
+type InferToolArgs<T> = T extends { inputSchema: infer S }
+  ? S extends z.ZodType
+    ? z.infer<S>
+    : never
+  : never;
+
+// Type guard to check if part has required properties
+function isToolConfirmationPart(part: unknown): part is {
+  type: string;
+  output: string;
+  input?: Record<string, unknown>;
+} {
+  return (
+    typeof part === "object" &&
+    part !== null &&
+    "type" in part &&
+    "output" in part &&
+    typeof (part as { type: unknown }).type === "string" &&
+    typeof (part as { output: unknown }).output === "string"
+  );
+}
+
 export const APPROVAL = {
   NO: "No, denied.",
   YES: "Yes, confirmed."
@@ -51,22 +74,11 @@ export async function processToolCalls<
     messages: UIMessage[];
   },
   executeFunctions: {
-    [K in keyof ExecutableTools]?: (
-      args: ExecutableTools[K] extends { inputSchema: infer S }
-        ? S extends z.ZodType<
-            // biome-ignore lint/suspicious/noExplicitAny: Complex Zod type inference
-            any,
-            // biome-ignore lint/suspicious/noExplicitAny: Complex Zod type inference
-            any,
-            // biome-ignore lint/suspicious/noExplicitAny: Complex Zod type inference
-            any
-          >
-          ? z.infer<S>
-          : // biome-ignore lint/suspicious/noExplicitAny: Complex type inference fallback
-            any
-        : // biome-ignore lint/suspicious/noExplicitAny: Complex type inference fallback
-          any
-    ) => Promise<string>;
+    [K in keyof ExecutableTools as ExecutableTools[K] extends {
+      inputSchema: z.ZodType;
+    }
+      ? K
+      : never]?: (args: InferToolArgs<ExecutableTools[K]>) => Promise<string>;
   }
 ): Promise<UIMessage[]> {
   const lastMessage = messages[messages.length - 1];
@@ -76,9 +88,9 @@ export async function processToolCalls<
   const processedParts = await Promise.all(
     parts.map(async (part) => {
       // Look for tool parts with output (confirmations) - v5 format
-      if (part.type?.startsWith("tool-") && "output" in part) {
+      if (isToolConfirmationPart(part) && part.type.startsWith("tool-")) {
         const toolName = part.type.replace("tool-", "");
-        const output = (part as { output: string }).output;
+        const output = part.output;
         // Only process if we have an execute function for this tool
         if (!(toolName in executeFunctions)) {
           return part;
@@ -90,12 +102,13 @@ export async function processToolCalls<
           const toolInstance =
             executeFunctions[toolName as keyof typeof executeFunctions];
           if (toolInstance) {
-            const toolInput =
-              "input" in part
-                ? // biome-ignore lint/suspicious/noExplicitAny: Dynamic tool input parsing
-                  (part as { input: any }).input
-                : {};
-            result = await toolInstance(toolInput);
+            // Pass the input data - the tool's Zod schema will validate at runtime
+            const toolInput = part.input ?? {};
+            // We need to trust that the runtime data matches the expected type
+            // The Zod schema in the tool will validate this
+            result = await (
+              toolInstance as (args: typeof toolInput) => Promise<string>
+            )(toolInput);
 
             // Stream the result directly using writer
             const messageId = crypto.randomUUID();

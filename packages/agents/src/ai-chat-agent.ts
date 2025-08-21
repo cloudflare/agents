@@ -31,11 +31,28 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       message text not null,
       created_at datetime default current_timestamp
     )`;
-    this.messages = (
-      this.sql`select * from cf_ai_chat_agent_messages` || []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
+    const rawMessages = this.sql`select * from cf_ai_chat_agent_messages` || [];
+    let hasOldFormat = false;
+
+    this.messages = rawMessages.map((row) => {
+      const message = JSON.parse(row.message as string);
+
+      // Check if this is an older message format (has 'role' and 'content' properties)
+      if (message.role && message.content && !message.parts) {
+        hasOldFormat = true;
+      }
+
+      return message;
     });
+
+    // Log migration notice if old format messages were detected
+    if (hasOldFormat) {
+      console.warn(
+        "🔄 [AIChatAgent] Detected messages in legacy format (role/content). " +
+          "These will continue to work but consider migrating to the new message format " +
+          "for better compatibility with AI SDK v5 features."
+      );
+    }
 
     this._chatMessageAbortControllers = new Map();
   }
