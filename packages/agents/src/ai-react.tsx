@@ -1,8 +1,10 @@
 import { useChat } from "@ai-sdk/react";
-import type { Message } from "ai";
+import type { UIMessage as Message } from "ai";
+import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
 import { use, useEffect } from "react";
-import { MessageType, type OutgoingMessage } from "./ai-types";
+import type { OutgoingMessage } from "./ai-types";
+import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
 
 type GetInitialMessagesOptions = {
@@ -15,17 +17,22 @@ type GetInitialMessagesOptions = {
  * Options for the useAgentChat hook
  */
 type UseAgentChatOptions<State> = Omit<
-  Parameters<typeof useChat>[0] & {
-    /** Agent connection from useAgent */
-    agent: ReturnType<typeof useAgent<State>>;
-    getInitialMessages?:
-      | undefined
-      | null
-      // | (() => Message[])
-      | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
-  },
-  "fetch"
->;
+  Parameters<typeof useChat>[0],
+  "fetch" | "messages"
+> & {
+  /** Agent connection from useAgent */
+  agent: ReturnType<typeof useAgent<State>>;
+  getInitialMessages?:
+    | undefined
+    | null
+    // | (() => Message[])
+    | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
+  messages?: Message[];
+  /** Request credentials */
+  credentials?: RequestCredentials;
+  /** Request headers */
+  headers?: HeadersInit;
+};
 
 const requestCache = new Map<string, Promise<Message[]>>();
 
@@ -36,8 +43,15 @@ const requestCache = new Map<string, Promise<Message[]>>();
  */
 export function useAgentChat<State = unknown>(
   options: UseAgentChatOptions<State>
-) {
-  const { agent, getInitialMessages, ...rest } = options;
+): ReturnType<typeof useChat> & {
+  clearHistory: () => void;
+} {
+  const {
+    agent,
+    getInitialMessages,
+    messages: optionsInitialMessages,
+    ...rest
+  } = options;
 
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
@@ -89,7 +103,7 @@ export function useAgentChat<State = unknown>(
         });
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
-    : (rest.initialMessages ?? []);
+    : (optionsInitialMessages ?? []);
 
   // manages adding and removing the promise from the cache
   useEffect(() => {
@@ -150,7 +164,7 @@ export function useAgentChat<State = unknown>(
       //        Reasoning: This code could be subject to collisions, as it "force saves" the messages we have locally
       //
       // agent.send(JSON.stringify({
-      //   type: "cf_agent_chat_messages",
+      //   type: MessageType.CF_AGENT_CHAT_MESSAGES,
       //   messages: ... /* some way of getting current messages ref? */
       // }))
 
@@ -216,10 +230,56 @@ export function useAgentChat<State = unknown>(
 
     return new Response(stream);
   }
+  const customTransport = {
+    sendMessages: async ({
+      trigger,
+      chatId,
+      messageId,
+      messages,
+      abortSignal,
+      ...options
+    }: {
+      trigger: "submit-message" | "regenerate-message";
+      chatId: string;
+      messageId: string | undefined;
+      messages: Message[];
+      abortSignal: AbortSignal | undefined;
+    } & Parameters<typeof useChat>[0]) => {
+      const transport = new DefaultChatTransport({
+        api: agentUrlString,
+        fetch: aiFetch
+      });
+
+      return transport.sendMessages({
+        trigger,
+        chatId,
+        messageId,
+        messages,
+        abortSignal,
+        ...options
+      });
+    },
+    reconnectToStream: async ({
+      chatId,
+      ...options
+    }: {
+      chatId: string;
+    } & Parameters<typeof useChat>[0]) => {
+      const transport = new DefaultChatTransport({
+        api: agentUrlString,
+        fetch: aiFetch
+      });
+
+      return transport.reconnectToStream({
+        chatId,
+        ...options
+      });
+    }
+  };
+
   const useChatHelpers = useChat({
-    fetch: aiFetch,
-    initialMessages,
-    sendExtraMessageFields: true,
+    messages: initialMessages,
+    transport: customTransport,
     ...rest
   });
 
@@ -284,11 +344,13 @@ export function useAgentChat<State = unknown>(
      * Set the chat messages and synchronize with the Agent
      * @param messages New messages to set
      */
-    setMessages: (messages: Message[]) => {
+    setMessages: (
+      messages: Parameters<typeof useChatHelpers.setMessages>[0]
+    ) => {
       useChatHelpers.setMessages(messages);
       agent.send(
         JSON.stringify({
-          messages,
+          messages: Array.isArray(messages) ? messages : [],
           type: MessageType.CF_AGENT_CHAT_MESSAGES
         })
       );

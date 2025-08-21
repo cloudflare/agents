@@ -518,7 +518,8 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   id: nanoid(),
                   payload: {
                     method,
-                    streaming: metadata?.streaming
+                    streaming: metadata?.streaming,
+                    success: true
                   },
                   timestamp: Date.now(),
                   type: "rpc"
@@ -1919,3 +1920,13 @@ export class StreamingResponse {
     this._connection.send(JSON.stringify(response));
   }
 }
+
+// AI SDK v5 Migration utilities
+export {
+  migrateToUIMessage,
+  migrateMessagesToUIFormat,
+  needsMigration,
+  isUIMessage,
+  type LegacyMessage,
+  type MigratableMessage
+} from "./ai-migration";

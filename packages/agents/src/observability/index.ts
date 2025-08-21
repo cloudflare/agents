@@ -34,6 +34,7 @@ export type ObservabilityEvent =
       {
         method: string;
         streaming?: boolean;
+        success: boolean;
       }
     >
   | BaseEvent<"message:request" | "message:response", {}>

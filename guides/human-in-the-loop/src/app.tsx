@@ -1,4 +1,4 @@
-import type { Message } from "@ai-sdk/react";
+import { isToolUIPart, getToolName } from "ai";
 import type { tools } from "./tools";
 import { APPROVAL } from "./utils";
 import "./styles.css";
@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function Chat() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -34,17 +35,20 @@ export default function Chat() {
     agent: "human-in-the-loop"
   });
 
-  const {
-    messages,
-    input,
-    handleInputChange,
-    handleSubmit,
-    addToolResult,
-    clearHistory
-  } = useAgentChat({
-    agent,
-    maxSteps: 5
+  const { messages, sendMessage, addToolResult, clearHistory } = useAgentChat({
+    agent
   });
+
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!input.trim()) return;
+
+      await sendMessage({ text: input });
+      setInput("");
+    },
+    [input, sendMessage]
+  );
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -56,13 +60,13 @@ export default function Chat() {
     "getWeatherInformation"
   ];
 
-  const pendingToolCallConfirmation = messages.some((m: Message) =>
+  const pendingToolCallConfirmation = messages.some((m) =>
     m.parts?.some(
       (part) =>
-        part.type === "tool-invocation" &&
-        part.toolInvocation.state === "call" &&
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
         toolsRequiringConfirmation.includes(
-          part.toolInvocation.toolName as keyof typeof tools
+          getToolName(part) as keyof typeof tools
         )
     )
   );
@@ -86,7 +90,7 @@ export default function Chat() {
 
       <div className="chat-container">
         <div className="messages-wrapper">
-          {messages?.map((m: Message) => (
+          {messages?.map((m) => (
             <div key={m.id} className="message">
               <strong>{`${m.role}: `}</strong>
               {m.parts?.map((part, i) => {
@@ -98,49 +102,54 @@ export default function Chat() {
                         {part.text}
                       </div>
                     );
-                  case "tool-invocation": {
-                    const toolInvocation = part.toolInvocation;
-                    const toolCallId = toolInvocation.toolCallId;
+                  default: {
+                    if (!isToolUIPart(part)) {
+                      return null;
+                    }
+
+                    const toolCallId = part.toolCallId;
+                    const toolName = getToolName(part);
 
                     // render confirmation tool (client-side tool with user interaction)
                     if (
+                      part.state === "input-available" &&
                       toolsRequiringConfirmation.includes(
-                        toolInvocation.toolName as keyof typeof tools
-                      ) &&
-                      toolInvocation.state === "call"
+                        toolName as keyof typeof tools
+                      )
                     ) {
                       return (
                         <div key={toolCallId} className="tool-invocation">
-                          Run{" "}
-                          <span className="dynamic-info">
-                            {toolInvocation.toolName}
-                          </span>{" "}
+                          Run <span className="dynamic-info">{toolName}</span>{" "}
                           with args:{" "}
                           <span className="dynamic-info">
-                            {JSON.stringify(toolInvocation.args)}
+                            {JSON.stringify("input" in part ? part.input : {})}
                           </span>
                           <div className="button-container">
                             <button
                               type="button"
                               className="button-approve"
-                              onClick={() =>
-                                addToolResult({
-                                  result: APPROVAL.YES,
+                              onClick={async () => {
+                                await addToolResult({
+                                  tool: toolName,
+                                  output: APPROVAL.YES,
                                   toolCallId
-                                })
-                              }
+                                });
+                                sendMessage();
+                              }}
                             >
                               Yes
                             </button>
                             <button
                               type="button"
                               className="button-reject"
-                              onClick={() =>
-                                addToolResult({
-                                  result: APPROVAL.NO,
+                              onClick={async () => {
+                                await addToolResult({
+                                  tool: toolName,
+                                  output: APPROVAL.NO,
                                   toolCallId
-                                })
-                              }
+                                });
+                                sendMessage();
+                              }}
                             >
                               No
                             </button>
@@ -148,6 +157,7 @@ export default function Chat() {
                         </div>
                       );
                     }
+                    return null;
                   }
                 }
               })}
@@ -163,7 +173,7 @@ export default function Chat() {
             className="chat-input"
             value={input}
             placeholder="Say something..."
-            onChange={handleInputChange}
+            onChange={(e) => setInput(e.target.value)}
           />
         </form>
       </div>

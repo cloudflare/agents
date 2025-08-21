@@ -12,14 +12,18 @@ type Env = {
 
 const getWeatherTool = tool({
   description: "Get the weather for a given city",
-  execute: async ({ location }) => {
+  execute: async ({ location }: { location: string }) => {
     console.log(`[getWeatherTool] Executing weather lookup for: ${location}`);
     const result = `The weather in ${location} is sunny`;
     console.log(`[getWeatherTool] Returning result: ${result}`);
     return result;
   },
   name: "get_weather",
-  needsApproval: async (_context, { location }) => {
+  needsApproval: async (
+    // biome-ignore lint/suspicious/noExplicitAny: OpenAI SDK type compatibility
+    _context: any,
+    { location }: { location: string }
+  ) => {
     console.log(
       `[getWeatherTool] Checking if approval needed for location: ${location}`
     );
@@ -30,7 +34,8 @@ const getWeatherTool = tool({
   },
   parameters: z.object({
     location: z.string()
-  })
+    // biome-ignore lint/suspicious/noExplicitAny: OpenAI SDK type compatibility
+  }) as any
 });
 
 export type AgentState = {
@@ -42,7 +47,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
     serialisedRunState: null
   };
 
-  // biome-ignore lint/suspicious/noExplicitAny: later
+  // biome-ignore lint/suspicious/noExplicitAny: OpenAI SDK type compatibility
   result: RunResult<unknown, Agent<unknown, any>> | null = null;
   agent = new Agent({
     instructions: "You are a helpful assistant",

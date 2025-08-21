@@ -1,15 +1,12 @@
 import type {
-  Message as ChatMessage,
+  UIMessage as ChatMessage,
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { appendResponseMessages } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
-import {
-  MessageType,
-  type IncomingMessage,
-  type OutgoingMessage
-} from "./ai-types";
+import type { IncomingMessage, OutgoingMessage } from "./ai-types";
+import { MessageType } from "./ai-types";
+import { needsMigration } from "./ai-migration";
 
 const decoder = new TextDecoder();
 
@@ -35,11 +32,23 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       message text not null,
       created_at datetime default current_timestamp
     )`;
-    this.messages = (
-      this.sql`select * from cf_ai_chat_agent_messages` || []
-    ).map((row) => {
+    const rawMessages = this.sql`select * from cf_ai_chat_agent_messages` || [];
+
+    this.messages = rawMessages.map((row) => {
       return JSON.parse(row.message as string);
     });
+
+    // Check if any messages need migration and log notice
+    if (needsMigration(this.messages)) {
+      console.warn(
+        "🔄 [AIChatAgent] Detected messages in legacy format (role/content). " +
+          "These will continue to work but consider migrating to the new message format " +
+          "for better compatibility with AI SDK v5 features.\n" +
+          "To migrate: import { migrateMessagesToUIFormat } from '@cloudflare/agents' and call " +
+          "await this.persistMessages(migrateMessagesToUIFormat(this.messages))\n" +
+          "See https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0 for more info."
+      );
+    }
 
     this._chatMessageAbortControllers = new Map();
   }
@@ -99,13 +108,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
         return this._tryCatchChat(async () => {
           const response = await this.onChatMessage(
-            async ({ response }) => {
-              const finalMessages = appendResponseMessages({
-                messages,
-                responseMessages: response.messages
-              });
-
-              await this.persistMessages(finalMessages, [connection.id]);
+            async (_finishResult) => {
+              // each agent that extends AIChatAgent handles persistence in their own onChatMessage method
               this._removeAbortController(chatMessageId);
 
               this.observability?.emit(
@@ -185,19 +189,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
-  private async _drainStream(stream: ReadableStream<Uint8Array>) {
-    const reader = stream.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        decoder.decode(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  }
-
   /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
@@ -221,18 +212,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
-    const response = await this.onChatMessage(async ({ response }) => {
-      const finalMessages = appendResponseMessages({
-        messages,
-        responseMessages: response.messages
-      });
-
-      await this.persistMessages(finalMessages, []);
+    const response = await this.onChatMessage(async (_finishResult) => {
+      //  each agent that extends AIChatAgent handles persistence in their own onChatMessage method
     });
-    if (response?.body) {
-      // we're just going to drain the body
-      await this._drainStream(response.body!);
-      response.body.cancel();
+    if (response) {
+      // Properly drain the response stream
+      await this._drainStream(response.body);
     }
   }
 
@@ -259,9 +244,25 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   private async _reply(id: string, response: Response) {
     // now take chunks out from dataStreamResponse and send them to the client
     return this._tryCatchChat(async () => {
-      if (response.body) {
-        await this._drainStream(response.body);
-        response.body.cancel();
+      if (!response.body) return;
+
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const body = decoder.decode(value);
+
+          this._broadcastChatMessage({
+            body,
+            done: false,
+            id,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          });
+        }
+      } finally {
+        reader.releaseLock();
       }
 
       this._broadcastChatMessage({
@@ -317,6 +318,28 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       controller?.abort();
     }
     this._chatMessageAbortControllers.clear();
+  }
+
+  /**
+   * Properly drains and cancels a ReadableStream
+   */
+  private async _drainStream(stream: ReadableStream<Uint8Array> | null) {
+    if (!stream) return;
+
+    const reader = stream.getReader();
+    try {
+      // Read all chunks to drain the stream
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    } finally {
+      // Always release the reader lock
+      reader.releaseLock();
+      // Cancel the stream to free resources
+      await stream.cancel();
+    }
   }
 
   /**
