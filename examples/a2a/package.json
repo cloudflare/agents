@@ -6,7 +6,7 @@
     "name": "Matt Carey"
   },
   "dependencies": {
-    "@a2a-js/sdk": "0.2.2",
+    "@a2a-js/sdk": "^0.2.2",
     "hono": "^4.9.1"
   },
   "keywords": [],

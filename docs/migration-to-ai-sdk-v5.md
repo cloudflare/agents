@@ -277,13 +277,6 @@ Use the migration utilities from Step 5 above. The Agents SDK now provides these
 - `CoreMessage` → `ModelMessage` (when working with model-specific messages)
 - Various streaming chunk properties renamed (e.g., `textDelta` → `delta`)
 
-### Package Scoping
-
-Many exports moved to scoped packages:
-
-- React hooks: `ai/react` → `@ai-sdk/react`
-- UI utilities: Import from `@ai-sdk/ui-utils`
-
 ## Need Help?
 
 - Check the [official AI SDK v5 migration guide](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0)
