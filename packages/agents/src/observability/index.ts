@@ -1,4 +1,3 @@
-import type { UIMessage } from "ai";
 import { getCurrentAgent } from "../index";
 
 type BaseEvent<
@@ -36,12 +35,6 @@ export type ObservabilityEvent =
         method: string;
         streaming?: boolean;
         success: boolean;
-      }
-    >
-  | BaseEvent<
-      "message:request" | "message:response",
-      {
-        message: UIMessage[];
       }
     >
   | BaseEvent<"message:request" | "message:response", {}>

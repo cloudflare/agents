@@ -231,16 +231,25 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   private async _reply(id: string, response: Response) {
     // now take chunks out from dataStreamResponse and send them to the client
     return this._tryCatchChat(async () => {
-      // @ts-expect-error TODO: fix this type error
-      for await (const chunk of response.body!) {
-        const body = decoder.decode(chunk);
+      if (!response.body) return;
 
-        this._broadcastChatMessage({
-          body,
-          done: false,
-          id,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-        });
+      const reader = response.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const body = decoder.decode(value);
+
+          this._broadcastChatMessage({
+            body,
+            done: false,
+            id,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          });
+        }
+      } finally {
+        reader.releaseLock();
       }
 
       this._broadcastChatMessage({

@@ -17,17 +17,18 @@ type GetInitialMessagesOptions = {
  * Options for the useAgentChat hook
  */
 type UseAgentChatOptions<State> = Omit<
-  Parameters<typeof useChat>[0] & {
-    /** Agent connection from useAgent */
-    agent: ReturnType<typeof useAgent<State>>;
-    getInitialMessages?:
-      | undefined
-      | null
-      // | (() => Message[])
-      | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
-  },
-  "fetch"
->;
+  Parameters<typeof useChat>[0],
+  "fetch" | "messages"
+> & {
+  /** Agent connection from useAgent */
+  agent: ReturnType<typeof useAgent<State>>;
+  getInitialMessages?:
+    | undefined
+    | null
+    // | (() => Message[])
+    | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
+  messages?: Message[];
+};
 
 const requestCache = new Map<string, Promise<Message[]>>();
 
@@ -41,7 +42,12 @@ export function useAgentChat<State = unknown>(
 ): ReturnType<typeof useChat> & {
   clearHistory: () => void;
 } {
-  const { agent, getInitialMessages, ...rest } = options;
+  const {
+    agent,
+    getInitialMessages,
+    messages: optionsInitialMessages,
+    ...rest
+  } = options;
 
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
@@ -90,7 +96,7 @@ export function useAgentChat<State = unknown>(
         });
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
-    : [];
+    : (optionsInitialMessages ?? []);
 
   // manages adding and removing the promise from the cache
   useEffect(() => {
@@ -232,24 +238,33 @@ export function useAgentChat<State = unknown>(
       messages: Message[];
       abortSignal: AbortSignal | undefined;
     } & Parameters<typeof useChat>[0]) => {
-      // Map the new trigger values to the old ones expected by DefaultChatTransport
-      const mappedTrigger =
-        trigger === "submit-message"
-          ? "submit-user-message"
-          : "regenerate-assistant-message";
-
       const transport = new DefaultChatTransport({
         api: agentUrlString,
         fetch: aiFetch
       });
 
       return transport.sendMessages({
-        // biome-ignore lint/suspicious/noExplicitAny: AI SDK type compatibility
-        trigger: mappedTrigger as any,
+        trigger,
         chatId,
         messageId,
         messages,
         abortSignal,
+        ...options
+      });
+    },
+    reconnectToStream: async ({
+      chatId,
+      ...options
+    }: {
+      chatId: string;
+    } & Parameters<typeof useChat>[0]) => {
+      const transport = new DefaultChatTransport({
+        api: agentUrlString,
+        fetch: aiFetch
+      });
+
+      return transport.reconnectToStream({
+        chatId,
         ...options
       });
     }
@@ -257,8 +272,7 @@ export function useAgentChat<State = unknown>(
 
   const useChatHelpers = useChat({
     messages: initialMessages,
-    // biome-ignore lint/suspicious/noExplicitAny: AI SDK type compatibility
-    transport: customTransport as any,
+    transport: customTransport,
     ...rest
   });
 
