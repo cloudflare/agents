@@ -28,6 +28,10 @@ type UseAgentChatOptions<State> = Omit<
     // | (() => Message[])
     | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
   messages?: Message[];
+  /** Request credentials */
+  credentials?: RequestCredentials;
+  /** Request headers */
+  headers?: HeadersInit;
 };
 
 const requestCache = new Map<string, Promise<Message[]>>();
@@ -65,7 +69,10 @@ export function useAgentChat<State = unknown>(
   }: GetInitialMessagesOptions) {
     const getMessagesUrl = new URL(url);
     getMessagesUrl.pathname += "/get-messages";
-    const response = await fetch(getMessagesUrl.toString());
+    const response = await fetch(getMessagesUrl.toString(), {
+      credentials: options.credentials,
+      headers: options.headers
+    });
     return response.json<Message[]>();
   }
 

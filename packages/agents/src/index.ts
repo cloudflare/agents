@@ -1920,3 +1920,13 @@ export class StreamingResponse {
     this._connection.send(JSON.stringify(response));
   }
 }
+
+// AI SDK v5 Migration utilities
+export {
+  migrateToUIMessage,
+  migrateMessagesToUIFormat,
+  needsMigration,
+  isUIMessage,
+  type LegacyMessage,
+  type MigratableMessage
+} from "./ai-migration";

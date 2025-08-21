@@ -6,6 +6,7 @@ import type {
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import type { IncomingMessage, OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
+import { needsMigration } from "./ai-migration";
 
 const decoder = new TextDecoder();
 
@@ -32,25 +33,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       created_at datetime default current_timestamp
     )`;
     const rawMessages = this.sql`select * from cf_ai_chat_agent_messages` || [];
-    let hasOldFormat = false;
 
     this.messages = rawMessages.map((row) => {
-      const message = JSON.parse(row.message as string);
-
-      // Check if this is an older message format (has 'role' and 'content' properties)
-      if (message.role && message.content && !message.parts) {
-        hasOldFormat = true;
-      }
-
-      return message;
+      return JSON.parse(row.message as string);
     });
 
-    // Log migration notice if old format messages were detected
-    if (hasOldFormat) {
+    // Check if any messages need migration and log notice
+    if (needsMigration(this.messages)) {
       console.warn(
         "🔄 [AIChatAgent] Detected messages in legacy format (role/content). " +
           "These will continue to work but consider migrating to the new message format " +
-          "for better compatibility with AI SDK v5 features."
+          "for better compatibility with AI SDK v5 features.\n" +
+          "To migrate: import { migrateMessagesToUIFormat } from '@cloudflare/agents' and call " +
+          "await this.persistMessages(migrateMessagesToUIFormat(this.messages))\n" +
+          "See https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0 for more info."
       );
     }
 
