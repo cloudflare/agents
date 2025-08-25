@@ -18,6 +18,8 @@
   },
   "description": "A home for your AI agents",
   "devDependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.0.6",
+    "alchemy": "^0.62.3",
     "react": "*",
     "vitest-browser-react": "^1.0.1"
   },
@@ -106,7 +108,8 @@
     "check:test:workers": "vitest -r src/tests --watch false",
     "evals": "(cd evals; evalite)",
     "test": "vitest -r src/tests",
-    "test:react": "vitest -r src/react-tests"
+    "test:react": "vitest -r src/react-tests",
+    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent"
   },
   "type": "module",
   "types": "dist/index.d.ts",
