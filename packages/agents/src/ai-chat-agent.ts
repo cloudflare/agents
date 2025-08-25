@@ -72,7 +72,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           // dispatcher,
           // duplex
         } = data.init;
-        const { messages } = JSON.parse(body as string);
+        const { messages: incomingMessages } = JSON.parse(body as string);
+
+        const messages = [...this.messages, ...incomingMessages];
+
         this._broadcastChatMessage(
           {
             messages,
@@ -81,7 +84,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           [connection.id]
         );
 
-        await this.persistMessages(messages, [connection.id]);
+        await this.persistMessages(incomingMessages, [connection.id]);
 
         this.observability?.emit(
           {
@@ -154,6 +157,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         );
       } else if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
         // replace the messages with the new ones
+        this.sql`delete from cf_ai_chat_agent_messages`;
+        this.messages = [];
         await this.persistMessages(data.messages, [connection.id]);
       } else if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
         // propagate an abort signal for the associated request
@@ -162,15 +167,19 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
+  private getMessages(): ChatMessage[] {
+    return (this.sql`select * from cf_ai_chat_agent_messages` || []).map(
+      (row) => {
+        return JSON.parse(row.message as string);
+      }
+    );
+  }
+
   override async onRequest(request: Request): Promise<Response> {
     return this._tryCatchChat(() => {
       const url = new URL(request.url);
       if (url.pathname.endsWith("/get-messages")) {
-        const messages = (
-          this.sql`select * from cf_ai_chat_agent_messages` || []
-        ).map((row) => {
-          return JSON.parse(row.message as string);
-        });
+        const messages = this.getMessages();
         return Response.json(messages);
       }
       return super.onRequest(request);
@@ -217,16 +226,15 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   /**
    * Save messages on the server side and trigger AI response
-   * @param messages Chat messages to save
+   * @param incomingMessages Chat messages to save
    */
-  async saveMessages(messages: ChatMessage[]) {
-    await this.persistMessages(messages);
+  async saveMessages(incomingMessages: ChatMessage[]) {
+    await this.persistMessages(incomingMessages);
     const response = await this.onChatMessage(async ({ response }) => {
       const finalMessages = appendResponseMessages({
-        messages,
+        messages: incomingMessages,
         responseMessages: response.messages
       });
-
       await this.persistMessages(finalMessages, []);
     });
     if (response?.body) {
@@ -237,19 +245,19 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   async persistMessages(
-    messages: ChatMessage[],
+    incomingMessages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
-    this.sql`delete from cf_ai_chat_agent_messages`;
-    for (const message of messages) {
-      this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
+    for (const message of incomingMessages) {
+      this
+        .sql`insert or replace into cf_ai_chat_agent_messages (id, message) values (${
         message.id
       },${JSON.stringify(message)})`;
     }
-    this.messages = messages;
+    this.messages.push(...incomingMessages);
     this._broadcastChatMessage(
       {
-        messages: messages,
+        messages: this.messages,
         type: MessageType.CF_AGENT_CHAT_MESSAGES
       },
       excludeBroadcastIds
