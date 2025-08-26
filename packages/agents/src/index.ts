@@ -1927,6 +1927,8 @@ export {
   migrateMessagesToUIFormat,
   needsMigration,
   isUIMessage,
+  analyzeCorruption,
   type LegacyMessage,
+  type CorruptArrayMessage,
   type MigratableMessage
 } from "./ai-migration";

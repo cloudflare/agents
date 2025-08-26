@@ -3,10 +3,11 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
+import { convertToModelMessages } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import type { IncomingMessage, OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
-import { needsMigration } from "./ai-migration";
+import { needsMigration, migrateMessagesToUIFormat } from "./ai-migration";
 
 const decoder = new TextDecoder();
 
@@ -190,6 +191,33 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
+   * Safely converts the current messages to the format expected by AI SDK model functions
+   * Automatically handles corrupt message formats before conversion
+   * @returns Messages converted to ModelMessage format for use with streamText, generateText, etc.
+   */
+  protected getModelMessages() {
+    // First, clean any corrupt messages to ensure safe conversion
+    const cleanMessages = migrateMessagesToUIFormat(this.messages);
+    return convertToModelMessages(cleanMessages);
+  }
+
+  /**
+   * Safe wrapper for convertToModelMessages with automatic corruption handling
+   * @param messages - Messages to convert (will be cleaned if needed)
+   * @returns Safely converted ModelMessages
+   */
+  protected convertToModelMessagesSafe(messages: ChatMessage[]) {
+    try {
+      const cleanMessages = migrateMessagesToUIFormat(messages);
+      return convertToModelMessages(cleanMessages);
+    } catch (error) {
+      console.error("❌ Failed to convert messages safely:", error);
+      // Return empty array as fallback to prevent crashes
+      return [];
+    }
+  }
+
+  /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
    * @param options.signal A signal to pass to any child requests which can be used to cancel them
@@ -208,10 +236,22 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   /**
    * Save messages on the server side and trigger AI response
+   * Now includes corruption detection to prevent future data issues
    * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
-    await this.persistMessages(messages);
+    // Check for corruption and warn if found
+    if (needsMigration(messages)) {
+      console.warn(
+        "⚠️  saveMessages() detected corrupt message formats. Consider migrating data first."
+      );
+      // Auto-clean the messages to prevent corruption
+      const cleanMessages = migrateMessagesToUIFormat(messages);
+      await this.persistMessages(cleanMessages);
+    } else {
+      await this.persistMessages(messages);
+    }
+
     const response = await this.onChatMessage(async (_finishResult) => {
       //  each agent that extends AIChatAgent handles persistence in their own onChatMessage method
     });
