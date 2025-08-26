@@ -298,31 +298,36 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           const body = decoder.decode(value);
           fullBody += body;
 
-          // Extract text content from SSE chunks for both storage and streaming
+          // Extract text content from AI SDK v5 SSE format
           const lines = body.split("\n");
           let streamChunk = "";
 
           for (const line of lines) {
-            // Handle both AI SDK v5 format ("0:" prefix) and raw SSE format ("data:" prefix)
+            // Handle AI SDK v5 format ("0:" prefix)
             if (line.startsWith("0:")) {
               try {
                 const jsonPart = line.slice(2); // Remove "0:" prefix
                 const parsed = JSON.parse(jsonPart);
-                if (parsed.type === "text-delta" && parsed.textDelta) {
-                  assistantText += parsed.textDelta;
-                  streamChunk += parsed.textDelta;
+                if (parsed.type === "text-delta") {
+                  const text = parsed.textDelta || parsed.delta || "";
+                  assistantText += text;
+                  streamChunk += text;
                 }
               } catch (_e) {
                 // Ignore parsing errors for malformed chunks
               }
-            } else if (line.startsWith("data: ")) {
+            }
+            // Handle standard SSE format with "data:" prefix
+            else if (line.startsWith("data: ")) {
               try {
                 const jsonPart = line.slice(6); // Remove "data: " prefix
                 if (jsonPart === "[DONE]") break;
                 const parsed = JSON.parse(jsonPart);
-                if (parsed.type === "text-delta" && parsed.delta) {
-                  assistantText += parsed.delta;
-                  streamChunk += parsed.delta;
+                // Handle AI SDK v5 text-delta format
+                if (parsed.type === "text-delta") {
+                  const text = parsed.textDelta || parsed.delta || "";
+                  assistantText += text;
+                  streamChunk += text;
                 }
               } catch (_e) {
                 // Ignore parsing errors for malformed chunks
