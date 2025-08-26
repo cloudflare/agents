@@ -299,11 +299,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           fullBody += body;
 
           // Extract text content from SSE chunks for both storage and streaming
-          // Parse each line that starts with "0:" which contains the text content
           const lines = body.split("\n");
           let streamChunk = "";
 
           for (const line of lines) {
+            // Handle both AI SDK v5 format ("0:" prefix) and raw SSE format ("data:" prefix)
             if (line.startsWith("0:")) {
               try {
                 const jsonPart = line.slice(2); // Remove "0:" prefix
@@ -311,6 +311,18 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 if (parsed.type === "text-delta" && parsed.textDelta) {
                   assistantText += parsed.textDelta;
                   streamChunk += parsed.textDelta;
+                }
+              } catch (_e) {
+                // Ignore parsing errors for malformed chunks
+              }
+            } else if (line.startsWith("data: ")) {
+              try {
+                const jsonPart = line.slice(6); // Remove "data: " prefix
+                if (jsonPart === "[DONE]") break;
+                const parsed = JSON.parse(jsonPart);
+                if (parsed.type === "text-delta" && parsed.delta) {
+                  assistantText += parsed.delta;
+                  streamChunk += parsed.delta;
                 }
               } catch (_e) {
                 // Ignore parsing errors for malformed chunks
