@@ -298,9 +298,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           const body = decoder.decode(value);
           fullBody += body;
 
-          // Extract text content from SSE chunks for storage
+          // Extract text content from SSE chunks for both storage and streaming
           // Parse each line that starts with "0:" which contains the text content
           const lines = body.split("\n");
+          let streamChunk = "";
+
           for (const line of lines) {
             if (line.startsWith("0:")) {
               try {
@@ -308,6 +310,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 const parsed = JSON.parse(jsonPart);
                 if (parsed.type === "text-delta" && parsed.textDelta) {
                   assistantText += parsed.textDelta;
+                  streamChunk += parsed.textDelta;
                 }
               } catch (_e) {
                 // Ignore parsing errors for malformed chunks
@@ -315,12 +318,15 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             }
           }
 
-          this._broadcastChatMessage({
-            body,
-            done: false,
-            id,
-            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-          });
+          // Only broadcast if we have actual text content to send
+          if (streamChunk) {
+            this._broadcastChatMessage({
+              body: streamChunk,
+              done: false,
+              id,
+              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            });
+          }
         }
       } finally {
         reader.releaseLock();
