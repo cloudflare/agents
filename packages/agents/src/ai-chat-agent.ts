@@ -247,12 +247,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       if (!response.body) return;
 
       const reader = response.body.getReader();
+      let fullBody = "";
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
           const body = decoder.decode(value);
+          fullBody += body;
 
           this._broadcastChatMessage({
             body,
@@ -271,6 +273,15 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         id,
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
       });
+
+      await this.persistMessages([
+        ...this.messages,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          parts: [{ type: "text", text: fullBody }]
+        }
+      ]);
     });
   }
 
@@ -337,8 +348,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     } finally {
       // Always release the reader lock
       reader.releaseLock();
-      // Cancel the stream to free resources
-      await stream.cancel();
     }
   }
 
