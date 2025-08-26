@@ -312,6 +312,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                   const text = parsed.textDelta || parsed.delta || "";
                   assistantText += text;
                   streamChunk += text;
+                } else if (parsed.type === "error") {
+                  // Handle error events from the AI model
+                  const errorMessage =
+                    parsed.error?.message ||
+                    parsed.message ||
+                    "An error occurred";
+                  this._broadcastChatMessage({
+                    body: errorMessage,
+                    done: true,
+                    id,
+                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                    error: true
+                  });
+                  return; // Stop processing on error
                 }
               } catch (_e) {
                 // Ignore parsing errors for malformed chunks

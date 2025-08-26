@@ -34,6 +34,8 @@ export type OutgoingMessage =
       body: string;
       /** Whether this is the final chunk of the response */
       done: boolean;
+      /** Whether this response contains an error */
+      error?: boolean;
     }
   | {
       /** Indicates this message is a command to clear chat history */

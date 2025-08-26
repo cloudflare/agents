@@ -186,10 +186,17 @@ export function useAgentChat<State = unknown>(
         }
         if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
           if (data.id === id) {
-            controller.enqueue(new TextEncoder().encode(data.body));
-            if (data.done) {
+            if (data.error) {
+              // Handle error response - enqueue the error message before closing
+              controller.enqueue(new TextEncoder().encode(data.body));
               controller.close();
               abortController.abort();
+            } else {
+              controller.enqueue(new TextEncoder().encode(data.body));
+              if (data.done) {
+                controller.close();
+                abortController.abort();
+              }
             }
           }
         }
