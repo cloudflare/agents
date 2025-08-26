@@ -38,7 +38,6 @@ export abstract class McpAgent<
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
   // The connection ID for server-sent requests/notifications
   private _standaloneSseConnectionId?: string;
-  initRun = false;
 
   abstract server: MaybePromise<McpServer | Server>;
   abstract init(): Promise<void>;
@@ -58,7 +57,7 @@ export abstract class McpAgent<
   }
 
   /**
-   * Custom methods
+   * Helpers
    */
 
   async setInitialized() {
@@ -70,7 +69,8 @@ export abstract class McpAgent<
   }
 
   // Read the transport type for this agent.
-  // This relies on the transport type being present in the agent name.
+  // This relies on the naming scheme being `sse:${sessionId}`
+  // or `streamable-http:${sessionId}`.
   getTransportType(): TransportType {
     const [t, ..._] = this.name.split(":");
     switch (t) {
@@ -83,54 +83,6 @@ export abstract class McpAgent<
           "Invalid transport type. McpAgent must be addressed with a valid protocol."
         );
     }
-  }
-
-  // Elicit user input with a message and schema
-  async elicitInput(params: {
-    message: string;
-    requestedSchema: unknown;
-  }): Promise<ElicitResult> {
-    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
-
-    // Store pending request in durable storage
-    await this.ctx.storage.put(`elicitation:${requestId}`, {
-      message: params.message,
-      requestedSchema: params.requestedSchema,
-      timestamp: Date.now()
-    });
-
-    const elicitRequest = {
-      jsonrpc: "2.0" as const,
-      id: requestId,
-      method: "elicitation/create",
-      params: {
-        message: params.message,
-        requestedSchema: params.requestedSchema
-      }
-    };
-
-    // Send through MCP transport
-    if (this._transport) {
-      await this._transport.send(elicitRequest);
-    } else {
-      const connections = this.getConnections();
-      if (!connections || Array.from(connections).length === 0) {
-        await this.ctx.storage.delete(`elicitation:${requestId}`);
-        throw new Error("No active connections available for elicitation");
-      }
-
-      const connectionList = Array.from(connections);
-      for (const connection of connectionList) {
-        try {
-          connection.send(JSON.stringify(elicitRequest));
-        } catch (error) {
-          console.error("Failed to send elicitation request:", error);
-        }
-      }
-    }
-
-    // Wait for response through MCP
-    return this._waitForElicitationResponse(requestId);
   }
 
   // Get the WebSocket for the standalone SSE if any. Streaming HTTP only.
@@ -155,6 +107,7 @@ export abstract class McpAgent<
     return this.getConnection(connectionId) ?? null;
   }
 
+  // Returns a new transport matching the type of the Agent.
   private initTransport() {
     switch (this.getTransportType()) {
       case "sse": {
@@ -174,7 +127,7 @@ export abstract class McpAgent<
    * Base Agent / Parykit Server overrides
    */
 
-  // Set up MCP transport and server every time the Durable Object is created.
+  // Sets up the MCP transport and server every time the Agent is started.
   async onStart() {
     await this.init();
     const server = await this.server;
@@ -183,7 +136,7 @@ export abstract class McpAgent<
     await server.connect(this._transport);
   }
 
-  // Validate new WebSocket connections behave as expected. Runs before accepting the connection.
+  // Validates new WebSocket connections.
   async onConnect(conn: Connection, _: ConnectionContext): Promise<void> {
     switch (this.getTransportType()) {
       case "sse": {
@@ -201,7 +154,7 @@ export abstract class McpAgent<
     }
   }
 
-  /// MCP Messages handler for Streamable HTTP.
+  // Handles MCP Messages for Streamable HTTP.
   async onMessage(connection: Connection, event: WSMessage) {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
@@ -264,6 +217,109 @@ export abstract class McpAgent<
     this._transport?.onmessage?.(message);
   }
 
+  async onClose(
+    conn: Connection,
+    _code: number,
+    _reason: string,
+    _wasClean: boolean
+  ): Promise<void> {
+    // Remove the connection/socket mapping for the socket that just closed
+    for (const [reqId, connId] of this._requestIdToConnectionId) {
+      if (connId === conn.id) this._requestIdToConnectionId.delete(reqId);
+    }
+
+    // Clear the standalone SSE if it just closed
+    if (this._standaloneSseConnectionId === conn.id) {
+      this._standaloneSseConnectionId = undefined;
+    }
+  }
+
+  /**
+   * Transport ingress and routing
+   */
+
+  // Handles MCP Messages for the legacy SSE transport.
+  async onSSEMcpMessage(
+    _sessionId: string,
+    messageBody: unknown
+  ): Promise<Error | null> {
+    // Since we address the DO via both the protocol and the session id,
+    // this should never happen, but let's enforce it just in case
+    if (this.getTransportType() !== "sse") {
+      return new Error("Internal Server Error: Expected SSE transport");
+    }
+
+    try {
+      let parsedMessage: JSONRPCMessage;
+      try {
+        parsedMessage = JSONRPCMessageSchema.parse(messageBody);
+      } catch (error) {
+        this._transport?.onerror?.(error as Error);
+        throw error;
+      }
+
+      // Check if this is an elicitation response before passing to transport
+      if (await this._handleElicitationResponse(parsedMessage)) {
+        return null; // Message was handled by elicitation system
+      }
+
+      this._transport?.onmessage?.(parsedMessage);
+      return null;
+    } catch (error) {
+      console.error("Error forwarding message to SSE:", error);
+      this._transport?.onerror?.(error as Error);
+      return error as Error;
+    }
+  }
+
+  // Elicit user input with a message and schema
+  async elicitInput(params: {
+    message: string;
+    requestedSchema: unknown;
+  }): Promise<ElicitResult> {
+    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+
+    // Store pending request in durable storage
+    await this.ctx.storage.put(`elicitation:${requestId}`, {
+      message: params.message,
+      requestedSchema: params.requestedSchema,
+      timestamp: Date.now()
+    });
+
+    const elicitRequest = {
+      jsonrpc: "2.0" as const,
+      id: requestId,
+      method: "elicitation/create",
+      params: {
+        message: params.message,
+        requestedSchema: params.requestedSchema
+      }
+    };
+
+    // Send through MCP transport
+    if (this._transport) {
+      await this._transport.send(elicitRequest);
+    } else {
+      const connections = this.getConnections();
+      if (!connections || Array.from(connections).length === 0) {
+        await this.ctx.storage.delete(`elicitation:${requestId}`);
+        throw new Error("No active connections available for elicitation");
+      }
+
+      const connectionList = Array.from(connections);
+      for (const connection of connectionList) {
+        try {
+          connection.send(JSON.stringify(elicitRequest));
+        } catch (error) {
+          console.error("Failed to send elicitation request:", error);
+        }
+      }
+    }
+
+    // Wait for response through MCP
+    return this._waitForElicitationResponse(requestId);
+  }
+
   // Wait for elicitation response through storage polling
   private async _waitForElicitationResponse(
     requestId: string
@@ -296,8 +352,7 @@ export abstract class McpAgent<
     }
   }
 
-  /**
-   * Handle elicitation responses   */
+  // Handle elicitation responses
   private async _handleElicitationResponse(
     message: JSONRPCMessage
   ): Promise<boolean> {
@@ -346,58 +401,6 @@ export abstract class McpAgent<
     }
 
     return false;
-  }
-
-  // All messages received over SSE after the initial connection has been established
-  // will be passed here
-  async onSSEMcpMessage(
-    _sessionId: string,
-    messageBody: unknown
-  ): Promise<Error | null> {
-    // Since we address the DO via both the protocol and the session id,
-    // this should never happen, but let's enforce it just in case
-    if (this.getTransportType() !== "sse") {
-      return new Error("Internal Server Error: Expected SSE transport");
-    }
-
-    try {
-      let parsedMessage: JSONRPCMessage;
-      try {
-        parsedMessage = JSONRPCMessageSchema.parse(messageBody);
-      } catch (error) {
-        this._transport?.onerror?.(error as Error);
-        throw error;
-      }
-
-      // Check if this is an elicitation response before passing to transport
-      if (await this._handleElicitationResponse(parsedMessage)) {
-        return null; // Message was handled by elicitation system
-      }
-
-      this._transport?.onmessage?.(parsedMessage);
-      return null;
-    } catch (error) {
-      console.error("Error forwarding message to SSE:", error);
-      this._transport?.onerror?.(error as Error);
-      return error as Error;
-    }
-  }
-
-  async onClose(
-    conn: Connection,
-    _code: number,
-    _reason: string,
-    _wasClean: boolean
-  ): Promise<void> {
-    // Remove the connection/socket mapping for the socket that just closed
-    for (const [reqId, connId] of this._requestIdToConnectionId) {
-      if (connId === conn.id) this._requestIdToConnectionId.delete(reqId);
-    }
-
-    // Clear the standalone SSE if it just closed
-    if (this._standaloneSseConnectionId === conn.id) {
-      this._standaloneSseConnectionId = undefined;
-    }
   }
 
   static serve(
