@@ -309,7 +309,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 if (parsed.type === "text-delta" && parsed.textDelta) {
                   assistantText += parsed.textDelta;
                 }
-              } catch (e) {
+              } catch (_e) {
                 // Ignore parsing errors for malformed chunks
               }
             }

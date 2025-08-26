@@ -207,7 +207,11 @@ export function analyzeCorruption(messages: unknown[]): {
     legacyString: 0,
     corruptArray: 0,
     unknown: 0,
-    examples: {} as any
+    examples: {} as {
+      legacyString?: unknown;
+      corruptArray?: unknown;
+      unknown?: unknown;
+    }
   };
 
   for (const message of messages) {
