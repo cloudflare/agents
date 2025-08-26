@@ -288,6 +288,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
       const reader = response.body.getReader();
       let fullBody = "";
+      let assistantText = "";
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -295,6 +297,23 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
           const body = decoder.decode(value);
           fullBody += body;
+
+          // Extract text content from SSE chunks for storage
+          // Parse each line that starts with "0:" which contains the text content
+          const lines = body.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("0:")) {
+              try {
+                const jsonPart = line.slice(2); // Remove "0:" prefix
+                const parsed = JSON.parse(jsonPart);
+                if (parsed.type === "text-delta" && parsed.textDelta) {
+                  assistantText += parsed.textDelta;
+                }
+              } catch (e) {
+                // Ignore parsing errors for malformed chunks
+              }
+            }
+          }
 
           this._broadcastChatMessage({
             body,
@@ -319,7 +338,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          parts: [{ type: "text", text: fullBody }]
+          parts: [{ type: "text", text: assistantText || fullBody }] // Fallback to fullBody if parsing fails
         }
       ]);
     });
