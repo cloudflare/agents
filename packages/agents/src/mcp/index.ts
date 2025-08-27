@@ -17,7 +17,12 @@ import type {
   WSMessage
 } from "../";
 import { Agent } from "../index";
-import type { MaybePromise, ServeOptions, TransportType } from "./types";
+import type {
+  MaybeConnectionTag,
+  MaybePromise,
+  ServeOptions,
+  TransportType
+} from "./types";
 import {
   createLegacySseHandler,
   createStreamingHttpHandler,
@@ -38,6 +43,7 @@ export abstract class McpAgent<
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
   // The connection ID for server-sent requests/notifications
   private _standaloneSseConnectionId?: string;
+  props?: Props;
 
   abstract server: MaybePromise<McpServer | Server>;
   abstract init(): Promise<void>;
@@ -47,16 +53,16 @@ export abstract class McpAgent<
 
     // Re-set the standalone SSE connection ID if
     // coming out of hibernation
-    for (const ws of this.getConnections()) {
-      const meta = ws.deserializeAttachment();
+    for (const ws of this.getConnections<MaybeConnectionTag>()) {
+      const meta = ws.state;
       if (meta?.role === STANDALONE_SSE_MARKER) {
-        this._standaloneSseConnectionId = meta?.connectionId;
+        this._standaloneSseConnectionId = ws.id;
         return;
       }
     }
   }
 
-  /**
+  /*
    * Helpers
    */
 
@@ -123,12 +129,18 @@ export abstract class McpAgent<
     }
   }
 
-  /**
+  /*
    * Base Agent / Parykit Server overrides
    */
 
   // Sets up the MCP transport and server every time the Agent is started.
-  async onStart() {
+  async onStart(props?: Props) {
+    // If onStart was passed props, save them in storage
+    if (props) {
+      await this.ctx.storage.put("props", props);
+    }
+    this.props = await this.ctx.storage.get("props");
+
     await this.init();
     const server = await this.server;
     // Connect to the MCP server
@@ -193,9 +205,8 @@ export abstract class McpAgent<
         );
         standaloneSseSocket?.close(1000, "replaced");
       }
-      connection.serializeAttachment({
-        role: STANDALONE_SSE_MARKER,
-        connectionId: connection.id
+      connection.setState({
+        role: STANDALONE_SSE_MARKER
       });
 
       this._standaloneSseConnectionId = connection.id;
@@ -234,7 +245,7 @@ export abstract class McpAgent<
     }
   }
 
-  /**
+  /*
    * Transport ingress and routing
    */
 
