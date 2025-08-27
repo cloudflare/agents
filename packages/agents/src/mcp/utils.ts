@@ -567,9 +567,7 @@ export const createLegacySseHandler = (
         new Request(request.url, {
           headers: {
             ...existingHeaders,
-            Upgrade: "websocket",
-            // Required by PartyServer
-            "x-partykit-room": sessionId
+            Upgrade: "websocket"
           }
         })
       );

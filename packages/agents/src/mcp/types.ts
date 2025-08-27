@@ -1,4 +1,5 @@
 export type MaybePromise<T> = T | Promise<T>;
+export type MaybeConnectionTag = { role: string } | undefined;
 
 export type TransportType = "sse" | "streamable-http";
 

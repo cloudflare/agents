@@ -618,7 +618,7 @@ export class Agent<
     };
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async () => {
+    this.onStart = async (props?: Props) => {
       return agentContext.run(
         {
           agent: this,
@@ -678,7 +678,7 @@ export class Agent<
                   });
               });
             }
-            return _onStart();
+            return _onStart(props);
           });
         }
       );

@@ -40,7 +40,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       {},
       async (): Promise<CallToolResult> => {
         return {
-          content: [{ text: this.props.testValue, type: "text" }]
+          content: [{ text: this.props?.testValue ?? "unknown", type: "text" }]
         };
       }
     );
