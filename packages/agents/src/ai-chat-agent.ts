@@ -180,70 +180,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
-  private async _drainStream(stream: ReadableStream<Uint8Array>) {
-    const reader = stream.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        decoder.decode(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  }
-
-  private async _processAndDrainStream(response: Response) {
-    if (!response.body) return;
-
-    const reader = response.body.getReader();
-    let currentTextContent = "";
-    const messageParts: Array<{ type: "text"; text: string }> = [];
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value);
-        const lines = chunk.split("\n");
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-
-          // Handle AI SDK v5 format ("0:" prefix)
-          if (line.startsWith("0:")) {
-            try {
-              const jsonPart = line.slice(2);
-              const parsed = JSON.parse(jsonPart);
-
-              if (parsed.type === "text-delta") {
-                currentTextContent += parsed.textDelta || "";
-              }
-            } catch (_e) {
-              // Ignore parsing errors
-            }
-          }
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    // Save the assistant's response
-    if (currentTextContent) {
-      messageParts.push({ type: "text", text: currentTextContent });
-      await this.persistMessages([
-        ...this.messages,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          parts: messageParts
-        } as ChatMessage
-      ]);
-    }
-  }
-
   /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
@@ -267,14 +203,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
-    const response = await this.onChatMessage(async () => {
-      // In v5, persistence is handled after streaming is complete
-      // The result contains the final messages
-    });
-    if (response?.body) {
-      // Process and drain the response stream
-      await this._processAndDrainStream(response);
-    }
+    const response = await this.onChatMessage(async () => {});
+    return response;
   }
 
   async persistMessages(
@@ -298,137 +228,43 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   private async _reply(id: string, response: Response) {
-    // Process the v5 streaming response
     return this._tryCatchChat(async () => {
-      if (!response.body) return;
+      if (!response.body) {
+        // Send empty response if no body
+        this._broadcastChatMessage({
+          body: "",
+          done: true,
+          id,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        });
+        return;
+      }
 
       const reader = response.body.getReader();
-      const messageParts: Array<
-        | { type: "text"; text: string }
-        | {
-            type: "tool-call";
-            toolCallId: string;
-            toolName: string;
-            args: unknown;
-          }
-      > = [];
-      let currentTextContent = "";
-      const currentToolCalls: Array<{
-        toolCallId: string;
-        toolName: string;
-        args: unknown;
-      }> = [];
-
       try {
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value);
-
-          // Parse SSE format
-          const lines = chunk.split("\n");
-          for (const line of lines) {
-            if (!line.trim()) continue;
-
-            // Handle AI SDK v5 format ("0:" prefix)
-            if (line.startsWith("0:")) {
-              try {
-                const jsonPart = line.slice(2);
-                const parsed = JSON.parse(jsonPart);
-
-                switch (parsed.type) {
-                  case "text-delta": {
-                    const text = parsed.textDelta || "";
-                    currentTextContent += text;
-                    // Broadcast text delta
-                    this._broadcastChatMessage({
-                      body: text,
-                      done: false,
-                      id,
-                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                    });
-                    break;
-                  }
-
-                  case "tool-call":
-                    // Collect tool calls
-                    currentToolCalls.push({
-                      toolCallId: parsed.toolCallId,
-                      toolName: parsed.toolName,
-                      args: parsed.args
-                    });
-                    break;
-
-                  case "error": {
-                    // Handle error events
-                    const errorMessage =
-                      parsed.error?.message || "An error occurred";
-                    this._broadcastChatMessage({
-                      body: errorMessage,
-                      done: true,
-                      id,
-                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                      error: true
-                    });
-
-                    // Save error as message part
-                    await this.persistMessages([
-                      ...this.messages,
-                      {
-                        id: crypto.randomUUID(),
-                        role: "assistant",
-                        parts: [{ type: "text", text: errorMessage }]
-                      } as ChatMessage
-                    ]);
-                    return;
-                  }
-                }
-              } catch (_e) {
-                // Ignore parsing errors
-              }
-            }
+          if (done) {
+            // Send final completion signal
+            this._broadcastChatMessage({
+              body: "",
+              done: true,
+              id,
+              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            });
+            break;
           }
+          const chunk = decoder.decode(value);
+          this._broadcastChatMessage({
+            body: chunk,
+            done: false,
+            id,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          });
         }
       } finally {
         reader.releaseLock();
       }
-
-      // Send completion signal
-      this._broadcastChatMessage({
-        body: "",
-        done: true,
-        id,
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-      });
-
-      // Build message parts array
-      if (currentTextContent) {
-        messageParts.push({ type: "text", text: currentTextContent });
-      }
-
-      // Add tool calls as parts
-      for (const toolCall of currentToolCalls) {
-        messageParts.push({
-          type: "tool-call",
-          toolCallId: toolCall.toolCallId,
-          toolName: toolCall.toolName,
-          args: toolCall.args
-        });
-      }
-
-      // Save the complete message with all parts
-      await this.persistMessages([
-        ...this.messages,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          parts:
-            messageParts.length > 0
-              ? messageParts
-              : [{ type: "text", text: currentTextContent || "" }]
-        } as ChatMessage
-      ]);
     });
   }
 
