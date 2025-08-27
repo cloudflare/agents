@@ -3,11 +3,12 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { convertToModelMessages } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
-import type { IncomingMessage, OutgoingMessage } from "./ai-types";
-import { MessageType } from "./ai-types";
-import { needsMigration, migrateMessagesToUIFormat } from "./ai-migration";
+import {
+  MessageType,
+  type IncomingMessage,
+  type OutgoingMessage
+} from "./ai-types";
 
 const decoder = new TextDecoder();
 
@@ -33,23 +34,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       message text not null,
       created_at datetime default current_timestamp
     )`;
-    const rawMessages = this.sql`select * from cf_ai_chat_agent_messages` || [];
-
-    this.messages = rawMessages.map((row) => {
+    this.messages = (
+      this.sql`select * from cf_ai_chat_agent_messages` || []
+    ).map((row) => {
       return JSON.parse(row.message as string);
     });
-
-    // Check if any messages need migration and log notice
-    if (needsMigration(this.messages)) {
-      console.warn(
-        "🔄 [AIChatAgent] Detected messages in legacy format (role/content). " +
-          "These will continue to work but consider migrating to the new message format " +
-          "for better compatibility with AI SDK v5 features.\n" +
-          "To migrate: import { migrateMessagesToUIFormat } from '@cloudflare/agents' and call " +
-          "await this.persistMessages(migrateMessagesToUIFormat(this.messages))\n" +
-          "See https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0 for more info."
-      );
-    }
 
     this._chatMessageAbortControllers = new Map();
   }
@@ -109,8 +98,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
         return this._tryCatchChat(async () => {
           const response = await this.onChatMessage(
-            async (_finishResult) => {
-              // each agent that extends AIChatAgent handles persistence in their own onChatMessage method
+            async () => {
+              // In v5, we handle the result differently
+              // The onFinish callback provides the complete result including messages
               this._removeAbortController(chatMessageId);
 
               this.observability?.emit(
@@ -190,30 +180,67 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
-  /**
-   * Safely converts the current messages to the format expected by AI SDK model functions
-   * Automatically handles corrupt message formats before conversion
-   * @returns Messages converted to ModelMessage format for use with streamText, generateText, etc.
-   */
-  protected getModelMessages() {
-    // First, clean any corrupt messages to ensure safe conversion
-    const cleanMessages = migrateMessagesToUIFormat(this.messages);
-    return convertToModelMessages(cleanMessages);
+  private async _drainStream(stream: ReadableStream<Uint8Array>) {
+    const reader = stream.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        decoder.decode(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
-  /**
-   * Safe wrapper for convertToModelMessages with automatic corruption handling
-   * @param messages - Messages to convert (will be cleaned if needed)
-   * @returns Safely converted ModelMessages
-   */
-  protected convertToModelMessagesSafe(messages: ChatMessage[]) {
+  private async _processAndDrainStream(response: Response) {
+    if (!response.body) return;
+
+    const reader = response.body.getReader();
+    let currentTextContent = "";
+    const messageParts: Array<{ type: "text"; text: string }> = [];
+
     try {
-      const cleanMessages = migrateMessagesToUIFormat(messages);
-      return convertToModelMessages(cleanMessages);
-    } catch (error) {
-      console.error("❌ Failed to convert messages safely:", error);
-      // Return empty array as fallback to prevent crashes
-      return [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+
+          // Handle AI SDK v5 format ("0:" prefix)
+          if (line.startsWith("0:")) {
+            try {
+              const jsonPart = line.slice(2);
+              const parsed = JSON.parse(jsonPart);
+
+              if (parsed.type === "text-delta") {
+                currentTextContent += parsed.textDelta || "";
+              }
+            } catch (_e) {
+              // Ignore parsing errors
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    // Save the assistant's response
+    if (currentTextContent) {
+      messageParts.push({ type: "text", text: currentTextContent });
+      await this.persistMessages([
+        ...this.messages,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          parts: messageParts
+        } as ChatMessage
+      ]);
     }
   }
 
@@ -236,28 +263,17 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   /**
    * Save messages on the server side and trigger AI response
-   * Now includes corruption detection to prevent future data issues
    * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
-    // Check for corruption and warn if found
-    if (needsMigration(messages)) {
-      console.warn(
-        "⚠️  saveMessages() detected corrupt message formats. Consider migrating data first."
-      );
-      // Auto-clean the messages to prevent corruption
-      const cleanMessages = migrateMessagesToUIFormat(messages);
-      await this.persistMessages(cleanMessages);
-    } else {
-      await this.persistMessages(messages);
-    }
-
-    const response = await this.onChatMessage(async (_finishResult) => {
-      //  each agent that extends AIChatAgent handles persistence in their own onChatMessage method
+    await this.persistMessages(messages);
+    const response = await this.onChatMessage(async () => {
+      // In v5, persistence is handled after streaming is complete
+      // The result contains the final messages
     });
-    if (response) {
-      // Properly drain the response stream
-      await this._drainStream(response.body);
+    if (response?.body) {
+      // Process and drain the response stream
+      await this._processAndDrainStream(response);
     }
   }
 
@@ -282,87 +298,103 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   private async _reply(id: string, response: Response) {
-    // now take chunks out from dataStreamResponse and send them to the client
+    // Process the v5 streaming response
     return this._tryCatchChat(async () => {
       if (!response.body) return;
 
       const reader = response.body.getReader();
-      let fullBody = "";
-      let assistantText = "";
+      const messageParts: Array<
+        | { type: "text"; text: string }
+        | {
+            type: "tool-call";
+            toolCallId: string;
+            toolName: string;
+            args: unknown;
+          }
+      > = [];
+      let currentTextContent = "";
+      const currentToolCalls: Array<{
+        toolCallId: string;
+        toolName: string;
+        args: unknown;
+      }> = [];
 
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const body = decoder.decode(value);
-          fullBody += body;
+          const chunk = decoder.decode(value);
 
-          // Extract text content from AI SDK v5 SSE format
-          const lines = body.split("\n");
-          let streamChunk = "";
-
+          // Parse SSE format
+          const lines = chunk.split("\n");
           for (const line of lines) {
+            if (!line.trim()) continue;
+
             // Handle AI SDK v5 format ("0:" prefix)
             if (line.startsWith("0:")) {
               try {
-                const jsonPart = line.slice(2); // Remove "0:" prefix
+                const jsonPart = line.slice(2);
                 const parsed = JSON.parse(jsonPart);
-                if (parsed.type === "text-delta") {
-                  const text = parsed.textDelta || parsed.delta || "";
-                  assistantText += text;
-                  streamChunk += text;
-                } else if (parsed.type === "error") {
-                  // Handle error events from the AI model
-                  const errorMessage =
-                    parsed.error?.message ||
-                    parsed.message ||
-                    "An error occurred";
-                  this._broadcastChatMessage({
-                    body: errorMessage,
-                    done: true,
-                    id,
-                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                    error: true
-                  });
-                  return; // Stop processing on error
-                }
-              } catch (_e) {
-                // Ignore parsing errors for malformed chunks
-              }
-            }
-            // Handle standard SSE format with "data:" prefix
-            else if (line.startsWith("data: ")) {
-              try {
-                const jsonPart = line.slice(6); // Remove "data: " prefix
-                if (jsonPart === "[DONE]") break;
-                const parsed = JSON.parse(jsonPart);
-                // Handle AI SDK v5 text-delta format
-                if (parsed.type === "text-delta") {
-                  const text = parsed.textDelta || parsed.delta || "";
-                  assistantText += text;
-                  streamChunk += text;
-                }
-              } catch (_e) {
-                // Ignore parsing errors for malformed chunks
-              }
-            }
-          }
 
-          // Only broadcast if we have actual text content to send
-          if (streamChunk) {
-            this._broadcastChatMessage({
-              body: streamChunk,
-              done: false,
-              id,
-              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-            });
+                switch (parsed.type) {
+                  case "text-delta": {
+                    const text = parsed.textDelta || "";
+                    currentTextContent += text;
+                    // Broadcast text delta
+                    this._broadcastChatMessage({
+                      body: text,
+                      done: false,
+                      id,
+                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                    });
+                    break;
+                  }
+
+                  case "tool-call":
+                    // Collect tool calls
+                    currentToolCalls.push({
+                      toolCallId: parsed.toolCallId,
+                      toolName: parsed.toolName,
+                      args: parsed.args
+                    });
+                    break;
+
+                  case "error": {
+                    // Handle error events
+                    const errorMessage =
+                      parsed.error?.message || "An error occurred";
+                    this._broadcastChatMessage({
+                      body: errorMessage,
+                      done: true,
+                      id,
+                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                      error: true
+                    });
+
+                    // Save error as message part
+                    await this.persistMessages([
+                      ...this.messages,
+                      {
+                        id: crypto.randomUUID(),
+                        role: "assistant",
+                        parts: [{ type: "text", text: errorMessage }]
+                      } as ChatMessage
+                    ]);
+                    return;
+                  }
+                }
+              } catch (_e) {
+                // Ignore parsing errors
+              }
+            }
           }
         }
       } finally {
         reader.releaseLock();
       }
 
+      // Send completion signal
       this._broadcastChatMessage({
         body: "",
         done: true,
@@ -370,13 +402,32 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
       });
 
+      // Build message parts array
+      if (currentTextContent) {
+        messageParts.push({ type: "text", text: currentTextContent });
+      }
+
+      // Add tool calls as parts
+      for (const toolCall of currentToolCalls) {
+        messageParts.push({
+          type: "tool-call",
+          toolCallId: toolCall.toolCallId,
+          toolName: toolCall.toolName,
+          args: toolCall.args
+        });
+      }
+
+      // Save the complete message with all parts
       await this.persistMessages([
         ...this.messages,
         {
           id: crypto.randomUUID(),
           role: "assistant",
-          parts: [{ type: "text", text: assistantText || fullBody }] // Fallback to fullBody if parsing fails
-        }
+          parts:
+            messageParts.length > 0
+              ? messageParts
+              : [{ type: "text", text: currentTextContent || "" }]
+        } as ChatMessage
       ]);
     });
   }
@@ -425,26 +476,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       controller?.abort();
     }
     this._chatMessageAbortControllers.clear();
-  }
-
-  /**
-   * Properly drains and cancels a ReadableStream
-   */
-  private async _drainStream(stream: ReadableStream<Uint8Array> | null) {
-    if (!stream) return;
-
-    const reader = stream.getReader();
-    try {
-      // Read all chunks to drain the stream
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done } = await reader.read();
-        if (done) break;
-      }
-    } finally {
-      // Always release the reader lock
-      reader.releaseLock();
-    }
   }
 
   /**
