@@ -159,37 +159,36 @@ for await (const chunk of result.fullStream) {
 }
 ```
 
-### 6. Message Persistence and Migration
+### 6. Automatic Message Migration ✨
 
-The SDK automatically detects legacy message formats but **does NOT automatically rewrite your stored messages**. When old format messages are detected, you'll see a console warning:
+**The SDK automatically migrates all message formats** - no manual migration needed! Following the pattern from [this blog post](https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages), all legacy messages are transformed automatically.
 
-```
-🔄 [AIChatAgent] Detected messages in legacy format (role/content). These will continue to work but consider migrating to the new message format for better compatibility with AI SDK v5 features.
-To migrate: import { migrateMessagesToUIFormat } from '@cloudflare/agents' and call await this.persistMessages(migrateMessagesToUIFormat(this.messages))
-```
+**Automatic migration handles:**
 
-#### Important Notes:
+- **Legacy v4 format**: `{role: "user", content: "text"}` → `{role: "user", parts: [{type: "text", text}]}`
+- **Tool calls**: v4 `toolInvocations` → v5 tool parts with proper state mapping
+- **Reasoning**: Preserves reasoning parts from v4 messages
+- **File/media**: Converts file data/URLs to proper v5 media format
+- **Corrupt formats**: Fixes malformed message structures
+- **Missing IDs**: Generates UUIDs for messages without IDs
 
-- **No automatic rewriting**: The SDK reads and works with old format messages but doesn't modify your stored data
-- **Backward compatibility**: Your existing messages will continue to work without migration
-- **Manual migration**: You control when/if to migrate your data
+**Works automatically in:**
 
-#### How to migrate stored messages:
+- Loading messages from database (constructor)
+- Incoming message processing
+- All message entry points
+
+**Optional manual utilities:**
 
 ```typescript
-import { migrateMessagesToUIFormat } from "@cloudflare/agents";
+import { autoTransformMessages, analyzeCorruption } from "agents";
 
-class MyAgent extends AIChatAgent<Env> {
-  async migrateStoredMessages() {
-    // Convert messages to new format
-    const migratedMessages = migrateMessagesToUIFormat(this.messages);
+// Manual transformation (usually not needed)
+const cleanMessages = autoTransformMessages(anyFormatMessages);
 
-    // Persist the migrated messages
-    await this.persistMessages(migratedMessages);
-
-    console.log("Messages migrated to UIMessage format");
-  }
-}
+// Analyze existing message formats
+const stats = analyzeCorruption(messages);
+console.log(`Found ${stats.legacyString} legacy messages`);
 ```
 
 ## Step-by-Step Migration
@@ -197,7 +196,17 @@ class MyAgent extends AIChatAgent<Env> {
 ### Step 1: Update Dependencies
 
 ```bash
-npm update @cloudflare/agents ai
+npm update ai
+```
+
+Make sure you're on AI SDK v5.x. Check your package.json:
+
+```json
+{
+  "dependencies": {
+    "ai": "^5.0.0"
+  }
+}
 ```
 
 ### Step 2: Update Imports
@@ -224,51 +233,49 @@ Find all tool definitions and rename `parameters` to `inputSchema`:
 
 ### Step 5: (Optional) Migrate Legacy Messages
 
-The Agents SDK now provides migration utilities to help convert messages to the new format:
+Use the migration utilities to convert stored messages:
 
 ```typescript
 import {
-  migrateToUIMessage,
-  migrateMessagesToUIFormat,
   needsMigration,
-  isUIMessage
+  migrateMessagesToUIFormat,
+  analyzeCorruption
 } from "@cloudflare/agents";
 
-// Check if migration is needed
-if (needsMigration(messages)) {
-  console.log("Some messages need migration");
-}
+// In your agent class
+if (needsMigration(this.messages)) {
+  // Optional: analyze what types of corruption exist
+  const stats = analyzeCorruption(this.messages);
+  console.log(
+    `Migrating ${stats.legacyString} legacy and ${stats.corruptArray} corrupt messages`
+  );
 
-// Migrate a single message
-const newMessage = migrateToUIMessage(oldMessage);
-
-// Migrate an array of messages
-const newMessages = migrateMessagesToUIFormat(oldMessages);
-
-// Check if a message is already in UIMessage format
-if (isUIMessage(message)) {
-  console.log("Message is already in new format");
+  // Migrate and save
+  const cleanMessages = migrateMessagesToUIFormat(this.messages);
+  await this.saveMessages(cleanMessages);
 }
 ```
 
-Note: The SDK handles this conversion automatically at runtime, so manual migration is usually not necessary. These utilities are provided for cases where you want to explicitly migrate stored messages.
-
-## Converting Messages to New Format
-
-The SDK automatically handles old format messages, but if you want to convert them:
-
-### Automatic Conversion (Recommended)
+## Migration Utilities Reference
 
 ```typescript
-import { convertToModelMessages } from "ai";
+// Type guards
+isUIMessage(message); // Check if already in v5 format
+needsMigration(messages); // Check if any messages need migration
 
-// Converts any message format to model-compatible format
-const modelMessages = convertToModelMessages(messages);
+// Migration functions
+migrateToUIMessage(message); // Migrate single message
+migrateMessagesToUIFormat(messages); // Migrate array of messages
+
+// Analysis tools
+analyzeCorruption(messages); // Get stats about message format issues
 ```
 
-### Manual Conversion
+Migration handles:
 
-Use the migration utilities from Step 5 above. The Agents SDK now provides these utilities for explicit migration when needed.
+- `{role, content: string}` → `{role, parts: [{type: "text", text}]}`
+- `{role, content: [{type, text}]}` → `{role, parts: [{type, text}]}`
+- Preserves additional properties and generates missing IDs
 
 ## Additional Changes
 

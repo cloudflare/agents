@@ -1923,6 +1923,8 @@ export class StreamingResponse {
 
 // AI SDK v5 Migration utilities
 export {
+  autoTransformMessage,
+  autoTransformMessages,
   migrateToUIMessage,
   migrateMessagesToUIFormat,
   needsMigration,

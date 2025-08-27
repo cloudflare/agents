@@ -1,8 +1,43 @@
 import type { UIMessage } from "ai";
 
 /**
- * Utility to help migrate messages from AI SDK v4 format to v5 UIMessage format
+ * AI SDK v5 Migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
+ * Using exact types from the official AI SDK documentation
  */
+
+/**
+ * AI SDK v5 Message Part types reference (from official AI SDK documentation)
+ *
+ * The migration logic below transforms legacy messages to match these official AI SDK v5 formats:
+ * - TextUIPart: { type: "text", text: string, state?: "streaming" | "done" }
+ * - ReasoningUIPart: { type: "reasoning", text: string, state?: "streaming" | "done", providerMetadata?: Record<string, unknown> }
+ * - FileUIPart: { type: "file", mediaType: string, filename?: string, url: string }
+ * - ToolUIPart: { type: `tool-${string}`, toolCallId: string, state: "input-streaming" | "input-available" | "output-available" | "output-error", input?: Record<string, unknown>, output?: unknown, errorText?: string, providerExecuted?: boolean }
+ */
+
+/**
+ * Tool invocation from v4 format
+ */
+type ToolInvocation = {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: unknown;
+  state: "partial-call" | "call" | "result" | "error";
+};
+
+/**
+ * Legacy part from v4 format
+ */
+type LegacyPart = {
+  type: string;
+  text?: string;
+  url?: string;
+  data?: string;
+  mimeType?: string;
+  mediaType?: string;
+  filename?: string;
+};
 
 /**
  * Legacy message format from AI SDK v4
@@ -11,24 +46,46 @@ export type LegacyMessage = {
   id?: string;
   role: string;
   content: string;
-  [key: string]: unknown; // Allow additional properties
+  reasoning?: string;
+  toolInvocations?: ToolInvocation[];
+  parts?: LegacyPart[];
+  [key: string]: unknown;
+};
+
+/**
+ * Corrupt content item
+ */
+type CorruptContentItem = {
+  type: string;
+  text: string;
 };
 
 /**
  * Corrupted message format - has content as array instead of parts
- * This is the specific corruption pattern: {role: "user", content: [{type: "text", text: "..."}]}
  */
 export type CorruptArrayMessage = {
   id?: string;
   role: string;
-  content: Array<{ type: string; text: string }>;
-  [key: string]: unknown; // Allow additional properties
+  content: CorruptContentItem[];
+  reasoning?: string;
+  toolInvocations?: ToolInvocation[];
+  [key: string]: unknown;
 };
 
 /**
  * Union type for messages that could be in any format
  */
 export type MigratableMessage = LegacyMessage | CorruptArrayMessage | UIMessage;
+
+/**
+ * Tool call state mapping for v4 to v5 migration
+ */
+const STATE_MAP = {
+  "partial-call": "input-streaming",
+  call: "input-available",
+  result: "output-available",
+  error: "output-error"
+} as const;
 
 /**
  * Checks if a message is already in the UIMessage format (has parts array)
@@ -75,86 +132,166 @@ function isCorruptArrayMessage(
 }
 
 /**
- * Migrates a single message from any format to UIMessage format
- * @param message - Message in old, corrupt, or new format
- * @returns UIMessage in the new format
+ * Internal message part type for transformation
  */
-export function migrateToUIMessage(message: MigratableMessage): UIMessage {
-  // Already in new format
+type TransformMessagePart = {
+  type: string;
+  text?: string;
+  toolCallId?: string;
+  state?: string;
+  input?: Record<string, unknown>;
+  output?: unknown;
+  url?: string;
+  mediaType?: string;
+  errorText?: string;
+  filename?: string;
+};
+
+/**
+ * Input message that could be in any format - using unknown for flexibility
+ */
+type InputMessage = {
+  id?: string;
+  role?: string;
+  content?: unknown;
+  reasoning?: string;
+  toolInvocations?: unknown[];
+  parts?: unknown[];
+  [key: string]: unknown;
+};
+
+/**
+ * Automatic message transformer following the blog post pattern
+ * Handles comprehensive migration from AI SDK v4 to v5 format
+ * @param message - Message in any legacy format
+ * @param index - Index for ID generation fallback
+ * @returns UIMessage in v5 format
+ */
+export function autoTransformMessage(
+  message: InputMessage,
+  index = 0
+): UIMessage {
+  // Already in v5 format
   if (isUIMessage(message)) {
     return message;
   }
 
-  // Handle corrupt array format: {role: "user", content: [{type: "text", text: "..."}]}
-  if (isCorruptArrayMessage(message)) {
-    const baseMessage = {
-      id: message.id || crypto.randomUUID(),
-      role: message.role,
-      parts: message.content.map((item) => ({
-        type: (item.type || "text") as "text", // Default to "text" if type is missing
-        text: item.text || "" // Default to empty string if text is missing
-      }))
-    };
+  const parts: TransformMessagePart[] = [];
 
-    // Preserve any additional properties except id, role, and content
-    const additionalProps = Object.fromEntries(
-      Object.entries(message).filter(
-        ([key]) => !["id", "role", "content"].includes(key)
-      )
-    );
-
-    return { ...baseMessage, ...additionalProps } as UIMessage;
+  // Handle reasoning transformation
+  if (message.reasoning) {
+    parts.push({
+      type: "reasoning",
+      text: message.reasoning
+    });
   }
 
-  // Handle legacy format with role and content as string
-  if (isLegacyMessage(message)) {
-    const baseMessage = {
-      id: message.id || crypto.randomUUID(),
-      role: message.role,
-      parts: [
-        {
-          type: "text" as const,
-          text: message.content
-        }
-      ]
-    };
-
-    // Preserve any additional properties except id, role, and content
-    const additionalProps = Object.fromEntries(
-      Object.entries(message).filter(
-        ([key]) => !["id", "role", "content"].includes(key)
-      )
-    );
-
-    return { ...baseMessage, ...additionalProps } as UIMessage;
-  }
-
-  // Fallback for completely malformed messages - create a safe default
-  console.warn("Unknown message format, creating fallback message:", message);
-  return {
-    id: crypto.randomUUID(),
-    role: "user", // Default to user role
-    parts: [
-      {
-        type: "text" as const,
-        text:
-          typeof message === "object" && message !== null
-            ? JSON.stringify(message)
-            : String(message || "")
+  // Handle tool invocations transformation
+  if (message.toolInvocations && Array.isArray(message.toolInvocations)) {
+    message.toolInvocations.forEach((inv: unknown) => {
+      if (typeof inv === "object" && inv !== null && "toolName" in inv) {
+        const invObj = inv as ToolInvocation;
+        parts.push({
+          type: `tool-${invObj.toolName}`,
+          toolCallId: invObj.toolCallId,
+          state:
+            STATE_MAP[invObj.state as keyof typeof STATE_MAP] ||
+            "input-available",
+          input: invObj.args,
+          output: invObj.result
+        });
       }
-    ]
+    });
+  }
+
+  // Handle file parts transformation
+  if (message.parts && Array.isArray(message.parts)) {
+    message.parts.forEach((part: unknown) => {
+      if (typeof part === "object" && part !== null && "type" in part) {
+        const partObj = part as LegacyPart;
+        if (partObj.type === "file") {
+          parts.push({
+            type: "file",
+            url:
+              partObj.url ||
+              (partObj.data
+                ? `data:${partObj.mimeType || partObj.mediaType};base64,${partObj.data}`
+                : undefined),
+            mediaType: partObj.mediaType || partObj.mimeType,
+            filename: partObj.filename
+          });
+        }
+      }
+    });
+  }
+
+  // Handle corrupt array format: {role: "user", content: [{type: "text", text: "..."}]}
+  if (Array.isArray(message.content)) {
+    message.content.forEach((item: unknown) => {
+      if (typeof item === "object" && item !== null && "text" in item) {
+        const itemObj = item as CorruptContentItem;
+        parts.push({
+          type: itemObj.type || "text",
+          text: itemObj.text || ""
+        });
+      }
+    });
+  }
+
+  // Fallback: convert plain content to text part
+  if (!parts.length && message.content !== undefined) {
+    parts.push({
+      type: "text",
+      text:
+        typeof message.content === "string"
+          ? message.content
+          : JSON.stringify(message.content)
+    });
+  }
+
+  // If still no parts, create a default text part
+  if (!parts.length) {
+    parts.push({
+      type: "text",
+      text: typeof message === "string" ? message : JSON.stringify(message)
+    });
+  }
+
+  return {
+    id: message.id || `msg-${index}`,
+    role:
+      message.role === "data"
+        ? "system"
+        : (message.role as "user" | "assistant" | "system") || "user",
+    parts: parts as UIMessage["parts"]
   };
 }
 
 /**
- * Migrates an array of messages to UIMessage format
+ * Legacy single message migration for backward compatibility
+ */
+export function migrateToUIMessage(message: MigratableMessage): UIMessage {
+  return autoTransformMessage(message as InputMessage);
+}
+
+/**
+ * Automatic message transformer for arrays following the blog post pattern
+ * @param messages - Array of messages in any format
+ * @returns Array of UIMessages in v5 format
+ */
+export function autoTransformMessages(messages: unknown[]): UIMessage[] {
+  return messages.map((msg, i) => autoTransformMessage(msg as InputMessage, i));
+}
+
+/**
+ * Migrates an array of messages to UIMessage format (legacy compatibility)
  * @param messages - Array of messages in old or new format
  * @returns Array of UIMessages in the new format
  */
 export function migrateMessagesToUIFormat(
   messages: MigratableMessage[]
 ): UIMessage[] {
-  return messages.map(migrateToUIMessage);
+  return autoTransformMessages(messages as InputMessage[]);
 }
 
 /**
