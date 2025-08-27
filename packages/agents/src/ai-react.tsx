@@ -187,9 +187,8 @@ export function useAgentChat<State = unknown>(
         if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
           if (data.id === id) {
             if (data.error) {
-              // Handle error response - enqueue the error message before closing
-              controller.enqueue(new TextEncoder().encode(data.body));
-              controller.close();
+              // Handle error response - close stream and throw error
+              controller.error(new Error(data.body));
               abortController.abort();
             } else {
               controller.enqueue(new TextEncoder().encode(data.body));
