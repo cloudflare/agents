@@ -17,7 +17,7 @@ type Env = {
 };
 
 export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
-  server = new McpServer({
+  mcp = new McpServer({
     name: "Elicitation Demo Server",
     version: "1.0.0"
   });
@@ -83,7 +83,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
 
   async init() {
     // Counter tool with user confirmation via elicitation
-    this.server.tool(
+    this.mcp.tool(
       "increment-counter",
       "Increment the counter with user confirmation",
       {
@@ -151,7 +151,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
     );
 
     // User creation tool with form-based elicitation
-    this.server.tool(
+    this.mcp.tool(
       "create-user",
       "Create a new user with form input",
       {
@@ -225,7 +225,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
     );
 
     // Counter resource
-    this.server.resource("counter", "mcp://resource/counter", (uri: URL) => {
+    this.mcp.resource("counter", "mcp://resource/counter", (uri: URL) => {
       return {
         contents: [
           {

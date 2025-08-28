@@ -291,7 +291,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  mcp: MCPClientManager = new MCPClientManager(this._ParentClass.name, "0.0.1");
+  mcpClientManager: MCPClientManager = new MCPClientManager(
+    this._ParentClass.name,
+    "0.0.1"
+  );
 
   /**
    * Initial state for the Agent
@@ -441,8 +444,8 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          if (this.mcp.isCallbackRequest(request)) {
-            await this.mcp.handleCallbackRequest(request);
+          if (this.mcpClientManager.isCallbackRequest(request)) {
+            await this.mcpClientManager.handleCallbackRequest(request);
 
             // after the MCP connection handshake, we can send updated mcp state
             this.broadcast(
@@ -1483,7 +1486,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
       };
     }
 
-    const { id, authUrl, clientId } = await this.mcp.connect(url, {
+    const { id, authUrl, clientId } = await this.mcpClientManager.connect(url, {
       client: options?.client,
       reconnect,
       transport: {
@@ -1500,7 +1503,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
   }
 
   async removeMcpServer(id: string) {
-    this.mcp.closeConnection(id);
+    this.mcpClientManager.closeConnection(id);
     this.sql`
       DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
     `;
@@ -1514,10 +1517,10 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
 
   getMcpServers(): MCPServersState {
     const mcpState: MCPServersState = {
-      prompts: this.mcp.listPrompts(),
-      resources: this.mcp.listResources(),
+      prompts: this.mcpClientManager.listPrompts(),
+      resources: this.mcpClientManager.listResources(),
       servers: {},
-      tools: this.mcp.listTools()
+      tools: this.mcpClientManager.listTools()
     };
 
     const servers = this.sql<MCPServerRow>`
@@ -1526,7 +1529,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
 
     if (servers && Array.isArray(servers) && servers.length > 0) {
       for (const server of servers) {
-        const serverConn = this.mcp.mcpConnections[server.id];
+        const serverConn = this.mcpClientManager.mcpConnections[server.id];
         mcpState.servers[server.id] = {
           auth_url: server.auth_url,
           capabilities: serverConn?.serverCapabilities ?? null,

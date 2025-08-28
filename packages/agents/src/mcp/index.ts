@@ -210,8 +210,24 @@ export abstract class McpAgent<
    */
   private _agent: Agent<Env, State>;
 
-  get mcp() {
-    return this._agent.mcp;
+  get mcpClientManager() {
+    return this._agent.mcpClientManager;
+  }
+
+  /**
+   * Getter that returns the MCP server implementation.
+   * Supports both 'server' and 'mcp' properties for better developer experience.
+   * If 'mcp' property is set, use that; otherwise fall back to 'server' property.
+   */
+  get mcpServer(): MaybePromise<McpServer | Server> {
+    const server = this.mcp ?? this.server;
+    if (!server) {
+      throw new Error(
+        'Neither the `mcp` nor `server` property is set. Please set "mcp".'
+      );
+    }
+
+    return server;
   }
 
   protected constructor(ctx: DurableObjectState, env: Env) {
@@ -333,7 +349,7 @@ export abstract class McpAgent<
     )) as TransportType;
     await this._init(this.props);
 
-    const server = await this.server;
+    const server = await this.mcpServer;
 
     // Connect to the MCP server
     if (this._transportType === "sse") {
@@ -350,8 +366,17 @@ export abstract class McpAgent<
 
   /**
    * McpAgent API
+   * @deprecated Use the `mcp` property instead for better developer experience.
    */
-  abstract server: MaybePromise<McpServer | Server>;
+  server?: MaybePromise<McpServer | Server>;
+  /**
+   * This is only set as optional for backward compatibility in case you're
+   * using the legacy `server` property. It's recommended to use `mcp`.
+   *
+   * In the future, we'll make this a required abstract property to implement
+   * and remove the `server` property.
+   */
+  mcp?: MaybePromise<McpServer | Server>;
   props!: Props;
   initRun = false;
 
@@ -430,7 +455,7 @@ export abstract class McpAgent<
     // This is not the path that the user requested, but the path that the worker
     // generated. We'll use this path to determine which transport to use.
     const path = url.pathname;
-    const server = await this.server;
+    const server = await this.mcpServer;
 
     switch (path) {
       case "/sse": {
