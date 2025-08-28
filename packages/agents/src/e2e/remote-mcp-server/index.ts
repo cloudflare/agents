@@ -2,7 +2,7 @@ import {
   OAuthProvider,
   type OAuthHelpers
 } from "@cloudflare/workers-oauth-provider";
-import OAuthMCP from "./mcp";
+import { WhoamiMCP, AddMCP } from "./mcp";
 
 type Env = {
   OAUTH_PROVIDER: OAuthHelpers;
@@ -16,7 +16,7 @@ const defaultHandler = {
     const url = new URL(request.url);
     const provider = (env as Env).OAUTH_PROVIDER;
     // Health check
-    if (url.pathname === "/") {
+    if (url.pathname === "/health") {
       return new Response("OK");
     }
 
@@ -63,8 +63,10 @@ const defaultHandler = {
 export default new OAuthProvider({
   // Expose both the MCP SSE endpoint and a simple REST API under OAuth
   apiHandlers: {
-    "/sse": OAuthMCP.serveSSE("/sse"),
-    "/mcp": OAuthMCP.serve("/mcp")
+    "/whoami/sse": WhoamiMCP.serveSSE("/whoami/sse", { binding: "WHOAMI_MCP" }),
+    "/whoami/mcp": WhoamiMCP.serve("/whoami/mcp", { binding: "WHOAMI_MCP" }),
+    "/add/sse": AddMCP.serveSSE("/add/sse", { binding: "ADD_MCP" }),
+    "/add/mcp": AddMCP.serve("/add/mcp", { binding: "ADD_MCP" })
   },
   defaultHandler,
   authorizeEndpoint: "/authorize",
@@ -73,4 +75,4 @@ export default new OAuthProvider({
   allowImplicitFlow: true
 });
 
-export { OAuthMCP } from "./mcp";
+export { WhoamiMCP, AddMCP } from "./mcp";

@@ -9,7 +9,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import crypto from "node:crypto";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import {
+  headlessImplicitToken,
+  registerClient,
+  sendPostRequest,
+  textOf,
+  waitForWorker
+} from "./utils";
 
 // Make name unique so parallel tests don't clash
 const testId = `agents-e2e-${crypto.randomBytes(4).toString("hex")}`;
@@ -18,7 +24,7 @@ let authlessWorker: Awaited<ReturnType<typeof Worker>>;
 let oauthWorker: Awaited<ReturnType<typeof Worker>>;
 
 beforeAll(async () => {
-  app = await alchemy("mcp-e2e", { stage: "test", phase: "up" });
+  app = await alchemy("mcp-e2e", { phase: "up" });
 
   // Deploy the workers
   await app.run(async (_) => {
@@ -36,14 +42,19 @@ beforeAll(async () => {
       compatibilityFlags: ["nodejs_compat"],
       bundle: { metafile: true, format: "esm", target: "es2020" }
     });
+    await waitForWorker(authlessWorker.url!);
 
     name = `${testId}-oauth`;
     oauthWorker = await Worker(`${name}-worker`, {
       name,
       entrypoint: "src/e2e/remote-mcp-server/index.ts",
       bindings: {
-        MCP_OBJECT: DurableObjectNamespace("mcp-server", {
-          className: "OAuthMCP",
+        WHOAMI_MCP: DurableObjectNamespace("whoami-mcp", {
+          className: "WhoamiMCP",
+          sqlite: true
+        }),
+        ADD_MCP: DurableObjectNamespace("add-mcp", {
+          className: "AddMCP",
           sqlite: true
         }),
         // required by OAuthProvider
@@ -55,24 +66,14 @@ beforeAll(async () => {
       compatibilityFlags: ["nodejs_compat"],
       bundle: { metafile: true, format: "esm", target: "es2020" }
     });
+    await waitForWorker(oauthWorker.url!);
   });
-  // Give it a second to finish provisioning
-  await new Promise((resolve) => setTimeout(resolve, 1000));
 }, 90_000);
 
 afterAll(async () => {
   await alchemy.destroy(app);
   await app.finalize();
 }, 90_000);
-
-// Helper to pull the first text content from an MCP tool result
-function textOf(result: unknown): string | undefined {
-  if (result && typeof result === "object" && "content" in result) {
-    const content = Array.isArray(result?.content) ? result.content : [];
-    const block = content.find((c: { type: string }) => c && c.type === "text");
-    return block?.text;
-  }
-}
 
 describe("Authless MCP e2e", () => {
   let worker: Awaited<ReturnType<typeof Worker>>;
@@ -83,6 +84,7 @@ describe("Authless MCP e2e", () => {
     let client: Client;
 
     beforeAll(async () => {
+      // Create a first MCP client to our calculator MCP
       client = new Client({ name: "vitest-client", version: "1.0.0" });
       const transport = new StreamableHTTPClientTransport(
         new URL("/mcp", worker.url)
@@ -95,7 +97,7 @@ describe("Authless MCP e2e", () => {
       await client.close?.();
     }, 30_000);
 
-    it("lists tools", async () => {
+    it("lists tools on both MCPs", async () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name);
       expect(names).toContain("add");
@@ -184,7 +186,6 @@ describe("Authless MCP e2e", () => {
 
   describe("Legacy SSE", () => {
     let client: Client;
-
     beforeAll(async () => {
       client = new Client({ name: "vitest-client-sse", version: "1.0.0" });
       const transport = new SSEClientTransport(new URL("/sse", worker.url));
@@ -195,79 +196,21 @@ describe("Authless MCP e2e", () => {
       await client.close?.();
     }, 30_000);
 
-    it("can call add over SSE", async () => {
-      const res = await client.callTool({
+    it("calls add", async () => {
+      const res1 = await client.callTool({
         name: "add",
         arguments: { a: 10, b: 15 }
       });
-      expect(textOf(res)).toBe("25");
+      expect(textOf(res1)).toBe("25");
     });
   });
 });
 
-async function registerClient(base: URL) {
-  const res = await fetch(new URL("/register", base), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      client_name: "e2e",
-      token_endpoint_auth_method: "none",
-      redirect_uris: ["http://localhost/callback"],
-      grant_types: ["implicit", "authorization_code"],
-      response_types: ["token", "code"]
-    })
-  });
-  const j = await res.json<{ client_id: string }>();
-  return j.client_id;
-}
-
-async function headlessImplicitToken(
-  base: URL,
-  clientId: string,
-  email: string
-) {
-  const u = new URL("/authorize", base);
-  u.searchParams.set("response_type", "token");
-  u.searchParams.set("client_id", clientId);
-  u.searchParams.set("redirect_uri", "http://localhost/callback");
-  u.searchParams.set("scope", "profile");
-  u.searchParams.set("email", email);
-  u.searchParams.set("password", "x");
-
-  const res = await (await fetch(u)).json<{ fragment?: string }>();
-  const params = new URLSearchParams(res.fragment);
-  const token = params.get("access_token");
-  if (!token) throw new Error("No access_token in FRAGMENT");
-  return token;
-}
-
-export async function sendPostRequest(
-  url: string,
-  message: JSONRPCMessage | JSONRPCMessage[],
-  sessionId?: string
-): Promise<Response> {
-  const headers: Record<string, string> = {
-    Accept: "application/json, text/event-stream",
-    "Content-Type": "application/json"
-  };
-
-  if (sessionId) {
-    headers["mcp-session-id"] = sessionId;
-  }
-
-  const res = fetch(url, {
-    body: JSON.stringify(message),
-    headers,
-    method: "POST"
-  });
-
-  return res;
-}
-
-describe("OAuth MCP e2e", () => {
+describe("OAuth MCPs e2e", () => {
   let worker: Awaited<ReturnType<typeof Worker>>;
   let token: string;
   const TEST_EMAIL = "test@example.com";
+
   beforeAll(async () => {
     worker = oauthWorker;
     const clientId = await registerClient(new URL(worker.url!));
@@ -278,38 +221,44 @@ describe("OAuth MCP e2e", () => {
     );
   });
 
-  it("deploys OAuth MCP", async () => {
-    const res = await fetch(new URL("/", worker.url));
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("OK");
-  });
-
   describe("Streamable HTTP", () => {
-    let client: Client;
+    let whoamiClient: Client;
+    let addClient: Client;
 
     beforeAll(async () => {
-      client = new Client({ name: "vitest-client", version: "1.0.0" });
-      const transport = new StreamableHTTPClientTransport(
-        new URL("/mcp", worker.url),
+      // Setup client for the WhoamiMCP
+      whoamiClient = new Client({ name: "whoami-client", version: "1.0.0" });
+      const whoamiTransport = new StreamableHTTPClientTransport(
+        new URL("/whoami/mcp", worker.url),
         { requestInit: { headers: { Authorization: `Bearer ${token}` } } }
       );
-      await client.connect(transport);
+      await whoamiClient.connect(whoamiTransport);
+
+      // Setup client for the AddMCP
+      addClient = new Client({ name: "add-client", version: "1.0.0" });
+      const addTransport = new StreamableHTTPClientTransport(
+        new URL("/add/mcp", worker.url),
+        { requestInit: { headers: { Authorization: `Bearer ${token}` } } }
+      );
+      await addClient.connect(addTransport);
     }, 30_000);
 
     afterAll(async () => {
-      // Close the MCP client to release the session/streams
-      await client.close?.();
+      // Close the MCP clients
+      await whoamiClient.close?.();
+      await addClient.close?.();
     }, 30_000);
 
-    it("lists tools", async () => {
-      const { tools } = await client.listTools();
-      const names = tools.map((t) => t.name);
-      expect(names).toContain("add");
-      expect(names).toContain("whoami");
+    it("lists tools on both MCPs", async () => {
+      const { tools: whoamiMCPTools } = await whoamiClient.listTools();
+      expect(whoamiMCPTools.map((t) => t.name)).toContain("whoami");
+
+      const { tools: addMCPTools } = await addClient.listTools();
+      expect(addMCPTools.map((t) => t.name)).toContain("add");
     });
 
     it("calls add", async () => {
-      const res = await client.callTool({
+      const res = await addClient.callTool({
         name: "add",
         arguments: { a: 2, b: 3 }
       });
@@ -317,7 +266,7 @@ describe("OAuth MCP e2e", () => {
     });
 
     it("calls whoami", async () => {
-      const res = await client.callTool({
+      const res = await whoamiClient.callTool({
         name: "whoami",
         arguments: {}
       });
@@ -326,22 +275,44 @@ describe("OAuth MCP e2e", () => {
   });
 
   describe("Legacy SSE", () => {
-    let client: Client;
+    let whoamiClient: Client;
+    let addClient: Client;
 
     beforeAll(async () => {
-      client = new Client({ name: "vitest-client-sse", version: "1.0.0" });
-      const transport = new SSEClientTransport(new URL("/sse", worker.url), {
-        requestInit: { headers: { Authorization: `Bearer ${token}` } }
+      // Setup client for the WhoamiMCP
+      whoamiClient = new Client({
+        name: "whoami-client-sse",
+        version: "1.0.0"
       });
-      await client.connect(transport);
+      const whoamiTransport = new SSEClientTransport(
+        new URL("/whoami/sse", worker.url),
+        {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } }
+        }
+      );
+      await whoamiClient.connect(whoamiTransport);
+
+      // Setup client for the AddMCP
+      addClient = new Client({
+        name: "whoami-client-sse",
+        version: "1.0.0"
+      });
+      const addTransport = new SSEClientTransport(
+        new URL("/add/sse", worker.url),
+        {
+          requestInit: { headers: { Authorization: `Bearer ${token}` } }
+        }
+      );
+      await addClient.connect(addTransport);
     }, 30_000);
 
     afterAll(async () => {
-      await client.close?.();
+      await whoamiClient.close?.();
+      await addClient.close?.();
     }, 30_000);
 
-    it("can call add over SSE", async () => {
-      const res = await client.callTool({
+    it("calls add", async () => {
+      const res = await addClient.callTool({
         name: "add",
         arguments: { a: 10, b: 15 }
       });
@@ -349,7 +320,7 @@ describe("OAuth MCP e2e", () => {
     });
 
     it("calls whoami", async () => {
-      const res = await client.callTool({
+      const res = await whoamiClient.callTool({
         name: "whoami",
         arguments: {}
       });

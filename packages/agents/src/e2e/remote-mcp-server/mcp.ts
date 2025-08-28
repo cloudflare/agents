@@ -8,20 +8,27 @@ type Env = unknown;
 
 type State = {};
 
-export class OAuthMCP extends McpAgent<Env, State, AuthProps> {
-  server = new McpServer({ name: "oauth-mcp", version: "0.1.0" });
+export class WhoamiMCP extends McpAgent<Env, State, AuthProps> {
+  server = new McpServer({ name: "whoami-mcp", version: "0.1.0" });
 
   async init() {
-    // Proves we kept email in the execution context
+    // Proves we kept the email from the execution context
+    const email = this.props?.email;
     this.server.tool(
       "whoami",
       "Return the authenticated email (from auth props)",
       {},
       async () => ({
-        content: [{ type: "text", text: this.props?.email ?? "unknown" }]
+        content: [{ type: "text", text: email ?? "unknown" }]
       })
     );
+  }
+}
 
+export class AddMCP extends McpAgent<Env, State, AuthProps> {
+  server = new McpServer({ name: "add-mcp", version: "0.1.0" });
+
+  async init() {
     // Simple math tool
     this.server.tool(
       "add",
@@ -33,5 +40,3 @@ export class OAuthMCP extends McpAgent<Env, State, AuthProps> {
     );
   }
 }
-
-export default OAuthMCP;
