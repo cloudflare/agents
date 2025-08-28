@@ -269,7 +269,7 @@ export abstract class McpAgent<
 
   resolveAuthInfo(
     requestInfo: RequestInfo
-  ): Promise<AuthInfo | null | undefined> | null {
+  ): MaybePromise<AuthInfo | null | undefined> {
     return null;
   }
 
