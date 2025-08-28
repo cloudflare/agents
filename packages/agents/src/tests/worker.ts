@@ -1,7 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  CallToolResult,
+  RequestInfo
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { McpAgent } from "../mcp/index.ts";
+import { McpAgent, type ResolveAuthInfoArgs } from "../mcp/index.ts";
 import { Agent, type AgentEmail } from "../index.ts";
 
 export type Env = {
@@ -17,11 +20,27 @@ type Props = {
   testValue: string;
 };
 
+function asHeaders(headers: RequestInfo["headers"]): Headers {
+  const headersCopy: Headers = new Headers();
+  for (const [key, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const v of value) headersCopy.append(key, v);
+    } else if (value) headersCopy.append(key, value);
+  }
+  return headersCopy;
+}
+
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
     { capabilities: { logging: {} } }
   );
+  async resolveAuthInfo({ headers }: ResolveAuthInfoArgs) {
+    const authHeader = asHeaders(headers).get("authorization");
+    if (!authHeader?.startsWith("Bearer ")) return undefined;
+    const token = authHeader.substring(7);
+    return { token, clientId: "test-user", scopes: ["read", "write"] };
+  }
 
   async init() {
     this.server.tool(
@@ -39,6 +58,47 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       async (): Promise<CallToolResult> => {
         return {
           content: [{ text: this.props.testValue, type: "text" }]
+        };
+      }
+    );
+
+    this.server.tool(
+      "getRequestInfo",
+      "Get request info for testing",
+      {},
+      async (params, extra): Promise<CallToolResult> => {
+        // This should have access to requestInfo
+        return {
+          content: [
+            {
+              text: JSON.stringify({
+                hasRequestInfo: !!extra.requestInfo,
+                requestInfo: extra.requestInfo
+              }),
+              type: "text"
+            }
+          ]
+        };
+      }
+    );
+
+    this.server.tool(
+      "getAuthInfo",
+      "Get auth info for testing",
+      {},
+      async (params, extra): Promise<CallToolResult> => {
+        // This should have access to authInfo
+        const result = {
+          hasAuthInfo: !!extra.authInfo,
+          authInfo: extra.authInfo || null // Use null instead of undefined for JSON serialization
+        };
+        return {
+          content: [
+            {
+              text: JSON.stringify(result),
+              type: "text"
+            }
+          ]
         };
       }
     );

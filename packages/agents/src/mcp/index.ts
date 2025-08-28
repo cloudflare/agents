@@ -2,7 +2,12 @@ import { DurableObject } from "cloudflare:workers";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  JSONRPCMessage,
+  MessageExtraInfo,
+  RequestInfo as SDKRequestInfo
+} from "@modelcontextprotocol/sdk/types.js";
+import type { AuthInfo as SDKAuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
   InitializeRequestSchema,
   JSONRPCMessageSchema,
@@ -14,6 +19,31 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, WSMessage } from "../";
 import { Agent } from "../index";
+
+type RequestInfo = SDKRequestInfo & { method: string; url: string };
+type RequestInfoHeaders = RequestInfo["headers"];
+
+function serializeRequestInfo(request: Request): RequestInfo {
+  return {
+    method: request.method,
+    url: request.url,
+    headers: convertHeadersToRequestInfoHeaders(request.headers)
+  };
+}
+
+function convertHeadersToRequestInfoHeaders(
+  headers: Headers
+): RequestInfoHeaders {
+  const headersCopy: RequestInfoHeaders = {};
+  headers.forEach((value, key) => {
+    if (headersCopy[key]) {
+      headersCopy[key] = [...headersCopy[key], value];
+    } else {
+      headersCopy[key] = value;
+    }
+  });
+  return headersCopy;
+}
 
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
@@ -67,7 +97,7 @@ interface CORSOptions {
 class McpSSETransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
+  onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
   sessionId?: string;
 
   private _getWebSocket: () => WebSocket | null;
@@ -112,7 +142,7 @@ type TransportType = "sse" | "streamable-http" | "unset";
 class McpStreamableHttpTransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
+  onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
   sessionId?: string;
 
   // TODO: If there is an open connection to send server-initiated messages
@@ -194,7 +224,8 @@ type MaybePromise<T> = T | Promise<T>;
 export abstract class McpAgent<
   Env = unknown,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
+  Props extends Record<string, unknown> = Record<string, unknown>,
+  AuthInfo extends SDKAuthInfo = SDKAuthInfo
 > extends DurableObject<Env> {
   private _status: "zero" | "starting" | "started" = "zero";
   private _transport?: Transport;
@@ -234,6 +265,25 @@ export abstract class McpAgent<
         return self.onMessage(connection, message);
       }
     })(ctx, env);
+  }
+
+  requestInfo: RequestInfo | null | undefined;
+  authInfo: AuthInfo | null | undefined;
+
+  resolveAuthInfo(
+    requestInfo: RequestInfo
+  ): Promise<AuthInfo | null | undefined> | null {
+    return null;
+  }
+
+  async setCurrentAuthInfo(requestInfo: RequestInfo) {
+    try {
+      const authInfo = await this.resolveAuthInfo(requestInfo);
+      await this.updateAuthInfo(authInfo);
+    } catch (error) {
+      console.error("Error validating auth:", error);
+      await this.updateAuthInfo(null);
+    }
   }
 
   /**
@@ -331,7 +381,11 @@ export abstract class McpAgent<
     this._transportType = (await this.ctx.storage.get(
       "transportType"
     )) as TransportType;
-    await this._init(this.props);
+    const requestInfo = (await this.ctx.storage.get(
+      "requestInfo"
+    )) as RequestInfo;
+    const authInfo = (await this.ctx.storage.get("authInfo")) as AuthInfo;
+    await this._init(this.props, requestInfo, authInfo);
 
     const server = await this.server;
 
@@ -372,8 +426,15 @@ export abstract class McpAgent<
     };
   }
 
-  async _init(props: Props) {
+  async _init(props: Props, requestInfo: RequestInfo, authInfo?: AuthInfo) {
     await this.updateProps(props);
+    await this.updateRequestInfo(requestInfo);
+    if (authInfo) {
+      await this.updateAuthInfo(authInfo);
+    } else {
+      await this.setCurrentAuthInfo(requestInfo);
+    }
+
     if (!this.ctx.storage.get("transportType")) {
       await this.ctx.storage.put("transportType", "unset");
     }
@@ -396,9 +457,24 @@ export abstract class McpAgent<
     return (await this.ctx.storage.get("initialized")) === true;
   }
 
+  async updateRequestInfo(requestInfo: RequestInfo) {
+    await this.ctx.storage.put("requestInfo", requestInfo);
+    this.requestInfo = requestInfo;
+  }
+
   async updateProps(props: Props) {
     await this.ctx.storage.put("props", props ?? {});
     this.props = props;
+  }
+
+  async updateAuthInfo(authInfo: AuthInfo | null | undefined) {
+    if (authInfo) {
+      await this.ctx.storage.put("authInfo", authInfo);
+      this.authInfo = authInfo;
+    } else {
+      await this.ctx.storage.delete("authInfo");
+      this.authInfo = undefined;
+    }
   }
 
   private async _initialize(): Promise<void> {
@@ -445,6 +521,10 @@ export abstract class McpAgent<
         await this.ctx.storage.put("transportType", "sse");
         this._transportType = "sse";
 
+        const requestInfo = serializeRequestInfo(request);
+        await this.updateRequestInfo(requestInfo);
+        await this.setCurrentAuthInfo(requestInfo);
+
         if (!this._transport) {
           this._transport = new McpSSETransport(() => this.getWebSocket());
           await server.connect(this._transport);
@@ -454,6 +534,10 @@ export abstract class McpAgent<
         return this._agent.fetch(request);
       }
       case "/streamable-http": {
+        const requestInfo = serializeRequestInfo(request);
+        await this.updateRequestInfo(requestInfo);
+        await this.setCurrentAuthInfo(requestInfo);
+
         if (!this._transport) {
           this._transport = new McpStreamableHttpTransport(
             (id) => this.getWebSocketForResponseID(id),
@@ -528,7 +612,10 @@ export abstract class McpAgent<
       this._requestIdToConnectionId.set(message.id.toString(), connection.id);
     }
 
-    this._transport?.onmessage?.(message);
+    this._transport?.onmessage?.(message, {
+      requestInfo: this.requestInfo ?? undefined,
+      authInfo: this.authInfo ?? undefined
+    });
   }
 
   /**
@@ -649,7 +736,10 @@ export abstract class McpAgent<
         return null; // Message was handled by elicitation system
       }
 
-      this._transport?.onmessage?.(parsedMessage);
+      this._transport?.onmessage?.(parsedMessage, {
+        requestInfo: this.requestInfo ?? undefined,
+        authInfo: this.authInfo ?? undefined
+      });
       return null;
     } catch (error) {
       console.error("Error forwarding message to SSE:", error);
@@ -783,7 +873,11 @@ export abstract class McpAgent<
 
           // Initialize the object
           try {
-            await doStub._init(ctx.props);
+            await doStub._init(ctx.props, {
+              method: request.method,
+              url: request.url,
+              headers: convertHeadersToRequestInfoHeaders(request.headers)
+            });
           } catch (error) {
             console.error("Failed to initialize McpAgent:", error);
             await writer.close();
@@ -926,6 +1020,7 @@ export abstract class McpAgent<
           const messageBody = await request.json();
           // Update props with fresh values before processing message
           await doStub.updateProps(ctx.props);
+          await doStub.updateRequestInfo(serializeRequestInfo(request));
           const error = await doStub.onSSEMcpMessage(sessionId, messageBody);
 
           if (error) {
@@ -1156,7 +1251,11 @@ export abstract class McpAgent<
 
           if (isInitializationRequest) {
             try {
-              await doStub._init(ctx.props);
+              await doStub._init(ctx.props, {
+                method: request.method,
+                url: request.url,
+                headers: convertHeadersToRequestInfoHeaders(request.headers)
+              });
               await doStub.setInitialized();
             } catch (error) {
               console.error("Failed to initialize McpAgent:", error);
@@ -1187,6 +1286,7 @@ export abstract class McpAgent<
           } else {
             // Update props for existing sessions
             await doStub.updateProps(ctx.props);
+            await doStub.updateRequestInfo(serializeRequestInfo(request));
           }
 
           // We've evaluated all the error conditions! Now it's time to establish
@@ -1364,6 +1464,8 @@ export abstract class McpAgent<
     };
   }
 }
+
+export type ResolveAuthInfoArgs = Parameters<McpAgent["resolveAuthInfo"]>[0];
 
 // Export client transport classes
 export { SSEEdgeClientTransport } from "./sse-edge";

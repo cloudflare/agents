@@ -331,4 +331,148 @@ describe("Streamable HTTP Transport", () => {
       expect(text2).toContain("Hello, Connection2");
     });
   });
+
+  describe("Request Info Tracking", () => {
+    it("should provide requestInfo in tool handlers", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const message: JSONRPCMessage = {
+        id: "req-info-test",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          arguments: {},
+          name: "getRequestInfo"
+        }
+      };
+
+      const response = await sendPostRequest(ctx, baseUrl, message, sessionId);
+
+      expect(response.status).toBe(200);
+      const reader = response.body?.getReader();
+      const { value } = await reader!.read();
+      const text = new TextDecoder().decode(value);
+
+      // Log the actual response to see what we're getting
+      console.log("Response text:", text);
+
+      // Parse the SSE response format
+      const lines = text.split("\n");
+      const dataLine = lines.find((line) => line.startsWith("data: "));
+      expect(dataLine).toBeDefined();
+
+      const jsonData = dataLine!.substring(6); // Remove 'data: ' prefix
+      console.log("JSON data:", jsonData);
+
+      const responseData = JSON.parse(jsonData);
+      console.log("Parsed response:", JSON.stringify(responseData, null, 2));
+
+      // The response should contain requestInfo data
+      expect(responseData.id).toBe("req-info-test");
+      expect(responseData.result).toBeDefined();
+
+      // Check if requestInfo is actually available
+      expect(responseData.result.content[0].text).toContain(
+        '"hasRequestInfo":true'
+      );
+      expect(responseData.result.content[0].text).toContain('"requestInfo"');
+    });
+  });
+
+  describe("Auth Info Tracking", () => {
+    it("should provide authInfo in tool handlers when authorization header is present", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const message: JSONRPCMessage = {
+        id: "auth-info-test",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          arguments: {},
+          name: "getAuthInfo"
+        }
+      };
+
+      // Send request with authorization header
+      const request = new Request(baseUrl, {
+        body: JSON.stringify(message),
+        headers: {
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "mcp-session-id": sessionId,
+          Authorization: "Bearer valid-token-123"
+        },
+        method: "POST"
+      });
+      const response = await worker.fetch(request, env, ctx);
+
+      expect(response.status).toBe(200);
+      const reader = response.body?.getReader();
+      const { value } = await reader!.read();
+      const text = new TextDecoder().decode(value);
+
+      // Parse the SSE response format
+      const lines = text.split("\n");
+      const dataLine = lines.find((line) => line.startsWith("data: "));
+      expect(dataLine).toBeDefined();
+
+      const jsonData = dataLine!.substring(6); // Remove 'data: ' prefix
+      const responseData = JSON.parse(jsonData);
+
+      // The response should contain authInfo data
+      expect(responseData.id).toBe("auth-info-test");
+      expect(responseData.result).toBeDefined();
+
+      // Check if authInfo is actually available
+      expect(responseData.result.content[0].text).toContain(
+        '"hasAuthInfo":true'
+      );
+      expect(responseData.result.content[0].text).toContain('"authInfo"');
+      expect(responseData.result.content[0].text).toContain(
+        '"valid-token-123"'
+      );
+    });
+
+    it("should provide undefined authInfo when no authorization header is present", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const message: JSONRPCMessage = {
+        id: "no-auth-test",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          arguments: {},
+          name: "getAuthInfo"
+        }
+      };
+
+      const response = await sendPostRequest(ctx, baseUrl, message, sessionId);
+
+      expect(response.status).toBe(200);
+      const reader = response.body?.getReader();
+      const { value } = await reader!.read();
+      const text = new TextDecoder().decode(value);
+
+      // Parse the SSE response format
+      const lines = text.split("\n");
+      const dataLine = lines.find((line) => line.startsWith("data: "));
+      expect(dataLine).toBeDefined();
+
+      const jsonData = dataLine!.substring(6); // Remove 'data: ' prefix
+      const responseData = JSON.parse(jsonData);
+
+      // The response should indicate no authInfo
+      expect(responseData.id).toBe("no-auth-test");
+      expect(responseData.result).toBeDefined();
+
+      // Check that authInfo is undefined
+      expect(responseData.result.content[0].text).toContain(
+        '"hasAuthInfo":false'
+      );
+      expect(responseData.result.content[0].text).toContain('"authInfo":null');
+    });
+  });
 });
