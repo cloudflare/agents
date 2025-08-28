@@ -279,6 +279,7 @@ export const createStreamingHttpHandler = (
               // If we have received all the responses, close the connection
               if (requestIds.size === 0) {
                 ws!.close();
+                await writer.close();
               }
             } catch (error) {
               console.error("Error forwarding message to SSE:", error);
