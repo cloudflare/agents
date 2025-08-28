@@ -5,7 +5,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   JSONRPCMessage,
   MessageExtraInfo,
-  RequestInfo as SDKRequestInfo
+  RequestInfo
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AuthInfo as SDKAuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import {
@@ -20,13 +20,10 @@ import {
 import type { Connection, WSMessage } from "../";
 import { Agent } from "../index";
 
-type RequestInfo = SDKRequestInfo & { method: string; url: string };
 type RequestInfoHeaders = RequestInfo["headers"];
 
-function serializeRequestInfo(request: Request): RequestInfo {
+function getRequestInfo(request: Request): RequestInfo {
   return {
-    method: request.method,
-    url: request.url,
     headers: convertHeadersToRequestInfoHeaders(request.headers)
   };
 }
@@ -521,7 +518,7 @@ export abstract class McpAgent<
         await this.ctx.storage.put("transportType", "sse");
         this._transportType = "sse";
 
-        const requestInfo = serializeRequestInfo(request);
+        const requestInfo = getRequestInfo(request);
         await this.updateRequestInfo(requestInfo);
         await this.setCurrentAuthInfo(requestInfo);
 
@@ -534,7 +531,7 @@ export abstract class McpAgent<
         return this._agent.fetch(request);
       }
       case "/streamable-http": {
-        const requestInfo = serializeRequestInfo(request);
+        const requestInfo = getRequestInfo(request);
         await this.updateRequestInfo(requestInfo);
         await this.setCurrentAuthInfo(requestInfo);
 
@@ -873,11 +870,7 @@ export abstract class McpAgent<
 
           // Initialize the object
           try {
-            await doStub._init(ctx.props, {
-              method: request.method,
-              url: request.url,
-              headers: convertHeadersToRequestInfoHeaders(request.headers)
-            });
+            await doStub._init(ctx.props, getRequestInfo(request));
           } catch (error) {
             console.error("Failed to initialize McpAgent:", error);
             await writer.close();
@@ -1020,7 +1013,7 @@ export abstract class McpAgent<
           const messageBody = await request.json();
           // Update props with fresh values before processing message
           await doStub.updateProps(ctx.props);
-          await doStub.updateRequestInfo(serializeRequestInfo(request));
+          await doStub.updateRequestInfo(getRequestInfo(request));
           const error = await doStub.onSSEMcpMessage(sessionId, messageBody);
 
           if (error) {
@@ -1251,11 +1244,7 @@ export abstract class McpAgent<
 
           if (isInitializationRequest) {
             try {
-              await doStub._init(ctx.props, {
-                method: request.method,
-                url: request.url,
-                headers: convertHeadersToRequestInfoHeaders(request.headers)
-              });
+              await doStub._init(ctx.props, getRequestInfo(request));
               await doStub.setInitialized();
             } catch (error) {
               console.error("Failed to initialize McpAgent:", error);
@@ -1286,7 +1275,7 @@ export abstract class McpAgent<
           } else {
             // Update props for existing sessions
             await doStub.updateProps(ctx.props);
-            await doStub.updateRequestInfo(serializeRequestInfo(request));
+            await doStub.updateRequestInfo(getRequestInfo(request));
           }
 
           // We've evaluated all the error conditions! Now it's time to establish
