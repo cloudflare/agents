@@ -1,5 +1,5 @@
 ---
-"@cloudflare/agents": patch
+"@cloudflare/agents": major
 ---
 
 Rename `server` property to `mcp` in MCP-related classes for better developer experience

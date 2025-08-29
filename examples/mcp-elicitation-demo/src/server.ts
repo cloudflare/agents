@@ -388,7 +388,7 @@ export class MyAgent extends Agent<Env, never> {
         __clientSession: this.name
       };
 
-      const result = await this.mcp.callTool({
+      const result = await this.mcpClientManager.callTool({
         serverId,
         name: toolName,
         arguments: enhancedArgs
