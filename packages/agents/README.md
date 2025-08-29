@@ -411,7 +411,7 @@ type Env = {
 type State = { counter: number };
 
 export class MyMCP extends McpAgent<Env, State, {}> {
-  server = new McpServer({
+  mcp = new McpServer({
     name: "Demo",
     version: "1.0.0"
   });
@@ -421,13 +421,13 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   };
 
   async init() {
-    this.server.resource("counter", "mcp://resource/counter", (uri) => {
+    this.mcp.resource("counter", "mcp://resource/counter", (uri) => {
       return {
         contents: [{ text: String(this.state.counter), uri: uri.href }]
       };
     });
 
-    this.server.tool(
+    this.mcp.tool(
       "add",
       "Add to the counter, stored in the MCP",
       { a: z.number() },
