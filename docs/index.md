@@ -7,6 +7,7 @@
 - sync-engine
 - ai-sdk
 - tools
+- mcp
 - other stacks
 - http/ws
 - email
