@@ -49,7 +49,7 @@
     "fast-glob": "^3.3.3",
     "husky": "^9.1.7",
     "lint-staged": "^16.1.5",
-    "partyserver": "^0.0.72",
+    "partyserver": "^0.0.73",
     "partysocket": "1.1.5",
     "patch-package": "^8.0.0",
     "pkg-pr-new": "^0.0.54",
