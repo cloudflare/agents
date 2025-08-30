@@ -25,10 +25,21 @@ export class WhoamiMCP extends McpAgent<Env, State, AuthProps> {
   }
 }
 
-export class AddMCP extends McpAgent<Env, State, AuthProps> {
+export class AddMCP extends McpAgent<
+  Env,
+  State,
+  AuthProps & { echoAvailable: boolean }
+> {
   server = new McpServer({ name: "add-mcp", version: "0.1.0" });
 
   async init() {
+    // Simple echo tool that's gated behind a feature flag
+    if (this.props?.echoAvailable) {
+      this.server.tool("echo", { msg: z.string() }, async ({ msg }) => ({
+        content: [{ type: "text", text: msg }]
+      }));
+    }
+
     // Simple math tool
     this.server.tool(
       "add",

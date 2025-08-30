@@ -129,6 +129,12 @@ export abstract class McpAgent<
     }
   }
 
+  // Store the props
+  async updateProps(props?: Props) {
+    await this.ctx.storage.put("props", props ?? {});
+    this.props = props;
+  }
+
   /*
    * Base Agent / Parykit Server overrides
    */
@@ -136,9 +142,7 @@ export abstract class McpAgent<
   // Sets up the MCP transport and server every time the Agent is started.
   async onStart(props?: Props) {
     // If onStart was passed props, save them in storage
-    if (props) {
-      await this.ctx.storage.put("props", props);
-    }
+    if (props) await this.updateProps(props);
     this.props = await this.ctx.storage.get("props");
 
     await this.init();

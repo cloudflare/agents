@@ -65,8 +65,34 @@ export default new OAuthProvider({
   apiHandlers: {
     "/whoami/sse": WhoamiMCP.serveSSE("/whoami/sse", { binding: "WHOAMI_MCP" }),
     "/whoami/mcp": WhoamiMCP.serve("/whoami/mcp", { binding: "WHOAMI_MCP" }),
-    "/add/sse": AddMCP.serveSSE("/add/sse", { binding: "ADD_MCP" }),
-    "/add/mcp": AddMCP.serve("/add/mcp", { binding: "ADD_MCP" })
+    "/add/sse": {
+      // These run after the OAuthProvider sets the props, so we can safely append
+      // our custom props to them before routing to the MCP
+      fetch(request: Request, env: unknown, ctx: ExecutionContext) {
+        ctx.props = {
+          ...ctx.props,
+          echoAvailable: !!request.headers.get("x-my-feature-flag")
+        };
+        return AddMCP.serveSSE("/add/sse", { binding: "ADD_MCP" }).fetch(
+          request,
+          env,
+          ctx
+        );
+      }
+    },
+    "/add/mcp": {
+      fetch(request: Request, env: unknown, ctx: ExecutionContext) {
+        ctx.props = {
+          ...ctx.props,
+          echoAvailable: !!request.headers.get("x-my-feature-flag")
+        };
+        return AddMCP.serve("/add/mcp", { binding: "ADD_MCP" }).fetch(
+          request,
+          env,
+          ctx
+        );
+      }
+    }
   },
   defaultHandler,
   authorizeEndpoint: "/authorize",
