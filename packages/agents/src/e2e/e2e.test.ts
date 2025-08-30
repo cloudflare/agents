@@ -97,11 +97,29 @@ describe("Authless MCP e2e", () => {
       await client.close?.();
     }, 30_000);
 
-    it("lists tools on both MCPs", async () => {
+    it("lists tools", async () => {
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name);
       expect(names).toContain("add");
       expect(names).toContain("calculate");
+      expect(names).not.contain("echo");
+    });
+
+    it("list tools with feature flag set", async () => {
+      // Create a another client that sets the feature flag header
+      const client = new Client({ name: "vitest-client", version: "1.0.0" });
+      const transport = new StreamableHTTPClientTransport(
+        new URL("/mcp", worker.url),
+        { requestInit: { headers: { "x-my-feature-flag": "1" } } }
+      );
+      await client.connect(transport);
+
+      // Should include gated tool
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name);
+      expect(names).toContain("add");
+      expect(names).toContain("calculate");
+      expect(names).toContain("echo");
     });
 
     it("calls add", async () => {
@@ -196,6 +214,30 @@ describe("Authless MCP e2e", () => {
       await client.close?.();
     }, 30_000);
 
+    it("lists tools", async () => {
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name);
+      expect(names).toContain("add");
+      expect(names).toContain("calculate");
+      expect(names).not.contain("echo");
+    });
+
+    it("list tools with feature flag set", async () => {
+      // Create a client that sets the feature flag header
+      const client = new Client({ name: "vitest-client", version: "1.0.0" });
+      const transport = new SSEClientTransport(new URL("/sse", worker.url), {
+        requestInit: { headers: { "x-my-feature-flag": "1" } }
+      });
+      await client.connect(transport);
+
+      // Should include gated tool
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name);
+      expect(names).toContain("add");
+      expect(names).toContain("calculate");
+      expect(names).toContain("echo");
+    });
+
     it("calls add", async () => {
       const res1 = await client.callTool({
         name: "add",
@@ -255,6 +297,28 @@ describe("OAuth MCPs e2e", () => {
 
       const { tools: addMCPTools } = await addClient.listTools();
       expect(addMCPTools.map((t) => t.name)).toContain("add");
+      expect(addMCPTools.map((t) => t.name)).not.contain("echo");
+    });
+
+    it("list tools includes gated tool", async () => {
+      const client = new Client({ name: "add-client", version: "1.0.0" });
+      const addTransport = new StreamableHTTPClientTransport(
+        new URL("/add/mcp", worker.url),
+        {
+          requestInit: {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "x-my-feature-flag": "1"
+            }
+          }
+        }
+      );
+      await client.connect(addTransport);
+
+      // When we set the feature flag header we should have access to `echo`
+      const { tools: addMCPTools } = await client.listTools();
+      expect(addMCPTools.map((t) => t.name)).toContain("add");
+      expect(addMCPTools.map((t) => t.name)).toContain("echo");
     });
 
     it("calls add", async () => {
@@ -311,6 +375,15 @@ describe("OAuth MCPs e2e", () => {
       await addClient.close?.();
     }, 30_000);
 
+    it("lists tools on both MCPs", async () => {
+      const { tools: whoamiMCPTools } = await whoamiClient.listTools();
+      expect(whoamiMCPTools.map((t) => t.name)).toContain("whoami");
+
+      const { tools: addMCPTools } = await addClient.listTools();
+      expect(addMCPTools.map((t) => t.name)).toContain("add");
+      expect(addMCPTools.map((t) => t.name)).not.contain("echo");
+    });
+
     it("calls add", async () => {
       const res = await addClient.callTool({
         name: "add",
@@ -325,6 +398,27 @@ describe("OAuth MCPs e2e", () => {
         arguments: {}
       });
       expect(textOf(res)).toBe(TEST_EMAIL);
+    });
+
+    it("list tools includes gated tool", async () => {
+      const client = new Client({ name: "add-client", version: "1.0.0" });
+      const addTransport = new SSEClientTransport(
+        new URL("/add/sse", worker.url),
+        {
+          requestInit: {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "x-my-feature-flag": "1"
+            }
+          }
+        }
+      );
+      await client.connect(addTransport);
+
+      // When we set the feature flag header we should have access to `echo`
+      const { tools: addMCPTools } = await client.listTools();
+      expect(addMCPTools.map((t) => t.name)).toContain("add");
+      expect(addMCPTools.map((t) => t.name)).toContain("echo");
     });
   });
 });
