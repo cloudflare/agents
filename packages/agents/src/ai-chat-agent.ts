@@ -121,6 +121,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 },
                 this.ctx
               );
+
+              // Note: Message persistence now happens in the _reply method
+              // after the complete response text has been accumulated
             },
             abortSignal ? { abortSignal } : undefined
           );
@@ -248,6 +251,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }
 
       const reader = response.body.getReader();
+      let fullResponseText = ""; // Accumulate the assistant's response text
 
       try {
         while (true) {
@@ -272,6 +276,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
               try {
                 const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
 
+                // Accumulate text deltas for final message persistence
+                if (data.type === "text-delta" && data.textDelta) {
+                  fullResponseText += data.textDelta;
+                }
+
                 this._broadcastChatMessage({
                   body: JSON.stringify(data),
                   done: false,
@@ -288,8 +297,17 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         reader.releaseLock();
       }
 
-      // Note: Message persistence now happens in the onFinish callback
-      // This ensures we capture the complete response with tool calls
+      // After streaming is complete, persist the assistant's response
+      if (fullResponseText.trim()) {
+        await this.persistMessages([
+          ...this.messages,
+          {
+            id: `assistant_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
+            role: "assistant",
+            parts: [{ type: "text", text: fullResponseText }]
+          } as ChatMessage
+        ]);
+      }
     });
   }
 
