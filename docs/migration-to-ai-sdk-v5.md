@@ -159,7 +159,7 @@ for await (const chunk of result.fullStream) {
 }
 ```
 
-### 6. Automatic Message Migration ✨
+### 6. Automatic Message Migration
 
 **The SDK automatically migrates all message formats** - no manual migration needed! Following the pattern from [this blog post](https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages), all legacy messages are transformed automatically.
 
@@ -189,6 +189,88 @@ const cleanMessages = autoTransformMessages(anyFormatMessages);
 // Analyze existing message formats
 const stats = analyzeCorruption(messages);
 console.log(`Found ${stats.legacyString} legacy messages`);
+```
+
+### 7. Handling Human-in-the-Loop and Tool Confirmation
+
+The SDK now provides a more robust and streamlined way to handle tools that require user confirmation, simplifying the logic in your UI components.
+
+#### Automatic Confirmation Detection
+
+The `useAgentChat` hook can now automatically detect which tools require human-in-the-loop confirmation. This is based on a simple convention:
+
+- **Tools with an `execute` function** are considered automatic and will be resolved by the agent without user interaction.
+- **Tools without an `execute` function** are considered to require human confirmation.
+
+To enable this, pass your `tools` object to the `useAgentChat` hook:
+
+```typescript
+import { useAgentChat } from "agents/ai-react";
+import { tools } from "./tools";
+
+// ...
+
+const { messages, ... } = useAgentChat({
+  agent,
+  experimental_automaticToolResolution: true,
+  tools // Pass the tools object here
+});
+```
+
+#### Manual Override
+
+If you need to override the automatic detection, you can use the `toolsRequiringConfirmation` option to provide an explicit list of tool names:
+
+```typescript
+const { messages, ... } = useAgentChat({
+  agent,
+  experimental_automaticToolResolution: true,
+  // This will override the automatic detection
+  toolsRequiringConfirmation: ["getWeatherInformation"]
+});
+```
+
+#### Simplified UI Logic
+
+This new approach significantly simplifies the logic required in your UI components. The `useAgentChat` hook handles the automatic resolution of tools, so your UI only needs to render the confirmation prompt for tools that are left in the `input-available` state.
+
+**Before:** The UI had to contain logic to decide if a tool needed confirmation.
+
+```typescript
+// In your component
+const pendingToolCallConfirmation = messages.some((m) =>
+  m.parts?.some(
+    (part) =>
+      isToolUIPart(part) &&
+      part.state === "input-available" &&
+      // Manual check inside the component
+      !(tools as Record<string, any>)[getToolName(part)]?.execute
+  )
+);
+
+// ... and in the render method
+if (
+  part.state === "input-available" &&
+  !(tools as Record<string, any>)[toolName]?.execute
+) {
+  // Render confirmation UI
+}
+```
+
+**After:** The UI logic is much cleaner, as the hook handles the decision.
+
+```typescript
+// In your component
+const pendingToolCallConfirmation = messages.some((m) =>
+  m.parts?.some(
+    (part) => isToolUIPart(part) && part.state === "input-available"
+  )
+);
+
+// ... and in the render method
+if (part.state === "input-available") {
+  // Render confirmation UI
+}
 ```
 
 ## Step-by-Step Migration
@@ -240,7 +322,7 @@ import {
   needsMigration,
   migrateMessagesToUIFormat,
   analyzeCorruption
-} from "@cloudflare/agents";
+} from "agents";
 
 // In your agent class
 if (needsMigration(this.messages)) {

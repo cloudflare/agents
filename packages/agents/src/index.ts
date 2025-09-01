@@ -1934,3 +1934,10 @@ export {
   type CorruptArrayMessage,
   type MigratableMessage
 } from "./ai-migration";
+
+// AI React utilities and types
+export {
+  useAgentChat,
+  detectToolsRequiringConfirmation,
+  type AITool
+} from "./ai-react";

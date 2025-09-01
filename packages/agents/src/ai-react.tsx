@@ -1,11 +1,18 @@
 import { useChat } from "@ai-sdk/react";
+import { getToolName, isToolUIPart } from "ai";
 import type { UIMessage as Message } from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
-import { use, useEffect } from "react";
+import { use, useEffect, useRef } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
+
+export type AITool<Input = unknown, Output = unknown> = {
+  description?: string;
+  inputSchema?: unknown;
+  execute?: (input: Input) => Output | Promise<Output>;
+};
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -25,13 +32,27 @@ type UseAgentChatOptions<State> = Omit<
   getInitialMessages?:
     | undefined
     | null
-    // | (() => Message[])
     | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
   messages?: Message[];
   /** Request credentials */
   credentials?: RequestCredentials;
   /** Request headers */
   headers?: HeadersInit;
+  /**
+   * @description Whether to automatically resolve tool calls that do not require human interaction.
+   * @experimental
+   */
+  experimental_automaticToolResolution?: boolean;
+  /**
+   * @description Tools object for automatic detection of confirmation requirements.
+   * Tools without execute function will require confirmation.
+   */
+  tools?: Record<string, AITool<unknown, unknown>>;
+  /**
+   * @description Manual override for tools requiring confirmation.
+   * If not provided, will auto-detect from tools object.
+   */
+  toolsRequiringConfirmation?: string[];
 };
 
 const requestCache = new Map<string, Promise<Message[]>>();
@@ -41,6 +62,22 @@ const requestCache = new Map<string, Promise<Message[]>>();
  * @param options Chat options including the agent connection
  * @returns Chat interface controls and state with added clearHistory method
  */
+/**
+ * Automatically detects which tools require confirmation based on whether they have an execute function.
+ * Tools without execute function will require human confirmation.
+ * @param tools - Record of tool name to tool definition
+ * @returns Array of tool names that require confirmation
+ */
+export function detectToolsRequiringConfirmation(
+  tools?: Record<string, AITool<unknown, unknown>>
+): string[] {
+  if (!tools) return [];
+
+  return Object.entries(tools)
+    .filter(([_name, tool]) => !tool.execute) // Tools without execute need confirmation
+    .map(([name]) => name);
+}
+
 export function useAgentChat<State = unknown>(
   options: UseAgentChatOptions<State>
 ): ReturnType<typeof useChat> & {
@@ -50,8 +87,15 @@ export function useAgentChat<State = unknown>(
     agent,
     getInitialMessages,
     messages: optionsInitialMessages,
+    experimental_automaticToolResolution,
+    tools,
+    toolsRequiringConfirmation: manualToolsRequiringConfirmation,
     ...rest
   } = options;
+
+  // Auto-detect tools requiring confirmation, or use manual override
+  const toolsRequiringConfirmation =
+    manualToolsRequiringConfirmation ?? detectToolsRequiringConfirmation(tools);
 
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
@@ -60,7 +104,6 @@ export function useAgentChat<State = unknown>(
       .replace("wss://", "https://")}`
   );
 
-  // delete the _pk query param
   agentUrl.searchParams.delete("_pk");
   const agentUrlString = agentUrl.toString();
 
@@ -86,9 +129,6 @@ export function useAgentChat<State = unknown>(
       return requestCache.get(agentUrlString)!;
     }
     const promise = getInitialMessagesFetch(getInitialMessagesOptions);
-    // immediately cache the promise so that we don't
-    // create multiple requests for the same agent during multiple
-    // concurrent renders
     requestCache.set(agentUrlString, promise);
     return promise;
   }
@@ -105,16 +145,10 @@ export function useAgentChat<State = unknown>(
     ? use(initialMessagesPromise)
     : (optionsInitialMessages ?? []);
 
-  // manages adding and removing the promise from the cache
   useEffect(() => {
     if (!initialMessagesPromise) {
       return;
     }
-    // this effect is responsible for removing the promise from the cache
-    // when the component unmounts or the promise changes,
-    // but that means it also must add the promise to the cache
-    // so that multiple arbitrary effect runs produce the expected state
-    // when resolved.
     requestCache.set(agentUrlString, initialMessagesPromise!);
     return () => {
       if (requestCache.get(agentUrlString) === initialMessagesPromise) {
@@ -127,10 +161,6 @@ export function useAgentChat<State = unknown>(
     request: RequestInfo | URL,
     options: RequestInit = {}
   ) {
-    // we're going to use a websocket to do the actual "fetching"
-    // but still satisfy the type signature of the fetch function
-    // so we'll return a promise that resolves to a response
-
     const {
       method,
       keepalive,
@@ -144,14 +174,13 @@ export function useAgentChat<State = unknown>(
       referrer,
       referrerPolicy,
       window
-      //  dispatcher, duplex
     } = options;
     const id = nanoid(8);
     const abortController = new AbortController();
+    let controller: ReadableStreamDefaultController;
+    let isToolCallInProgress = false;
 
     signal?.addEventListener("abort", () => {
-      // Propagate request cancellation to the Agent
-      // We need to communciate cancellation as a websocket message, instead of a request signal
       agent.send(
         JSON.stringify({
           id,
@@ -170,7 +199,9 @@ export function useAgentChat<State = unknown>(
 
       abortController.abort();
       // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
-      controller.close();
+      if (!isToolCallInProgress) {
+        controller.close();
+      }
     });
 
     agent.addEventListener(
@@ -187,12 +218,16 @@ export function useAgentChat<State = unknown>(
         if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
           if (data.id === id) {
             if (data.error) {
-              // Handle error response - close stream and throw error
               controller.error(new Error(data.body));
               abortController.abort();
             } else {
-              controller.enqueue(new TextEncoder().encode(data.body));
-              if (data.done) {
+              if (data.body.includes('"tool_calls"')) {
+                isToolCallInProgress = true;
+              }
+              controller.enqueue(
+                new TextEncoder().encode(`data: ${data.body}\n\n`)
+              );
+              if (data.done && !isToolCallInProgress) {
                 controller.close();
                 abortController.abort();
               }
@@ -202,8 +237,6 @@ export function useAgentChat<State = unknown>(
       },
       { signal: abortController.signal }
     );
-
-    let controller: ReadableStreamDefaultController;
 
     const stream = new ReadableStream({
       start(c) {
@@ -226,8 +259,6 @@ export function useAgentChat<State = unknown>(
           referrer,
           referrerPolicy,
           window
-          // dispatcher,
-          // duplex
         },
         type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
         url: request.toString()
@@ -236,70 +267,94 @@ export function useAgentChat<State = unknown>(
 
     return new Response(stream);
   }
+
   const customTransport = {
-    sendMessages: async ({
-      trigger,
-      chatId,
-      messageId,
-      messages,
-      abortSignal,
-      ...options
-    }: {
-      trigger: "submit-message" | "regenerate-message";
-      chatId: string;
-      messageId: string | undefined;
-      messages: Message[];
-      abortSignal: AbortSignal | undefined;
-    } & Parameters<typeof useChat>[0]) => {
+    sendMessages: async (
+      options: Parameters<typeof DefaultChatTransport.prototype.sendMessages>[0]
+    ) => {
       const transport = new DefaultChatTransport({
         api: agentUrlString,
         fetch: aiFetch
       });
-
-      return transport.sendMessages({
-        trigger,
-        chatId,
-        messageId,
-        messages,
-        abortSignal,
-        ...options
-      });
+      return transport.sendMessages(options);
     },
-    reconnectToStream: async ({
-      chatId,
-      ...options
-    }: {
-      chatId: string;
-    } & Parameters<typeof useChat>[0]) => {
+    reconnectToStream: async (
+      options: Parameters<
+        typeof DefaultChatTransport.prototype.reconnectToStream
+      >[0]
+    ) => {
       const transport = new DefaultChatTransport({
         api: agentUrlString,
         fetch: aiFetch
       });
-
-      return transport.reconnectToStream({
-        chatId,
-        ...options
-      });
+      return transport.reconnectToStream(options);
     }
   };
 
   const useChatHelpers = useChat({
+    ...rest,
     messages: initialMessages,
-    transport: customTransport,
-    ...rest
+    transport: customTransport
   });
+
+  const processedToolCalls = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!experimental_automaticToolResolution) {
+      return;
+    }
+
+    const lastMessage =
+      useChatHelpers.messages[useChatHelpers.messages.length - 1];
+    if (!lastMessage || lastMessage.role !== "assistant") {
+      return;
+    }
+
+    const toolCalls = lastMessage.parts.filter(
+      (part) =>
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
+        !processedToolCalls.current.has(part.toolCallId)
+    );
+
+    if (toolCalls.length > 0) {
+      (async () => {
+        const toolCallsToResolve = toolCalls.filter(
+          (part) =>
+            isToolUIPart(part) &&
+            !toolsRequiringConfirmation.includes(getToolName(part))
+        );
+
+        if (toolCallsToResolve.length > 0) {
+          for (const part of toolCallsToResolve) {
+            if (isToolUIPart(part)) {
+              processedToolCalls.current.add(part.toolCallId);
+              await useChatHelpers.addToolResult({
+                toolCallId: part.toolCallId,
+                tool: getToolName(part),
+                output: null
+              });
+            }
+          }
+          useChatHelpers.sendMessage();
+        }
+      })();
+    }
+  }, [
+    useChatHelpers.messages,
+    experimental_automaticToolResolution,
+    useChatHelpers.addToolResult,
+    useChatHelpers.sendMessage,
+    toolsRequiringConfirmation
+  ]);
 
   useEffect(() => {
     function onClearHistory(event: MessageEvent) {
-      if (typeof event.data !== "string") {
-        return;
-      }
+      if (typeof event.data !== "string") return;
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
       } catch (_error) {
-        // silently ignore invalid messages for now
-        // TODO: log errors with log levels
         return;
       }
       if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
@@ -308,15 +363,11 @@ export function useAgentChat<State = unknown>(
     }
 
     function onMessages(event: MessageEvent) {
-      if (typeof event.data !== "string") {
-        return;
-      }
+      if (typeof event.data !== "string") return;
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
       } catch (_error) {
-        // silently ignore invalid messages for now
-        // TODO: log errors with log levels
         return;
       }
       if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
@@ -333,11 +384,16 @@ export function useAgentChat<State = unknown>(
     };
   }, [agent, useChatHelpers.setMessages]);
 
+  const { addToolResult } = useChatHelpers;
+
+  const addToolResultAndSendMessage: typeof addToolResult = async (...args) => {
+    await addToolResult(...args);
+    useChatHelpers.sendMessage();
+  };
+
   return {
     ...useChatHelpers,
-    /**
-     * Clear chat history on both client and Agent
-     */
+    addToolResult: addToolResultAndSendMessage,
     clearHistory: () => {
       useChatHelpers.setMessages([]);
       agent.send(
@@ -346,10 +402,6 @@ export function useAgentChat<State = unknown>(
         })
       );
     },
-    /**
-     * Set the chat messages and synchronize with the Agent
-     * @param messages New messages to set
-     */
     setMessages: (
       messages: Parameters<typeof useChatHelpers.setMessages>[0]
     ) => {

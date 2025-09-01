@@ -108,7 +108,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
         return this._tryCatchChat(async () => {
           const response = await this.onChatMessage(
-            async () => {
+            async (_finishResult) => {
               this._removeAbortController(chatMessageId);
 
               this.observability?.emit(
@@ -248,7 +248,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }
 
       const reader = response.body.getReader();
-      let fullResponseText = "";
 
       try {
         while (true) {
@@ -273,16 +272,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
               try {
                 const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
 
-                // Only send text-delta events to the client as text
-                if (data.type === "text-delta" && data.delta) {
-                  fullResponseText += data.delta;
-                  this._broadcastChatMessage({
-                    body: data.delta,
-                    done: false,
-                    id,
-                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                  });
-                }
+                this._broadcastChatMessage({
+                  body: JSON.stringify(data),
+                  done: false,
+                  id,
+                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                });
               } catch (_e) {
                 // Skip malformed JSON lines silently
               }
@@ -293,17 +288,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         reader.releaseLock();
       }
 
-      // After streaming is complete, persist the assistant's response
-      if (fullResponseText.trim()) {
-        await this.persistMessages([
-          ...this.messages,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            parts: [{ type: "text", text: fullResponseText }]
-          } as ChatMessage
-        ]);
-      }
+      // Note: Message persistence now happens in the onFinish callback
+      // This ensures we capture the complete response with tool calls
     });
   }
 

@@ -20,6 +20,10 @@ export enum MessageType {
  */
 export type OutgoingMessage =
   | {
+      /** Indicates this message is a command to clear chat history */
+      type: MessageType.CF_AGENT_CHAT_CLEAR;
+    }
+  | {
       /** Indicates this message contains updated chat messages */
       type: MessageType.CF_AGENT_CHAT_MESSAGES;
       /** Array of chat messages */
@@ -46,6 +50,10 @@ export type OutgoingMessage =
  * Types of messages sent from clients to the Agent
  */
 export type IncomingMessage =
+  | {
+      /** Indicates this message is a command to clear chat history */
+      type: MessageType.CF_AGENT_CHAT_CLEAR;
+    }
   | {
       /** Indicates this message is a request to the chat API */
       type: MessageType.CF_AGENT_USE_CHAT_REQUEST;
