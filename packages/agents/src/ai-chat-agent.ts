@@ -277,8 +277,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
 
                 // Accumulate text deltas for final message persistence
-                if (data.type === "text-delta" && data.textDelta) {
-                  fullResponseText += data.textDelta;
+                if (data.type === "text-delta" && data.delta) {
+                  fullResponseText += data.delta;
                 }
 
                 this._broadcastChatMessage({
