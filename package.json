@@ -28,7 +28,7 @@
     "@ai-sdk/anthropic": "1.2.12",
     "@ai-sdk/google": "2.0.0",
     "@ai-sdk/openai": "2.0.0",
-    "@ai-sdk/react": "2.0.0",
+    "@ai-sdk/react": "2.0.1",
     "@ai-sdk/ui-utils": "^1.2.11",
     "@biomejs/biome": "2.1.4",
     "@changesets/changelog-github": "^0.5.1",

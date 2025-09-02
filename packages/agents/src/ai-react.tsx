@@ -1,6 +1,11 @@
-import { useChat } from "@ai-sdk/react";
+import { useChat, type UseChatOptions } from "@ai-sdk/react";
 import { getToolName, isToolUIPart } from "ai";
-import type { UIMessage as Message } from "ai";
+import type {
+  ChatInit,
+  ChatTransport,
+  UIMessage as Message,
+  UIMessage
+} from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
 import { use, useEffect, useRef } from "react";
@@ -20,20 +25,23 @@ type GetInitialMessagesOptions = {
   url: string;
 };
 
+// v5 useChat parameters
+type UseChatParams<M extends UIMessage = UIMessage> = ChatInit<M> &
+  UseChatOptions<M>;
+
 /**
  * Options for the useAgentChat hook
  */
-type UseAgentChatOptions<State> = Omit<
-  Parameters<typeof useChat>[0],
-  "fetch" | "messages"
-> & {
+type UseAgentChatOptions<
+  State,
+  ChatMessage extends UIMessage = UIMessage
+> = Omit<UseChatParams<ChatMessage>, "fetch"> & {
   /** Agent connection from useAgent */
   agent: ReturnType<typeof useAgent<State>>;
   getInitialMessages?:
     | undefined
     | null
-    | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
-  messages?: Message[];
+    | ((options: GetInitialMessagesOptions) => Promise<ChatMessage[]>);
   /** Request credentials */
   credentials?: RequestCredentials;
   /** Request headers */
@@ -78,9 +86,12 @@ export function detectToolsRequiringConfirmation(
     .map(([name]) => name);
 }
 
-export function useAgentChat<State = unknown>(
-  options: UseAgentChatOptions<State>
-): ReturnType<typeof useChat> & {
+export function useAgentChat<
+  State = unknown,
+  ChatMessage extends UIMessage = UIMessage
+>(
+  options: UseAgentChatOptions<State, ChatMessage>
+): ReturnType<typeof useChat<ChatMessage>> & {
   clearHistory: () => void;
 } {
   const {
@@ -116,7 +127,7 @@ export function useAgentChat<State = unknown>(
       credentials: options.credentials,
       headers: options.headers
     });
-    return response.json<Message[]>();
+    return response.json<ChatMessage[]>();
   }
 
   const getInitialMessagesFetch =
@@ -126,7 +137,7 @@ export function useAgentChat<State = unknown>(
     getInitialMessagesOptions: GetInitialMessagesOptions
   ) {
     if (requestCache.has(agentUrlString)) {
-      return requestCache.get(agentUrlString)!;
+      return requestCache.get(agentUrlString)! as Promise<ChatMessage[]>;
     }
     const promise = getInitialMessagesFetch(getInitialMessagesOptions);
     requestCache.set(agentUrlString, promise);
@@ -207,9 +218,9 @@ export function useAgentChat<State = unknown>(
     agent.addEventListener(
       "message",
       (event) => {
-        let data: OutgoingMessage;
+        let data: OutgoingMessage<ChatMessage>;
         try {
-          data = JSON.parse(event.data) as OutgoingMessage;
+          data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
         } catch (_error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
@@ -268,11 +279,11 @@ export function useAgentChat<State = unknown>(
     return new Response(stream);
   }
 
-  const customTransport = {
+  const customTransport: ChatTransport<ChatMessage> = {
     sendMessages: async (
       options: Parameters<typeof DefaultChatTransport.prototype.sendMessages>[0]
     ) => {
-      const transport = new DefaultChatTransport({
+      const transport = new DefaultChatTransport<ChatMessage>({
         api: agentUrlString,
         fetch: aiFetch
       });
@@ -283,7 +294,7 @@ export function useAgentChat<State = unknown>(
         typeof DefaultChatTransport.prototype.reconnectToStream
       >[0]
     ) => {
-      const transport = new DefaultChatTransport({
+      const transport = new DefaultChatTransport<ChatMessage>({
         api: agentUrlString,
         fetch: aiFetch
       });
@@ -291,7 +302,7 @@ export function useAgentChat<State = unknown>(
     }
   };
 
-  const useChatHelpers = useChat({
+  const useChatHelpers = useChat<ChatMessage>({
     ...rest,
     messages: initialMessages,
     transport: customTransport
@@ -364,9 +375,9 @@ export function useAgentChat<State = unknown>(
 
     function onMessages(event: MessageEvent) {
       if (typeof event.data !== "string") return;
-      let data: OutgoingMessage;
+      let data: OutgoingMessage<ChatMessage>;
       try {
-        data = JSON.parse(event.data) as OutgoingMessage;
+        data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
       } catch (_error) {
         return;
       }

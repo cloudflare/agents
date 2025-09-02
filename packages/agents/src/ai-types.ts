@@ -1,4 +1,4 @@
-import type { UIMessage as ChatMessage } from "ai";
+import type { UIMessage } from "ai";
 
 /**
  * Enum for message types to improve type safety and maintainability
@@ -18,7 +18,7 @@ export enum MessageType {
 /**
  * Types of messages sent from the Agent to clients
  */
-export type OutgoingMessage =
+export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
   | {
       /** Indicates this message is a command to clear chat history */
       type: MessageType.CF_AGENT_CHAT_CLEAR;
@@ -49,7 +49,7 @@ export type OutgoingMessage =
 /**
  * Types of messages sent from clients to the Agent
  */
-export type IncomingMessage =
+export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
   | {
       /** Indicates this message is a command to clear chat history */
       type: MessageType.CF_AGENT_CHAT_CLEAR;
