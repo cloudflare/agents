@@ -557,42 +557,22 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
 
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = (connection: Connection, ctx: ConnectionContext) => {
-      // TODO: This is a hack to ensure the state is sent after the connection is established
-      // must fix this
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
-          setTimeout(() => {
-            if (this.state) {
-              connection.send(
-                JSON.stringify({
-                  state: this.state,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
-            }
-
-            connection.send(
-              JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: MessageType.CF_AGENT_MCP_SERVERS
-              })
-            );
-
-            this.observability?.emit(
-              {
-                displayMessage: "Connection established",
-                id: nanoid(),
-                payload: {
-                  connectionId: connection.id
-                },
-                timestamp: Date.now(),
-                type: "connect"
+          this.observability?.emit(
+            {
+              displayMessage: "Connection established",
+              id: nanoid(),
+              payload: {
+                connectionId: connection.id
               },
-              this.ctx
-            );
-            return this._tryCatch(() => _onConnect(connection, ctx));
-          }, 20);
+              timestamp: Date.now(),
+              type: "connect"
+            },
+            this.ctx
+          );
+          return this._tryCatch(() => _onConnect(connection, ctx));
         }
       );
     };

@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -278,6 +278,18 @@ export function useAgent<State>(
       }
     }
   );
+
+  useEffect(() => {
+    const onOpen = () => {
+      agent.send(JSON.stringify({ type: MessageType.CF_AGENT_CLIENT_READY }));
+    };
+
+    agent.addEventListener("open", onOpen);
+
+    return () => {
+      agent.removeEventListener("open", onOpen);
+    };
+  }, [agent]);
 
   // warn if agent isn't in lowercase
   if (agent.agent !== agent.agent.toLowerCase()) {

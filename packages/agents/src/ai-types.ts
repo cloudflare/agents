@@ -12,7 +12,8 @@ export enum MessageType {
 
   CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
   CF_AGENT_STATE = "cf_agent_state",
-  RPC = "rpc"
+  RPC = "rpc",
+  CF_AGENT_CLIENT_READY = "cf_agent_client_ready"
 }
 
 /**
