@@ -276,6 +276,16 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
               try {
                 const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
 
+                if (data.type === "error") {
+                  this._broadcastChatMessage({
+                    error: true,
+                    body: data.errorText ?? JSON.stringify(data),
+                    done: false,
+                    id,
+                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                  });
+                  return;
+                }
                 // Accumulate text deltas for final message persistence
                 if (data.type === "text-delta" && data.delta) {
                   fullResponseText += data.delta;
