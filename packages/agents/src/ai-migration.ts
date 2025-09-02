@@ -198,7 +198,7 @@ export function autoTransformMessage(
             STATE_MAP[invObj.state as keyof typeof STATE_MAP] ||
             "input-available",
           input: invObj.args,
-          output: invObj.result
+          output: invObj.result !== undefined ? invObj.result : null
         });
       }
     });

@@ -340,10 +340,22 @@ export function useAgentChat<
           for (const part of toolCallsToResolve) {
             if (isToolUIPart(part)) {
               processedToolCalls.current.add(part.toolCallId);
+              let toolOutput = null;
+              const toolName = getToolName(part);
+              const tool = tools?.[toolName];
+
+              if (tool?.execute && part.input) {
+                try {
+                  toolOutput = await tool.execute(part.input);
+                } catch (error) {
+                  toolOutput = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+                }
+              }
+
               await useChatHelpers.addToolResult({
                 toolCallId: part.toolCallId,
-                tool: getToolName(part),
-                output: null
+                tool: toolName,
+                output: toolOutput
               });
             }
           }

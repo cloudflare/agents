@@ -252,6 +252,15 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
       const reader = response.body.getReader();
       let fullResponseText = ""; // Accumulate the assistant's response text
+      const assistantParts: Array<{
+        type: string;
+        text?: string;
+        toolCallId?: string;
+        state?: string;
+        input?: Record<string, unknown>;
+        output?: unknown;
+        errorText?: string;
+      }> = []; // Accumulate all parts of the assistant's response
 
       try {
         while (true) {
@@ -286,6 +295,24 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                   });
                   return;
                 }
+                // Handle tool calls and results
+                if (data.type === "tool-call") {
+                  assistantParts.push({
+                    type: `tool-${data.toolName}`,
+                    toolCallId: data.toolCallId,
+                    state: "input-available",
+                    input: data.args
+                  });
+                } else if (data.type === "tool-result") {
+                  // Find the corresponding tool call part and update it
+                  const toolPart = assistantParts.find(
+                    (part) => part.toolCallId === data.toolCallId
+                  );
+                  if (toolPart) {
+                    toolPart.state = "output-available";
+                    toolPart.output = data.result;
+                  }
+                }
                 // Accumulate text deltas for final message persistence
                 if (data.type === "text-delta" && data.delta) {
                   fullResponseText += data.delta;
@@ -307,14 +334,25 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         reader.releaseLock();
       }
 
-      // After streaming is complete, persist the assistant's response
+      // After streaming is complete, persist the complete assistant's response
+      const messageParts: ChatMessage["parts"] = [];
+
+      // Add text part if there's text content
       if (fullResponseText.trim()) {
+        messageParts.push({ type: "text", text: fullResponseText });
+      }
+
+      // Add tool parts
+      messageParts.push(...(assistantParts as ChatMessage["parts"]));
+
+      // Only persist if there are parts to save
+      if (messageParts.length > 0) {
         await this.persistMessages([
           ...this.messages,
           {
             id: `assistant_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
             role: "assistant",
-            parts: [{ type: "text", text: fullResponseText }]
+            parts: messageParts
           } as ChatMessage
         ]);
       }
