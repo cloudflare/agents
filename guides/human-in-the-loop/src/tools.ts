@@ -31,12 +31,7 @@ export const tools = {
 export const clientTools: Record<string, AITool> = {
   getLocalTime: {
     description: getLocalTimeTool.description,
-    inputSchema: getLocalTimeTool.inputSchema,
-    execute: async (...args: unknown[]) => {
-      const input = args[0] as { location: string };
-      console.log(`Getting local time for ${input.location}`);
-      return "10am";
-    }
+    inputSchema: getLocalTimeTool.inputSchema
   },
   getWeatherInformation: {
     description: getWeatherInformationTool.description,

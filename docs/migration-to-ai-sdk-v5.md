@@ -1,10 +1,10 @@
-# Migration Guide: Upgrading to Agents SDK with AI SDK v5
+# Migration Guide: Upgrading to Agents SDK v0.1.0 with AI SDK v5
 
-This guide helps you migrate your existing code to a new version of our SDK. The Agents SDK now uses AI SDK v5, which introduces several breaking changes and new features.
+This guide helps you migrate your existing code to **Agents SDK v0.1.0** (`agents/ai-chat-agent`) and **AI SDK v5.x**. AI SDK v5 introduces several breaking changes and new features that the Agents SDK adopts.
 
-## Overview of Changes
+## Overview of Changes ([AI SDK v5 migration guide](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0))
 
-### 1. Message Format Changes
+### 1. Message Format Changes ([UIMessage Changes](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0#uimessage-changes))
 
 The most significant change is the message format. AI SDK v5 uses a new `UIMessage` format that replaces the older `Message` format.
 
@@ -40,7 +40,7 @@ const message: UIMessage = {
 };
 ```
 
-### 2. Import Changes
+### 2. Import Changes ([Package Versions](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0#ai-sdk-50-package-versions))
 
 Update your imports to use the new types and packages:
 
@@ -90,7 +90,7 @@ class MyAgent extends AIChatAgent<Env> {
 }
 ```
 
-### 4. Tool Definitions
+### 4. Tool Definitions ([Tool Definition Changes](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0#tool-definition-changes-parameters--inputschema))
 
 Tool definitions now use `inputSchema` instead of `parameters`:
 
@@ -127,7 +127,7 @@ const tools = {
 };
 ```
 
-### 5. Streaming Response Changes
+### 5. Streaming Response Changes ([Streaming Architecture](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0#streaming-architecture))
 
 AI SDK v5 introduces a new streaming pattern with start/delta/end events:
 
@@ -278,7 +278,7 @@ if (part.state === "input-available") {
 ### Step 1: Update Dependencies
 
 ```bash
-npm update ai
+npm update agents ai
 ```
 
 Make sure you're on AI SDK v5.x. Check your package.json:
@@ -315,7 +315,7 @@ Find all tool definitions and rename `parameters` to `inputSchema`:
 
 ### Step 5: (Optional) Migrate Legacy Messages
 
-Use the migration utilities to convert stored messages:
+You can optionally use the migration utilities to convert stored messages:
 
 ```typescript
 import {

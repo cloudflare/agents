@@ -9,7 +9,7 @@ import {
   type IncomingMessage,
   type OutgoingMessage
 } from "./ai-types";
-import { autoTransformMessages } from "./ai-migration";
+import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 const decoder = new TextDecoder();
 
@@ -252,16 +252,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
       const reader = response.body.getReader();
       let fullResponseText = ""; // Accumulate the assistant's response text
-      const assistantParts: Array<{
-        type: string;
-        text?: string;
-        toolCallId?: string;
-        state?: string;
-        input?: Record<string, unknown>;
-        output?: unknown;
-        errorText?: string;
-      }> = []; // Accumulate all parts of the assistant's response
-
+      // Track tool calls by toolCallid, so we can persist them as parts later
+      const toolCalls = new Map<
+        string,
+        {
+          type: string;
+          state: string;
+          toolCallId: string;
+          toolName: string;
+          input?: unknown;
+          output?: unknown;
+          isError?: boolean;
+          errorText?: string;
+        }
+      >();
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -285,39 +289,57 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
               try {
                 const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
 
-                if (data.type === "error") {
-                  this._broadcastChatMessage({
-                    error: true,
-                    body: data.errorText ?? JSON.stringify(data),
-                    done: false,
-                    id,
-                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                  });
-                  return;
-                }
-                // Handle tool calls and results
-                if (data.type === "tool-call") {
-                  assistantParts.push({
-                    type: `tool-${data.toolName}`,
-                    toolCallId: data.toolCallId,
-                    state: "input-available",
-                    input: data.args
-                  });
-                } else if (data.type === "tool-result") {
-                  // Find the corresponding tool call part and update it
-                  const toolPart = assistantParts.find(
-                    (part) => part.toolCallId === data.toolCallId
-                  );
-                  if (toolPart) {
-                    toolPart.state = "output-available";
-                    toolPart.output = data.result;
+                switch (data.type) {
+                  // SSE event signaling the tool input is ready. We track by
+                  // `toolCallId` so we can persist it as a tool part in the message.
+                  case "tool-input-available": {
+                    const { toolCallId, toolName, input } = data;
+                    toolCalls.set(toolCallId, {
+                      toolCallId,
+                      toolName,
+                      input,
+                      type: toolName ? `tool-${toolName}` : "dynamic-tool",
+                      state: "input-available"
+                    });
+                    break;
+                  }
+
+                  // SSE event signaling the tool output is ready. We should've
+                  // already received the input in a previous event so an entry
+                  // with `toolCallId` should already be present
+                  case "tool-output-available": {
+                    const { toolCallId, output, isError, errorText } = data;
+                    const toolPart = toolCalls.get(toolCallId);
+                    if (toolPart)
+                      toolCalls.set(toolCallId, {
+                        ...toolPart,
+                        output,
+                        isError,
+                        errorText,
+                        state: "output-available"
+                      });
+                    break;
+                  }
+
+                  case "error": {
+                    // Non-tool errors, we set `error: true` and terminate early
+                    this._broadcastChatMessage({
+                      error: true,
+                      body: data.errorText ?? JSON.stringify(data),
+                      done: false,
+                      id,
+                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                    });
+                    return;
+                  }
+
+                  case "text-delta": {
+                    if (data.delta) fullResponseText += data.delta;
+                    break;
                   }
                 }
-                // Accumulate text deltas for final message persistence
-                if (data.type === "text-delta" && data.delta) {
-                  fullResponseText += data.delta;
-                }
 
+                // Always forward the raw part to the client
                 this._broadcastChatMessage({
                   body: JSON.stringify(data),
                   done: false,
@@ -337,23 +359,22 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       // After streaming is complete, persist the complete assistant's response
       const messageParts: ChatMessage["parts"] = [];
 
-      // Add text part if there's text content
+      Array.from(toolCalls.values()).forEach((t) => {
+        messageParts.push(t as ChatMessage["parts"][number]);
+      });
+
       if (fullResponseText.trim()) {
         messageParts.push({ type: "text", text: fullResponseText });
       }
 
-      // Add tool parts
-      messageParts.push(...(assistantParts as ChatMessage["parts"]));
-
-      // Only persist if there are parts to save
       if (messageParts.length > 0) {
         await this.persistMessages([
           ...this.messages,
           {
-            id: `assistant_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
+            id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
             role: "assistant",
             parts: messageParts
-          } as ChatMessage
+          }
         ]);
       }
     });

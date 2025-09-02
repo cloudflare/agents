@@ -20,14 +20,6 @@ type Env = {
 };
 
 export class HumanInTheLoop extends AIChatAgent<Env> {
-  override async onRequest(request: Request): Promise<Response> {
-    if (request.method === "POST") {
-      return new Response("", { status: 200 });
-    }
-
-    return super.onRequest(request);
-  }
-
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
@@ -59,10 +51,9 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
-    const response = await routeAgentRequest(request, env, {
-      cors: true
-    });
-
-    return response || new Response("Not found", { status: 404 });
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
   }
 } satisfies ExportedHandler<Env>;

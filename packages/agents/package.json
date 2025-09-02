@@ -32,6 +32,11 @@
       "import": "./dist/ai-chat-agent.js",
       "require": "./dist/ai-chat-agent.js"
     },
+    "./ai-chat-v5-migration": {
+      "types": "./dist/ai-chat-v5-migration.d.ts",
+      "import": "./dist/ai-chat-v5-migration.js",
+      "require": "./dist/ai-chat-v5-migration.js"
+    },
     "./ai-react": {
       "types": "./dist/ai-react.d.ts",
       "import": "./dist/ai-react.js",
