@@ -17,6 +17,11 @@ export type AITool<Input = unknown, Output = unknown> = {
   description?: string;
   inputSchema?: unknown;
   execute?: (input: Input) => Output | Promise<Output>;
+  /**
+   * Indicates this tool is executed server-side and should not trigger client-side execution.
+   * When true, the tool will not show confirmation UI but also won't execute on the client.
+   */
+  serverExecuted?: boolean;
 };
 
 type GetInitialMessagesOptions = {
@@ -71,8 +76,8 @@ const requestCache = new Map<string, Promise<Message[]>>();
  * @returns Chat interface controls and state with added clearHistory method
  */
 /**
- * Automatically detects which tools require confirmation based on whether they have an execute function.
- * Tools without execute function will require human confirmation.
+ * Automatically detects which tools require confirmation based on their configuration.
+ * Tools require confirmation if they have no execute function AND are not server-executed.
  * @param tools - Record of tool name to tool definition
  * @returns Array of tool names that require confirmation
  */
@@ -82,7 +87,7 @@ export function detectToolsRequiringConfirmation(
   if (!tools) return [];
 
   return Object.entries(tools)
-    .filter(([_name, tool]) => !tool.execute) // Tools without execute need confirmation
+    .filter(([_name, tool]) => !tool.execute && !tool.serverExecuted)
     .map(([name]) => name);
 }
 
@@ -127,7 +132,25 @@ export function useAgentChat<
       credentials: options.credentials,
       headers: options.headers
     });
-    return response.json<ChatMessage[]>();
+
+    if (!response.ok) {
+      console.warn(
+        `Failed to fetch initial messages: ${response.status} ${response.statusText}`
+      );
+      return [];
+    }
+
+    const text = await response.text();
+    if (!text.trim()) {
+      return [];
+    }
+
+    try {
+      return JSON.parse(text) as ChatMessage[];
+    } catch (error) {
+      console.warn("Failed to parse initial messages JSON:", error);
+      return [];
+    }
   }
 
   const getInitialMessagesFetch =
@@ -232,12 +255,15 @@ export function useAgentChat<
               controller.error(new Error(data.body));
               abortController.abort();
             } else {
-              if (data.body.includes('"tool_calls"')) {
-                isToolCallInProgress = true;
+              // Only enqueue non-empty data to prevent JSON parsing errors
+              if (data.body?.trim()) {
+                if (data.body.includes('"tool_calls"')) {
+                  isToolCallInProgress = true;
+                }
+                controller.enqueue(
+                  new TextEncoder().encode(`data: ${data.body}\n\n`)
+                );
               }
-              controller.enqueue(
-                new TextEncoder().encode(`data: ${data.body}\n\n`)
-              );
               if (data.done && !isToolCallInProgress) {
                 controller.close();
                 abortController.abort();
@@ -333,7 +359,8 @@ export function useAgentChat<
         const toolCallsToResolve = toolCalls.filter(
           (part) =>
             isToolUIPart(part) &&
-            !toolsRequiringConfirmation.includes(getToolName(part))
+            !toolsRequiringConfirmation.includes(getToolName(part)) &&
+            tools?.[getToolName(part)]?.execute // Only execute if client has execute function
         );
 
         if (toolCallsToResolve.length > 0) {

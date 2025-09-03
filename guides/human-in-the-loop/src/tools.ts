@@ -31,11 +31,12 @@ export const tools = {
 export const clientTools: Record<string, AITool> = {
   getLocalTime: {
     description: getLocalTimeTool.description,
-    inputSchema: getLocalTimeTool.inputSchema
+    inputSchema: getLocalTimeTool.inputSchema,
+    serverExecuted: true // Executed server-side, no client confirmation needed
   },
   getWeatherInformation: {
     description: getWeatherInformationTool.description,
     inputSchema: getWeatherInformationTool.inputSchema
-    // no execute function - requires human confirmation
+    // no execute function or serverExecuted flag - requires human confirmation
   }
 };

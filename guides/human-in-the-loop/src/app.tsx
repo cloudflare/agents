@@ -123,6 +123,16 @@ export default function Chat() {
 
                       // render confirmation tool (client-side tool with user interaction)
                       if (part.state === "input-available") {
+                        const tool = clientTools[toolName];
+                        // Don't show confirmation UI for server-executed tools
+                        if (tool?.serverExecuted) {
+                          return (
+                            <div key={toolCallId} className="tool-invocation">
+                              <span className="dynamic-info">{toolName}</span>{" "}
+                              executing...
+                            </div>
+                          );
+                        }
                         return (
                           <div key={toolCallId} className="tool-invocation">
                             Run <span className="dynamic-info">{toolName}</span>{" "}
