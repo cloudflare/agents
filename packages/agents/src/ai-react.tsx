@@ -17,11 +17,6 @@ export type AITool<Input = unknown, Output = unknown> = {
   description?: string;
   inputSchema?: unknown;
   execute?: (input: Input) => Output | Promise<Output>;
-  /**
-   * Indicates this tool is executed server-side and should not trigger client-side execution.
-   * When true, the tool will not show confirmation UI but also won't execute on the client.
-   */
-  serverExecuted?: boolean;
 };
 
 type GetInitialMessagesOptions = {
@@ -87,7 +82,7 @@ export function detectToolsRequiringConfirmation(
   if (!tools) return [];
 
   return Object.entries(tools)
-    .filter(([_name, tool]) => !tool.execute && !tool.serverExecuted)
+    .filter(([_name, tool]) => !tool.execute)
     .map(([name]) => name);
 }
 

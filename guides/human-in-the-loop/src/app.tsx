@@ -1,7 +1,7 @@
 import type { UIMessage as Message } from "ai";
 import { getToolName, isToolUIPart } from "ai";
 import { clientTools } from "./tools";
-import { APPROVAL } from "./utils";
+import { APPROVAL, toolsRequiringConfirmation } from "./utils";
 import "./styles.css";
 import { useAgentChat, type AITool } from "agents/ai-react";
 import { useAgent } from "agents/react";
@@ -38,6 +38,7 @@ export default function Chat() {
   const { messages, sendMessage, addToolResult, clearHistory } = useAgentChat({
     agent,
     experimental_automaticToolResolution: true,
+    toolsRequiringConfirmation,
     tools: clientTools satisfies Record<string, AITool>
   });
 
@@ -125,7 +126,7 @@ export default function Chat() {
                       if (part.state === "input-available") {
                         const tool = clientTools[toolName];
                         // Don't show confirmation UI for server-executed tools
-                        if (tool?.serverExecuted) {
+                        if (!toolsRequiringConfirmation.includes(toolName)) {
                           return (
                             <div key={toolCallId} className="tool-invocation">
                               <span className="dynamic-info">{toolName}</span>{" "}
@@ -144,26 +145,35 @@ export default function Chat() {
                               <button
                                 type="button"
                                 className="button-approve"
-                                onClick={() =>
+                                onClick={async () => {
+                                  // If it's a client-side tool requiring approval
+                                  // we execute it and set the result, otherwise we
+                                  // set the approval and let the server handle it
+                                  const output = tool.execute
+                                    ? await tool.execute(input)
+                                    : APPROVAL.YES;
                                   addToolResult({
                                     tool: toolName,
-                                    output: APPROVAL.YES,
+                                    output,
                                     toolCallId
-                                  })
-                                }
+                                  });
+                                }}
                               >
                                 Yes
                               </button>
                               <button
                                 type="button"
                                 className="button-reject"
-                                onClick={() =>
+                                onClick={() => {
+                                  const output = tool.execute
+                                    ? "User declined to run tool"
+                                    : APPROVAL.NO;
                                   addToolResult({
                                     tool: toolName,
-                                    output: APPROVAL.NO,
+                                    output,
                                     toolCallId
-                                  })
-                                }
+                                  });
+                                }}
                               >
                                 No
                               </button>

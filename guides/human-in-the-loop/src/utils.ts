@@ -31,12 +31,23 @@ export const APPROVAL = {
 } as const;
 
 /**
+ * Tools that require Human-In-The-Loop
+ */
+export const toolsRequiringConfirmation = [
+  "getLocalTime",
+  "getWeatherInformation"
+];
+
+/**
  * Check if a message contains tool confirmations
  */
 export function hasToolConfirmation(message: UIMessage): boolean {
   return (
     message?.parts?.some(
-      (part) => part.type?.startsWith("tool-") && "output" in part
+      (part) =>
+        part.type?.startsWith("tool-") &&
+        toolsRequiringConfirmation.includes(part.type?.slice("tool-".length)) &&
+        "output" in part
     ) || false
   );
 }
