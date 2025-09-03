@@ -60,10 +60,10 @@ Your `wrangler.jsonc` would look something like:
 
 `McpAgent` requires us to define 2 bits, `server` and `init()`.
 
-`init()` is the initializaiton logic that runs every time our MCP server is started (each client session goes to a different Agent instance).  
+`init()` is the initialization logic that runs every time our MCP server is started (each client session goes to a different Agent instance).  
 In there you'll normally setup all your tools/resources and anything else you might need. In this case, we're only setting the tool `square`.
 
-That was just the `McpAgent`, but we still need a Worker to route requests to our MCP server. `McpAgent` exports a static method that deals with that for you. That's what `TinyMCP.serve(...)` is for.  
+That was just the `McpAgent`, but we still need a Worker to route requests to our MCP server. `McpAgent` exports a static method that deals with that for you. That's what `TinyMcp.serve(...)` is for.  
 It returns an object with a `fetch` handler that can act as our Worker entrypoint and deal with the Streamable HTTP transport for us, so we can deploy our MCP directly!
 
 ### Putting it to the test
@@ -71,7 +71,7 @@ It returns an object with a `fetch` handler that can act as our Worker entrypoin
 It's a very simple MCP indeed, but you can get a feel of how fast you can get a server up and running. You can deploy this worker and test your MCP with any client. I'll try with https://playground.ai.cloudflare.com:
 ![model calls the square tool after connecting to our mcp](https://github.com/user-attachments/assets/1e979a82-ed3e-49e9-b9d5-a3fc9b0363a7)
 
-## Password-protected StorageMCP with OAuth!
+## Password-protected StorageMcp with OAuth!
 
 To get a feel of what a more realistic MCP might look like, let's deploy an MCP that lets anyone that knows our secret password access a shared R2 bucket. (This is an example of a custom authorization flow, please do **not** use this in production)
 
@@ -258,7 +258,7 @@ In ~160 lines we were able to write our custom OAuth authorization flow so anyon
 Just like before, in `init()` we set a few tools to access files in our R2 bucket. We also have the `whoami` tool to show users what `userId` we authenticated them with. It's just an example of how to access `props` from within the `McpAgent`.
 
 Most of the code here is either the HTML page to type in the password or the OAuth `/authorize` logic.
-The important part is to notice how in the `OAuthProvider` we expose the `StorageMCP` through the `apiHandlers` key and use the same `serve` method we were using before.
+The important part is to notice how in the `OAuthProvider` we expose the `StorageMcp` through the `apiHandlers` key and use the same `serve` method we were using before.
 
 ### Let's see how this looks like
 
@@ -271,4 +271,4 @@ Once we've authenticated ourselves we can use all the tools!
 
 ### Read more
 
-To find out how to use your favorite providers for your authorizaiton flow and more complex examples, have a look at the demos [here](https://github.com/cloudflare/ai/tree/main/demos).
+To find out how to use your favorite providers for your authorization flow and more complex examples, have a look at the demos [here](https://github.com/cloudflare/ai/tree/main/demos).
