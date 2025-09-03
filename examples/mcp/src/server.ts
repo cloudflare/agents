@@ -63,9 +63,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
         );
       } else {
         // Fall back to default error handling
-        console.error(
-          error.message || "An unexpected error occurred during initialization"
-        );
+        console.error(error);
       }
     }
   }

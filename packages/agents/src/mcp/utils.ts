@@ -11,6 +11,17 @@ import type { McpAgent } from ".";
 import { getAgentByName } from "..";
 import type { CORSOptions } from "./types";
 
+/**
+ * Tag placed in `connection.state.role` to mark the WebSocket that carries
+ * the standalone SSE stream for a session. We use it to recover the connection
+ * after hibernation.
+ */
+export const STANDALONE_SSE_MARKER = "standalone-sse";
+
+/**
+ * Internal JSON-RPC notif method to attach current a
+ * connection as the standalone SSE.
+ */
 export const STANDALONE_SSE_METHOD = "cf/standalone_sse/attach";
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
@@ -502,7 +513,11 @@ export const createStreamingHttpHandler = (
         }
         // .destroy() passes an uncatchable Error, so we make sure we first return
         // the response to the client.
-        ctx.waitUntil(agent.destroy());
+        ctx.waitUntil(
+          agent.destroy().catch(() => {
+            /* This will always throw. We silently catch here */
+          })
+        );
         return new Response(null, {
           status: 204,
           headers: corsHeaders(request, corsOptions)

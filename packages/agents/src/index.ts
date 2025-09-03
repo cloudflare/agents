@@ -1882,7 +1882,7 @@ export type EmailSendOptions = {
 export async function getAgentByName<
   Env,
   T extends Agent<Env>,
-  Props extends Record<string, unknown>
+  Props extends Record<string, unknown> = Record<string, unknown>
 >(
   namespace: AgentNamespace<T>,
   name: string,

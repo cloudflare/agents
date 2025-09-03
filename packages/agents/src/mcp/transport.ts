@@ -9,10 +9,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 export class McpSSETransport implements Transport {
+  sessionId?: string;
+  // Set by the server in `server.connect(transport)`
   onclose?: () => void;
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage) => void;
-  sessionId?: string;
 
   private _getWebSocket: () => WebSocket | null;
   private _started = false;
@@ -41,7 +42,6 @@ export class McpSSETransport implements Transport {
       websocket.send(JSON.stringify(message));
     } catch (error) {
       this.onerror?.(error as Error);
-      throw error;
     }
   }
 
@@ -52,10 +52,11 @@ export class McpSSETransport implements Transport {
 }
 
 export class McpStreamableHttpTransport implements Transport {
+  sessionId?: string;
+  // Set by the server in `server.connect(transport)`
   onclose?: () => void;
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage) => void;
-  sessionId?: string;
 
   // The server MAY use a standalone SSE stream to send requests/notifications.
   private _getWebSocketForStandaloneSse: () => WebSocket | null;
@@ -121,7 +122,6 @@ export class McpStreamableHttpTransport implements Transport {
         standaloneSseSocket?.send(JSON.stringify(message));
       } catch (error) {
         this.onerror?.(error as Error);
-        throw error;
       }
       return;
     }
@@ -139,7 +139,6 @@ export class McpStreamableHttpTransport implements Transport {
       }
     } catch (error) {
       this.onerror?.(error as Error);
-      throw error;
     }
   }
 

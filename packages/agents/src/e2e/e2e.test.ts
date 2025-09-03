@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+// TODO: Move to https://developers.cloudflare.com/workers/wrangler/api/#unstable_startworker
 import alchemy, { type Scope } from "alchemy";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   DurableObjectNamespace,
   KVNamespace,

@@ -28,11 +28,10 @@ import {
   createStreamingHttpHandler,
   handleCORS,
   isDurableObjectNamespace,
+  STANDALONE_SSE_MARKER,
   STANDALONE_SSE_METHOD
 } from "./utils";
 import { McpSSETransport, McpStreamableHttpTransport } from "./transport";
-
-const STANDALONE_SSE_MARKER = "standalone-sse";
 
 export abstract class McpAgent<
   Env = unknown,
@@ -53,10 +52,10 @@ export abstract class McpAgent<
 
     // Re-set the standalone SSE connection ID if
     // coming out of hibernation
-    for (const ws of this.getConnections<MaybeConnectionTag>()) {
-      const meta = ws.state;
+    for (const connection of this.getConnections<MaybeConnectionTag>()) {
+      const meta = connection.state;
       if (meta?.role === STANDALONE_SSE_MARKER) {
-        this._standaloneSseConnectionId = ws.id;
+        this._standaloneSseConnectionId = connection.id;
         return;
       }
     }
@@ -67,6 +66,7 @@ export abstract class McpAgent<
    */
 
   async setInitialized() {
+    // TODO: move to sync api once https://github.com/cloudflare/workerd/pull/4895 lands
     await this.ctx.storage.put("initialized", true);
   }
 
@@ -74,9 +74,10 @@ export abstract class McpAgent<
     return (await this.ctx.storage.get("initialized")) === true;
   }
 
-  // Read the transport type for this agent.
-  // This relies on the naming scheme being `sse:${sessionId}`
-  // or `streamable-http:${sessionId}`.
+  /** Read the transport type for this agent.
+   * This relies on the naming scheme being `sse:${sessionId}`
+   * or `streamable-http:${sessionId}`.
+   */
   getTransportType(): TransportType {
     const [t, ..._] = this.name.split(":");
     switch (t) {
@@ -91,12 +92,13 @@ export abstract class McpAgent<
     }
   }
 
-  // Get the WebSocket for the standalone SSE if any. Streaming HTTP only.
+  /** Get the WebSocket for the standalone SSE if any. Streamable HTTP only. */
   private getWebSocketForStandaloneSse(): WebSocket | null {
     if (!this._standaloneSseConnectionId) return null;
     return this.getConnection(this._standaloneSseConnectionId) ?? null;
   }
 
+  /** Get the unique WebSocket. SSE transport only. */
   private getWebSocket() {
     const websockets = Array.from(this.getConnections());
     if (websockets.length === 0) {
@@ -105,6 +107,7 @@ export abstract class McpAgent<
     return websockets[0];
   }
 
+  /** Get the corresponding WebSocket for a responseId. Streamable HTTP only. */
   private getWebSocketForResponseID(id: string): WebSocket | null {
     const connectionId = this._requestIdToConnectionId.get(id);
     if (connectionId === undefined) {
@@ -113,7 +116,7 @@ export abstract class McpAgent<
     return this.getConnection(connectionId) ?? null;
   }
 
-  // Returns a new transport matching the type of the Agent.
+  /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
       case "sse": {
@@ -129,7 +132,7 @@ export abstract class McpAgent<
     }
   }
 
-  // Store the props
+  /** Update and store the props */
   async updateProps(props?: Props) {
     await this.ctx.storage.put("props", props ?? {});
     this.props = props;
@@ -139,7 +142,7 @@ export abstract class McpAgent<
    * Base Agent / Parykit Server overrides
    */
 
-  // Sets up the MCP transport and server every time the Agent is started.
+  /** Sets up the MCP transport and server every time the Agent is started.*/
   async onStart(props?: Props) {
     // If onStart was passed props, save them in storage
     if (props) await this.updateProps(props);
@@ -152,7 +155,7 @@ export abstract class McpAgent<
     await server.connect(this._transport);
   }
 
-  // Validates new WebSocket connections.
+  /** Validates new WebSocket connections. */
   async onConnect(conn: Connection, _: ConnectionContext): Promise<void> {
     switch (this.getTransportType()) {
       case "sse": {
@@ -160,7 +163,7 @@ export abstract class McpAgent<
         // If we get an upgrade while already connected, we should error
         const websockets = Array.from(this.getConnections());
         if (websockets.length > 1) {
-          conn.close(1000, "Websocket already connected");
+          conn.close(1008, "Websocket already connected");
           return;
         }
         break;
@@ -170,7 +173,7 @@ export abstract class McpAgent<
     }
   }
 
-  // Handles MCP Messages for Streamable HTTP.
+  /** Handles MCP Messages for Streamable HTTP. */
   async onMessage(connection: Connection, event: WSMessage) {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
@@ -232,6 +235,7 @@ export abstract class McpAgent<
     this._transport?.onmessage?.(message);
   }
 
+  /** Remove clients from our cache when they disconnect */
   async onClose(
     conn: Connection,
     _code: number,
@@ -253,7 +257,7 @@ export abstract class McpAgent<
    * Transport ingress and routing
    */
 
-  // Handles MCP Messages for the legacy SSE transport.
+  /** Handles MCP Messages for the legacy SSE transport. */
   async onSSEMcpMessage(
     _sessionId: string,
     messageBody: unknown
@@ -287,7 +291,7 @@ export abstract class McpAgent<
     }
   }
 
-  // Elicit user input with a message and schema
+  /** Elicit user input with a message and schema */
   async elicitInput(params: {
     message: string;
     requestedSchema: unknown;
@@ -335,7 +339,7 @@ export abstract class McpAgent<
     return this._waitForElicitationResponse(requestId);
   }
 
-  // Wait for elicitation response through storage polling
+  /** Wait for elicitation response through storage polling */
   private async _waitForElicitationResponse(
     requestId: string
   ): Promise<ElicitResult> {
@@ -367,7 +371,7 @@ export abstract class McpAgent<
     }
   }
 
-  // Handle elicitation responses
+  /** Handle elicitation responses */
   private async _handleElicitationResponse(
     message: JSONRPCMessage
   ): Promise<boolean> {
@@ -418,6 +422,9 @@ export abstract class McpAgent<
     return false;
   }
 
+  /** Return a handler for the given path for this MCP.
+   * Defaults to Streamable HTTP transport.
+   */
   static serve(
     path: string,
     {
@@ -451,7 +458,7 @@ export abstract class McpAgent<
         // Ensure that the binding is to a DurableObject
         if (!isDurableObjectNamespace(bindingValue)) {
           throw new Error(
-            `Invalid McpAgent binding for ${binding}. Did you update your wrangler configuration?`
+            `Invalid McpAgent binding for ${binding}. Make sure it's a Durable Object binding.`
           );
         }
 
@@ -486,7 +493,9 @@ export abstract class McpAgent<
       }
     };
   }
-
+  /**
+   * Legacy api
+   **/
   static mount(path: string, opts: Omit<ServeOptions, "transport"> = {}) {
     return McpAgent.serveSSE(path, opts);
   }
