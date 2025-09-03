@@ -369,16 +369,12 @@ export const createStreamingHttpHandler = (
         // Validate the Accept header
         const acceptHeader = request.headers.get("accept");
         // The client MUST include an Accept header, listing both application/json and text/event-stream as supported content types.
-        if (
-          !acceptHeader?.includes("application/json") ||
-          !acceptHeader.includes("text/event-stream")
-        ) {
+        if (!acceptHeader?.includes("text/event-stream")) {
           const body = JSON.stringify({
             jsonrpc: "2.0",
             error: {
               code: -32000,
-              message:
-                "Not Acceptable: Client must accept both application/json and text/event-stream"
+              message: "Not Acceptable: Client must accept text/event-stream"
             },
             id: null
           });
