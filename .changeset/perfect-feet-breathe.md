@@ -1,5 +1,4 @@
 ---
-"@cloudflare/agents-mcp-example": patch
 "agents": patch
 ---
 
