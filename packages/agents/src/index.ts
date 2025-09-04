@@ -578,37 +578,35 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
-          setTimeout(() => {
-            if (this.state) {
-              connection.send(
-                JSON.stringify({
-                  state: this.state,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
-            }
-
+          if (this.state) {
             connection.send(
               JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: MessageType.CF_AGENT_MCP_SERVERS
+                state: this.state,
+                type: MessageType.CF_AGENT_STATE
               })
             );
+          }
 
-            this.observability?.emit(
-              {
-                displayMessage: "Connection established",
-                id: nanoid(),
-                payload: {
-                  connectionId: connection.id
-                },
-                timestamp: Date.now(),
-                type: "connect"
+          connection.send(
+            JSON.stringify({
+              mcp: this.getMcpServers(),
+              type: MessageType.CF_AGENT_MCP_SERVERS
+            })
+          );
+
+          this.observability?.emit(
+            {
+              displayMessage: "Connection established",
+              id: nanoid(),
+              payload: {
+                connectionId: connection.id
               },
-              this.ctx
-            );
-            return this._tryCatch(() => _onConnect(connection, ctx));
-          }, 20);
+              timestamp: Date.now(),
+              type: "connect"
+            },
+            this.ctx
+          );
+          return this._tryCatch(() => _onConnect(connection, ctx));
         }
       );
     };
