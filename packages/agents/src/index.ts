@@ -850,11 +850,12 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     while (proto && proto !== Object.prototype && depth < 10) {
       const methodNames = Object.getOwnPropertyNames(proto);
       for (const methodName of methodNames) {
-        // Skip if it's a private method or not a function
+        // Skip if it's a private method or not a function or a getter
         if (
           baseMethods.has(methodName) ||
           methodName.startsWith("_") ||
-          typeof this[methodName as keyof this] !== "function"
+          typeof this[methodName as keyof this] !== "function" ||
+          !!Object.getOwnPropertyDescriptor(proto, methodName)?.get
         ) {
           continue;
         }
