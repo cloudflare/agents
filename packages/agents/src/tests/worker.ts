@@ -109,7 +109,7 @@ export class TestRaceAgent extends Agent<Env> {
 }
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
     // set some props that should be passed init
@@ -130,7 +130,10 @@ export default {
     }
 
     if (url.pathname.startsWith("/agents/")) {
-      return routeAgentRequest(request, env);
+      return (
+        (await routeAgentRequest(request, env)) ||
+        new Response("Not found", { status: 404 })
+      );
     }
 
     return new Response("Not found", { status: 404 });
