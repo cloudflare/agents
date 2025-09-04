@@ -4,6 +4,31 @@ This guide helps you migrate your existing code to **Agents SDK v0.1.0** (`agent
 
 ## Overview of Changes ([AI SDK v5 migration guide](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0))
 
+### New Feature: Custom Message Types
+
+**Agents SDK v0.1.0** introduces support for custom message types in `AIChatAgent`. You can now extend the `UIMessage` type with additional fields for enhanced functionality.
+
+```typescript
+import { AIChatAgent } from "agents/ai-chat-agent";
+import type { UIMessage } from "ai";
+
+// Define custom message type
+interface CustomMessage extends UIMessage {
+  priority: "high" | "medium" | "low";
+  category: string;
+}
+
+// Use generic parameter for type safety
+export class CustomAgent extends AIChatAgent<Env, State, CustomMessage> {
+  // this.messages is now CustomMessage[] with full type safety
+  getHighPriorityMessages() {
+    return this.messages.filter((msg) => msg.priority === "high");
+  }
+}
+```
+
+For detailed documentation, see [Custom Message Types Guide](./custom-message-types.md).
+
 ### 1. Message Format Changes ([UIMessage Changes](https://ai-sdk.dev/docs/migration-guides/migration-guide-5-0#uimessage-changes))
 
 The most significant change is the message format. AI SDK v5 uses a new `UIMessage` format that replaces the older `Message` format.

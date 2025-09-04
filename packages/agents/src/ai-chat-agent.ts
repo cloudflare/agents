@@ -15,19 +15,41 @@ const decoder = new TextDecoder();
 
 /**
  * Extension of Agent with built-in chat capabilities
- * @template Env Environment type containing bindings
+ * @template Env Environment type containing bindings (default: unknown)
+ * @template State State type for the agent (default: unknown)
+ * @template Message Message type extending UIMessage (default: UIMessage)
+ *
+ * @example
+ * // Basic usage (backward compatible)
+ * class MyAgent extends AIChatAgent<Env> {
+ *   // messages will be UIMessage[]
+ * }
+ *
+ * @example
+ * // Custom message type
+ * interface CustomMessage extends UIMessage {
+ *   priority: "high" | "medium" | "low";
+ * }
+ *
+ * class CustomAgent extends AIChatAgent<Env, State, CustomMessage> {
+ *   // messages will be CustomMessage[] with full type safety
+ *   getHighPriorityMessages() {
+ *     return this.messages.filter(msg => msg.priority === "high");
+ *   }
+ * }
  */
-export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
-  Env,
-  State
-> {
+export class AIChatAgent<
+  Env = unknown,
+  State = unknown,
+  Message extends ChatMessage = ChatMessage
+> extends Agent<Env, State> {
   /**
    * Map of message `id`s to `AbortController`s
    * useful to propagate request cancellation signals for any external calls made by the agent
    */
   private _chatMessageAbortControllers: Map<string, AbortController>;
   /** Array of chat messages for the current conversation */
-  messages: ChatMessage[];
+  messages: Message[];
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.sql`create table if not exists cf_ai_chat_agent_messages (
@@ -44,7 +66,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     });
 
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-    this.messages = autoTransformMessages(rawMessages);
+    this.messages = autoTransformMessages(rawMessages) as Message[];
 
     this._chatMessageAbortControllers = new Map();
   }
@@ -80,7 +102,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         const { messages } = JSON.parse(body as string);
 
         // Automatically transform any incoming messages
-        const transformedMessages = autoTransformMessages(messages);
+        const transformedMessages = autoTransformMessages(
+          messages
+        ) as Message[];
 
         this._broadcastChatMessage(
           {
@@ -160,7 +184,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         );
       } else if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
         // replace the messages with the new ones, automatically transformed
-        const transformedMessages = autoTransformMessages(data.messages);
+        const transformedMessages = autoTransformMessages(
+          data.messages
+        ) as Message[];
         await this.persistMessages(transformedMessages, [connection.id]);
       } else if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
         // propagate an abort signal for the associated request
@@ -213,12 +239,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * Save messages on the server side
    * @param messages Chat messages to save
    */
-  async saveMessages(messages: ChatMessage[]) {
+  async saveMessages(messages: Message[]) {
     await this.persistMessages(messages);
   }
 
   async persistMessages(
-    messages: ChatMessage[],
+    messages: Message[],
     excludeBroadcastIds: string[] = []
   ) {
     this.sql`delete from cf_ai_chat_agent_messages`;
@@ -374,7 +400,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
             role: "assistant",
             parts: messageParts
-          }
+          } as Message
         ]);
       }
     });

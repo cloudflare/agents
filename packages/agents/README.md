@@ -335,6 +335,59 @@ export class DialogueAgent extends AIChatAgent {
 }
 ```
 
+#### Custom Message Types
+
+You can extend the message type system with custom fields for enhanced functionality:
+
+```ts
+import { AIChatAgent } from "agents/ai-chat-agent";
+import type { UIMessage } from "ai";
+
+// Define your custom message type
+interface CustomMessage extends UIMessage {
+  priority: "high" | "medium" | "low";
+  category: string;
+  metadata?: Record<string, any>;
+}
+
+// Use the generic parameter to specify your message type
+export class CustomDialogueAgent extends AIChatAgent<
+  Env,
+  State,
+  CustomMessage
+> {
+  async onChatMessage(onFinish) {
+    // this.messages is now typed as CustomMessage[]
+    const highPriorityMessages = this.messages.filter(
+      (msg) => msg.priority === "high"
+    );
+
+    return createDataStreamResponse({
+      execute: async (dataStream) => {
+        const stream = streamText({
+          model: openai("gpt-4o"),
+          messages: convertToModelMessages(this.messages),
+          onFinish
+        });
+        stream.mergeIntoDataStream(dataStream);
+      }
+    });
+  }
+
+  // Custom methods with full type safety
+  async processHighPriorityMessages() {
+    const urgent = this.messages.filter((msg) => msg.priority === "high");
+    // Process urgent messages...
+  }
+}
+```
+
+The `AIChatAgent` class supports three generic parameters:
+
+- `Env`: Environment type containing bindings (default: `unknown`)
+- `State`: State type for the agent (default: `unknown`)
+- `Message`: Message type extending `UIMessage` (default: `UIMessage`)
+
 #### Creating the Interface
 
 Connect with your agent through a React interface:
