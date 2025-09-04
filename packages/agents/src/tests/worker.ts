@@ -24,9 +24,11 @@ type Props = {
 };
 
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
+  private tempToolHandle?: { remove: () => void };
+
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
-    { capabilities: { logging: {} } }
+    { capabilities: { logging: {}, tools: { listChanged: true } } }
   );
 
   async init() {
@@ -44,8 +46,68 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       {},
       async (): Promise<CallToolResult> => {
         return {
-          content: [{ text: this.props.testValue, type: "text" }]
+          content: [{ text: this.props?.testValue ?? "unknown", type: "text" }]
         };
+      }
+    );
+
+    this.server.tool(
+      "emitLog",
+      "Emit a logging/message notification",
+      {
+        level: z.enum(["debug", "info", "warning", "error"]),
+        message: z.string()
+      },
+      async ({ level, message }): Promise<CallToolResult> => {
+        // Force a logging message to be sent when the tool is called
+        await this.server.server.sendLoggingMessage({
+          level,
+          data: message
+        });
+        return {
+          content: [{ type: "text", text: `logged:${level}` }]
+        };
+      }
+    );
+
+    // Use `registerTool` so we can later remove it.
+    // Triggers notifications/tools/list_changed
+    this.server.tool(
+      "installTempTool",
+      "Register a temporary tool that echoes input",
+      {},
+      async (): Promise<CallToolResult> => {
+        if (!this.tempToolHandle) {
+          // Prefer modern registerTool(name, description, schema, handler)
+          this.tempToolHandle = this.server.registerTool(
+            "temp-echo",
+            {
+              description: "Echo text (temporary tool)",
+              inputSchema: { what: z.string().describe("Text to echo") }
+            },
+            async ({ what }: { what: string }): Promise<CallToolResult> => {
+              return { content: [{ type: "text", text: `echo:${what}` }] };
+            }
+          );
+        }
+        // Most SDKs auto-send notifications/tools/list_changed here.
+        return { content: [{ type: "text", text: "temp tool installed" }] };
+      }
+    );
+
+    // Remove the dynamically added tool.
+    // Triggers notifications/tools/list_changed
+    this.server.tool(
+      "uninstallTempTool",
+      "Remove the temporary tool if present",
+      {},
+      async (): Promise<CallToolResult> => {
+        if (this.tempToolHandle?.remove) {
+          this.tempToolHandle.remove();
+          this.tempToolHandle = undefined;
+          return { content: [{ type: "text", text: "temp tool removed" }] };
+        }
+        return { content: [{ type: "text", text: "nothing to remove" }] };
       }
     );
   }

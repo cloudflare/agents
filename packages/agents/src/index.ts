@@ -302,7 +302,11 @@ function withAgentContext<T extends (...args: any[]) => any>(
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
  */
-export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
+export class Agent<
+  Env = typeof env,
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
+> extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
 
   private _ParentClass: typeof Agent<Env, State> =
@@ -612,7 +616,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     };
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async () => {
+    this.onStart = async (props?: Props) => {
       return agentContext.run(
         {
           agent: this,
@@ -672,7 +676,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   });
               });
             }
-            return _onStart();
+            return _onStart(props);
           });
         }
       );
@@ -1874,12 +1878,17 @@ export type EmailSendOptions = {
  * @param options Options for Agent creation
  * @returns Promise resolving to an Agent instance stub
  */
-export async function getAgentByName<Env, T extends Agent<Env>>(
+export async function getAgentByName<
+  Env,
+  T extends Agent<Env>,
+  Props extends Record<string, unknown> = Record<string, unknown>
+>(
   namespace: AgentNamespace<T>,
   name: string,
   options?: {
     jurisdiction?: DurableObjectJurisdiction;
     locationHint?: DurableObjectLocationHint;
+    props?: Props;
   }
 ) {
   return getServerByName<Env, T>(namespace, name, options);
