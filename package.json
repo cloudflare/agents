@@ -34,7 +34,7 @@
     "@changesets/changelog-github": "^0.5.1",
     "@changesets/cli": "^2.29.5",
     "@cloudflare/vite-plugin": "^1.11.4",
-    "@cloudflare/vitest-pool-workers": "^0.8.63",
+    "@cloudflare/vitest-pool-workers": "^0.8.69",
     "@cloudflare/workers-types": "^4.20250813.0",
     "@openai/agents": "^0.0.17",
     "@openai/agents-extensions": "^0.0.17",
