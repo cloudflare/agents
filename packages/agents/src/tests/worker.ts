@@ -129,14 +129,10 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
 
-    if (url.pathname.startsWith("/agents/")) {
-      return (
-        (await routeAgentRequest(request, env)) ||
-        new Response("Not found", { status: 404 })
-      );
-    }
-
-    return new Response("Not found", { status: 404 });
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
   },
 
   async email(
