@@ -577,7 +577,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
       // must fix this
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
-        async () => {
+        () => {
           if (this.state) {
             connection.send(
               JSON.stringify({

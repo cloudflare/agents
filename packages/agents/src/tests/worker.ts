@@ -101,7 +101,7 @@ export class TestRaceAgent extends Agent<Env> {
     conn.setState({ tagged: true });
   }
 
-  async onMessage(conn: Connection<{ tagged: boolean }>, msg: WSMessage) {
+  async onMessage(conn: Connection<{ tagged: boolean }>, _: WSMessage) {
     const tagged = !!conn.state?.tagged;
     // Echo a single JSON frame so the test can assert ordering
     conn.send(JSON.stringify({ type: "echo", tagged }));

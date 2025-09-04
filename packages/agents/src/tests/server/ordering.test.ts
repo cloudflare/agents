@@ -14,7 +14,7 @@ async function connectWS(path: string) {
   });
   const res = await worker.fetch(req, env, ctx);
   expect(res?.status).toBe(101);
-  const ws = (res as any).webSocket as WebSocket;
+  const ws = res?.webSocket as WebSocket;
   expect(ws).toBeDefined();
   ws.accept();
   return { ws, ctx };
@@ -30,9 +30,11 @@ describe("WebSocket ordering / races", () => {
     // 2. Initial state sharing
     // 3. MCP servers
     // 4. Our echo message
-    let firstMessages: { type: string; tagged?: boolean }[] = [];
+    const firstMessages: { type: string; tagged?: boolean }[] = [];
     let resolvePromise: (value: boolean) => void;
-    let donePromise = new Promise((res) => (resolvePromise = res));
+    const donePromise = new Promise((res) => {
+      resolvePromise = res;
+    });
     // Timeout if we don't get a message in the first 100ms
     const t = setTimeout(() => resolvePromise(false), 100);
 
@@ -40,7 +42,10 @@ describe("WebSocket ordering / races", () => {
     ws.addEventListener("message", (e: MessageEvent) => {
       const data = JSON.parse(e.data as string);
       if (firstMessages.length < 4) firstMessages.push(data);
-      else resolvePromise(true);
+      else {
+        resolvePromise(true);
+        t.close();
+      }
     });
 
     // Hammer a burst right away, if ordering is wrong
