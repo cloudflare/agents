@@ -1,9 +1,23 @@
-import { useChat } from "@ai-sdk/react";
-import type { Message } from "ai";
+import { useChat, type UseChatOptions } from "@ai-sdk/react";
+import { getToolName, isToolUIPart } from "ai";
+import type {
+  ChatInit,
+  ChatTransport,
+  UIMessage as Message,
+  UIMessage
+} from "ai";
+import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
-import { use, useEffect } from "react";
-import { MessageType, type OutgoingMessage } from "./ai-types";
+import { use, useEffect, useRef } from "react";
+import type { OutgoingMessage } from "./ai-types";
+import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
+
+export type AITool<Input = unknown, Output = unknown> = {
+  description?: string;
+  inputSchema?: unknown;
+  execute?: (input: Input) => Output | Promise<Output>;
+};
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -11,21 +25,43 @@ type GetInitialMessagesOptions = {
   url: string;
 };
 
+// v5 useChat parameters
+type UseChatParams<M extends UIMessage = UIMessage> = ChatInit<M> &
+  UseChatOptions<M>;
+
 /**
  * Options for the useAgentChat hook
  */
-type UseAgentChatOptions<State> = Omit<
-  Parameters<typeof useChat>[0] & {
-    /** Agent connection from useAgent */
-    agent: ReturnType<typeof useAgent<State>>;
-    getInitialMessages?:
-      | undefined
-      | null
-      // | (() => Message[])
-      | ((options: GetInitialMessagesOptions) => Promise<Message[]>);
-  },
-  "fetch"
->;
+type UseAgentChatOptions<
+  State,
+  ChatMessage extends UIMessage = UIMessage
+> = Omit<UseChatParams<ChatMessage>, "fetch"> & {
+  /** Agent connection from useAgent */
+  agent: ReturnType<typeof useAgent<State>>;
+  getInitialMessages?:
+    | undefined
+    | null
+    | ((options: GetInitialMessagesOptions) => Promise<ChatMessage[]>);
+  /** Request credentials */
+  credentials?: RequestCredentials;
+  /** Request headers */
+  headers?: HeadersInit;
+  /**
+   * @description Whether to automatically resolve tool calls that do not require human interaction.
+   * @experimental
+   */
+  experimental_automaticToolResolution?: boolean;
+  /**
+   * @description Tools object for automatic detection of confirmation requirements.
+   * Tools without execute function will require confirmation.
+   */
+  tools?: Record<string, AITool<unknown, unknown>>;
+  /**
+   * @description Manual override for tools requiring confirmation.
+   * If not provided, will auto-detect from tools object.
+   */
+  toolsRequiringConfirmation?: string[];
+};
 
 const requestCache = new Map<string, Promise<Message[]>>();
 
@@ -34,10 +70,43 @@ const requestCache = new Map<string, Promise<Message[]>>();
  * @param options Chat options including the agent connection
  * @returns Chat interface controls and state with added clearHistory method
  */
-export function useAgentChat<State = unknown>(
-  options: UseAgentChatOptions<State>
-) {
-  const { agent, getInitialMessages, ...rest } = options;
+/**
+ * Automatically detects which tools require confirmation based on their configuration.
+ * Tools require confirmation if they have no execute function AND are not server-executed.
+ * @param tools - Record of tool name to tool definition
+ * @returns Array of tool names that require confirmation
+ */
+export function detectToolsRequiringConfirmation(
+  tools?: Record<string, AITool<unknown, unknown>>
+): string[] {
+  if (!tools) return [];
+
+  return Object.entries(tools)
+    .filter(([_name, tool]) => !tool.execute)
+    .map(([name]) => name);
+}
+
+export function useAgentChat<
+  State = unknown,
+  ChatMessage extends UIMessage = UIMessage
+>(
+  options: UseAgentChatOptions<State, ChatMessage>
+): ReturnType<typeof useChat<ChatMessage>> & {
+  clearHistory: () => void;
+} {
+  const {
+    agent,
+    getInitialMessages,
+    messages: optionsInitialMessages,
+    experimental_automaticToolResolution,
+    tools,
+    toolsRequiringConfirmation: manualToolsRequiringConfirmation,
+    ...rest
+  } = options;
+
+  // Auto-detect tools requiring confirmation, or use manual override
+  const toolsRequiringConfirmation =
+    manualToolsRequiringConfirmation ?? detectToolsRequiringConfirmation(tools);
 
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
@@ -46,7 +115,6 @@ export function useAgentChat<State = unknown>(
       .replace("wss://", "https://")}`
   );
 
-  // delete the _pk query param
   agentUrl.searchParams.delete("_pk");
   const agentUrlString = agentUrl.toString();
 
@@ -59,7 +127,25 @@ export function useAgentChat<State = unknown>(
       credentials: options.credentials,
       headers: options.headers
     });
-    return response.json<Message[]>();
+
+    if (!response.ok) {
+      console.warn(
+        `Failed to fetch initial messages: ${response.status} ${response.statusText}`
+      );
+      return [];
+    }
+
+    const text = await response.text();
+    if (!text.trim()) {
+      return [];
+    }
+
+    try {
+      return JSON.parse(text) as ChatMessage[];
+    } catch (error) {
+      console.warn("Failed to parse initial messages JSON:", error);
+      return [];
+    }
   }
 
   const getInitialMessagesFetch =
@@ -69,12 +155,9 @@ export function useAgentChat<State = unknown>(
     getInitialMessagesOptions: GetInitialMessagesOptions
   ) {
     if (requestCache.has(agentUrlString)) {
-      return requestCache.get(agentUrlString)!;
+      return requestCache.get(agentUrlString)! as Promise<ChatMessage[]>;
     }
     const promise = getInitialMessagesFetch(getInitialMessagesOptions);
-    // immediately cache the promise so that we don't
-    // create multiple requests for the same agent during multiple
-    // concurrent renders
     requestCache.set(agentUrlString, promise);
     return promise;
   }
@@ -89,18 +172,12 @@ export function useAgentChat<State = unknown>(
         });
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
-    : (rest.initialMessages ?? []);
+    : (optionsInitialMessages ?? []);
 
-  // manages adding and removing the promise from the cache
   useEffect(() => {
     if (!initialMessagesPromise) {
       return;
     }
-    // this effect is responsible for removing the promise from the cache
-    // when the component unmounts or the promise changes,
-    // but that means it also must add the promise to the cache
-    // so that multiple arbitrary effect runs produce the expected state
-    // when resolved.
     requestCache.set(agentUrlString, initialMessagesPromise!);
     return () => {
       if (requestCache.get(agentUrlString) === initialMessagesPromise) {
@@ -113,10 +190,6 @@ export function useAgentChat<State = unknown>(
     request: RequestInfo | URL,
     options: RequestInit = {}
   ) {
-    // we're going to use a websocket to do the actual "fetching"
-    // but still satisfy the type signature of the fetch function
-    // so we'll return a promise that resolves to a response
-
     const {
       method,
       keepalive,
@@ -130,14 +203,13 @@ export function useAgentChat<State = unknown>(
       referrer,
       referrerPolicy,
       window
-      //  dispatcher, duplex
     } = options;
     const id = nanoid(8);
     const abortController = new AbortController();
+    let controller: ReadableStreamDefaultController;
+    let isToolCallInProgress = false;
 
     signal?.addEventListener("abort", () => {
-      // Propagate request cancellation to the Agent
-      // We need to communciate cancellation as a websocket message, instead of a request signal
       agent.send(
         JSON.stringify({
           id,
@@ -150,21 +222,23 @@ export function useAgentChat<State = unknown>(
       //        Reasoning: This code could be subject to collisions, as it "force saves" the messages we have locally
       //
       // agent.send(JSON.stringify({
-      //   type: "cf_agent_chat_messages",
+      //   type: MessageType.CF_AGENT_CHAT_MESSAGES,
       //   messages: ... /* some way of getting current messages ref? */
       // }))
 
       abortController.abort();
       // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
-      controller.close();
+      if (!isToolCallInProgress) {
+        controller.close();
+      }
     });
 
     agent.addEventListener(
       "message",
       (event) => {
-        let data: OutgoingMessage;
+        let data: OutgoingMessage<ChatMessage>;
         try {
-          data = JSON.parse(event.data) as OutgoingMessage;
+          data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
         } catch (_error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
@@ -172,18 +246,29 @@ export function useAgentChat<State = unknown>(
         }
         if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
           if (data.id === id) {
-            controller.enqueue(new TextEncoder().encode(data.body));
-            if (data.done) {
-              controller.close();
+            if (data.error) {
+              controller.error(new Error(data.body));
               abortController.abort();
+            } else {
+              // Only enqueue non-empty data to prevent JSON parsing errors
+              if (data.body?.trim()) {
+                if (data.body.includes('"tool_calls"')) {
+                  isToolCallInProgress = true;
+                }
+                controller.enqueue(
+                  new TextEncoder().encode(`data: ${data.body}\n\n`)
+                );
+              }
+              if (data.done && !isToolCallInProgress) {
+                controller.close();
+                abortController.abort();
+              }
             }
           }
         }
       },
       { signal: abortController.signal }
     );
-
-    let controller: ReadableStreamDefaultController;
 
     const stream = new ReadableStream({
       start(c) {
@@ -206,8 +291,6 @@ export function useAgentChat<State = unknown>(
           referrer,
           referrerPolicy,
           window
-          // dispatcher,
-          // duplex
         },
         type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
         url: request.toString()
@@ -216,24 +299,111 @@ export function useAgentChat<State = unknown>(
 
     return new Response(stream);
   }
-  const useChatHelpers = useChat({
-    fetch: aiFetch,
-    initialMessages,
-    sendExtraMessageFields: true,
-    ...rest
+
+  const customTransport: ChatTransport<ChatMessage> = {
+    sendMessages: async (
+      options: Parameters<typeof DefaultChatTransport.prototype.sendMessages>[0]
+    ) => {
+      const transport = new DefaultChatTransport<ChatMessage>({
+        api: agentUrlString,
+        fetch: aiFetch
+      });
+      return transport.sendMessages(options);
+    },
+    reconnectToStream: async (
+      options: Parameters<
+        typeof DefaultChatTransport.prototype.reconnectToStream
+      >[0]
+    ) => {
+      const transport = new DefaultChatTransport<ChatMessage>({
+        api: agentUrlString,
+        fetch: aiFetch
+      });
+      return transport.reconnectToStream(options);
+    }
+  };
+
+  const useChatHelpers = useChat<ChatMessage>({
+    ...rest,
+    messages: initialMessages,
+    transport: customTransport
   });
+
+  const processedToolCalls = useRef(new Set<string>());
+
+  // tools can be a different object everytime it's called,
+  // which might lead to this effect being called multiple times with different tools objects.
+  // we need to fix this, but that's a bigger refactor.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: we need to fix this
+  useEffect(() => {
+    if (!experimental_automaticToolResolution) {
+      return;
+    }
+
+    const lastMessage =
+      useChatHelpers.messages[useChatHelpers.messages.length - 1];
+    if (!lastMessage || lastMessage.role !== "assistant") {
+      return;
+    }
+
+    const toolCalls = lastMessage.parts.filter(
+      (part) =>
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
+        !processedToolCalls.current.has(part.toolCallId)
+    );
+
+    if (toolCalls.length > 0) {
+      (async () => {
+        const toolCallsToResolve = toolCalls.filter(
+          (part) =>
+            isToolUIPart(part) &&
+            !toolsRequiringConfirmation.includes(getToolName(part)) &&
+            tools?.[getToolName(part)]?.execute // Only execute if client has execute function
+        );
+
+        if (toolCallsToResolve.length > 0) {
+          for (const part of toolCallsToResolve) {
+            if (isToolUIPart(part)) {
+              processedToolCalls.current.add(part.toolCallId);
+              let toolOutput = null;
+              const toolName = getToolName(part);
+              const tool = tools?.[toolName];
+
+              if (tool?.execute && part.input) {
+                try {
+                  toolOutput = await tool.execute(part.input);
+                } catch (error) {
+                  toolOutput = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+                }
+              }
+
+              await useChatHelpers.addToolResult({
+                toolCallId: part.toolCallId,
+                tool: toolName,
+                output: toolOutput
+              });
+            }
+          }
+          useChatHelpers.sendMessage();
+        }
+      })();
+    }
+  }, [
+    useChatHelpers.messages,
+    experimental_automaticToolResolution,
+    useChatHelpers.addToolResult,
+    useChatHelpers.sendMessage,
+    toolsRequiringConfirmation
+  ]);
 
   useEffect(() => {
     function onClearHistory(event: MessageEvent) {
-      if (typeof event.data !== "string") {
-        return;
-      }
+      if (typeof event.data !== "string") return;
       let data: OutgoingMessage;
       try {
         data = JSON.parse(event.data) as OutgoingMessage;
       } catch (_error) {
-        // silently ignore invalid messages for now
-        // TODO: log errors with log levels
         return;
       }
       if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
@@ -242,15 +412,11 @@ export function useAgentChat<State = unknown>(
     }
 
     function onMessages(event: MessageEvent) {
-      if (typeof event.data !== "string") {
-        return;
-      }
-      let data: OutgoingMessage;
+      if (typeof event.data !== "string") return;
+      let data: OutgoingMessage<ChatMessage>;
       try {
-        data = JSON.parse(event.data) as OutgoingMessage;
+        data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
       } catch (_error) {
-        // silently ignore invalid messages for now
-        // TODO: log errors with log levels
         return;
       }
       if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
@@ -267,11 +433,16 @@ export function useAgentChat<State = unknown>(
     };
   }, [agent, useChatHelpers.setMessages]);
 
+  const { addToolResult } = useChatHelpers;
+
+  const addToolResultAndSendMessage: typeof addToolResult = async (...args) => {
+    await addToolResult(...args);
+    useChatHelpers.sendMessage();
+  };
+
   return {
     ...useChatHelpers,
-    /**
-     * Clear chat history on both client and Agent
-     */
+    addToolResult: addToolResultAndSendMessage,
     clearHistory: () => {
       useChatHelpers.setMessages([]);
       agent.send(
@@ -280,15 +451,13 @@ export function useAgentChat<State = unknown>(
         })
       );
     },
-    /**
-     * Set the chat messages and synchronize with the Agent
-     * @param messages New messages to set
-     */
-    setMessages: (messages: Message[]) => {
+    setMessages: (
+      messages: Parameters<typeof useChatHelpers.setMessages>[0]
+    ) => {
       useChatHelpers.setMessages(messages);
       agent.send(
         JSON.stringify({
-          messages,
+          messages: Array.isArray(messages) ? messages : [],
           type: MessageType.CF_AGENT_CHAT_MESSAGES
         })
       );

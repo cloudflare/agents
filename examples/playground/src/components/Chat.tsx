@@ -1,4 +1,3 @@
-import type { Message } from "@ai-sdk/react";
 import "./Chat.css";
 import { useAgentChat } from "agents/ai-react";
 import { useAgent } from "agents/react";
@@ -31,11 +30,29 @@ function ChatRoom({ roomId }: ChatProps) {
     name: `chat-${roomId}`
   });
 
-  const { messages, input, handleInputChange, handleSubmit, clearHistory } =
-    useAgentChat({
-      agent,
-      maxSteps: 5
+  const { messages, clearHistory, sendMessage } = useAgentChat({
+    agent
+  });
+
+  const [input, setInput] = useState("");
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setInput(e.target.value);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim()) return;
+
+    const message = input;
+    setInput("");
+
+    // Send message to agent
+    await sendMessage({
+      role: "user",
+      parts: [{ type: "text", text: message }]
     });
+  };
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -52,22 +69,17 @@ function ChatRoom({ roomId }: ChatProps) {
 
       <div className="chat-container">
         <div className="messages-wrapper">
-          {messages?.map((m: Message) => (
+          {messages?.map((m) => (
             <div key={m.id} className="message">
               <strong>{`${m.role}: `}</strong>
-              {m.parts?.map((part, i) => {
-                switch (part.type) {
-                  case "text":
-                    return (
-                      // biome-ignore lint/suspicious/noArrayIndexKey: vibes
-                      <div key={i} className="message-content">
-                        {part.text}
-                      </div>
-                    );
-                  default:
-                    return null;
-                }
-              })}
+              {m.parts
+                ?.filter((part) => part.type === "text")
+                .map((part, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: vibes
+                  <div key={i} className="message-content">
+                    {part.text}
+                  </div>
+                ))}
               <br />
             </div>
           ))}

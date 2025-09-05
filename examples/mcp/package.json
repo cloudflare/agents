@@ -1,10 +1,10 @@
 {
   "author": "",
   "dependencies": {
-    "mcp-remote": "^0.1.18"
+    "mcp-remote": "^0.1.29"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.2"
+    "@modelcontextprotocol/sdk": "^1.17.5"
   },
   "keywords": [],
   "name": "@cloudflare/agents-mcp-example",

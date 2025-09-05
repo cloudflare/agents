@@ -15,7 +15,7 @@ import {
   Agent,
   type AgentNamespace,
   routeAgentRequest,
-  unstable_callable as callable,
+  callable,
   type Connection,
   type WSMessage
 } from "agents";

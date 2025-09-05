@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.1.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.2.2/schema.json",
   "assist": {
     "actions": {
       "source": {
@@ -43,7 +43,11 @@
         "useKeyWithClickEvents": "off"
       },
       "complexity": {
-        "noBannedTypes": "off"
+        "noBannedTypes": "off",
+        "noImportantStyles": "off"
+      },
+      "suspicious": {
+        "noExplicitAny": "warn"
       },
       "recommended": true,
       "style": {

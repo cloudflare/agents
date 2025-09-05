@@ -1,8 +1,4 @@
-import {
-  Agent,
-  type StreamingResponse,
-  unstable_callable as callable
-} from "agents";
+import { Agent, type StreamingResponse, callable } from "agents";
 import type { Env } from "../server";
 
 export class Rpc extends Agent<Env> {

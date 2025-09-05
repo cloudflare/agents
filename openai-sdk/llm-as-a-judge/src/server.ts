@@ -1,9 +1,5 @@
 import { Agent, type AgentInputItem, run, withTrace } from "@openai/agents";
-import {
-  Agent as CFAgent,
-  unstable_callable as callable,
-  routeAgentRequest
-} from "agents";
+import { Agent as CFAgent, callable, routeAgentRequest } from "agents";
 import { z } from "zod";
 
 type Env = {
@@ -82,11 +78,13 @@ export class MyAgent extends CFAgent<Env, CFAgentState> {
         inputItems = sloganResult.history;
         const evaluationResult = await run(this.evaluator, inputItems);
         const attempts = this.state.attempts;
-        const evaluation = evaluationResult.finalOutput;
+        const evaluation = evaluationResult.finalOutput as
+          | { feedback: string; score: "pass" | "needs_improvement" | "fail" }
+          | undefined;
         attempts.push({
           description,
           slogan,
-          feedback: evaluation?.feedback as string,
+          feedback: evaluation?.feedback || "",
           score: evaluation?.score || "fail"
         });
         // Updating state syncs to all connected clients

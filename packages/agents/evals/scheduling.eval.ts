@@ -5,8 +5,8 @@ import { generateObject } from "ai";
 import { createScorer, evalite } from "evalite";
 import {
   type Schedule,
-  unstable_getSchedulePrompt,
-  unstable_scheduleSchema
+  getSchedulePrompt,
+  scheduleSchema
 } from "../src/schedule";
 
 const model = openai("gpt-4o");
@@ -330,13 +330,13 @@ evalite<string, Schedule>("Evals for scheduling", {
       const result = await generateObject({
         maxRetries: 5,
         model, // <- the shape of the object that the scheduler expects
-        prompt: `${unstable_getSchedulePrompt({ date: new Date() })}
+        prompt: `${getSchedulePrompt({ date: new Date() })}
       
 Input to parse: "${input}"`,
         // mode: "json",
         // schemaName: "task",
         // schemaDescription: "A task to be scheduled",
-        schema: unstable_scheduleSchema
+        schema: scheduleSchema
       });
       return result.object;
     } catch (error) {

@@ -1,10 +1,11 @@
-import type {
-  A2ARequestHandler,
-  A2AResponse,
-  JSONRPCErrorResponse,
-  JSONRPCSuccessResponse
+import {
+  A2AError,
+  JsonRpcTransportHandler,
+  type A2ARequestHandler,
+  type A2AResponse,
+  type JSONRPCErrorResponse,
+  type JSONRPCSuccessResponse
 } from "@a2a-js/sdk";
-import { A2AError, JsonRpcTransportHandler } from "@a2a-js/sdk";
 import type { Context, Hono } from "hono";
 
 export class A2AHonoApp {

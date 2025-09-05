@@ -1,9 +1,5 @@
 import { Agent, type RunResult, RunState, run, tool } from "@openai/agents";
-import {
-  Agent as CFAgent,
-  unstable_callable as callable,
-  routeAgentRequest
-} from "agents";
+import { Agent as CFAgent, callable, routeAgentRequest } from "agents";
 import { z } from "zod";
 
 type Env = {
@@ -42,7 +38,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
     serialisedRunState: null
   };
 
-  // biome-ignore lint/suspicious/noExplicitAny: later
+  // biome-ignore lint/suspicious/noExplicitAny: OpenAI SDK type compatibility
   result: RunResult<unknown, Agent<unknown, any>> | null = null;
   agent = new Agent({
     instructions: "You are a helpful assistant",

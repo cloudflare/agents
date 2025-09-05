@@ -1,8 +1,11 @@
 import { z } from "zod";
 
-export type Schedule = z.infer<typeof unstable_scheduleSchema>;
-
-export function unstable_getSchedulePrompt(event: { date: Date }) {
+/**
+ * Get the schedule prompt for a given event
+ * @param event - The event to get the schedule prompt for
+ * @returns The schedule prompt
+ */
+export function getSchedulePrompt(event: { date: Date }) {
   return `
 [Schedule Parser Component]
 
@@ -52,7 +55,27 @@ Example outputs:
 `;
 }
 
-export const unstable_scheduleSchema = z.object({
+let didWarnAboutUnstableGetSchedulePrompt = false;
+
+/**
+ * @deprecated this has been renamed to getSchedulePrompt, and unstable_getSchedulePrompt will be removed in the next major version
+ * @param event - The event to get the schedule prompt for
+ * @returns The schedule prompt
+ */
+export function unstable_getSchedulePrompt(event: { date: Date }) {
+  if (!didWarnAboutUnstableGetSchedulePrompt) {
+    didWarnAboutUnstableGetSchedulePrompt = true;
+    console.warn(
+      "unstable_getSchedulePrompt is deprecated, use getSchedulePrompt instead. unstable_getSchedulePrompt will be removed in the next major version."
+    );
+  }
+  return getSchedulePrompt(event);
+}
+
+/**
+ * The schema for the schedule prompt
+ */
+export const scheduleSchema = z.object({
   description: z.string().describe("A description of the task"),
   when: z.object({
     cron: z
@@ -78,3 +101,14 @@ export const unstable_scheduleSchema = z.object({
       .describe("The type of scheduling details")
   })
 });
+
+/**
+ * The type for the schedule prompt
+ */
+export type Schedule = z.infer<typeof scheduleSchema>;
+
+/**
+ * @deprecated this has been renamed to scheduleSchema, and unstable_scheduleSchema will be removed in the next major version
+ * @returns The schedule schema
+ */
+export const unstable_scheduleSchema = scheduleSchema;

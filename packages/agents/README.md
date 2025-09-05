@@ -488,7 +488,7 @@ import { generateText } from "ai";
 // Convert MCP tools for AI use
 const result = await generateText({
   model: openai("gpt-4"),
-  tools: client.unstable_getAITools(),
+  tools: client.getAITools(),
   prompt: "What's the weather in Tokyo?"
 });
 ```

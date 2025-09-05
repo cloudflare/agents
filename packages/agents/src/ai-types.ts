@@ -1,18 +1,13 @@
-import type { Message as ChatMessage } from "ai";
+import type { UIMessage } from "ai";
 
 /**
- * Enum for message types used in Agent communication
+ * Enum for message types to improve type safety and maintainability
  */
 export enum MessageType {
-  /** Indicates this message contains updated chat messages */
   CF_AGENT_CHAT_MESSAGES = "cf_agent_chat_messages",
-  /** Indicates this message is a response to a chat request */
-  CF_AGENT_USE_CHAT_RESPONSE = "cf_agent_use_chat_response",
-  /** Indicates this message is a command to clear chat history */
-  CF_AGENT_CHAT_CLEAR = "cf_agent_chat_clear",
-  /** Indicates this message is a request to the chat API */
   CF_AGENT_USE_CHAT_REQUEST = "cf_agent_use_chat_request",
-  /** Indicates the user wants to stop generation of this message */
+  CF_AGENT_USE_CHAT_RESPONSE = "cf_agent_use_chat_response",
+  CF_AGENT_CHAT_CLEAR = "cf_agent_chat_clear",
   CF_AGENT_CHAT_REQUEST_CANCEL = "cf_agent_chat_request_cancel",
 
   CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
@@ -23,7 +18,11 @@ export enum MessageType {
 /**
  * Types of messages sent from the Agent to clients
  */
-export type OutgoingMessage =
+export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
+  | {
+      /** Indicates this message is a command to clear chat history */
+      type: MessageType.CF_AGENT_CHAT_CLEAR;
+    }
   | {
       /** Indicates this message contains updated chat messages */
       type: MessageType.CF_AGENT_CHAT_MESSAGES;
@@ -39,12 +38,8 @@ export type OutgoingMessage =
       body: string;
       /** Whether this is the final chunk of the response */
       done: boolean;
-    }
-  | {
-      /** Indicates this message contains updated chat messages */
-      type: MessageType.CF_AGENT_CHAT_MESSAGES;
-      /** Array of chat messages */
-      messages: ChatMessage[];
+      /** Whether this response contains an error */
+      error?: boolean;
     }
   | {
       /** Indicates this message is a command to clear chat history */
@@ -54,7 +49,11 @@ export type OutgoingMessage =
 /**
  * Types of messages sent from clients to the Agent
  */
-export type IncomingMessage =
+export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
+  | {
+      /** Indicates this message is a command to clear chat history */
+      type: MessageType.CF_AGENT_CHAT_CLEAR;
+    }
   | {
       /** Indicates this message is a request to the chat API */
       type: MessageType.CF_AGENT_USE_CHAT_REQUEST;

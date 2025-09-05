@@ -1,15 +1,15 @@
 import type {
-  Message as ChatMessage,
+  UIMessage as ChatMessage,
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { appendResponseMessages } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import {
   MessageType,
   type IncomingMessage,
   type OutgoingMessage
 } from "./ai-types";
+import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 const decoder = new TextDecoder();
 
@@ -35,11 +35,16 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       message text not null,
       created_at datetime default current_timestamp
     )`;
-    this.messages = (
+
+    // Load messages and automatically transform them to v5 format
+    const rawMessages = (
       this.sql`select * from cf_ai_chat_agent_messages` || []
     ).map((row) => {
       return JSON.parse(row.message as string);
     });
+
+    // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
+    this.messages = autoTransformMessages(rawMessages);
 
     this._chatMessageAbortControllers = new Map();
   }
@@ -73,15 +78,19 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           // duplex
         } = data.init;
         const { messages } = JSON.parse(body as string);
+
+        // Automatically transform any incoming messages
+        const transformedMessages = autoTransformMessages(messages);
+
         this._broadcastChatMessage(
           {
-            messages,
+            messages: transformedMessages,
             type: MessageType.CF_AGENT_CHAT_MESSAGES
           },
           [connection.id]
         );
 
-        await this.persistMessages(messages, [connection.id]);
+        await this.persistMessages(transformedMessages, [connection.id]);
 
         this.observability?.emit(
           {
@@ -99,13 +108,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
         return this._tryCatchChat(async () => {
           const response = await this.onChatMessage(
-            async ({ response }) => {
-              const finalMessages = appendResponseMessages({
-                messages,
-                responseMessages: response.messages
-              });
-
-              await this.persistMessages(finalMessages, [connection.id]);
+            async (_finishResult) => {
               this._removeAbortController(chatMessageId);
 
               this.observability?.emit(
@@ -118,6 +121,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 },
                 this.ctx
               );
+
+              // Note: Message persistence now happens in the _reply method
+              // after the complete response text has been accumulated
             },
             abortSignal ? { abortSignal } : undefined
           );
@@ -153,8 +159,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           [connection.id]
         );
       } else if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
-        // replace the messages with the new ones
-        await this.persistMessages(data.messages, [connection.id]);
+        // replace the messages with the new ones, automatically transformed
+        const transformedMessages = autoTransformMessages(data.messages);
+        await this.persistMessages(transformedMessages, [connection.id]);
       } else if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
         // propagate an abort signal for the associated request
         this._cancelChatRequest(data.id);
@@ -185,19 +192,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
   }
 
-  private async _drainStream(stream: ReadableStream<Uint8Array>) {
-    const reader = stream.getReader();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        decoder.decode(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  }
-
   /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
@@ -216,24 +210,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
-   * Save messages on the server side and trigger AI response
+   * Save messages on the server side
    * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
-    const response = await this.onChatMessage(async ({ response }) => {
-      const finalMessages = appendResponseMessages({
-        messages,
-        responseMessages: response.messages
-      });
-
-      await this.persistMessages(finalMessages, []);
-    });
-    if (response?.body) {
-      // we're just going to drain the body
-      await this._drainStream(response.body!);
-      response.body.cancel();
-    }
   }
 
   async persistMessages(
@@ -257,19 +238,145 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   private async _reply(id: string, response: Response) {
-    // now take chunks out from dataStreamResponse and send them to the client
     return this._tryCatchChat(async () => {
-      if (response.body) {
-        await this._drainStream(response.body);
-        response.body.cancel();
+      if (!response.body) {
+        // Send empty response if no body
+        this._broadcastChatMessage({
+          body: "",
+          done: true,
+          id,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        });
+        return;
       }
 
-      this._broadcastChatMessage({
-        body: "",
-        done: true,
-        id,
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+      const reader = response.body.getReader();
+      let fullResponseText = ""; // Accumulate the assistant's response text
+      // Track tool calls by toolCallid, so we can persist them as parts later
+      const toolCalls = new Map<
+        string,
+        {
+          type: string;
+          state: string;
+          toolCallId: string;
+          toolName: string;
+          input?: unknown;
+          output?: unknown;
+          isError?: boolean;
+          errorText?: string;
+        }
+      >();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            // Send final completion signal
+            this._broadcastChatMessage({
+              body: "",
+              done: true,
+              id,
+              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            });
+            break;
+          }
+
+          const chunk = decoder.decode(value);
+
+          // Parse AI SDK v5 SSE format and extract text deltas
+          const lines = chunk.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("data: ") && line !== "data: [DONE]") {
+              try {
+                const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
+
+                switch (data.type) {
+                  // SSE event signaling the tool input is ready. We track by
+                  // `toolCallId` so we can persist it as a tool part in the message.
+                  case "tool-input-available": {
+                    const { toolCallId, toolName, input } = data;
+                    toolCalls.set(toolCallId, {
+                      toolCallId,
+                      toolName,
+                      input,
+                      type: toolName ? `tool-${toolName}` : "dynamic-tool",
+                      state: "input-available"
+                    });
+                    break;
+                  }
+
+                  // SSE event signaling the tool output is ready. We should've
+                  // already received the input in a previous event so an entry
+                  // with `toolCallId` should already be present
+                  case "tool-output-available": {
+                    const { toolCallId, output, isError, errorText } = data;
+                    const toolPart = toolCalls.get(toolCallId);
+                    if (toolPart)
+                      toolCalls.set(toolCallId, {
+                        ...toolPart,
+                        output,
+                        isError,
+                        errorText,
+                        state: "output-available"
+                      });
+                    break;
+                  }
+
+                  case "error": {
+                    // Non-tool errors, we set `error: true` and terminate early
+                    this._broadcastChatMessage({
+                      error: true,
+                      body: data.errorText ?? JSON.stringify(data),
+                      done: false,
+                      id,
+                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                    });
+                    return;
+                  }
+
+                  case "text-delta": {
+                    if (data.delta) fullResponseText += data.delta;
+                    break;
+                  }
+                }
+
+                // Always forward the raw part to the client
+                this._broadcastChatMessage({
+                  body: JSON.stringify(data),
+                  done: false,
+                  id,
+                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                });
+              } catch (_e) {
+                // Skip malformed JSON lines silently
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      // After streaming is complete, persist the complete assistant's response
+      const messageParts: ChatMessage["parts"] = [];
+
+      Array.from(toolCalls.values()).forEach((t) => {
+        messageParts.push(t as ChatMessage["parts"][number]);
       });
+
+      if (fullResponseText.trim()) {
+        messageParts.push({ type: "text", text: fullResponseText });
+      }
+
+      if (messageParts.length > 0) {
+        await this.persistMessages([
+          ...this.messages,
+          {
+            id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+            role: "assistant",
+            parts: messageParts
+          }
+        ]);
+      }
     });
   }
 

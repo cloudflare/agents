@@ -118,7 +118,7 @@ const callableMetadata = new Map<Function, CallableMetadata>();
  * Decorator that marks a method as callable by clients
  * @param metadata Optional metadata about the callable method
  */
-export function unstable_callable(metadata: CallableMetadata = {}) {
+export function callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
     // biome-ignore lint/correctness/noUnusedFunctionParameters: later
@@ -131,6 +131,23 @@ export function unstable_callable(metadata: CallableMetadata = {}) {
     return target;
   };
 }
+
+let didWarnAboutUnstableCallable = false;
+
+/**
+ * Decorator that marks a method as callable by clients
+ * @deprecated this has been renamed to callable, and unstable_callable will be removed in the next major version
+ * @param metadata Optional metadata about the callable method
+ */
+export const unstable_callable = (metadata: CallableMetadata = {}) => {
+  if (!didWarnAboutUnstableCallable) {
+    didWarnAboutUnstableCallable = true;
+    console.warn(
+      "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
+    );
+  }
+  callable(metadata);
+};
 
 export type QueueItem<T = string> = {
   id: string;
@@ -560,38 +577,36 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
       // must fix this
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
-        async () => {
-          setTimeout(() => {
-            if (this.state) {
-              connection.send(
-                JSON.stringify({
-                  state: this.state,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
-            }
-
+        () => {
+          if (this.state) {
             connection.send(
               JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: MessageType.CF_AGENT_MCP_SERVERS
+                state: this.state,
+                type: MessageType.CF_AGENT_STATE
               })
             );
+          }
 
-            this.observability?.emit(
-              {
-                displayMessage: "Connection established",
-                id: nanoid(),
-                payload: {
-                  connectionId: connection.id
-                },
-                timestamp: Date.now(),
-                type: "connect"
+          connection.send(
+            JSON.stringify({
+              mcp: this.getMcpServers(),
+              type: MessageType.CF_AGENT_MCP_SERVERS
+            })
+          );
+
+          this.observability?.emit(
+            {
+              displayMessage: "Connection established",
+              id: nanoid(),
+              payload: {
+                connectionId: connection.id
               },
-              this.ctx
-            );
-            return this._tryCatch(() => _onConnect(connection, ctx));
-          }, 20);
+              timestamp: Date.now(),
+              type: "connect"
+            },
+            this.ctx
+          );
+          return this._tryCatch(() => _onConnect(connection, ctx));
         }
       );
     };
@@ -833,11 +848,12 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     while (proto && proto !== Object.prototype && depth < 10) {
       const methodNames = Object.getOwnPropertyNames(proto);
       for (const methodName of methodNames) {
-        // Skip if it's a private method or not a function
+        // Skip if it's a private method or not a function or a getter
         if (
           baseMethods.has(methodName) ||
           methodName.startsWith("_") ||
-          typeof this[methodName as keyof this] !== "function"
+          typeof this[methodName as keyof this] !== "function" ||
+          !!Object.getOwnPropertyDescriptor(proto, methodName)?.get
         ) {
           continue;
         }

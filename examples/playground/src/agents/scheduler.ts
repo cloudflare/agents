@@ -1,9 +1,6 @@
 import type { Connection, ConnectionContext, Schedule } from "agents";
 import { Agent } from "agents";
-import {
-  unstable_getSchedulePrompt,
-  unstable_scheduleSchema
-} from "agents/schedule";
+import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { generateObject } from "ai";
 import { model } from "../model";
 import type { Env } from "../server";
@@ -42,11 +39,11 @@ export class Scheduler extends Agent<Env> {
         maxRetries: 5,
         mode: "json",
         model,
-        prompt: `${unstable_getSchedulePrompt({
+        prompt: `${getSchedulePrompt({
           date: new Date()
         })} 
 Input to parse: "${event.input}"`,
-        schema: unstable_scheduleSchema, // <- the shape of the object that the scheduler expects
+        schema: scheduleSchema, // <- the shape of the object that the scheduler expects
         schemaDescription: "A task to be scheduled",
         schemaName: "task"
       });

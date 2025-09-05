@@ -2,7 +2,7 @@ import { openai } from "@ai-sdk/openai";
 import {
   Agent,
   type AgentNamespace,
-  unstable_callable as callable,
+  callable,
   routeAgentRequest
 } from "agents";
 

@@ -24,7 +24,7 @@ import {
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   private _callbackUrls: string[] = [];
-
+  private _didWarnAboutUnstableGetAITools = false;
   /**
    * @param _name Name of the MCP client
    * @param _version Version of the MCP Client
@@ -185,7 +185,7 @@ export class MCPClientManager {
   /**
    * @returns a set of tools that you can use with the AI SDK
    */
-  unstable_getAITools(): ToolSet {
+  getAITools(): ToolSet {
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
@@ -204,11 +204,25 @@ export class MCPClientManager {
               }
               return result;
             },
-            parameters: jsonSchema(tool.inputSchema)
+            inputSchema: jsonSchema(tool.inputSchema)
           }
         ];
       })
     );
+  }
+
+  /**
+   * @deprecated this has been renamed to getAITools(), and unstable_getAITools will be removed in the next major version
+   * @returns a set of tools that you can use with the AI SDK
+   */
+  unstable_getAITools(): ToolSet {
+    if (!this._didWarnAboutUnstableGetAITools) {
+      this._didWarnAboutUnstableGetAITools = true;
+      console.warn(
+        "unstable_getAITools is deprecated, use getAITools instead. unstable_getAITools will be removed in the next major version."
+      );
+    }
+    return this.getAITools();
   }
 
   /**

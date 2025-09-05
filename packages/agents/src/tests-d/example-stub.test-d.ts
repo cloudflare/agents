@@ -1,5 +1,6 @@
+/** biome-ignore-all lint/correctness/useHookAtTopLevel: testing types */
 import type { env } from "cloudflare:workers";
-import { Agent, unstable_callable as callable } from "..";
+import { Agent, callable } from "..";
 import { useAgent } from "../react.tsx";
 
 class MyAgent extends Agent<typeof env, {}> {
