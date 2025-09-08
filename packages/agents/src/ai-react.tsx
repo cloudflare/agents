@@ -306,7 +306,15 @@ export function useAgentChat<
     ) => {
       const transport = new DefaultChatTransport<ChatMessage>({
         api: agentUrlString,
-        fetch: aiFetch
+        fetch: aiFetch,
+        prepareSendMessagesRequest(body) {
+          return {
+            body: {
+              ...body,
+              messages: body?.messages?.length ? [body.messages.at(-1)] : []
+            }
+          };
+        }
       });
       return transport.sendMessages(options);
     },
@@ -317,7 +325,15 @@ export function useAgentChat<
     ) => {
       const transport = new DefaultChatTransport<ChatMessage>({
         api: agentUrlString,
-        fetch: aiFetch
+        fetch: aiFetch,
+        prepareSendMessagesRequest(body) {
+          return {
+            body: {
+              ...body,
+              messages: body?.messages?.length ? [body.messages.at(-1)] : []
+            }
+          };
+        }
       });
       return transport.reconnectToStream(options);
     }
