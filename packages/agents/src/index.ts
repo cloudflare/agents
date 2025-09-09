@@ -854,42 +854,37 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     while (proto && proto !== Object.prototype && depth < 10) {
       const methodNames = Object.getOwnPropertyNames(proto);
       for (const methodName of methodNames) {
-        // Skip if it's a private method or not a function or a getter
+        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
+
+        // Skip if it's a private method, a base method, a getter, or not a function,
         if (
           baseMethods.has(methodName) ||
           methodName.startsWith("_") ||
-          typeof this[methodName as keyof this] !== "function" ||
-          !!Object.getOwnPropertyDescriptor(proto, methodName)?.get
+          !descriptor ||
+          !!descriptor.get ||
+          typeof descriptor.value !== "function"
         ) {
           continue;
         }
-        // If the method doesn't exist in base prototypes, it's a custom method
-        if (!baseMethods.has(methodName)) {
-          const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
-          if (descriptor && typeof descriptor.value === "function") {
-            // Wrap the custom method with context
 
-            const wrappedFunction = withAgentContext(
-              // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
-              this[methodName as keyof this] as (...args: any[]) => any
-              // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
-            ) as any;
+        // Now, methodName is confirmed to be a custom method/function
+        // Wrap the custom method with context
+        const wrappedFunction = withAgentContext(
+          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+          this[methodName as keyof this] as (...args: any[]) => any
+          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+        ) as any;
 
-            // if the method is callable, copy the metadata from the original method
-            if (this._isCallable(methodName)) {
-              callableMetadata.set(
-                wrappedFunction,
-                callableMetadata.get(
-                  this[methodName as keyof this] as Function
-                )!
-              );
-            }
-
-            // set the wrapped function on the prototype
-            this.constructor.prototype[methodName as keyof this] =
-              wrappedFunction;
-          }
+        // if the method is callable, copy the metadata from the original method
+        if (this._isCallable(methodName)) {
+          callableMetadata.set(
+            wrappedFunction,
+            callableMetadata.get(this[methodName as keyof this] as Function)!
+          );
         }
+
+        // set the wrapped function on the prototype
+        this.constructor.prototype[methodName as keyof this] = wrappedFunction;
       }
 
       proto = Object.getPrototypeOf(proto);
