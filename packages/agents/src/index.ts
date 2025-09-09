@@ -290,7 +290,13 @@ function withAgentContext<T extends (...args: any[]) => any>(
   method: T
 ): (this: Agent<unknown, unknown>, ...args: Parameters<T>) => ReturnType<T> {
   return function (...args: Parameters<T>): ReturnType<T> {
-    const { connection, request, email } = getCurrentAgent();
+    const { connection, request, email, agent } = getCurrentAgent();
+
+    if (agent === this) {
+      // already wrapped, so we can just call the method
+      return method.apply(this, args);
+    }
+    // not wrapped, so we need to wrap it
     return agentContext.run({ agent: this, connection, request, email }, () => {
       return method.apply(this, args);
     });
