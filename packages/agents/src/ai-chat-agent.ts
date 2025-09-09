@@ -282,73 +282,92 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
           const chunk = decoder.decode(value);
 
-          // Parse AI SDK v5 SSE format and extract text deltas
-          const lines = chunk.split("\n");
-          for (const line of lines) {
-            if (line.startsWith("data: ") && line !== "data: [DONE]") {
-              try {
-                const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
+          // Determine response format based on content-type
+          const contentType = response.headers.get("content-type") || "";
+          const isSSE = contentType.includes("text/event-stream");
 
-                switch (data.type) {
-                  // SSE event signaling the tool input is ready. We track by
-                  // `toolCallId` so we can persist it as a tool part in the message.
-                  case "tool-input-available": {
-                    const { toolCallId, toolName, input } = data;
-                    toolCalls.set(toolCallId, {
-                      toolCallId,
-                      toolName,
-                      input,
-                      type: toolName ? `tool-${toolName}` : "dynamic-tool",
-                      state: "input-available"
-                    });
-                    break;
-                  }
+          if (isSSE) {
+            // Parse AI SDK v5 SSE format and extract text deltas
+            const lines = chunk.split("\n");
+            for (const line of lines) {
+              if (line.startsWith("data: ") && line !== "data: [DONE]") {
+                try {
+                  const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
 
-                  // SSE event signaling the tool output is ready. We should've
-                  // already received the input in a previous event so an entry
-                  // with `toolCallId` should already be present
-                  case "tool-output-available": {
-                    const { toolCallId, output, isError, errorText } = data;
-                    const toolPart = toolCalls.get(toolCallId);
-                    if (toolPart)
+                  switch (data.type) {
+                    // SSE event signaling the tool input is ready. We track by
+                    // `toolCallId` so we can persist it as a tool part in the message.
+                    case "tool-input-available": {
+                      const { toolCallId, toolName, input } = data;
                       toolCalls.set(toolCallId, {
-                        ...toolPart,
-                        output,
-                        isError,
-                        errorText,
-                        state: "output-available"
+                        toolCallId,
+                        toolName,
+                        input,
+                        type: toolName ? `tool-${toolName}` : "dynamic-tool",
+                        state: "input-available"
                       });
-                    break;
+                      break;
+                    }
+
+                    // SSE event signaling the tool output is ready. We should've
+                    // already received the input in a previous event so an entry
+                    // with `toolCallId` should already be present
+                    case "tool-output-available": {
+                      const { toolCallId, output, isError, errorText } = data;
+                      const toolPart = toolCalls.get(toolCallId);
+                      if (toolPart)
+                        toolCalls.set(toolCallId, {
+                          ...toolPart,
+                          output,
+                          isError,
+                          errorText,
+                          state: "output-available"
+                        });
+                      break;
+                    }
+
+                    case "error": {
+                      // Non-tool errors, we set `error: true` and terminate early
+                      this._broadcastChatMessage({
+                        error: true,
+                        body: data.errorText ?? JSON.stringify(data),
+                        done: false,
+                        id,
+                        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                      });
+                      return;
+                    }
+
+                    case "text-delta": {
+                      if (data.delta) fullResponseText += data.delta;
+                      break;
+                    }
                   }
 
-                  case "error": {
-                    // Non-tool errors, we set `error: true` and terminate early
-                    this._broadcastChatMessage({
-                      error: true,
-                      body: data.errorText ?? JSON.stringify(data),
-                      done: false,
-                      id,
-                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                    });
-                    return;
-                  }
-
-                  case "text-delta": {
-                    if (data.delta) fullResponseText += data.delta;
-                    break;
-                  }
+                  // Always forward the raw part to the client
+                  this._broadcastChatMessage({
+                    body: JSON.stringify(data),
+                    done: false,
+                    id,
+                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                  });
+                } catch (_e) {
+                  // Skip malformed JSON lines silently
                 }
-
-                // Always forward the raw part to the client
-                this._broadcastChatMessage({
-                  body: JSON.stringify(data),
-                  done: false,
-                  id,
-                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                });
-              } catch (_e) {
-                // Skip malformed JSON lines silently
               }
+            }
+          } else {
+            // Handle plain text responses (e.g., from generateText)
+            // Treat the entire chunk as a text delta to preserve exact formatting
+            if (chunk.length > 0) {
+              fullResponseText += chunk;
+              // Synthesize a text-delta event so clients can stream-render
+              this._broadcastChatMessage({
+                body: JSON.stringify({ type: "text-delta", delta: chunk }),
+                done: false,
+                id,
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+              });
             }
           }
         }

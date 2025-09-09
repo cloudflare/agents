@@ -317,20 +317,37 @@ Create meaningful conversations with intelligence:
 ```ts
 import { AIChatAgent } from "agents/ai-chat-agent";
 import { openai } from "@ai-sdk/openai";
+import { streamText, generateText, createDataStreamResponse } from "ai";
 
 export class DialogueAgent extends AIChatAgent {
   async onChatMessage(onFinish) {
+    // Option 1: Streaming responses (recommended for real-time interaction)
     return createDataStreamResponse({
       execute: async (dataStream) => {
         const stream = streamText({
           model: openai("gpt-4o"),
           messages: this.messages,
-          onFinish // call onFinish so that messages get saved
+          // Optional: onFinish is invoked by the AI SDK when generation completes.
+          // Persistence is handled automatically by AIChatAgent after streaming completes.
+          onFinish
         });
 
         stream.mergeIntoDataStream(dataStream);
       }
     });
+
+    // Option 2: Non-streaming responses (simpler, but no real-time updates)
+    // const result = await generateText({
+    //   model: openai("gpt-4o"),
+    //   messages: this.messages,
+    // });
+    //
+    // // Optional: you can call onFinish here for custom side effects. Message
+    // // persistence is still handled automatically by AIChatAgent.
+    // await onFinish?.(result);
+    // return new Response(result.text, {
+    //   headers: { 'Content-Type': 'text/plain' }
+    // });
   }
 }
 ```
@@ -363,7 +380,14 @@ function ChatInterface() {
         {messages.map((message) => (
           <div key={message.id} className="message">
             <div className="role">{message.role}</div>
-            <div className="content">{message.content}</div>
+            <div className="content">
+              {message.parts.map((part, i) => {
+                if (part.type === "text")
+                  return <span key={i}>{part.text}</span>;
+                // Render other part types (e.g., files, tool calls) as desired
+                return null;
+              })}
+            </div>
           </div>
         ))}
       </div>
