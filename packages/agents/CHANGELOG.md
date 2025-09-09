@@ -1,5 +1,41 @@
 # @cloudflare/agents
 
+## 0.1.0
+
+### Minor Changes
+
+- [#391](https://github.com/cloudflare/agents/pull/391) [`ecf8926`](https://github.com/cloudflare/agents/commit/ecf89262da1acc3874bb9aec9effc3be3c1c5a87) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - update to ai sdk v5
+
+### Patch Changes
+
+- [#445](https://github.com/cloudflare/agents/pull/445) [`14616d3`](https://github.com/cloudflare/agents/commit/14616d3254df1c292730d09a69846d5cffbb1590) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Fix MCP client to treat `client_uri` as a valid URL
+
+- [#410](https://github.com/cloudflare/agents/pull/410) [`25b261e`](https://github.com/cloudflare/agents/commit/25b261e6d7ac2e5cb1b1b7df7dcc9fdef84e9931) Thanks [@amorriscode](https://github.com/amorriscode)! - docs: minor fixes
+
+- [`2684ade`](https://github.com/cloudflare/agents/commit/2684adeb3f545c9c48d23e3a004050efe94735ce) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+- [`01b919d`](https://github.com/cloudflare/agents/commit/01b919db6ab6bb0fd3895e1f6c7c2fdb0905bca2) Thanks [@threepointone](https://github.com/threepointone)! - remove unstable\_ prefixes with deprecation warnings
+
+  This deprecates all unstable\_ prefixes with deprecation warnings. Specifically:
+  - unstable_callable -> callable
+  - unstable_getAITools -> getAITools
+  - unstable_getSchedulePrompt -> getSchedulePrompt
+  - unstable_scheduleSchema -> scheduleSchema
+
+  Using the unstable\_ prefixed versions will now emit a deprecation warning. In the next major version, the unstable\_ prefixed versions will be removed.
+
+- [#434](https://github.com/cloudflare/agents/pull/434) [`f0c6dce`](https://github.com/cloudflare/agents/commit/f0c6dceea9eaf4a682d3b0f3ecdbedcf3cc93c19) Thanks [@threepointone](https://github.com/threepointone)! - don't autowrap getters on an agent
+
+- [#446](https://github.com/cloudflare/agents/pull/446) [`696d33e`](https://github.com/cloudflare/agents/commit/696d33e5fcc0821317276b6b18231818f5c54772) Thanks [@Flouse](https://github.com/Flouse)! - fix: use Object.getOwnPropertyDescriptor for property check
+
+- [`1e4188c`](https://github.com/cloudflare/agents/commit/1e4188cb1256bd920ed9dcdb224a7437ac415506) Thanks [@threepointone](https://github.com/threepointone)! - update workers-ai-provider
+
+- [#436](https://github.com/cloudflare/agents/pull/436) [`8dac62c`](https://github.com/cloudflare/agents/commit/8dac62c6f6c513d7fd481eb3b519b533bac17f1f) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Fix onConnect race condition
+
+- [#409](https://github.com/cloudflare/agents/pull/409) [`352d62c`](https://github.com/cloudflare/agents/commit/352d62c6383797512be112ff3efcb462c0e44395) Thanks [@MrgSub](https://github.com/MrgSub)! - Refactor message types to use enum in AIChatAgent and related files
+
+- [#442](https://github.com/cloudflare/agents/pull/442) [`0dace6e`](https://github.com/cloudflare/agents/commit/0dace6e34cb32a018f0122c036e87d6c7f47d318) Thanks [@threepointone](https://github.com/threepointone)! - fix: don't wrap a method with an agent context if it's already wrapped
+
 ## 0.0.113
 
 ### Patch Changes
