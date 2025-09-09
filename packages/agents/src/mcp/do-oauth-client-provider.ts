@@ -28,12 +28,16 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   get clientMetadata(): OAuthClientMetadata {
     return {
       client_name: this.clientName,
-      client_uri: "example.com",
+      client_uri: this.clientUri,
       grant_types: ["authorization_code", "refresh_token"],
       redirect_uris: [this.redirectUrl],
       response_types: ["code"],
       token_endpoint_auth_method: "none"
     };
+  }
+
+  get clientUri() {
+    return new URL(this.redirectUrl).origin;
   }
 
   get redirectUrl() {
