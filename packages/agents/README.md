@@ -1,6 +1,6 @@
 ### 🧠 `agents` - A Framework for Digital Intelligence
 
-![agents-header](https://github.com/user-attachments/assets/f6d99eeb-1803-4495-9c5e-3cf07a37b402)
+![npm install agents](../../assets/npm-install-agents.svg)
 
 Welcome to a new chapter in software development, where AI agents persist, think, and act with purpose. The `agents` framework creates an environment where artificial intelligence can flourish - maintaining state, engaging in meaningful interactions, and evolving over time.
 
