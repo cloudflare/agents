@@ -12,6 +12,7 @@
 - email
 - a/v
 - scheduling
+- queue
 - pause/resume
 - memory
 - evals
