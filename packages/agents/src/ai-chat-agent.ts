@@ -37,11 +37,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     )`;
 
     // Load messages and automatically transform them to v5 format
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages` || []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
+    const rawMessages = this.getMessages();
 
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
     this.messages = autoTransformMessages(rawMessages);
