@@ -217,13 +217,10 @@ class DataProcessor extends Agent {
 
   async onDataUpload(uploadData: any) {
     // Queue the processing instead of doing it synchronously
-    await this.queue(
-      {
-        datasetId: uploadData.id,
-        userId: uploadData.userId
-      },
-      "processLargeDataset"
-    );
+    await this.queue("processLargeDataset", {
+      datasetId: uploadData.id,
+      userId: uploadData.userId
+    });
 
     return { message: "Data upload received, processing started" };
   }
@@ -308,12 +305,11 @@ The queue system works seamlessly with other Agent SDK features:
 - **State Management**: Access agent state within queued callbacks
 - **Scheduling**: Combine with `schedule()` for time-based queue processing
 - **Context**: Queued tasks maintain the original request context
-- **Database**: Uses the same D1 database as other agent data
+- **Database**: Uses the same database as other agent data
 
 ## Limitations
 
 - Tasks are processed sequentially, not in parallel
 - No built-in retry mechanism (implement your own)
 - No priority system (FIFO only)
-- Payload size is limited by D1's text field constraints
 - Queue processing happens during agent execution, not as separate background jobs
