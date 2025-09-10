@@ -232,11 +232,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   ) {
     this.ctx.storage.transactionSync(() => {
       for (const message of incomingMessages) {
-        this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
+        this
+          .sql`insert or replace into cf_ai_chat_agent_messages (id, message) values (${
           message.id
         },${JSON.stringify(message)})`;
       }
-      this.messages.push(...incomingMessages);
+      // we need to refetch all because some messages might have been updated/replaced.
+      this.messages = this.getMessages();
     });
     this._broadcastChatMessage(
       {
