@@ -210,7 +210,6 @@ class MyAgent extends Agent {
 ```typescript
 class DataProcessor extends Agent {
   async processLargeDataset(data: { datasetId: string; userId: string }) {
-    // Heavy processing that shouldn't block the main thread
     const results = await this.heavyComputation(data.datasetId);
     await this.notifyUser(data.userId, results);
   }
