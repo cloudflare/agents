@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.1.1
+
+### Patch Changes
+
+- [#451](https://github.com/cloudflare/agents/pull/451) [`9beccdd`](https://github.com/cloudflare/agents/commit/9beccdd7cb4299222eaed72b79278986ef256a73) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
+- [#447](https://github.com/cloudflare/agents/pull/447) [`3e523ea`](https://github.com/cloudflare/agents/commit/3e523ea3ed249416b8a464756086bcf3056edd6d) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - add support for plain text responses alongside SSE streaming
+
 ## 0.1.0
 
 ### Minor Changes
