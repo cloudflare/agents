@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.1.2
+
+### Patch Changes
+
+- [#415](https://github.com/cloudflare/agents/pull/415) [`f7bd395`](https://github.com/cloudflare/agents/commit/f7bd3959a49ac732baaa2ee9a92cd5544fa0ec29) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Make McpAgent extend Agent + Streaming HTTP protocol features
+
 ## 0.1.1
 
 ### Patch Changes
