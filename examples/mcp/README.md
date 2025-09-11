@@ -19,17 +19,17 @@ Inside your `McpAgent`'s `async init()` method, you can use the MCP SDK to defin
 
 ```ts
 export class MyMCP extends McpAgent<Env> {
-  server = new McpServer({
+  mcp = new McpServer({
     name: "Demo",
     version: "1.0.0"
   });
 
   async init() {
-    this.server.resource(`counter`, `mcp://resource/counter`, (uri) => {
+    this.mcp.resource(`counter`, `mcp://resource/counter`, (uri) => {
       // ...
     });
 
-    this.server.tool(
+    this.mcp.tool(
       "add",
       "Add two numbers together",
       { a: z.number(), b: z.number() },
