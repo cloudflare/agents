@@ -16,3 +16,11 @@ export interface ServeOptions {
   corsOptions?: CORSOptions;
   transport?: TransportType;
 }
+
+export type {
+  Icon,
+  Implementation,
+  Tool,
+  Resource,
+  Prompt
+} from "@modelcontextprotocol/sdk/types.js";

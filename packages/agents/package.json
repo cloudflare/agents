@@ -4,7 +4,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.5",
+    "@modelcontextprotocol/sdk": "^1.18.0",
     "ai": "5.0.39",
     "cron-schedule": "^5.0.4",
     "mimetext": "^3.0.27",

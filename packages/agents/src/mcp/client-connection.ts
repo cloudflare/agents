@@ -7,13 +7,10 @@ import {
   type ListResourceTemplatesResult,
   type ListResourcesResult,
   type ListToolsResult,
-  type Prompt,
   PromptListChangedNotificationSchema,
-  type Resource,
   ResourceListChangedNotificationSchema,
   type ResourceTemplate,
   type ServerCapabilities,
-  type Tool,
   ToolListChangedNotificationSchema,
   ElicitRequestSchema,
   type ElicitRequest,
@@ -22,6 +19,8 @@ import {
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+// Import extended types with icon support
+import type { Tool, Resource, Prompt, Implementation } from "./types";
 
 export type MCPTransportOptions = (
   | SSEClientTransportOptions
@@ -42,6 +41,7 @@ export class MCPClientConnection {
     | "discovering"
     | "failed" = "connecting";
   instructions?: string;
+  implementation?: Implementation;
   tools: Tool[] = [];
   prompts: Prompt[] = [];
   resources: Resource[] = [];
@@ -93,6 +93,14 @@ export class MCPClientConnection {
     this.serverCapabilities = await this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
       throw new Error("The MCP Server failed to return server capabilities");
+    }
+
+    // Get server implementation info which includes icons and website URL
+    try {
+      const serverInfo = await this.client.getServerVersion();
+      this.implementation = serverInfo;
+    } catch (error) {
+      console.warn("Failed to get server implementation info:", error);
     }
 
     const [
