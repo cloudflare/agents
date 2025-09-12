@@ -2,7 +2,7 @@ import { Agent, type Connection, routeAgentRequest } from "agents";
 import { env } from "cloudflare:workers";
 
 export class MyAgent extends Agent {
-  onConnect(connection: Connection, ctx: any) {
+  onConnect(connection: Connection, ctx: { request: Request }) {
     // Extract authentication from WebSocket connection
     const url = new URL(ctx.request.url);
     const token = url.searchParams.get("token");

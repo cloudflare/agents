@@ -1,4 +1,3 @@
-import { agentFetch } from "agents/client";
 import { useAgent } from "agents/react";
 import { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -64,7 +63,7 @@ function App() {
     try {
       // Cross-domain HTTP request with header-based authentication
       const response = await fetch(
-        `http://localhost:8787/agents/my-agent/default`,
+        "http://localhost:8787/agents/my-agent/default",
         {
           method: "GET",
           headers: {
@@ -116,7 +115,9 @@ function App() {
             placeholder="Enter auth token"
             defaultValue={authToken}
           />
-          <button onClick={updateAuthToken}>Update Token</button>
+          <button type="button" onClick={updateAuthToken}>
+            Update Token
+          </button>
         </div>
         <div className="status-indicator">
           <div className={`status-dot ${isConnected ? "connected" : ""}`} />
