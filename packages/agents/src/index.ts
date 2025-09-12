@@ -1577,65 +1577,96 @@ export type AgentContext = DurableObjectState;
  */
 export type AgentOptions<Env> = PartyServerOptions<Env> & {
   /**
-   * Whether to enable CORS for the Agent
+   * Whether to enable CORS for the Agent.
+   * Implement `HeadersInit` to enable CORS and override the default CORS header fields.
    */
-  cors?: boolean | HeadersInit | undefined;
+  cors?: boolean | HeadersInit;
 };
 
 /**
- * Route a request to the appropriate Agent
+ * Route a request to the appropriate Agent.
+ *
+ * An Agent is mapped to the route `/agents/[agent_namespace]/[agent_name]` (including sub-routes) for all methods, where:
+ * - `agent_namespace`: The kebab-case string of the Agent namespace (example: MyAgent maps to `my-agent`).
+ * - `agent_name`: The name of the Agent instance.
+ *
+ * If `options.cors` is `true` or satisfies `HeadersInit`, it will handle preflight requests to the agent route and set CORS header fields on all resolved responses.
+ * The header fields when `options.cors` is `true` are:
+ * - Access-Control-Allow-Credentials: true
+ * - Access-Control-Allow-Methods: GET, POST, HEAD, OPTIONS
+ * - Access-Control-Allow-Origin: *
+ * - Access-Control-Max-Age: 86400
+ *
  * @param request Request to route
  * @param env Environment containing Agent bindings
  * @param options Routing options
- * @returns Response from the Agent or undefined if no route matched
+ * @returns Response from the Agent or null if no route matched
  */
 export async function routeAgentRequest<Env>(
   request: Request,
   env: Env,
-  options?: AgentOptions<Env>
+  options: AgentOptions<Env> = {}
 ) {
-  const corsHeaders =
-    options?.cors === true
-      ? {
-          "Access-Control-Allow-Credentials": "true",
-          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Max-Age": "86400"
-        }
-      : options?.cors;
+  let corsEnabled: boolean;
+  let corsHeaders: HeadersInit;
+  if (options.cors === true) {
+    corsEnabled = true;
+    corsHeaders = {
+      "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Max-Age": "86400"
+    };
+  } else if (typeof options.cors === "object" || Array.isArray(options.cors)) {
+    // options.cors satisfies HeadersInit.
 
-  if (request.method === "OPTIONS") {
-    if (corsHeaders) {
-      return new Response(null, {
-        headers: corsHeaders
-      });
-    }
-    console.warn(
-      "Received an OPTIONS request, but cors was not enabled. Pass `cors: true` or `cors: { ...custom cors headers }` to routeAgentRequest to enable CORS."
-    );
+    corsEnabled = true;
+    corsHeaders = options.cors;
+  } else {
+    corsEnabled = false;
+    corsHeaders = {};
   }
 
-  let response = await routePartykitRequest(
-    request,
-    env as Record<string, unknown>,
-    {
-      prefix: "agents",
-      ...(options as PartyServerOptions<Record<string, unknown>>)
-    }
-  );
-
-  if (
-    response &&
-    corsHeaders &&
-    request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
-    request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
-  ) {
-    response = new Response(response.body, {
-      headers: {
-        ...response.headers,
-        ...corsHeaders
+  let response = await routePartykitRequest(request, env as any, {
+    prefix: "agents",
+    jurisdiction: options.jurisdiction,
+    locationHint: options.locationHint,
+    // Preflight request with `Upgrade` header field don't exist.
+    onBeforeConnect: options.onBeforeConnect as any,
+    onBeforeRequest: async (req, lobby) => {
+      if (options.onBeforeRequest !== undefined) {
+        const reqOrRes = await options.onBeforeRequest(req, lobby as any);
+        if (reqOrRes instanceof Response) {
+          return reqOrRes;
+        }
+        if (reqOrRes instanceof Request) {
+          req = reqOrRes;
+        }
       }
-    });
+
+      if (req.method === "OPTIONS") {
+        if (corsEnabled) {
+          return new Response(null, {
+            headers: corsHeaders
+          });
+        }
+        console.warn(
+          "Received an OPTIONS request, but cors was not enabled. Pass `cors: true` or `cors: { ...custom cors headers }` to routeAgentRequest to enable CORS."
+        );
+      }
+    },
+    props: options.props
+  });
+
+  if (response === null) {
+    return null;
+  }
+
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    const headersEntries = new Headers(corsHeaders).entries();
+    for (const [fieldName, fieldValue] of headersEntries) {
+      response.headers.set(fieldName, fieldValue);
+    }
   }
   return response;
 }
