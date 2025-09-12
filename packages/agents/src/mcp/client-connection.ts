@@ -19,8 +19,13 @@ import {
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
-// Import extended types with icon support
-import type { Tool, Resource, Prompt, Implementation } from "./types";
+// Import types directly from MCP SDK
+import type {
+  Tool,
+  Resource,
+  Prompt,
+  Implementation
+} from "@modelcontextprotocol/sdk/types.js";
 
 export type MCPTransportOptions = (
   | SSEClientTransportOptions

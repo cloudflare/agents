@@ -104,11 +104,5 @@ export class MyMCP extends McpAgent<Env, State, {}> {
 }
 
 export default MyMCP.serve("/mcp", {
-  binding: "MyMCP",
-  corsOptions: {
-    origin: "http://localhost:6275", // Allow the inspector origin
-    methods: "GET,POST,OPTIONS",
-    headers: "Content-Type,Accept",
-    maxAge: 86400
-  }
+  binding: "MyMCP"
 });
