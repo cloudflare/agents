@@ -23,8 +23,7 @@ import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
 import type {
   Tool,
   Resource,
-  Prompt,
-  Implementation
+  Prompt
 } from "@modelcontextprotocol/sdk/types.js";
 
 export type MCPTransportOptions = (
