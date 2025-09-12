@@ -46,7 +46,6 @@ export class MCPClientConnection {
     | "discovering"
     | "failed" = "connecting";
   instructions?: string;
-  implementation?: Implementation;
   tools: Tool[] = [];
   prompts: Prompt[] = [];
   resources: Resource[] = [];
@@ -98,14 +97,6 @@ export class MCPClientConnection {
     this.serverCapabilities = await this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
       throw new Error("The MCP Server failed to return server capabilities");
-    }
-
-    // Get server implementation info which includes icons and website URL
-    try {
-      const serverInfo = await this.client.getServerVersion();
-      this.implementation = serverInfo;
-    } catch (error) {
-      console.warn("Failed to get server implementation info:", error);
     }
 
     const [
