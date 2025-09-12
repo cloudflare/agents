@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
+import icon from "./mcp-icon.svg";
 
 type Env = {
   MyMCP: DurableObjectNamespace<MyMCP>;
@@ -11,7 +12,16 @@ type State = { counter: number };
 export class MyMCP extends McpAgent<Env, State, {}> {
   server = new McpServer({
     name: "Demo",
-    version: "1.0.0"
+    version: "1.0.0",
+    // Add icons and website URL to the server implementation
+    icons: [
+      {
+        src: icon,
+        sizes: "any",
+        mimeType: "image/svg+xml"
+      }
+    ],
+    websiteUrl: "https://github.com/cloudflare/agents"
   });
 
   initialState: State = {
@@ -19,12 +29,16 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   };
 
   async init() {
+    // Register resource - Note: Current MCP SDK doesn't support icons in resource method yet
+    // Icons are supported at the server implementation level
     this.server.resource("counter", "mcp://resource/counter", (uri) => {
       return {
         contents: [{ text: String(this.state.counter), uri: uri.href }]
       };
     });
 
+    // Register tool - Note: Current MCP SDK doesn't support icons in tool method yet
+    // Icons are supported at the server implementation level
     this.server.tool(
       "add",
       "Add to the counter, stored in the MCP",
@@ -42,6 +56,27 @@ export class MyMCP extends McpAgent<Env, State, {}> {
         };
       }
     );
+
+    // Note: To fully support icons on tools and resources, you would need to use
+    // the server's setRequestHandler method to manually implement the list handlers
+    // with icon metadata, as shown in the commented example below:
+
+    /*
+    this.server.server.setRequestHandler("tools/list", async () => {
+      return {
+        tools: [{
+          name: "add",
+          description: "Add to the counter, stored in the MCP",
+          inputSchema: { type: "object", properties: { a: { type: "number" } }, required: ["a"] },
+          icons: [{
+            src: "data:image/svg+xml;base64,...",
+            mimeType: "image/svg+xml",
+            sizes: "any"
+          }]
+        }]
+      };
+    });
+    */
   }
 
   onStateUpdate(state: State) {
