@@ -326,7 +326,8 @@ export function useAgentChat<
   const useChatHelpers = useChat<ChatMessage>({
     ...rest,
     messages: initialMessages,
-    transport: customTransport
+    transport: customTransport,
+    id: agent._pk
   });
 
   const processedToolCalls = useRef(new Set<string>());
