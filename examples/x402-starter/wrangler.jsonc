@@ -1,0 +1,28 @@
+{
+  "name": "x402-ai-starter",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "X402_AGENT", "class_name": "X402Agent" },
+      { "name": "X402_MCP", "class_name": "X402MCP" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["X402Agent", "X402MCP"]
+    }
+  ],
+  "vars": {
+    // Environment variables for development
+    "ENVIRONMENT": "development"
+    // Add these to your .dev.vars file:
+    // OPENAI_API_KEY = "your-openai-api-key"
+    // CDP_API_KEY_ID = "your-coinbase-cdp-api-key-id"
+    // CDP_API_KEY_SECRET = "your-coinbase-cdp-api-key-secret"
+    // CDP_WALLET_SECRET = "your-coinbase-cdp-wallet-secret"
+    // WALLET_ADDRESS = "your-wallet-address-for-receiving-payments"
+  }
+}

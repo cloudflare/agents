@@ -1,0 +1,11 @@
+# OpenAI Configuration
+OPENAI_API_KEY=your-openai-api-key-here
+
+# Coinbase CDP Configuration (Optional - for real wallet integration)
+CDP_API_KEY_ID=your-coinbase-cdp-api-key-id
+CDP_API_KEY_SECRET=your-coinbase-cdp-api-key-secret
+CDP_WALLET_SECRET=your-coinbase-cdp-wallet-secret
+WALLET_ADDRESS=your-wallet-address-for-receiving-payments
+
+# Network Configuration
+NETWORK=base-sepolia

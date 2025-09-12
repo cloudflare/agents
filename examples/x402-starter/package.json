@@ -1,0 +1,31 @@
+{
+  "name": "@cloudflare/agents-x402-ai-starter",
+  "version": "1.0.0",
+  "description": "X402 AI Starter template using Agents SDK and Cloudflare stack",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"wrangler dev --port 8787\" \"vite dev\" --kill-others",
+    "build": "vite build",
+    "deploy": "wrangler deploy",
+    "start": "npm run dev"
+  },
+  "dependencies": {
+    "agents": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "zod": "^3.22.4",
+    "ai": "^4.0.0",
+    "@ai-sdk/openai": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0",
+    "wrangler": "^3.0.0",
+    "concurrently": "^8.0.0"
+  }
+}
