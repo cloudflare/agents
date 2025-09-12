@@ -2,21 +2,23 @@ body {
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
     Cantarell, sans-serif;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #ffffff;
   margin: 0 auto;
   padding: 20px;
 }
 
 .auth-section {
-  background: #f8f9fa;
+  background: #fff;
   padding: 20px;
   border-radius: 8px;
   margin-bottom: 20px;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .auth-section h2 {
   margin-top: 0;
-  color: #333;
+  color: #ff6b35;
 }
 
 .auth-controls {
@@ -33,10 +35,10 @@ body {
 }
 
 .auth-info {
-  background: #fff;
+  background: #f0f9ff;
   padding: 15px;
   border-radius: 4px;
-  border-left: 4px solid #007bff;
+  border-left: 4px solid #3b82f6;
   margin-top: 15px;
 }
 
@@ -60,12 +62,12 @@ body {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: #dc3545;
+  background: #ef4444;
   transition: background-color 0.3s;
 }
 
 .status-dot.connected {
-  background: #28a745;
+  background: #22c55e;
 }
 
 .message-form {
@@ -84,7 +86,8 @@ body {
 
 .message-input:focus {
   outline: none;
-  border-color: #007bff;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
 .message-input:disabled {
@@ -94,7 +97,7 @@ body {
 
 button {
   padding: 10px 20px;
-  background: #007bff;
+  background: #3b82f6;
   color: white;
   border: none;
   border-radius: 4px;
@@ -104,7 +107,7 @@ button {
 }
 
 button:hover:not(:disabled) {
-  background: #0056b3;
+  background: #2563eb;
 }
 
 button:disabled {
@@ -115,11 +118,11 @@ button:disabled {
 .http-button {
   width: 100%;
   margin-bottom: 20px;
-  background: #28a745;
+  background: #ff6b35;
 }
 
 .http-button:hover:not(:disabled) {
-  background: #1e7e34;
+  background: #ff5722;
 }
 
 .messages-section {
@@ -128,15 +131,16 @@ button:disabled {
 
 .messages-section h3 {
   margin-bottom: 10px;
-  color: #333;
+  color: #ff6b35;
 }
 
 .messages {
   max-height: 300px;
   overflow-y: auto;
-  border: 1px solid #dee2e6;
+  border: 1px solid #e5e7eb;
   border-radius: 4px;
   padding: 10px;
+  background: #ffffff;
 }
 
 .message {
@@ -147,12 +151,13 @@ button:disabled {
 }
 
 .incoming-message {
-  background: #e9ecef;
+  background: #f3f4f6;
   margin-right: 20%;
+  border: 1px solid #e5e7eb;
 }
 
 .outgoing-message {
-  background: #007bff;
+  background: #3b82f6;
   color: white;
   margin-left: 20%;
   text-align: right;
@@ -165,15 +170,16 @@ button:disabled {
 }
 
 .debug-section {
-  background: #f8f9fa;
+  background: #ffffff;
   padding: 15px;
   border-radius: 4px;
-  border: 1px solid #dee2e6;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .debug-section h4 {
   margin-top: 0;
-  color: #333;
+  color: #ff6b35;
 }
 
 .debug-info p {

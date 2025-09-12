@@ -12,13 +12,19 @@ Demonstrates **cross-domain authentication** between a React client (`127.0.0.1:
 
 ## Quick Start
 
-1. **Install dependencies**:
+1. **Navigate to the example directory**:
+
+   ```bash
+   cd examples/cross-domain
+   ```
+
+2. **Install dependencies** (if not already installed):
 
    ```bash
    npm install
    ```
 
-2. **Start both servers**:
+3. **Start both servers**:
    ```bash
    npm start
    ```
