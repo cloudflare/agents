@@ -346,11 +346,126 @@ export class DialogueAgent extends AIChatAgent {
     // // persistence is still handled automatically by AIChatAgent.
     // await onFinish?.(result);
     // return new Response(result.text, {
-    //   headers: { 'Content-Type': 'text/plain' }
+    //   headers: {
+    //     'Content-Type': 'text/plain',
+    //     // Optional: Include metadata in response headers
+    //     'X-Agent-Metadata': JSON.stringify({
+    //       totalTokens: result.usage?.totalTokens,
+    //       model: "gpt-4o",
+    //       responseTime: Date.now()
+    //     })
+    //   }
     // });
   }
 }
 ```
+
+#### Metadata Support
+
+You can include metadata with your responses in two ways:
+
+##### For `streamText` responses (SSE):
+
+Use the `withMetadata` helper method to attach metadata to streaming responses:
+
+```typescript
+async onChatMessage() {
+  let tokenUsage: any = {};
+
+  const result = await streamText({
+    model: openai("gpt-4o"),
+    messages: this.messages,
+    onFinish: async (completion) => {
+      // Capture token usage from completion
+      tokenUsage = completion.usage;
+    }
+  });
+
+  // Attach metadata to the streaming response
+  // Note: Token usage will be populated after streaming completes
+  return this.withMetadata(result.toDataStreamResponse(), {
+    model: "gpt-4o",
+    responseTime: Date.now(),
+    confidence: 0.95,
+    category: "streaming",
+    // You can include any custom metadata here
+    sessionId: this.id,
+    messageCount: this.messages.length
+  });
+}
+```
+
+##### For `generateText` responses (plain text):
+
+Add the `X-Agent-Metadata` header to your response. This metadata will be automatically included in the streaming events and available to clients:
+
+```typescript
+async onChatMessage() {
+  const result = await generateText({
+    model: openai("gpt-4o"),
+    messages: this.messages,
+  });
+
+  // Prepare metadata (with size validation)
+  const metadata = {
+    // Token usage information
+    totalTokens: result.usage?.totalTokens,
+    promptTokens: result.usage?.promptTokens,
+    completionTokens: result.usage?.completionTokens,
+
+    // Model and performance info
+    model: "gpt-4o",
+    responseTime: Date.now(),
+
+    // Custom metadata
+    confidence: 0.95,
+    category: "general"
+  };
+
+  // Validate metadata size before including in headers
+  const metadataString = JSON.stringify(metadata);
+  const headers: HeadersInit = { 'Content-Type': 'text/plain' };
+
+  if (metadataString.length <= 4096) {
+    headers['X-Agent-Metadata'] = metadataString;
+  } else {
+    console.warn('Metadata too large, omitting from response');
+  }
+
+  return new Response(result.text, { headers });
+}
+```
+
+##### How Clients Receive Metadata
+
+For SSE responses, clients will receive an initial metadata event:
+
+```json
+{
+  "type": "metadata",
+  "metadata": { "model": "gpt-4o", "responseTime": 1234567890 }
+}
+```
+
+Then each text-delta event will also include the metadata:
+
+```json
+{
+  "type": "text-delta",
+  "delta": "Response text...",
+  "metadata": { "model": "gpt-4o", "responseTime": 1234567890 }
+}
+```
+
+The metadata will be available in the client-side messages and can be used for analytics, token tracking, or displaying additional information to users.
+
+##### Security Considerations
+
+- **Sensitive Information**: Avoid including sensitive data (API keys, user PII) in metadata
+- **Header Size Limits**: Metadata is limited to 4KB to prevent header overflow issues
+- **Client Exposure**: All metadata is visible to clients - only include public information
+- **Token Usage**: Be mindful that token counts could reveal usage patterns
+- **Validation**: Always validate metadata on the client side before using it
 
 #### Creating the Interface
 

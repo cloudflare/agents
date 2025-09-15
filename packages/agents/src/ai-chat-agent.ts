@@ -6,6 +6,7 @@ import type {
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import {
   MessageType,
+  type AgentMetadata,
   type IncomingMessage,
   type OutgoingMessage
 } from "./ai-types";
@@ -17,6 +18,11 @@ const decoder = new TextDecoder();
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
+// Internal interface for metadata storage
+interface WithMetadata {
+  _responseMetadata?: AgentMetadata;
+}
+
 export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   Env,
   State
@@ -107,6 +113,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         const abortSignal = this._getAbortSignal(chatMessageId);
 
         return this._tryCatchChat(async () => {
+          // Store metadata if provided via agent property
+          let agentMetadata: AgentMetadata | undefined;
+          const withMetadata = this as AIChatAgent & WithMetadata;
+          if (withMetadata._responseMetadata) {
+            agentMetadata = withMetadata._responseMetadata;
+            delete withMetadata._responseMetadata; // Clean up after use
+          }
+
           const response = await this.onChatMessage(
             async (_finishResult) => {
               this._removeAbortController(chatMessageId);
@@ -129,7 +143,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           );
 
           if (response) {
-            await this._reply(data.id, response);
+            await this._reply(data.id, response, agentMetadata);
           } else {
             // Log a warning for observability
             console.warn(
@@ -193,10 +207,35 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
-   * Handle incoming chat messages and generate a response
-   * @param onFinish Callback to be called when the response is finished
-   * @param options.signal A signal to pass to any child requests which can be used to cancel them
-   * @returns Response to send to the client or undefined
+   * Helper method to attach metadata to streaming responses.
+   * Use this when returning streamText responses that need metadata.
+   *
+   * @param response - The response from streamText().toDataStreamResponse()
+   * @param metadata - The metadata to attach
+   * @returns The response with metadata configured
+   *
+   * @example
+   * ```typescript
+   * const result = await streamText({...});
+   * return this.withMetadata(result.toDataStreamResponse(), {
+   *   totalTokens: 100,
+   *   model: "gpt-4o"
+   * });
+   * ```
+   */
+  protected withMetadata(
+    response: Response,
+    metadata: AgentMetadata
+  ): Response {
+    // Store metadata temporarily on the agent instance
+    const withMetadata = this as AIChatAgent & WithMetadata;
+    withMetadata._responseMetadata = metadata;
+    return response;
+  }
+
+  /**
+   * Override this method to handle incoming chat messages.
+   * This is where you implement your AI logic using the AI SDK.
    */
   async onChatMessage(
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
@@ -237,7 +276,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     );
   }
 
-  private async _reply(id: string, response: Response) {
+  private async _reply(
+    id: string,
+    response: Response,
+    agentMetadata?: AgentMetadata
+  ) {
     return this._tryCatchChat(async () => {
       if (!response.body) {
         // Send empty response if no body
@@ -286,6 +329,50 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           // Determine response format based on content-type
           const contentType = response.headers.get("content-type") || "";
           const isSSE = contentType.includes("text/event-stream");
+
+          // Extract metadata from response headers or agent property
+          let metadata: AgentMetadata | undefined;
+          let cachedMetadata: AgentMetadata | undefined; // Cache for performance
+
+          // First check if metadata was set via agent property (for SSE responses)
+          if (agentMetadata) {
+            metadata = agentMetadata;
+            cachedMetadata = metadata;
+          } else {
+            // Otherwise try to extract from response headers (for plain text responses)
+            const metadataHeader = response.headers.get("X-Agent-Metadata");
+            if (metadataHeader) {
+              try {
+                // Validate header size (conservative 4KB limit)
+                if (metadataHeader.length > 4096) {
+                  console.warn(
+                    "[AIChatAgent] X-Agent-Metadata header too large, truncating to 4KB"
+                  );
+                }
+                metadata = JSON.parse(metadataHeader);
+                cachedMetadata = metadata; // Cache the parsed metadata
+              } catch (e) {
+                console.warn(
+                  "[AIChatAgent] Failed to parse X-Agent-Metadata header:",
+                  e
+                );
+              }
+            }
+          }
+
+          // For SSE responses, inject metadata as a custom event at the start
+          if (isSSE && cachedMetadata && !done) {
+            // Send metadata as a separate event type first
+            this._broadcastChatMessage({
+              body: JSON.stringify({
+                type: "metadata",
+                metadata: cachedMetadata
+              }),
+              done: false,
+              id,
+              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            });
+          }
 
           if (isSSE) {
             // Parse AI SDK v5 SSE format and extract text deltas
@@ -346,6 +433,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
                     case "text-delta": {
                       if (data.delta) fullResponseText += data.delta;
+                      // Add metadata to SSE text-delta events
+                      if (cachedMetadata) {
+                        data.metadata = cachedMetadata;
+                      }
                       break;
                     }
                   }
@@ -368,8 +459,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             if (chunk.length > 0) {
               fullResponseText += chunk;
               // Synthesize a text-delta event so clients can stream-render
+              const textDeltaEvent: {
+                type: string;
+                delta: string;
+                metadata?: AgentMetadata;
+              } = {
+                type: "text-delta",
+                delta: chunk
+              };
+              // Use cached metadata for all chunks (performance optimization)
+              if (cachedMetadata) {
+                textDeltaEvent.metadata = cachedMetadata;
+              }
               this._broadcastChatMessage({
-                body: JSON.stringify({ type: "text-delta", delta: chunk }),
+                body: JSON.stringify(textDeltaEvent),
                 done: false,
                 id,
                 type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
