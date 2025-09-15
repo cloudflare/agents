@@ -374,7 +374,7 @@ export const createStreamingHttpHandler = (
         }
 
         // Require sessionId
-        const sessionId = url.searchParams.get("sessionId");
+        const sessionId = request.headers.get("mcp-session-id");
         if (!sessionId)
           return new Response("Missing sessionId", { status: 400 });
 
