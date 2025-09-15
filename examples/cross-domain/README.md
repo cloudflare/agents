@@ -1,9 +1,11 @@
 # Cross-Domain Authentication Demo
 
-Demonstrates **cross-domain authentication** between a React client (`127.0.0.1:5174`) and Cloudflare Worker server (`localhost:8787`) using both WebSocket and HTTP authentication.
+Demonstrates **cross-domain authentication** between a React client (`127.0.0.1:5174`) and Cloudflare Worker server (`localhost:8787`) using both WebSocket and HTTP authentication, with support for both **static** and **async** authentication patterns.
 
 ## What This Demo Shows
 
+- **Static Authentication** (`useAgent`): Query parameters provided at initialization
+- **Async Authentication** (`useAsyncAgent`): Dynamic token fetching with React Suspense
 - **WebSocket Authentication**: Query parameters validated on connection
 - **HTTP Authentication**: Bearer token + API key headers validated on requests
 - **Real Cross-Domain**: Different hostnames (`127.0.0.1` vs `localhost`) trigger actual CORS
@@ -46,12 +48,14 @@ Demonstrates **cross-domain authentication** between a React client (`127.0.0.1:
 
 ## How It Works
 
-### WebSocket Authentication
+The demo includes two authentication patterns that you can toggle between:
 
-Query parameters are extracted and validated when the WebSocket connects:
+### Static Authentication (`useAgent`)
+
+Query parameters are provided at component initialization:
 
 ```typescript
-// Client sends authentication in query parameters
+// Client sends static authentication in query parameters
 const agent = useAgent({
   agent: "my-agent",
   host: "http://localhost:8787",
@@ -61,6 +65,37 @@ const agent = useAgent({
   }
 });
 ```
+
+### Async Authentication (`useAsyncAgent`)
+
+Authentication data is fetched dynamically before WebSocket connection:
+
+```typescript
+// Client fetches authentication data asynchronously
+const asyncQuery = useCallback(async () => {
+  const [token, user] = await Promise.all([
+    getAuthToken(), // Fetch from auth service
+    getCurrentUser() // Get user context
+  ]);
+
+  return {
+    token,
+    userId: user.id,
+    timestamp: Date.now()
+  };
+}, []);
+
+const agent = useAsyncAgent({
+  agent: "my-agent",
+  host: "http://localhost:8787",
+  query: asyncQuery // Async function instead of static object
+  // ... other options
+});
+```
+
+### Server-Side Validation
+
+Both patterns use the same server-side validation:
 
 ```typescript
 // Server validates on connection
@@ -80,7 +115,7 @@ onConnect(connection: Connection, ctx: any) {
 
 private validateAuth(token: string | null, userId: string | null): boolean {
   // For demo: accept 'demo-token-123' as valid
-  if (token === 'demo-token-123' && userId.length > 0) {
+  if (token === 'demo-token-123' && userId && userId.length > 0) {
     return true;
   }
   return false;

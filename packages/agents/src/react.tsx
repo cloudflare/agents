@@ -288,3 +288,13 @@ export function useAgent<State>(
 
   return agent;
 }
+
+export {
+  useAsyncAgent,
+  type UseAsyncAgentOptions,
+  type AuthData,
+  AuthError,
+  type RetryConfig,
+  type CacheConfig
+} from "./use-async-agent";
+export { useAsyncQuery, type UseAsyncQueryOptions } from "./use-async-query";

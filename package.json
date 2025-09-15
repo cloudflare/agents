@@ -85,5 +85,8 @@
       "prettier --write --ignore-unknown"
     ]
   },
-  "packageManager": "npm@11.6.0"
+  "packageManager": "npm@11.6.0",
+  "dependencies": {
+    "biome": "^0.3.3"
+  }
 }
