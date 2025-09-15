@@ -362,107 +362,128 @@ export class DialogueAgent extends AIChatAgent {
 
 #### Metadata Support
 
-You can include metadata with your responses in two ways:
+The AI SDK provides native support for message metadata through the `messageMetadata` callback in `toUIMessageStreamResponse()` and the `metadata` property in `toUIMessage()`.
 
-##### For `streamText` responses (SSE):
-
-Use the `withMetadata` helper method to attach metadata to streaming responses:
+##### For streaming responses:
 
 ```typescript
+import { streamText } from 'ai';
+import type { UIMessage } from 'ai';
+
+export interface MessageMetadata {
+  model?: string;
+  createdAt?: number;
+  totalTokens?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  responseTime?: number;
+  confidence?: number;
+}
+
+export type MyUIMessage = UIMessage<MessageMetadata>;
+
 async onChatMessage() {
-  let tokenUsage: any = {};
+  const startTime = Date.now();
 
   const result = await streamText({
     model: openai("gpt-4o"),
-    messages: this.messages,
-    onFinish: async (completion) => {
-      // Capture token usage from completion
-      tokenUsage = completion.usage;
-    }
+    messages: this.messages
   });
 
-  // Attach metadata to the streaming response
-  // Note: Token usage will be populated after streaming completes
-  return this.withMetadata(result.toDataStreamResponse(), {
-    model: "gpt-4o",
-    responseTime: Date.now(),
-    confidence: 0.95,
-    category: "streaming",
-    // You can include any custom metadata here
-    sessionId: this.id,
-    messageCount: this.messages.length
+  return result.toUIMessageStreamResponse({
+    messageMetadata: ({ part }) => {
+      // Send initial metadata when streaming starts
+      if (part.type === 'start') {
+        return {
+          model: 'gpt-4o',
+          createdAt: Date.now()
+        };
+      }
+
+      // Send token usage when streaming completes
+      if (part.type === 'finish') {
+        return {
+          totalTokens: part.totalUsage?.totalTokens,
+          promptTokens: part.totalUsage?.promptTokens,
+          completionTokens: part.totalUsage?.completionTokens,
+          responseTime: Date.now() - startTime
+        };
+      }
+    }
   });
 }
 ```
 
-##### For `generateText` responses (plain text):
-
-Add the `X-Agent-Metadata` header to your response. This metadata will be automatically included in the streaming events and available to clients:
+##### For non-streaming responses:
 
 ```typescript
 async onChatMessage() {
+  const startTime = Date.now();
+
   const result = await generateText({
     model: openai("gpt-4o"),
-    messages: this.messages,
+    messages: this.messages
   });
 
-  // Prepare metadata (with size validation)
-  const metadata = {
-    // Token usage information
-    totalTokens: result.usage?.totalTokens,
-    promptTokens: result.usage?.promptTokens,
-    completionTokens: result.usage?.completionTokens,
+  // Convert to UIMessage with metadata
+  const message = result.toUIMessage({
+    metadata: {
+      model: 'gpt-4o',
+      totalTokens: result.usage?.totalTokens,
+      promptTokens: result.usage?.promptTokens,
+      completionTokens: result.usage?.completionTokens,
+      responseTime: Date.now() - startTime,
+      createdAt: Date.now()
+    }
+  });
 
-    // Model and performance info
-    model: "gpt-4o",
-    responseTime: Date.now(),
-
-    // Custom metadata
-    confidence: 0.95,
-    category: "general"
-  };
-
-  // Validate metadata size before including in headers
-  const metadataString = JSON.stringify(metadata);
-  const headers: HeadersInit = { 'Content-Type': 'text/plain' };
-
-  if (metadataString.length <= 4096) {
-    headers['X-Agent-Metadata'] = metadataString;
-  } else {
-    console.warn('Metadata too large, omitting from response');
-  }
-
-  return new Response(result.text, { headers });
+  // Return as a properly formatted response
+  return new Response(JSON.stringify(message), {
+    headers: { 'Content-Type': 'application/json' }
+  });
 }
 ```
 
-##### How Clients Receive Metadata
+##### Accessing metadata on the client:
 
-For SSE responses, clients will receive an initial metadata event:
+```typescript
+import { useChat } from '@ai-sdk/react';
+import type { MyUIMessage } from './types';
 
-```json
-{
-  "type": "metadata",
-  "metadata": { "model": "gpt-4o", "responseTime": 1234567890 }
+export function Chat() {
+  const { messages } = useChat<MyUIMessage>({
+    api: '/api/chat'
+  });
+
+  return (
+    <div>
+      {messages.map(message => (
+        <div key={message.id}>
+          <div>{message.content}</div>
+          {message.metadata && (
+            <div className="metadata">
+              <span>Model: {message.metadata.model}</span>
+              <span>Tokens: {message.metadata.totalTokens}</span>
+              <span>Time: {message.metadata.responseTime}ms</span>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 ```
 
-Then each text-delta event will also include the metadata:
-
-```json
-{
-  "type": "text-delta",
-  "delta": "Response text...",
-  "metadata": { "model": "gpt-4o", "responseTime": 1234567890 }
-}
-```
-
-The metadata will be available in the client-side messages and can be used for analytics, token tracking, or displaying additional information to users.
+For more details, see the [AI SDK Message Metadata documentation](https://ai-sdk.dev/docs/ai-sdk-ui/message-metadata).
 
 ##### Security Considerations
 
 - **Sensitive Information**: Avoid including sensitive data (API keys, user PII) in metadata
 - **Header Size Limits**: Metadata is limited to 4KB to prevent header overflow issues
+  {{ ... }}
+  }
+
+````
 - **Client Exposure**: All metadata is visible to clients - only include public information
 - **Token Usage**: Be mindful that token counts could reveal usage patterns
 - **Validation**: Always validate metadata on the client side before using it
@@ -523,7 +544,7 @@ function ChatInterface() {
     </div>
   );
 }
-```
+````
 
 This creates:
 

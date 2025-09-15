@@ -21,7 +21,7 @@ type Env = {
 
 export class HumanInTheLoop extends AIChatAgent<Env> {
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
-    const startTime = Date.now();
+    const _startTime = Date.now();
 
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
@@ -47,30 +47,27 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
       }
     });
 
-    const response = createUIMessageStreamResponse({ stream });
+    // NOTE: The AI SDK's native messageMetadata approach should be used:
+    // return createUIMessageStreamResponse({
+    //   stream,
+    //   messageMetadata: ({ part }) => {
+    //     if (part.type === 'start') {
+    //       return {
+    //         model: 'gpt-4o',
+    //         createdAt: Date.now(),
+    //         messageCount: this.messages.length
+    //       };
+    //     }
+    //     if (part.type === 'finish') {
+    //       return {
+    //         responseTime: Date.now() - startTime,
+    //         totalTokens: part.totalUsage?.totalTokens
+    //       };
+    //     }
+    //   }
+    // });
 
-    // Log metadata (simulating what the metadata feature will do)
-    const metadata = {
-      model: "gpt-4o",
-      responseTime: Date.now() - startTime,
-      sessionId: `session-${Date.now()}`,
-      messageCount: this.messages.length,
-      conversationTurns: Math.floor(this.messages.length / 2),
-      hasTools: true,
-      toolsAvailable: Object.keys(tools).length,
-      humanInLoopEnabled: true,
-      timestamp: new Date().toISOString()
-    };
-
-    console.log(
-      "[HumanInTheLoop] Metadata:",
-      JSON.stringify(metadata, null, 2)
-    );
-
-    // Once the metadata feature is available in the workspace version, use:
-    // return this.withMetadata(response, metadata);
-
-    return response;
+    return createUIMessageStreamResponse({ stream });
   }
 }
 

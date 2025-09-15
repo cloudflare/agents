@@ -166,13 +166,7 @@ export default function Chat() {
               fontSize: "12px",
               color: "var(--text-tertiary)"
             }}
-          >
-            <em>
-              💡 Tip: Check the server console to see detailed metadata being
-              logged for each response, including exact response times and
-              session IDs.
-            </em>
-          </div>
+          />
         </div>
       )}
 
