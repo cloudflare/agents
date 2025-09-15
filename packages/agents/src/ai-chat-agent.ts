@@ -193,8 +193,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
-   * Override this method to handle incoming chat messages.
-   * This is where you implement your AI logic using the AI SDK.
+   * Handle incoming chat messages and generate a response
+   * @param onFinish Callback to be called when the response is finished
+   * @param options.signal A signal to pass to any child requests which can be used to cancel them
+   * @returns Response to send to the client or undefined
    */
   async onChatMessage(
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
@@ -344,7 +346,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
                     case "text-delta": {
                       if (data.delta) fullResponseText += data.delta;
-                      // Metadata is handled by AI SDK's native methods
                       break;
                     }
                   }
@@ -367,15 +368,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             if (chunk.length > 0) {
               fullResponseText += chunk;
               // Synthesize a text-delta event so clients can stream-render
-              const textDeltaEvent: {
-                type: string;
-                delta: string;
-              } = {
-                type: "text-delta",
-                delta: chunk
-              };
               this._broadcastChatMessage({
-                body: JSON.stringify(textDeltaEvent),
+                body: JSON.stringify({ type: "text-delta", delta: chunk }),
                 done: false,
                 id,
                 type: MessageType.CF_AGENT_USE_CHAT_RESPONSE

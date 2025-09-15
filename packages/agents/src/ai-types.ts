@@ -1,28 +1,6 @@
 import type { UIMessage } from "ai";
 
 /**
- * Metadata that can be attached to agent responses
- */
-export interface AgentMetadata {
-  /** Total tokens used in the response */
-  totalTokens?: number;
-  /** Tokens used in the prompt */
-  promptTokens?: number;
-  /** Tokens used in the completion */
-  completionTokens?: number;
-  /** Model identifier used for generation */
-  model?: string;
-  /** Response generation timestamp */
-  responseTime?: number;
-  /** Confidence score (0-1) */
-  confidence?: number;
-  /** Response category or type */
-  category?: string;
-  /** Allow custom fields */
-  [key: string]: string | number | boolean | undefined;
-}
-
-/**
  * Enum for message types to improve type safety and maintainability
  */
 export enum MessageType {
