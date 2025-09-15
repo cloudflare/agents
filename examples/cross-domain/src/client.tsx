@@ -47,7 +47,7 @@ function AsyncAuthApp() {
     host: "http://localhost:8788",
     query: asyncQuery, // Async function - automatically detected and cached
     onClose: () => setIsConnected(false),
-    onMessage: (message: any) => {
+    onMessage: (message: MessageEvent) => {
       const newMessage: Message = {
         id: Math.random().toString(36).substring(7),
         text: message.data as string,
@@ -57,7 +57,7 @@ function AsyncAuthApp() {
       setMessages((prev) => [...prev, newMessage]);
     },
     onOpen: () => setIsConnected(true),
-    onError: (error: any) => {
+    onError: (error: Event) => {
       console.error("WebSocket error:", error);
       setIsConnected(false);
     },
@@ -127,24 +127,23 @@ function AsyncAuthApp() {
         <div className="status-indicator">
           <div className={`status-dot ${isConnected ? "connected" : ""}`} />
           <div className="connection-status">
-            {(agent as any).connectionState === "connecting" &&
+            {"readyState" in agent &&
+              agent.readyState === WebSocket.CONNECTING &&
               "🔄 Connecting..."}
-            {(agent as any).connectionState === "connected" &&
+            {"readyState" in agent &&
+              agent.readyState === WebSocket.OPEN &&
               "✅ Connected to server"}
-            {(agent as any).connectionState === "retrying" &&
+            {"readyState" in agent &&
+              agent.readyState === WebSocket.CLOSING &&
               "🔄 Retrying authentication..."}
-            {(agent as any).connectionState === "failed" &&
+            {"readyState" in agent &&
+              agent.readyState === WebSocket.CLOSED &&
               "❌ Connection failed (auto-retry enabled)"}
           </div>
-          {(agent as any).isRetrying && (
-            <div className="retry-info">
-              <span>🔄 Automatic retry in progress...</span>
-            </div>
-          )}
-          {(agent as any).lastError &&
-            (agent as any).connectionState === "failed" && (
-              <div className="error-info">
-                <span>Last error: {(agent as any).lastError.message}</span>
+          {"readyState" in agent &&
+            agent.readyState === WebSocket.CONNECTING && (
+              <div className="retry-info">
+                <span>🔄 Automatic retry in progress...</span>
               </div>
             )}
         </div>

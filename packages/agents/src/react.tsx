@@ -206,35 +206,39 @@ export function useAgent<State>(
   );
 
   // Handle both sync and async query patterns
+  const cacheKey = useMemo(
+    () =>
+      `agent_${agentNamespace}_${options.name || "default"}_${JSON.stringify(queryDeps)}`,
+    [agentNamespace, options.name, queryDeps]
+  );
+
+  const queryPromise = useMemo(() => {
+    if (!query || typeof query !== "function") {
+      return null;
+    }
+
+    if (queryCache.has(cacheKey)) {
+      return queryCache.get(cacheKey)!;
+    }
+
+    const promise = query();
+    queryCache.set(cacheKey, promise);
+
+    // Simple TTL cleanup after 5 minutes
+    setTimeout(
+      () => {
+        queryCache.delete(cacheKey);
+      },
+      5 * 60 * 1000
+    );
+
+    return promise;
+  }, [cacheKey, query]);
+
   let resolvedQuery: QueryObject | undefined;
 
   if (query) {
     if (typeof query === "function") {
-      const cacheKey = useMemo(
-        () =>
-          `agent_${agentNamespace}_${options.name || "default"}_${JSON.stringify(queryDeps)}`,
-        [agentNamespace, options.name, queryDeps]
-      );
-
-      const queryPromise = useMemo(() => {
-        if (queryCache.has(cacheKey)) {
-          return queryCache.get(cacheKey)!;
-        }
-
-        const promise = query();
-        queryCache.set(cacheKey, promise);
-
-        // Simple TTL cleanup after 5 minutes
-        setTimeout(
-          () => {
-            queryCache.delete(cacheKey);
-          },
-          5 * 60 * 1000
-        );
-
-        return promise;
-      }, [cacheKey, query]);
-
       if (debug) {
         console.log(
           `[useAgent] Using async query for agent "${options.agent}"`
@@ -242,7 +246,7 @@ export function useAgent<State>(
       }
 
       // Use React's use() to resolve the promise
-      const queryResult = use(queryPromise);
+      const queryResult = use(queryPromise!);
 
       // Transform resolved data to WebSocket-compatible format
       if (queryResult) {
