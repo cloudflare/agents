@@ -183,9 +183,59 @@ button:disabled {
 }
 
 .debug-info p {
-  margin: 5px 0;
-  font-size: 13px;
+  margin: 4px 0;
+  font-size: 14px;
   font-family: monospace;
+}
+
+.auth-error {
+  margin-top: 10px;
+  padding: 10px;
+  background-color: #fee;
+  border: 1px solid #fcc;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.refresh-button {
+  background: #007bff;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.refresh-button:hover {
+  background: #0056b3;
+}
+
+.connection-status {
+  font-weight: 500;
+  margin-left: 8px;
+}
+
+.retry-info {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background-color: #fff3cd;
+  border: 1px solid #ffeaa7;
+  border-radius: 4px;
+  font-size: 14px;
+  color: #856404;
+}
+
+.error-info {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background-color: #f8d7da;
+  border: 1px solid #f5c6cb;
+  border-radius: 4px;
+  font-size: 14px;
+  color: #721c24;
 }
 
 .status-indicator {

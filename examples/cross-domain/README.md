@@ -6,11 +6,13 @@ Demonstrates **cross-domain authentication** between a React client (`127.0.0.1:
 
 - **Static Authentication** (`useAgent`): Query parameters provided at initialization
 - **Async Authentication** (`useAsyncAgent`): Dynamic token fetching with React Suspense
+- **Automatic Retry**: Event-driven recovery with exponential backoff
+- **Connection State Management**: Real-time status feedback (`connecting`, `connected`, `retrying`, `failed`)
 - **WebSocket Authentication**: Query parameters validated on connection
 - **HTTP Authentication**: Bearer token + API key headers validated on requests
 - **Real Cross-Domain**: Different hostnames (`127.0.0.1` vs `localhost`) trigger actual CORS
 - **Token Validation**: Server accepts `demo-token-123` and rejects invalid tokens
-- **Visual Feedback**: Connection status, auth results, and debug info
+- **Visual Feedback**: Connection status, retry progress, and error information
 
 ## Quick Start
 
@@ -68,7 +70,7 @@ const agent = useAgent({
 
 ### Async Authentication (`useAsyncAgent`)
 
-Authentication data is fetched dynamically before WebSocket connection:
+Authentication data is fetched dynamically before WebSocket connection with automatic retry:
 
 ```typescript
 // Client fetches authentication data asynchronously
@@ -88,9 +90,21 @@ const asyncQuery = useCallback(async () => {
 const agent = useAsyncAgent({
   agent: "my-agent",
   host: "http://localhost:8787",
-  query: asyncQuery // Async function instead of static object
-  // ... other options
+  query: asyncQuery, // Async function instead of static object
+  autoRetry: {
+    enabled: true,
+    maxAttempts: 5,
+    baseDelay: 1000,
+    maxDelay: 30000,
+    backoffMultiplier: 1.5,
+    stopAfterMs: 5 * 60 * 1000,
+    triggers: ["focus", "online", "visibility", "periodic"],
+    periodicInterval: 30000
+  }
 });
+
+// Access connection state for UI feedback
+const { connectionState, isRetrying, lastError } = agent;
 ```
 
 ### Server-Side Validation
@@ -189,6 +203,17 @@ private validateHttpAuth(authHeader: string | null, apiKey: string | null): bool
 
 ## What You'll See
 
+### Client UI States
+
+The async authentication demo shows different connection states:
+
+- **🔄 Connecting...** - Initial authentication attempt
+- **✅ Connected to server** - Successfully authenticated and connected
+- **🔄 Retrying authentication...** - Automatic retry in progress
+- **❌ Connection failed (auto-retry enabled)** - Max retries exceeded
+- **🔄 Automatic retry in progress...** - Retry indicator when `isRetrying` is true
+- **Last error: [error message]** - Shows specific error when connection fails
+
 ### Server Console Logs
 
 ```
@@ -203,11 +228,28 @@ HTTP Request - Auth: Bearer demo-token-123, API Key: demo-api-key
 
 ## Troubleshooting
 
-### Red Dot (Disconnected)
+### Connection Issues
+
+**Red Dot (Disconnected)**
 
 - Check both servers are running
 - Verify token is exactly `demo-token-123`
 - Look at server console for auth errors
+- **Automatic retry will attempt to reconnect** - no manual action needed
+
+**Stuck in "Retrying" State**
+
+- Check network connectivity
+- Verify auth service is responding
+- Try switching browser tabs (triggers focus retry)
+- Automatic retry will stop after 5 minutes by default
+
+**"Connection failed" State**
+
+- Max retry attempts exceeded
+- Check server logs for persistent auth issues
+- Refresh page to restart retry cycle
+- Consider adjusting `autoRetry.maxAttempts` if needed
 
 ### HTTP Requests Fail
 

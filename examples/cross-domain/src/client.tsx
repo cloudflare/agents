@@ -1,4 +1,4 @@
-import { useAgent, useAsyncAgent } from "agents/react";
+import { useAgent, useAsyncAgent, type AuthData } from "agents/react";
 import { useRef, useState, Suspense, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -41,13 +41,13 @@ function AsyncAuthApp() {
     };
   }, []);
 
-  // Cross-domain WebSocket connection with async authentication
+  // Cross-domain WebSocket connection with async authentication and automatic retry
   const agent = useAsyncAgent({
     agent: "my-agent",
-    host: "http://localhost:63552",
+    host: "http://localhost:8788",
     query: asyncQuery,
     onClose: () => setIsConnected(false),
-    onMessage: (message) => {
+    onMessage: (message: any) => {
       const newMessage: Message = {
         id: Math.random().toString(36).substring(7),
         text: message.data as string,
@@ -57,11 +57,26 @@ function AsyncAuthApp() {
       setMessages((prev) => [...prev, newMessage]);
     },
     onOpen: () => setIsConnected(true),
-    onError: (error) => {
-      console.error("WebSocket auth error:", error);
+    onError: (error: any) => {
+      console.error("WebSocket error:", error);
       setIsConnected(false);
-    }
-  });
+    },
+    onAuthError: (error: any) => {
+      console.error("Authentication failed:", error);
+      setIsConnected(false);
+    },
+    autoRetry: {
+      enabled: true,
+      maxAttempts: 5,
+      baseDelay: 1000,
+      maxDelay: 30000,
+      backoffMultiplier: 1.5,
+      stopAfterMs: 5 * 60 * 1000,
+      triggers: ["focus", "online", "visibility", "periodic"],
+      periodicInterval: 30000
+    },
+    debug: true
+  } as any);
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -86,7 +101,7 @@ function AsyncAuthApp() {
       const token = await getAuthToken();
 
       const response = await fetch(
-        "http://localhost:63552/agents/my-agent/default",
+        "http://localhost:8788/agents/my-agent/default",
         {
           method: "GET",
           headers: {
@@ -125,7 +140,27 @@ function AsyncAuthApp() {
         <h2>Cross-Domain Authentication Demo (Async)</h2>
         <div className="status-indicator">
           <div className={`status-dot ${isConnected ? "connected" : ""}`} />
-          {isConnected ? "Connected to server" : "Disconnected"}
+          <div className="connection-status">
+            {(agent as any).connectionState === "connecting" &&
+              "🔄 Connecting..."}
+            {(agent as any).connectionState === "connected" &&
+              "✅ Connected to server"}
+            {(agent as any).connectionState === "retrying" &&
+              "🔄 Retrying authentication..."}
+            {(agent as any).connectionState === "failed" &&
+              "❌ Connection failed (auto-retry enabled)"}
+          </div>
+          {(agent as any).isRetrying && (
+            <div className="retry-info">
+              <span>🔄 Automatic retry in progress...</span>
+            </div>
+          )}
+          {(agent as any).lastError &&
+            (agent as any).connectionState === "failed" && (
+              <div className="error-info">
+                <span>Last error: {(agent as any).lastError.message}</span>
+              </div>
+            )}
         </div>
         <div className="auth-info">
           <p>
@@ -139,7 +174,7 @@ function AsyncAuthApp() {
             <strong>🌐 Cross-Domain Setup:</strong>
           </p>
           <p>• Client: {window.location.origin} (this page)</p>
-          <p>• Server: http://localhost:8787 (different port)</p>
+          <p>• Server: http://localhost:8788 (different port)</p>
         </div>
       </div>
 
@@ -204,7 +239,7 @@ function StaticAuthApp() {
   // Cross-domain WebSocket connection with static query parameter authentication
   const agent = useAgent({
     agent: "my-agent",
-    host: "http://localhost:63552",
+    host: "http://localhost:8788",
     query: {
       token: authToken, // Authentication token (demo-token-123)
       userId: "demo-user" // User identifier for server validation
@@ -247,7 +282,7 @@ function StaticAuthApp() {
     try {
       // Cross-domain HTTP request with header-based authentication
       const response = await fetch(
-        "http://localhost:63552/agents/my-agent/default",
+        "http://localhost:8788/agents/my-agent/default",
         {
           method: "GET",
           headers: {
@@ -312,7 +347,7 @@ function StaticAuthApp() {
             <strong>🌐 Cross-Domain Setup:</strong>
           </p>
           <p>• Client: {window.location.origin} (this page)</p>
-          <p>• Server: http://localhost:8787 (different port)</p>
+          <p>• Server: http://localhost:8788 (different port)</p>
           <p>
             <strong>🔗 WebSocket Auth:</strong> Query parameter (token=
             {authToken})

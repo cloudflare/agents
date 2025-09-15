@@ -26,7 +26,8 @@ For scenarios where authentication data is available at component initialization
 For scenarios requiring dynamic token fetching or runtime authentication:
 
 - Supports async query functions
-- Built-in retry logic and error handling
+- **Automatic retry with event-driven recovery**
+- **Connection state management for better UX**
 - Requires Suspense boundary
 - Best for JWT refresh, OAuth flows, or cross-domain auth
 
@@ -99,10 +100,15 @@ function useJWTAgent(agentName: string) {
       // Redirect to login on auth failure
       window.location.href = "/login";
     },
-    retryConfig: {
-      attempts: 3,
-      delay: 1000,
-      backoffMultiplier: 2
+    autoRetry: {
+      enabled: true,
+      maxAttempts: 5,
+      baseDelay: 1000,
+      maxDelay: 30000,
+      backoffMultiplier: 1.5,
+      stopAfterMs: 5 * 60 * 1000, // Stop after 5 minutes
+      triggers: ["focus", "online", "visibility", "periodic"],
+      periodicInterval: 30000 // Retry every 30 seconds
     }
   });
 }
@@ -125,7 +131,7 @@ const agent = useAgent({
   }
 });
 
-// Async cross-domain authentication
+// Async cross-domain authentication with automatic retry
 const agent = useAsyncAgent({
   agent: "my-agent",
   host: "https://my-agent-server.com",
@@ -139,8 +145,92 @@ const agent = useAsyncAgent({
   onAuthError: (error) => {
     console.error("Cross-domain auth failed:", error);
   },
+  autoRetry: {
+    enabled: true,
+    maxAttempts: 3,
+    baseDelay: 2000,
+    triggers: ["focus", "online", "visibility"]
+  },
   debug: true
 });
+
+// Access connection state for UI feedback
+const { connectionState, isRetrying, lastError } = agent;
+// connectionState: 'connecting' | 'connected' | 'retrying' | 'failed'
+```
+
+## Automatic Retry and Connection State
+
+The `useAsyncAgent` hook provides robust automatic retry functionality that handles common network issues without manual intervention.
+
+### Automatic Retry Features
+
+- **Event-driven recovery**: Automatically retries on window focus, network online, page visibility, and periodic intervals
+- **Exponential backoff**: Smart delay increases to avoid overwhelming servers
+- **Configurable limits**: Control max attempts, delays, and total retry duration
+- **Connection state tracking**: Real-time feedback for UI components
+
+### Connection States
+
+| State        | Description                 | UI Recommendation             |
+| ------------ | --------------------------- | ----------------------------- |
+| `connecting` | Initial connection attempt  | Show loading spinner          |
+| `connected`  | Successfully authenticated  | Show success indicator        |
+| `retrying`   | Automatic retry in progress | Show retry indicator          |
+| `failed`     | Max retries exceeded        | Show error with manual action |
+
+### Retry Configuration
+
+```typescript
+const agent = useAsyncAgent({
+  agent: "my-agent",
+  query: asyncAuthQuery,
+  autoRetry: {
+    enabled: true, // Enable automatic retry
+    maxAttempts: 5, // Max retry attempts
+    baseDelay: 1000, // Initial delay (1s)
+    maxDelay: 30000, // Maximum delay (30s)
+    backoffMultiplier: 1.5, // Exponential backoff factor
+    stopAfterMs: 300000, // Stop after 5 minutes
+    triggers: [
+      // When to trigger retry
+      "focus", // Window gains focus
+      "online", // Network comes online
+      "visibility", // Tab becomes visible
+      "periodic" // Periodic background retry
+    ],
+    periodicInterval: 30000 // Background retry interval
+  }
+});
+```
+
+### UI Integration
+
+```typescript
+function AuthenticatedComponent() {
+  const agent = useAsyncAgent({ /* config */ });
+
+  return (
+    <div>
+      <div className="connection-status">
+        {agent.connectionState === 'connecting' && "🔄 Connecting..."}
+        {agent.connectionState === 'connected' && "✅ Connected"}
+        {agent.connectionState === 'retrying' && "🔄 Retrying..."}
+        {agent.connectionState === 'failed' && "❌ Connection failed"}
+      </div>
+
+      {agent.isRetrying && (
+        <div>Automatic retry in progress...</div>
+      )}
+
+      {agent.lastError && agent.connectionState === 'failed' && (
+        <div>Error: {agent.lastError.message}</div>
+      )}
+
+      {/* Your app content */}
+    </div>
+  );
+}
 ```
 
 ### HTTP Authentication

@@ -68,6 +68,7 @@ export interface UseAsyncQueryOptions {
   cacheKey?: string;
   skipFunctionHash?: boolean;
   ttl?: number;
+  forceRefresh?: boolean;
 }
 
 /**
@@ -106,12 +107,16 @@ export function useAsyncQuery(
     const now = Date.now();
     const cached = queryCache.get(cacheKey);
 
-    // Check if cached entry exists and is still valid
-    if (cached && cached.timestamp + cached.ttl > now) {
+    // Check if cached entry exists and is still valid (unless forceRefresh is true)
+    if (
+      !options.forceRefresh &&
+      cached &&
+      cached.timestamp + cached.ttl > now
+    ) {
       return cached.promise;
     }
 
-    // Create new cache entry
+    // Create new cache entry (or force refresh existing one)
     const promise = queryFn();
     const ttl = options.ttl || DEFAULT_TTL;
     queryCache.set(cacheKey, {
@@ -121,7 +126,7 @@ export function useAsyncQuery(
     });
 
     return promise;
-  }, [queryFn, cacheKey, options.ttl]);
+  }, [queryFn, cacheKey, options.ttl, options.forceRefresh]);
 
   // Reference counting to prevent race conditions during cleanup
   useEffect(() => {

@@ -295,6 +295,8 @@ export {
   type AuthData,
   AuthError,
   type RetryConfig,
-  type CacheConfig
+  type CacheConfig,
+  type AutoRetryConfig,
+  type ConnectionState
 } from "./use-async-agent";
 export { useAsyncQuery, type UseAsyncQueryOptions } from "./use-async-query";
