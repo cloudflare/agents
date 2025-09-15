@@ -291,7 +291,7 @@ export const createStreamingHttpHandler = (
               // If we have received all the responses, close the connection
               if (requestIds.size === 0) {
                 ws?.close();
-                await writer.close();
+                await writer.close().catch(() => {});
               }
             } catch (error) {
               console.error("Error forwarding message to SSE:", error);
@@ -303,11 +303,7 @@ export const createStreamingHttpHandler = (
         // Handle WebSocket errors
         ws.addEventListener("error", (error) => {
           async function onError(_error: Event) {
-            try {
-              await writer.close();
-            } catch (_e) {
-              // Ignore errors when closing
-            }
+            await writer.close().catch(() => {});
           }
           onError(error).catch(console.error);
         });
@@ -315,11 +311,7 @@ export const createStreamingHttpHandler = (
         // Handle WebSocket closure
         ws.addEventListener("close", () => {
           async function onClose() {
-            try {
-              await writer.close();
-            } catch (error) {
-              console.error("Error closing SSE connection:", error);
-            }
+            await writer.close().catch(() => {});
           }
           onClose().catch(console.error);
         });
