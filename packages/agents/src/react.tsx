@@ -140,7 +140,7 @@ type UntypedAgentStub = Record<string, Method>;
  * });
  *
  * @example
- * // Async query (new pattern - replaces useAsyncAgent)
+ * // Async query (new pattern)
  * const agent = useAgent({
  *   agent: "MyAgent",
  *   query: async () => ({ token: await getAuthToken(), userId: await getUserId() }),
