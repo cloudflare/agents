@@ -151,7 +151,7 @@ export function useAsyncQuery(
         cacheRefCount.set(cacheKey, count - 1);
       }
     };
-  }, [cacheKey, queryPromise]);
+  }, [cacheKey, queryPromise, options.ttl]);
 
   // React's use() hook will suspend if promise is pending
   return queryPromise ? use(queryPromise) : undefined;
