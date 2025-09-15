@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, use, useMemo } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -27,22 +27,33 @@ function camelCaseToKebabCase(str: string): string {
   return kebabified.replace(/_/g, "-").replace(/-$/, "");
 }
 
+type QueryObject = Record<string, string | number | boolean | null | undefined>;
+
+// Simple cache for async queries
+const queryCache = new Map<string, Promise<QueryObject>>();
+
 /**
  * Options for the useAgent hook
  * @template State Type of the Agent's state
  */
 export type UseAgentOptions<State = unknown> = Omit<
   Parameters<typeof usePartySocket>[0],
-  "party" | "room"
+  "party" | "room" | "query"
 > & {
   /** Name of the agent to connect to */
   agent: string;
   /** Name of the specific Agent instance */
   name?: string;
+  /** Query parameters - can be static object or async function */
+  query?: QueryObject | (() => Promise<QueryObject>);
+  /** Dependencies for async query caching */
+  queryDeps?: unknown[];
   /** Called when the Agent's state is updated */
   onStateUpdate?: (state: State, source: "server" | "client") => void;
   /** Called when MCP server state is updated */
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
+  /** Enable debug logging */
+  debug?: boolean;
 };
 
 type AllOptional<T> = T extends [infer A, ...infer R]
@@ -116,10 +127,35 @@ type AgentStub<T> = {
 type UntypedAgentStub = Record<string, Method>;
 
 /**
- * React hook for connecting to an Agent
+ * React hook for connecting to an Agent with support for both sync and async queries
+ *
+ * This hook automatically detects whether you're using a static query object or an async function
+ * and handles both cases seamlessly with proper caching and Suspense integration.
+ *
+ * @example
+ * // Sync query (existing pattern)
+ * const agent = useAgent({
+ *   agent: "MyAgent",
+ *   query: { token: "abc123", userId: "user1" }
+ * });
+ *
+ * @example
+ * // Async query (new pattern - replaces useAsyncAgent)
+ * const agent = useAgent({
+ *   agent: "MyAgent",
+ *   query: async () => ({ token: await getAuthToken(), userId: await getUserId() }),
+ *   queryDeps: [userId] // Dependencies for caching
+ * });
+ *
+ * @example
+ * // No query (existing pattern)
+ * const agent = useAgent({
+ *   agent: "MyAgent"
+ * });
+ *
  * @template State Type of the Agent's state
  * @template Agent Type of the Agent
- * @param options Connection options
+ * @param options Connection options with optional sync/async query
  * @returns WebSocket connection with setState and call methods
  */
 export function useAgent<State = unknown>(
@@ -155,6 +191,8 @@ export function useAgent<State>(
   stub: UntypedAgentStub;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
+  const { query, queryDeps, debug, ...restOptions } = options;
+
   // Keep track of pending RPC calls
   const pendingCallsRef = useRef(
     new Map<
@@ -167,14 +205,77 @@ export function useAgent<State>(
     >()
   );
 
-  // TODO: if options.query is a function, then use
-  // "use()" to get the value and pass it
-  // as a query parameter to usePartySocket
+  // Handle both sync and async query patterns
+  let resolvedQuery: QueryObject | undefined;
+
+  if (query) {
+    if (typeof query === "function") {
+      const cacheKey = useMemo(
+        () =>
+          `agent_${agentNamespace}_${options.name || "default"}_${JSON.stringify(queryDeps)}`,
+        [agentNamespace, options.name, queryDeps]
+      );
+
+      const queryPromise = useMemo(() => {
+        if (queryCache.has(cacheKey)) {
+          return queryCache.get(cacheKey)!;
+        }
+
+        const promise = query();
+        queryCache.set(cacheKey, promise);
+
+        // Simple TTL cleanup after 5 minutes
+        setTimeout(
+          () => {
+            queryCache.delete(cacheKey);
+          },
+          5 * 60 * 1000
+        );
+
+        return promise;
+      }, [cacheKey, query]);
+
+      if (debug) {
+        console.log(
+          `[useAgent] Using async query for agent "${options.agent}"`
+        );
+      }
+
+      // Use React's use() to resolve the promise
+      const queryResult = use(queryPromise);
+
+      // Transform resolved data to WebSocket-compatible format
+      if (queryResult) {
+        const transformedQuery: Record<string, string | null | undefined> = {};
+        for (const [key, value] of Object.entries(queryResult)) {
+          if (value === null || value === undefined) {
+            transformedQuery[key] = value;
+          } else if (typeof value === "string") {
+            transformedQuery[key] = value;
+          } else if (typeof value === "number" || typeof value === "boolean") {
+            transformedQuery[key] = String(value);
+          } else {
+            transformedQuery[key] = JSON.stringify(value);
+          }
+        }
+        resolvedQuery = transformedQuery;
+      }
+    } else {
+      // Sync query - use directly
+      resolvedQuery = query;
+
+      if (debug) {
+        console.log(`[useAgent] Using sync query for agent "${options.agent}"`);
+      }
+    }
+  }
+
   const agent = usePartySocket({
     party: agentNamespace,
     prefix: "agents",
     room: options.name || "default",
-    ...options,
+    query: resolvedQuery as Record<string, string | null | undefined>,
+    ...restOptions,
     onMessage: (message) => {
       if (typeof message.data === "string") {
         let parsedMessage: Record<string, unknown>;
@@ -289,14 +390,4 @@ export function useAgent<State>(
   return agent;
 }
 
-export {
-  useAsyncAgent,
-  type UseAsyncAgentOptions,
-  type AuthData,
-  AuthError,
-  type RetryConfig,
-  type CacheConfig,
-  type AutoRetryConfig,
-  type ConnectionState
-} from "./use-async-agent";
-export { useAsyncQuery, type UseAsyncQueryOptions } from "./use-async-query";
+// No additional exports needed - useAgent now handles everything internally

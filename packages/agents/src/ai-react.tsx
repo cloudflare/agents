@@ -42,9 +42,9 @@ type UseAgentChatOptions<
     | undefined
     | null
     | ((options: GetInitialMessagesOptions) => Promise<ChatMessage[]>);
-  /** Request credentials for HTTP requests (e.g., /get-messages) */
+  /** Request credentials */
   credentials?: RequestCredentials;
-  /** Request headers for HTTP requests (e.g., /get-messages) */
+  /** Request headers */
   headers?: HeadersInit;
   /**
    * @description Whether to automatically resolve tool calls that do not require human interaction.

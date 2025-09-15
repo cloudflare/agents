@@ -5,15 +5,14 @@ This guide covers authentication patterns for the Agents SDK, including static a
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [When to Use Each Approach](#when-to-use-each-approach)
-3. [Static vs Async Authentication](#static-vs-async-authentication)
-4. [Cross-Domain Authentication Patterns](#cross-domain-authentication-patterns)
+2. [Authentication Patterns](#authentication-patterns)
+3. [Cross-Domain Authentication](#cross-domain-authentication)
 
 ## Overview
 
-The Agents SDK provides two main approaches for authentication:
+The Agents SDK provides a unified `useAgent` hook that automatically handles both static and async authentication patterns:
 
-### Static Authentication (`useAgent`)
+### Static Authentication
 
 For scenarios where authentication data is available at component initialization:
 
@@ -21,32 +20,28 @@ For scenarios where authentication data is available at component initialization
 - No Suspense boundary required
 - Best for static tokens or pre-fetched auth data
 
-### Async Authentication (`useAsyncAgent`)
+### Async Authentication
 
 For scenarios requiring dynamic token fetching or runtime authentication:
 
-- Supports async query functions
-- **Automatic retry with event-driven recovery**
-- **Connection state management for better UX**
+- Supports async query functions with automatic caching
 - Requires Suspense boundary
 - Best for JWT refresh, OAuth flows, or cross-domain auth
 
-## When to Use Each Approach
+## Authentication Patterns
 
-| Scenario            | Recommended Hook | Reason                      |
-| ------------------- | ---------------- | --------------------------- |
-| Static API keys     | `useAgent`       | Simple, no async needed     |
-| Pre-fetched tokens  | `useAgent`       | Auth data already available |
-| JWT token refresh   | `useAsyncAgent`  | Dynamic token fetching      |
-| OAuth flows         | `useAsyncAgent`  | Async token exchange        |
-| Cross-domain auth   | `useAsyncAgent`  | Fetch from auth service     |
-| User-dependent auth | `useAsyncAgent`  | Dynamic user context        |
+| Scenario            | Implementation               | Reason                      |
+| ------------------- | ---------------------------- | --------------------------- |
+| Static API keys     | `useAgent` with static query | Simple, no async needed     |
+| Pre-fetched tokens  | `useAgent` with static query | Auth data already available |
+| JWT token refresh   | `useAgent` with async query  | Dynamic token fetching      |
+| OAuth flows         | `useAgent` with async query  | Async token exchange        |
+| Cross-domain auth   | `useAgent` with async query  | Fetch from auth service     |
+| User-dependent auth | `useAgent` with async query  | Dynamic user context        |
 
-## Static vs Async Authentication
+## Usage Examples
 
-### Basic Migration
-
-**Before (useAgent):**
+### Static Authentication
 
 ```typescript
 function ChatComponent() {
@@ -62,11 +57,11 @@ function ChatComponent() {
 <ChatComponent />
 ```
 
-**After (useAsyncAgent):**
+### Async Authentication
 
 ```typescript
 function ChatComponent() {
-  const agent = useAsyncAgent({
+  const agent = useAgent({
     agent: "chat",
     query: async () => ({ token: await getToken() })
   });
@@ -74,7 +69,7 @@ function ChatComponent() {
   return <div>Connected to {agent.id}</div>;
 }
 
-// Usage - Suspense wrapper required
+// Usage - Suspense wrapper required for async queries
 <Suspense fallback={<div>Authenticating...</div>}>
   <ChatComponent />
 </Suspense>
@@ -84,7 +79,7 @@ function ChatComponent() {
 
 ```typescript
 function useJWTAgent(agentName: string) {
-  return useAsyncAgent({
+  return useAgent({
     agent: agentName,
     query: async () => {
       const token = localStorage.getItem("jwt");
@@ -96,20 +91,7 @@ function useJWTAgent(agentName: string) {
       return { token };
     },
     queryDeps: [], // Re-run on component mount only
-    onAuthError: (error) => {
-      // Redirect to login on auth failure
-      window.location.href = "/login";
-    },
-    autoRetry: {
-      enabled: true,
-      maxAttempts: 5,
-      baseDelay: 1000,
-      maxDelay: 30000,
-      backoffMultiplier: 1.5,
-      stopAfterMs: 5 * 60 * 1000, // Stop after 5 minutes
-      triggers: ["focus", "online", "visibility", "periodic"],
-      periodicInterval: 30000 // Retry every 30 seconds
-    }
+    debug: true
   });
 }
 ```
@@ -131,8 +113,8 @@ const agent = useAgent({
   }
 });
 
-// Async cross-domain authentication with automatic retry
-const agent = useAsyncAgent({
+// Async cross-domain authentication
+const agent = useAgent({
   agent: "my-agent",
   host: "https://my-agent-server.com",
   query: async () => {
@@ -142,96 +124,42 @@ const agent = useAsyncAgent({
     const { token, userId } = await response.json();
     return { token, userId };
   },
-  onAuthError: (error) => {
-    console.error("Cross-domain auth failed:", error);
-  },
-  autoRetry: {
-    enabled: true,
-    maxAttempts: 3,
-    baseDelay: 2000,
-    triggers: ["focus", "online", "visibility"]
-  },
   debug: true
 });
-
-// Access connection state for UI feedback
-const { connectionState, isRetrying, lastError } = agent;
-// connectionState: 'connecting' | 'connected' | 'retrying' | 'failed'
 ```
 
-## Automatic Retry and Connection State
+## Caching and Performance
 
-The `useAsyncAgent` hook provides robust automatic retry functionality that handles common network issues without manual intervention.
+The unified `useAgent` hook automatically caches async query results to improve performance and reduce redundant authentication requests.
 
-### Automatic Retry Features
+### Caching Features
 
-- **Event-driven recovery**: Automatically retries on window focus, network online, page visibility, and periodic intervals
-- **Exponential backoff**: Smart delay increases to avoid overwhelming servers
-- **Configurable limits**: Control max attempts, delays, and total retry duration
-- **Connection state tracking**: Real-time feedback for UI components
+- **Automatic caching**: Query results are cached with configurable TTL (default 5 minutes)
+- **Dependency tracking**: Cache invalidation based on `queryDeps` array
+- **Memory management**: Automatic cleanup of expired entries and reference counting
+- **Performance optimization**: Reduces redundant authentication requests
 
-### Connection States
-
-| State        | Description                 | UI Recommendation             |
-| ------------ | --------------------------- | ----------------------------- |
-| `connecting` | Initial connection attempt  | Show loading spinner          |
-| `connected`  | Successfully authenticated  | Show success indicator        |
-| `retrying`   | Automatic retry in progress | Show retry indicator          |
-| `failed`     | Max retries exceeded        | Show error with manual action |
-
-### Retry Configuration
+### Cache Configuration
 
 ```typescript
-const agent = useAsyncAgent({
+const agent = useAgent({
   agent: "my-agent",
-  query: asyncAuthQuery,
-  autoRetry: {
-    enabled: true, // Enable automatic retry
-    maxAttempts: 5, // Max retry attempts
-    baseDelay: 1000, // Initial delay (1s)
-    maxDelay: 30000, // Maximum delay (30s)
-    backoffMultiplier: 1.5, // Exponential backoff factor
-    stopAfterMs: 300000, // Stop after 5 minutes
-    triggers: [
-      // When to trigger retry
-      "focus", // Window gains focus
-      "online", // Network comes online
-      "visibility", // Tab becomes visible
-      "periodic" // Periodic background retry
-    ],
-    periodicInterval: 30000 // Background retry interval
-  }
+  query: async () => {
+    // This will be cached automatically
+    const token = await fetchAuthToken();
+    return { token, userId: "user123" };
+  },
+  queryDeps: [userId], // Cache invalidates when userId changes
+  debug: true // Enable debug logging
 });
 ```
 
-### UI Integration
+### Best Practices
 
-```typescript
-function AuthenticatedComponent() {
-  const agent = useAsyncAgent({ /* config */ });
-
-  return (
-    <div>
-      <div className="connection-status">
-        {agent.connectionState === 'connecting' && "🔄 Connecting..."}
-        {agent.connectionState === 'connected' && "✅ Connected"}
-        {agent.connectionState === 'retrying' && "🔄 Retrying..."}
-        {agent.connectionState === 'failed' && "❌ Connection failed"}
-      </div>
-
-      {agent.isRetrying && (
-        <div>Automatic retry in progress...</div>
-      )}
-
-      {agent.lastError && agent.connectionState === 'failed' && (
-        <div>Error: {agent.lastError.message}</div>
-      )}
-
-      {/* Your app content */}
-    </div>
-  );
-}
-```
+- Use `queryDeps` to control when async queries should re-execute
+- Wrap async authentication components in `<Suspense>` boundaries
+- Handle authentication errors gracefully with try/catch in query functions
+- Use `debug: true` during development to monitor caching behavior
 
 ### HTTP Authentication
 

@@ -1,4 +1,4 @@
-import { useAgent, useAsyncAgent, type AuthData } from "agents/react";
+import { useAgent } from "agents/react";
 import { useRef, useState, Suspense, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
@@ -37,15 +37,15 @@ function AsyncAuthApp() {
     return {
       token,
       userId: user.id,
-      timestamp: Date.now()
+      timestamp: Date.now().toString() // Convert to string for WebSocket compatibility
     };
   }, []);
 
-  // Cross-domain WebSocket connection with async authentication and automatic retry
-  const agent = useAsyncAgent({
+  // Cross-domain WebSocket connection with async authentication using unified useAgent
+  const agent = useAgent({
     agent: "my-agent",
     host: "http://localhost:8788",
-    query: asyncQuery,
+    query: asyncQuery, // Async function - automatically detected and cached
     onClose: () => setIsConnected(false),
     onMessage: (message: any) => {
       const newMessage: Message = {
@@ -61,22 +61,8 @@ function AsyncAuthApp() {
       console.error("WebSocket error:", error);
       setIsConnected(false);
     },
-    onAuthError: (error: any) => {
-      console.error("Authentication failed:", error);
-      setIsConnected(false);
-    },
-    autoRetry: {
-      enabled: true,
-      maxAttempts: 5,
-      baseDelay: 1000,
-      maxDelay: 30000,
-      backoffMultiplier: 1.5,
-      stopAfterMs: 5 * 60 * 1000,
-      triggers: ["focus", "online", "visibility", "periodic"],
-      periodicInterval: 30000
-    },
     debug: true
-  } as any);
+  });
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -439,12 +425,12 @@ function App() {
               checked={useAsync}
               onChange={(e) => setUseAsync(e.target.checked)}
             />
-            Use Async Authentication (useAsyncAgent)
+            Use Async Authentication (useAgent with async query)
           </label>
         </div>
         <p style={{ margin: 0, fontSize: "14px", color: "#666" }}>
           Toggle between static authentication (useAgent) and async
-          authentication (useAsyncAgent)
+          authentication (useAgent with async query)
         </p>
       </div>
 
