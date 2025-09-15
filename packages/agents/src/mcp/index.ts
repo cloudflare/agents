@@ -65,12 +65,12 @@ export abstract class McpAgent<
    * Helpers
    */
 
-  setInitializeRequest(initializeRequest: JSONRPCMessage) {
-    this.ctx.storage.kv.put("initializeRequest", initializeRequest);
+  async setInitializeRequest(initializeRequest: JSONRPCMessage) {
+    await this.ctx.storage.put("initializeRequest", initializeRequest);
   }
 
   getInitializeRequest() {
-    return this.ctx.storage.kv.get<JSONRPCMessage>("initializeRequest");
+    return this.ctx.storage.get<JSONRPCMessage>("initializeRequest");
   }
 
   /** Read the transport type for this agent.
@@ -156,7 +156,7 @@ export abstract class McpAgent<
     // If the agent was previously initialized, we have to populate
     // the server again by sending the initialize request to make
     // client information available to the server.
-    const initializeRequest = this.getInitializeRequest();
+    const initializeRequest = await this.getInitializeRequest();
     if (initializeRequest) {
       this._transport.onmessage?.(initializeRequest);
     }
