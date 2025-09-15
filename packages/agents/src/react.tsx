@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef, use, useMemo } from "react";
+import { useCallback, useRef, use, useMemo, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -206,11 +206,10 @@ export function useAgent<State>(
   );
 
   // Handle both sync and async query patterns
-  const cacheKey = useMemo(
-    () =>
-      `agent_${agentNamespace}_${options.name || "default"}_${JSON.stringify(queryDeps)}`,
-    [agentNamespace, options.name, queryDeps]
-  );
+  const cacheKey = useMemo(() => {
+    const deps = queryDeps?.map((d) => String(d)).join("_") || "no-deps";
+    return `agent_${agentNamespace}_${options.name || "default"}_${deps}`;
+  }, [agentNamespace, options.name, queryDeps]);
 
   const queryPromise = useMemo(() => {
     if (!query || typeof query !== "function") {
@@ -221,19 +220,30 @@ export function useAgent<State>(
       return queryCache.get(cacheKey)!;
     }
 
-    const promise = query();
+    const promise = query().catch((error) => {
+      console.error(
+        `[useAgent] Query failed for agent "${options.agent}":`,
+        error
+      );
+      queryCache.delete(cacheKey); // Remove failed promise from cache
+      throw error; // Re-throw for Suspense error boundary
+    });
+
     queryCache.set(cacheKey, promise);
 
     // Simple TTL cleanup after 5 minutes
-    setTimeout(
+    const timeoutId = setTimeout(
       () => {
         queryCache.delete(cacheKey);
       },
       5 * 60 * 1000
     );
 
+    // Clear timeout if promise settles early
+    promise.finally(() => clearTimeout(timeoutId));
+
     return promise;
-  }, [cacheKey, query]);
+  }, [cacheKey, query, options.agent]);
 
   let resolvedQuery: QueryObject | undefined;
 
@@ -273,6 +283,15 @@ export function useAgent<State>(
       }
     }
   }
+
+  // Cleanup cache on unmount
+  useEffect(() => {
+    return () => {
+      if (queryPromise && queryCache.get(cacheKey) === queryPromise) {
+        queryCache.delete(cacheKey);
+      }
+    };
+  }, [cacheKey, queryPromise]);
 
   const agent = usePartySocket({
     party: agentNamespace,
