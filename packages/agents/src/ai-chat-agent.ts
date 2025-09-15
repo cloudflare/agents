@@ -252,6 +252,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
       const reader = response.body.getReader();
       let fullResponseText = ""; // Accumulate the assistant's response text
+      let fullReasoningText = ""; // Accumulate the assistant's reasoning
       // Track tool calls by toolCallid, so we can persist them as parts later
       const toolCalls = new Map<
         string,
@@ -338,6 +339,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                       return;
                     }
 
+                    case "reasoning-delta": {
+                      if (data.delta) fullReasoningText += data.delta;
+                      break;
+                    }
+
                     case "text-delta": {
                       if (data.delta) fullResponseText += data.delta;
                       break;
@@ -381,6 +387,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       Array.from(toolCalls.values()).forEach((t) => {
         messageParts.push(t as ChatMessage["parts"][number]);
       });
+
+      if (fullReasoningText.trim()) {
+        messageParts.push({ type: "reasoning", text: fullReasoningText });
+      }
 
       if (fullResponseText.trim()) {
         messageParts.push({ type: "text", text: fullResponseText });
