@@ -342,19 +342,16 @@ export class DialogueAgent extends AIChatAgent {
     //   messages: this.messages,
     // });
     //
-    // // Optional: you can call onFinish here for custom side effects. Message
-    // // persistence is still handled automatically by AIChatAgent.
-    // await onFinish?.(result);
-    // return new Response(result.text, {
-    //   headers: {
-    //     'Content-Type': 'text/plain',
-    //     // Optional: Include metadata in response headers
-    //     'X-Agent-Metadata': JSON.stringify({
-    //       totalTokens: result.usage?.totalTokens,
-    //       model: "gpt-4o",
-    //       responseTime: Date.now()
-    //     })
+    // // For non-streaming with metadata, use toUIMessage:
+    // const message = result.toUIMessage({
+    //   metadata: {
+    //     model: 'gpt-4o',
+    //     totalTokens: result.usage?.totalTokens,
     //   }
+    // });
+    //
+    // return new Response(JSON.stringify(message), {
+    //   headers: { 'Content-Type': 'application/json' }
     // });
   }
 }
@@ -362,51 +359,61 @@ export class DialogueAgent extends AIChatAgent {
 
 #### Metadata Support
 
-The AI SDK provides native support for message metadata through the `messageMetadata` callback in `toUIMessageStreamResponse()` and the `metadata` property in `toUIMessage()`.
+The AI SDK provides native support for message metadata through the `messageMetadata` callback. This allows you to attach custom information to messages at the message level.
 
-##### For streaming responses:
+##### Defining Metadata Types
+
+First, define your metadata type for type safety:
 
 ```typescript
-import { streamText } from 'ai';
-import type { UIMessage } from 'ai';
+import { UIMessage } from "ai";
+import { z } from "zod";
 
-export interface MessageMetadata {
-  model?: string;
-  createdAt?: number;
-  totalTokens?: number;
-  promptTokens?: number;
-  completionTokens?: number;
-  responseTime?: number;
-  confidence?: number;
-}
+// Define your metadata schema
+export const messageMetadataSchema = z.object({
+  createdAt: z.number().optional(),
+  model: z.string().optional(),
+  totalTokens: z.number().optional()
+});
 
+export type MessageMetadata = z.infer<typeof messageMetadataSchema>;
+
+// Create a typed UIMessage
 export type MyUIMessage = UIMessage<MessageMetadata>;
+```
 
-async onChatMessage() {
-  const startTime = Date.now();
+##### Sending Metadata from the Server
 
-  const result = await streamText({
+Use the `messageMetadata` callback in `toUIMessageStreamResponse` to send metadata at different streaming stages:
+
+```typescript
+import { openai } from "@ai-sdk/openai";
+import { convertToModelMessages, streamText } from "ai";
+import type { MyUIMessage } from "@/types";
+
+export async function POST(req: Request) {
+  const { messages }: { messages: MyUIMessage[] } = await req.json();
+
+  const result = streamText({
     model: openai("gpt-4o"),
-    messages: this.messages
+    messages: convertToModelMessages(messages)
   });
 
   return result.toUIMessageStreamResponse({
+    originalMessages: messages, // pass this in for type-safe return objects
     messageMetadata: ({ part }) => {
-      // Send initial metadata when streaming starts
-      if (part.type === 'start') {
+      // Send metadata when streaming starts
+      if (part.type === "start") {
         return {
-          model: 'gpt-4o',
-          createdAt: Date.now()
+          createdAt: Date.now(),
+          model: "gpt-4o"
         };
       }
 
-      // Send token usage when streaming completes
-      if (part.type === 'finish') {
+      // Send additional metadata when streaming completes
+      if (part.type === "finish") {
         return {
-          totalTokens: part.totalUsage?.totalTokens,
-          promptTokens: part.totalUsage?.promptTokens,
-          completionTokens: part.totalUsage?.completionTokens,
-          responseTime: Date.now() - startTime
+          totalTokens: part.totalUsage.totalTokens
         };
       }
     }
@@ -414,57 +421,84 @@ async onChatMessage() {
 }
 ```
 
-##### For non-streaming responses:
+##### AIChatAgent Integration
+
+In the context of `AIChatAgent`, you can use metadata like this:
 
 ```typescript
-async onChatMessage() {
-  const startTime = Date.now();
+import { AIChatAgent } from "agents/ai-chat-agent";
+import { streamText } from "ai";
+import { openai } from "@ai-sdk/openai";
 
-  const result = await generateText({
-    model: openai("gpt-4o"),
-    messages: this.messages
-  });
+export class MyAgent extends AIChatAgent<Env> {
+  async onChatMessage(onFinish) {
+    const startTime = Date.now();
 
-  // Convert to UIMessage with metadata
-  const message = result.toUIMessage({
-    metadata: {
-      model: 'gpt-4o',
-      totalTokens: result.usage?.totalTokens,
-      promptTokens: result.usage?.promptTokens,
-      completionTokens: result.usage?.completionTokens,
-      responseTime: Date.now() - startTime,
-      createdAt: Date.now()
-    }
-  });
+    const result = streamText({
+      model: openai("gpt-4o"),
+      messages: this.messages,
+      onFinish
+    });
 
-  // Return as a properly formatted response
-  return new Response(JSON.stringify(message), {
-    headers: { 'Content-Type': 'application/json' }
-  });
+    return result.toUIMessageStreamResponse({
+      messageMetadata: ({ part }) => {
+        if (part.type === "start") {
+          return {
+            model: "gpt-4o",
+            createdAt: Date.now(),
+            messageCount: this.messages.length
+          };
+        }
+        if (part.type === "finish") {
+          return {
+            responseTime: Date.now() - startTime,
+            totalTokens: part.totalUsage?.totalTokens
+          };
+        }
+      }
+    });
+  }
 }
 ```
 
-##### Accessing metadata on the client:
+##### Accessing Metadata on the Client
+
+Access metadata through the `message.metadata` property:
 
 ```typescript
+'use client';
+
 import { useChat } from '@ai-sdk/react';
-import type { MyUIMessage } from './types';
+import { DefaultChatTransport } from 'ai';
+import type { MyUIMessage } from '@/types';
 
-export function Chat() {
+export default function Chat() {
   const { messages } = useChat<MyUIMessage>({
-    api: '/api/chat'
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+    }),
   });
 
   return (
     <div>
       {messages.map(message => (
         <div key={message.id}>
-          <div>{message.content}</div>
-          {message.metadata && (
-            <div className="metadata">
-              <span>Model: {message.metadata.model}</span>
-              <span>Tokens: {message.metadata.totalTokens}</span>
-              <span>Time: {message.metadata.responseTime}ms</span>
+          <div>
+            {message.role === 'user' ? 'User: ' : 'AI: '}
+            {message.metadata?.createdAt && (
+              <span className="text-sm text-gray-500">
+                {new Date(message.metadata.createdAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+          {/* Render message content */}
+          {message.parts.map((part, index) =>
+            part.type === 'text' ? <div key={index}>{part.text}</div> : null,
+          )}
+          {/* Display additional metadata */}
+          {message.metadata?.totalTokens && (
+            <div className="text-xs text-gray-400">
+              {message.metadata.totalTokens} tokens
             </div>
           )}
         </div>
@@ -473,6 +507,17 @@ export function Chat() {
   );
 }
 ```
+
+##### Common Use Cases
+
+Message metadata is ideal for:
+
+- **Timestamps**: When messages were created or completed
+- **Model Information**: Which AI model was used
+- **Token Usage**: Track costs and usage limits
+- **User Context**: User IDs, session information
+- **Performance Metrics**: Generation time, time to first token
+- **Quality Indicators**: Finish reason, confidence scores
 
 For more details, see the [AI SDK Message Metadata documentation](https://ai-sdk.dev/docs/ai-sdk-ui/message-metadata).
 
