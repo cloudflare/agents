@@ -7,6 +7,19 @@ import { useAgentChat, type AITool } from "agents/ai-react";
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+// Define metadata type
+interface MessageMetadata {
+  model?: string;
+  createdAt?: number;
+  totalTokens?: number;
+  responseTime?: number;
+  messageCount?: number;
+}
+
+type MessageWithMetadata = Message & {
+  metadata?: MessageMetadata;
+};
+
 export default function Chat() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [showMetadata, setShowMetadata] = useState(true);
@@ -128,34 +141,47 @@ export default function Chat() {
               color: "var(--text-secondary)"
             }}
           >
-            <div>
-              <strong>Model:</strong> gpt-4o
-            </div>
-            <div>
-              <strong>Messages:</strong> {messages.length}
-            </div>
-            <div>
-              <strong>Conversation Turns:</strong>{" "}
-              {Math.floor(messages.length / 2)}
-            </div>
-            <div>
-              <strong>Tools Available:</strong>{" "}
-              {Object.keys(clientTools).length}
-            </div>
-            <div>
-              <strong>Human-in-Loop:</strong> ✓ Enabled
-            </div>
-            <div>
-              <strong>Session ID:</strong> {agent.id || "Active"}
-            </div>
-            {lastResponseTime && (
-              <div>
-                <strong>Last Response:</strong> {lastResponseTime}ms
-              </div>
-            )}
-            <div>
-              <strong>Timestamp:</strong> {new Date().toLocaleTimeString()}
-            </div>
+            {/* Get metadata from the last assistant message */}
+            {(() => {
+              const lastAssistantMessage = messages
+                .filter((m) => m.role === "assistant")
+                .pop() as MessageWithMetadata | undefined;
+              const metadata = lastAssistantMessage?.metadata;
+
+              return (
+                <>
+                  <div>
+                    <strong>Model:</strong> {metadata?.model || "gpt-4o"}
+                  </div>
+                  <div>
+                    <strong>Messages:</strong> {messages.length}
+                  </div>
+                  <div>
+                    <strong>Conversation Turns:</strong>{" "}
+                    {Math.floor(messages.length / 2)}
+                  </div>
+                  {metadata?.totalTokens && (
+                    <div>
+                      <strong>Total Tokens:</strong> {metadata.totalTokens}
+                    </div>
+                  )}
+                  {metadata?.responseTime && (
+                    <div>
+                      <strong>Response Time:</strong> {metadata.responseTime}ms
+                    </div>
+                  )}
+                  {metadata?.createdAt && (
+                    <div>
+                      <strong>Created:</strong>{" "}
+                      {new Date(metadata.createdAt).toLocaleTimeString()}
+                    </div>
+                  )}
+                  <div>
+                    <strong>Session ID:</strong> {agent.id || "Active"}
+                  </div>
+                </>
+              );
+            })()}
           </div>
           <div
             style={{

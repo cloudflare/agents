@@ -21,53 +21,48 @@ type Env = {
 
 export class HumanInTheLoop extends AIChatAgent<Env> {
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
-    const _startTime = Date.now();
+    const startTime = Date.now();
 
-    const stream = createUIMessageStream({
-      execute: async ({ writer }) => {
-        const lastMessage = this.messages[this.messages.length - 1];
+    const lastMessage = this.messages[this.messages.length - 1];
 
-        if (hasToolConfirmation(lastMessage)) {
-          // Process tool confirmations and return early if any tool was executed
+    if (hasToolConfirmation(lastMessage)) {
+      // Process tool confirmations using UI stream
+      const stream = createUIMessageStream({
+        execute: async ({ writer }) => {
           await processToolCalls(
             { writer, messages: this.messages, tools },
             { getWeatherInformation }
           );
-          return;
         }
+      });
+      return createUIMessageStreamResponse({ stream });
+    }
 
-        const result = streamText({
-          messages: convertToModelMessages(this.messages),
-          model: openai("gpt-4o"),
-          onFinish,
-          tools
-        });
-
-        writer.merge(result.toUIMessageStream());
-      }
+    // Use streamText directly and return with metadata
+    const result = streamText({
+      messages: convertToModelMessages(this.messages),
+      model: openai("gpt-4o"),
+      onFinish,
+      tools
     });
 
-    // NOTE: The AI SDK's native messageMetadata approach should be used:
-    // return createUIMessageStreamResponse({
-    //   stream,
-    //   messageMetadata: ({ part }) => {
-    //     if (part.type === 'start') {
-    //       return {
-    //         model: 'gpt-4o',
-    //         createdAt: Date.now(),
-    //         messageCount: this.messages.length
-    //       };
-    //     }
-    //     if (part.type === 'finish') {
-    //       return {
-    //         responseTime: Date.now() - startTime,
-    //         totalTokens: part.totalUsage?.totalTokens
-    //       };
-    //     }
-    //   }
-    // });
-
-    return createUIMessageStreamResponse({ stream });
+    return result.toUIMessageStreamResponse({
+      messageMetadata: ({ part }) => {
+        if (part.type === "start") {
+          return {
+            model: "gpt-4o",
+            createdAt: Date.now(),
+            messageCount: this.messages.length
+          };
+        }
+        if (part.type === "finish") {
+          return {
+            responseTime: Date.now() - startTime,
+            totalTokens: part.totalUsage?.totalTokens
+          };
+        }
+      }
+    });
   }
 }
 
