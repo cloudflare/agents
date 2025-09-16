@@ -17,7 +17,8 @@ The default behavior is to `console.log()` the event value.
 This can be configured by overriding the property with an implementation of the `Observability` interface. This interface has a single `emit()` method that takes an `ObservabilityEvent`.
 
 ```ts
-import { Agent, type Observability } from "agents";
+import { Agent } from "agents";
+import { type Observability } from "agents/observability";
 
 const observability: Observability = {
   emit(event) {
@@ -35,6 +36,8 @@ class MyAgent extends Agent {
 Or, alternatively, you can set the property to `undefined` to ignore all events.
 
 ```ts
+import { Agent } from "agents";
+
 class MyAgent extends Agent {
   override observability = undefined;
 }
