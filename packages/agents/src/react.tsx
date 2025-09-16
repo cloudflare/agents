@@ -39,35 +39,12 @@ const queryCache = new Map<
   }
 >();
 
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (a === null || b === null || a === undefined || b === undefined)
-    return a === b;
-
-  if (typeof a === "object" && typeof b === "object") {
-    const aObj = a as Record<string, unknown>;
-    const bObj = b as Record<string, unknown>;
-    const aKeys = Object.keys(aObj);
-    const bKeys = Object.keys(bObj);
-
-    if (aKeys.length !== bKeys.length) return false;
-
-    for (const key of aKeys) {
-      if (!bKeys.includes(key) || !deepEqual(aObj[key], bObj[key])) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  return false;
-}
-
 function arraysEqual(a: unknown[], b: unknown[]): boolean {
+  if (a === b) return true;
   if (a.length !== b.length) return false;
 
   for (let i = 0; i < a.length; i++) {
-    if (!deepEqual(a[i], b[i])) return false;
+    if (!Object.is(a[i], b[i])) return false;
   }
   return true;
 }
