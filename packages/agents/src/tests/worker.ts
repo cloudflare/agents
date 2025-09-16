@@ -175,7 +175,7 @@ export default {
     const url = new URL(request.url);
 
     // set some props that should be passed init
-    (ctx as any).props = {
+    ctx.props = {
       testValue: "123"
     };
 
