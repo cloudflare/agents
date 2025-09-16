@@ -16,8 +16,5 @@
       "tag": "v1"
     }
   ],
-  "name": "cross-domain",
-  "dev": {
-    "port": 8788
-  }
+  "name": "cross-domain"
 }

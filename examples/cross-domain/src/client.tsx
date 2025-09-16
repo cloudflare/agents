@@ -44,7 +44,7 @@ function AsyncAuthApp() {
   // Cross-domain WebSocket connection with async authentication using unified useAgent
   const agent = useAgent({
     agent: "my-agent",
-    host: "http://localhost:8788",
+    host: "http://localhost:8787",
     query: asyncQuery, // Async function - automatically detected and cached
     onClose: () => setIsConnected(false),
     onMessage: (message: MessageEvent) => {
@@ -87,7 +87,7 @@ function AsyncAuthApp() {
       const token = await getAuthToken();
 
       const response = await fetch(
-        "http://localhost:8788/agents/my-agent/default",
+        "http://localhost:8787/agents/my-agent/default",
         {
           method: "GET",
           headers: {
@@ -159,7 +159,7 @@ function AsyncAuthApp() {
             <strong>🌐 Cross-Domain Setup:</strong>
           </p>
           <p>• Client: {window.location.origin} (this page)</p>
-          <p>• Server: http://localhost:8788 (different port)</p>
+          <p>• Server: http://localhost:8787 (different port)</p>
         </div>
       </div>
 
@@ -224,7 +224,7 @@ function StaticAuthApp() {
   // Cross-domain WebSocket connection with static query parameter authentication
   const agent = useAgent({
     agent: "my-agent",
-    host: "http://localhost:8788",
+    host: "http://localhost:8787",
     query: {
       token: authToken, // Authentication token (demo-token-123)
       userId: "demo-user" // User identifier for server validation
@@ -267,7 +267,7 @@ function StaticAuthApp() {
     try {
       // Cross-domain HTTP request with header-based authentication
       const response = await fetch(
-        "http://localhost:8788/agents/my-agent/default",
+        "http://localhost:8787/agents/my-agent/default",
         {
           method: "GET",
           headers: {
@@ -332,7 +332,7 @@ function StaticAuthApp() {
             <strong>🌐 Cross-Domain Setup:</strong>
           </p>
           <p>• Client: {window.location.origin} (this page)</p>
-          <p>• Server: http://localhost:8788 (different port)</p>
+          <p>• Server: http://localhost:8787 (different port)</p>
           <p>
             <strong>🔗 WebSocket Auth:</strong> Query parameter (token=
             {authToken})
