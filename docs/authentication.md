@@ -1,7 +1,6 @@
 # Authentication
 
-When your Agents SDK app is deployed, it accepts HTTP requests and WebSocket connections from the Internet.
-To keep things secure, send a token from the client, then verify it on the server. This mirrors the shape used in PartyKit’s auth guide.
+When your Agents are deployed, to keep things secure, send a token from the client, then verify it on the server. This mirrors the shape used in PartyKit’s auth guide.
 
 ## WebSocket authentication
 
