@@ -15,25 +15,6 @@ export class MyAgent extends Agent {
     );
   }
 
-  private static validateAuth(
-    token: string | null,
-    userId: string | null
-  ): boolean {
-    if (!token || !userId) {
-      console.log("❌ Missing token or userId");
-      return false;
-    }
-
-    // For demo: accept 'demo-token-123' as valid
-    if (token === "demo-token-123" && userId.length > 0) {
-      console.log("✅ Valid authentication");
-      return true;
-    }
-
-    console.log("❌ Invalid token or userId");
-    return false;
-  }
-
   onClose(connection: Connection) {
     console.log("Client disconnected:", connection.id);
   }
