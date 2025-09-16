@@ -27,6 +27,7 @@ This project is actively evolving. Current focus areas:
 - Core agent framework with state management
 - Real-time WebSocket communication
 - HTTP endpoints and routing
+- React integration hooks
 - Basic AI chat capabilities
 
 ### In Development
