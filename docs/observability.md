@@ -32,7 +32,7 @@ class MyAgent extends Agent {
 }
 ```
 
-Or, alternatively, you can set the property to `undefined` if you don't need to catch events.
+Or, alternatively, you can set the property to `undefined` to ignore all events.
 
 ```ts
 class MyAgent extends Agent {
