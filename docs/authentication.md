@@ -1,47 +1,61 @@
-# Authentication Guide
+# Authentication
 
-This guide covers authentication patterns for the Agents SDK, including static authentication, async authentication, cross-domain scenarios, and security best practices.
+When your Agents SDK app is deployed, it accepts HTTP requests and WebSocket connections from the Internet.
+To keep things secure, send a token from the client, then verify it on the server. This mirrors the shape used in PartyKit’s auth guide.
 
-## Overview
+## WebSocket authentication
 
-The Agents SDK provides a unified `useAgent` hook that automatically handles both static and async authentication patterns:
+WebSockets are not HTTP, so the handshake is limited.
 
-## Usage Examples
+**What you cannot send**
 
-### Static Authentication
+- Custom headers during the upgrade
+- `Authorization: Bearer ...` on connect
 
-```typescript
+**What works**
+
+- Put a signed, short-lived token in the connection URL as query parameters
+- Verify the token in your server’s connect path
+
+> Tip: never place raw secrets in URLs. Prefer a JWT or a signed token that expires quickly and is scoped to the user or room.
+
+### Same origin
+
+If the client and server share the origin, the browser will send cookies during the WebSocket handshake. Session based auth can work here. Prefer HTTP-only cookies.
+
+### Cross origin
+
+Cookies do not help across origins. Pass credentials in the URL query, then verify on the server.
+
+## Usage examples
+
+### Static authentication
+
+```ts
 import { useAgent } from "agents/react";
-import { useState } from "react";
 
 function ChatComponent() {
-  const [isConnected, setIsConnected] = useState(false);
-
   const agent = useAgent({
     agent: "my-agent",
     query: {
       token: "demo-token-123",
       userId: "demo-user"
-    },
-    onOpen: () => setIsConnected(true),
-    onClose: () => setIsConnected(false),
-    onError: (error) => console.error("Connection error:", error)
+    }
   });
 
-  return <div>Agent: {agent.agent} - {isConnected ? "Connected" : "Disconnected"}</div>;
+  return <div>Agent: {agent.agent}</div>;
 }
 ```
 
-### Async Authentication
+### Async authentication
 
-```typescript
+Build query values right before connect. Use Suspense for async setup.
+
+```ts
 import { useAgent } from "agents/react";
-import { useRef, useState, Suspense, useCallback } from "react";
+import { Suspense, useCallback } from "react";
 
 function ChatComponent() {
-  const [isConnected, setIsConnected] = useState(false);
-
-  // Async authentication query
   const asyncQuery = useCallback(async () => {
     const [token, user] = await Promise.all([getAuthToken(), getCurrentUser()]);
     return {
@@ -53,24 +67,22 @@ function ChatComponent() {
 
   const agent = useAgent({
     agent: "my-agent",
-    query: asyncQuery,
-    onOpen: () => setIsConnected(true),
-    onClose: () => setIsConnected(false),
-    onError: (error) => console.error("Connection error:", error)
+    query: asyncQuery
   });
 
-  return <div>Agent: {agent.agent} - {isConnected ? "Connected" : "Disconnected"}</div>;
+  return <div>Agent: {agent.agent}</div>;
 }
 
-// Usage - Suspense wrapper required for async queries
 <Suspense fallback={<div>Authenticating...</div>}>
   <ChatComponent />
 </Suspense>
 ```
 
-### JWT Token Refresh Pattern
+### JWT refresh pattern
 
-```typescript
+Refresh the token when it expires, then reconnect with fresh credentials.
+
+```ts
 import { useAgent } from "agents/react";
 import { useCallback } from "react";
 
@@ -92,45 +104,36 @@ function useJWTAgent(agentName: string) {
   return useAgent({
     agent: agentName,
     query: asyncQuery,
-    queryDeps: [], // Re-run on component mount only
+    queryDeps: [], // Run on mount
     debug: true
   });
 }
 ```
 
-## Cross-Domain Authentication Patterns
+## Cross-domain authentication
 
-### WebSocket Authentication
+Pass credentials in the URL when connecting to another host, then verify on the server.
 
-Cross-domain WebSocket connections require authentication via query parameters:
-
-```typescript
+```ts
 import { useAgent } from "agents/react";
-import { useState, useCallback } from "react";
+import { useCallback } from "react";
 
-// Static cross-domain authentication
+// Static cross-domain auth
 function StaticCrossDomainAuth() {
-  const [isConnected, setIsConnected] = useState(false);
-
   const agent = useAgent({
     agent: "my-agent",
     host: "http://localhost:8788",
     query: {
       token: "demo-token-123",
       userId: "demo-user"
-    },
-    onOpen: () => setIsConnected(true),
-    onClose: () => setIsConnected(false),
-    onError: (error) => console.error("WebSocket auth error:", error)
+    }
   });
 
-  return <div>Cross-domain connection: {isConnected ? "Connected" : "Disconnected"}</div>;
+  return <div>Cross-domain agent: {agent.agent}</div>;
 }
 
-// Async cross-domain authentication
+// Async cross-domain auth
 function AsyncCrossDomainAuth() {
-  const [isConnected, setIsConnected] = useState(false);
-
   const asyncQuery = useCallback(async () => {
     const [token, user] = await Promise.all([getAuthToken(), getCurrentUser()]);
     return {
@@ -144,49 +147,21 @@ function AsyncCrossDomainAuth() {
     agent: "my-agent",
     host: "http://localhost:8788",
     query: asyncQuery,
-    onOpen: () => setIsConnected(true),
-    onClose: () => setIsConnected(false),
-    onError: (error) => console.error("WebSocket auth error:", error),
     debug: true
   });
 
-  return <div>Cross-domain connection: {isConnected ? "Connected" : "Disconnected"}</div>;
+  return <div>Cross-domain agent: {agent.agent}</div>;
 }
 ```
 
-## Caching and Performance
+## HTTP authentication
 
-The unified `useAgent` hook automatically caches async query results to improve performance and reduce redundant authentication requests.
+For HTTP calls you can use headers and credentials.
 
-### Things caching solves for you:
-
-- **Automatic caching**: Query results are cached with configurable TTL (default 5 minutes)
-- **Dependency tracking**: Cache invalidation based on `queryDeps` array
-- **Memory management**: Automatic cleanup of expired entries and reference counting
-
-### Cache Configuration
-
-```typescript
-const agent = useAgent({
-  agent: "my-agent",
-  query: async () => {
-    // This will be cached automatically
-    const token = await fetchAuthToken();
-    return { token, userId: "user123" };
-  },
-  queryDeps: [userId], // Cache invalidates when userId changes
-  debug: true // Enable debug logging
-});
-```
-
-### HTTP Authentication
-
-HTTP requests support multiple authentication methods:
-
-```typescript
+```ts
 import { useAgentChat } from "agents/ai-react";
 
-// Bearer token authentication
+// Bearer token
 const chat = useAgentChat({
   agent,
   headers: {
@@ -194,7 +169,7 @@ const chat = useAgentChat({
   }
 });
 
-// API key authentication
+// API key
 const chat = useAgentChat({
   agent,
   headers: {
@@ -202,9 +177,11 @@ const chat = useAgentChat({
   }
 });
 
-// Session-based authentication
+// Session based
 const chat = useAgentChat({
   agent,
-  credentials: "include" // Includes cookies
+  credentials: "include" // Sends cookies
 });
 ```
+
+\

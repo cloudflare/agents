@@ -29,8 +29,105 @@ function camelCaseToKebabCase(str: string): string {
 
 type QueryObject = Record<string, string | number | boolean | null | undefined>;
 
-// Simple cache for async queries
-const queryCache = new Map<string, Promise<QueryObject>>();
+const queryCache = new Map<
+  unknown[],
+  {
+    promise: Promise<QueryObject>;
+    refCount: number;
+    expiresAt: number;
+    cacheTtl?: number;
+  }
+>();
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || a === undefined || b === undefined)
+    return a === b;
+
+  if (typeof a === "object" && typeof b === "object") {
+    const aObj = a as Record<string, unknown>;
+    const bObj = b as Record<string, unknown>;
+    const aKeys = Object.keys(aObj);
+    const bKeys = Object.keys(bObj);
+
+    if (aKeys.length !== bKeys.length) return false;
+
+    for (const key of aKeys) {
+      if (!bKeys.includes(key) || !deepEqual(aObj[key], bObj[key])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  return false;
+}
+
+function arraysEqual(a: unknown[], b: unknown[]): boolean {
+  if (a.length !== b.length) return false;
+
+  for (let i = 0; i < a.length; i++) {
+    if (!deepEqual(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+function findCacheEntry(
+  targetKey: unknown[]
+): Promise<QueryObject> | undefined {
+  for (const [existingKey, entry] of queryCache.entries()) {
+    if (arraysEqual(existingKey, targetKey)) {
+      // Check if entry has expired
+      if (Date.now() > entry.expiresAt) {
+        queryCache.delete(existingKey);
+        return undefined;
+      }
+      entry.refCount++;
+      return entry.promise;
+    }
+  }
+  return undefined;
+}
+
+function setCacheEntry(
+  key: unknown[],
+  value: Promise<QueryObject>,
+  cacheTtl?: number
+): void {
+  // Remove any existing entry with matching members
+  for (const [existingKey] of queryCache.entries()) {
+    if (arraysEqual(existingKey, key)) {
+      queryCache.delete(existingKey);
+      break;
+    }
+  }
+
+  const expiresAt = cacheTtl
+    ? Date.now() + cacheTtl
+    : Date.now() + 5 * 60 * 1000; // Default 5 minutes
+  queryCache.set(key, { promise: value, refCount: 1, expiresAt, cacheTtl });
+}
+
+function decrementCacheEntry(targetKey: unknown[]): boolean {
+  for (const [existingKey, entry] of queryCache.entries()) {
+    if (arraysEqual(existingKey, targetKey)) {
+      entry.refCount--;
+      if (entry.refCount <= 0) {
+        queryCache.delete(existingKey);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+function createCacheKey(
+  agentNamespace: string,
+  name: string | undefined,
+  deps: unknown[]
+): unknown[] {
+  return [agentNamespace, name || "default", ...deps];
+}
 
 /**
  * Options for the useAgent hook
@@ -48,12 +145,12 @@ export type UseAgentOptions<State = unknown> = Omit<
   query?: QueryObject | (() => Promise<QueryObject>);
   /** Dependencies for async query caching */
   queryDeps?: unknown[];
+  /** Cache TTL in milliseconds for auth tokens/time-sensitive data */
+  cacheTtl?: number;
   /** Called when the Agent's state is updated */
   onStateUpdate?: (state: State, source: "server" | "client") => void;
   /** Called when MCP server state is updated */
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
-  /** Enable debug logging */
-  debug?: boolean;
 };
 
 type AllOptional<T> = T extends [infer A, ...infer R]
@@ -191,7 +288,7 @@ export function useAgent<State>(
   stub: UntypedAgentStub;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
-  const { query, queryDeps, debug, ...restOptions } = options;
+  const { query, queryDeps, cacheTtl, ...restOptions } = options;
 
   // Keep track of pending RPC calls
   const pendingCallsRef = useRef(
@@ -207,8 +304,8 @@ export function useAgent<State>(
 
   // Handle both sync and async query patterns
   const cacheKey = useMemo(() => {
-    const deps = queryDeps?.map((d) => String(d)).join("_") || "no-deps";
-    return `agent_${agentNamespace}_${options.name || "default"}_${deps}`;
+    const deps = queryDeps || [];
+    return createCacheKey(agentNamespace, options.name, deps);
   }, [agentNamespace, options.name, queryDeps]);
 
   const queryPromise = useMemo(() => {
@@ -216,8 +313,9 @@ export function useAgent<State>(
       return null;
     }
 
-    if (queryCache.has(cacheKey)) {
-      return queryCache.get(cacheKey)!;
+    const existingPromise = findCacheEntry(cacheKey);
+    if (existingPromise) {
+      return existingPromise;
     }
 
     const promise = query().catch((error) => {
@@ -225,36 +323,19 @@ export function useAgent<State>(
         `[useAgent] Query failed for agent "${options.agent}":`,
         error
       );
-      queryCache.delete(cacheKey); // Remove failed promise from cache
+      decrementCacheEntry(cacheKey); // Remove failed promise from cache
       throw error; // Re-throw for Suspense error boundary
     });
 
-    queryCache.set(cacheKey, promise);
-
-    // Simple TTL cleanup after 5 minutes
-    const timeoutId = setTimeout(
-      () => {
-        queryCache.delete(cacheKey);
-      },
-      5 * 60 * 1000
-    );
-
-    // Clear timeout if promise settles early
-    promise.finally(() => clearTimeout(timeoutId));
+    setCacheEntry(cacheKey, promise, cacheTtl);
 
     return promise;
-  }, [cacheKey, query, options.agent]);
+  }, [cacheKey, query, options.agent, cacheTtl]);
 
   let resolvedQuery: QueryObject | undefined;
 
   if (query) {
     if (typeof query === "function") {
-      if (debug) {
-        console.log(
-          `[useAgent] Using async query for agent "${options.agent}"`
-        );
-      }
-
       // Use React's use() to resolve the promise
       const queryResult = use(queryPromise!);
 
@@ -277,18 +358,14 @@ export function useAgent<State>(
     } else {
       // Sync query - use directly
       resolvedQuery = query;
-
-      if (debug) {
-        console.log(`[useAgent] Using sync query for agent "${options.agent}"`);
-      }
     }
   }
 
   // Cleanup cache on unmount
   useEffect(() => {
     return () => {
-      if (queryPromise && queryCache.get(cacheKey) === queryPromise) {
-        queryCache.delete(cacheKey);
+      if (queryPromise) {
+        decrementCacheEntry(cacheKey);
       }
     };
   }, [cacheKey, queryPromise]);
@@ -412,5 +489,3 @@ export function useAgent<State>(
 
   return agent;
 }
-
-// No additional exports needed - useAgent now handles everything internally

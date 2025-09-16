@@ -319,10 +319,10 @@ function StaticAuthApp() {
             placeholder="Enter auth token"
             defaultValue={authToken}
           />
-          <button type="button" onClick={updateAuthToken}>
-            Update Token
-          </button>
         </div>
+        <button type="button" onClick={updateAuthToken}>
+          Update Token
+        </button>
         <div className="status-indicator">
           <div className={`status-dot ${isConnected ? "connected" : ""}`} />
           {isConnected ? "Connected to server" : "Disconnected"}
