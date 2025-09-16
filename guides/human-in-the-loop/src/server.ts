@@ -48,6 +48,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 
     return result.toUIMessageStreamResponse({
       messageMetadata: ({ part }) => {
+        // This is optional, purely for demo purposes in this example
         if (part.type === "start") {
           return {
             model: "gpt-4o",
