@@ -2,20 +2,36 @@ import { Agent, type Connection, routeAgentRequest } from "agents";
 import { env } from "cloudflare:workers";
 
 export class MyAgent extends Agent {
-  onConnect(connection: Connection, ctx: { request: Request }) {
+  static async onBeforeConnect(request: Request): Promise<Response | Request> {
+    console.log("🔍 onBeforeConnect called!");
     // Extract authentication from WebSocket connection
-    const url = new URL(ctx.request.url);
+    const url = new URL(request.url);
     const token = url.searchParams.get("token");
     const userId = url.searchParams.get("userId");
 
     console.log(`Connection attempt - Token: ${token}, UserId: ${userId}`);
 
     // Validate authentication
-    if (!this.validateAuth(token, userId)) {
-      console.log("Authentication failed - closing connection");
-      connection.close(1008, "Unauthorized: Invalid or missing authentication");
-      return;
+    if (!MyAgent.validateAuth(token, userId)) {
+      console.log("Authentication failed - rejecting connection");
+      return new Response("Unauthorized: Invalid or missing authentication", {
+        status: 401,
+        headers: {
+          "Content-Type": "text/plain",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
     }
+
+    console.log(`✅ Authentication validated for user: ${userId}`);
+    return request;
+  }
+
+  onConnect(connection: Connection, ctx: { request: Request }) {
+    // Extract user info for welcome message
+    const url = new URL(ctx.request.url);
+    const token = url.searchParams.get("token");
+    const userId = url.searchParams.get("userId");
 
     console.log(
       `✅ Authenticated client connected: ${connection.id} (user: ${userId})`
@@ -25,7 +41,10 @@ export class MyAgent extends Agent {
     );
   }
 
-  private validateAuth(token: string | null, userId: string | null): boolean {
+  private static validateAuth(
+    token: string | null,
+    userId: string | null
+  ): boolean {
     // Example validation logic - in production, validate against your auth service
     if (!token || !userId) {
       console.log("❌ Missing token or userId");
@@ -62,14 +81,15 @@ export class MyAgent extends Agent {
     }
   }
 
-  onRequest(request: Request): Response | Promise<Response> {
+  static async onBeforeRequest(request: Request): Promise<Response | Request> {
+    console.log("🔍 onBeforeRequest called!");
     // Handle HTTP authentication for API requests
     const authHeader = request.headers.get("Authorization");
     const apiKey = request.headers.get("X-API-Key");
 
     console.log(`HTTP Request - Auth: ${authHeader}, API Key: ${apiKey}`);
 
-    if (!this.validateHttpAuth(authHeader, apiKey)) {
+    if (!MyAgent.validateHttpAuth(authHeader, apiKey)) {
       console.log("❌ HTTP Authentication failed");
       return new Response(
         "🚫 Unauthorized - Invalid or missing authentication",
@@ -84,6 +104,11 @@ export class MyAgent extends Agent {
     }
 
     console.log("✅ HTTP Authentication successful");
+    return request;
+  }
+
+  onRequest(_request: Request): Response | Promise<Response> {
+    // Handle authenticated HTTP requests
     const timestamp = new Date().toLocaleTimeString();
     return new Response(
       `🔐 Authenticated HTTP request processed at ${timestamp}\n✅ Bearer token and API key validated successfully!`,
@@ -96,7 +121,7 @@ export class MyAgent extends Agent {
     );
   }
 
-  private validateHttpAuth(
+  private static validateHttpAuth(
     authHeader: string | null,
     apiKey: string | null
   ): boolean {
