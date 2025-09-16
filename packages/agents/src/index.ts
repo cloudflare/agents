@@ -1627,24 +1627,25 @@ export async function routeAgentRequest<Env>(
     corsHeaders = {};
   }
 
-  let response = await routePartykitRequest(request, env as any, {
+  const response = await routePartykitRequest(request, env as any, {
     prefix: "agents",
     jurisdiction: options.jurisdiction,
     locationHint: options.locationHint,
     // Preflight request with `Upgrade` header field don't exist.
     onBeforeConnect: options.onBeforeConnect as any,
     onBeforeRequest: async (req, lobby) => {
+      let resolvedRequest = req;
       if (options.onBeforeRequest !== undefined) {
         const reqOrRes = await options.onBeforeRequest(req, lobby as any);
         if (reqOrRes instanceof Response) {
           return reqOrRes;
         }
         if (reqOrRes instanceof Request) {
-          req = reqOrRes;
+          resolvedRequest = reqOrRes;
         }
       }
 
-      if (req.method === "OPTIONS") {
+      if (resolvedRequest.method === "OPTIONS") {
         if (corsEnabled) {
           return new Response(null, {
             headers: corsHeaders
