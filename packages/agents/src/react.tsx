@@ -27,7 +27,7 @@ function camelCaseToKebabCase(str: string): string {
   return kebabified.replace(/_/g, "-").replace(/-$/, "");
 }
 
-type QueryObject = Record<string, string | number | boolean | null | undefined>;
+type QueryObject = Record<string, string | number | boolean | null>;
 
 const queryCache = new Map<
   unknown[],
@@ -287,21 +287,23 @@ export function useAgent<State>(
       // Use React's use() to resolve the promise
       const queryResult = use(queryPromise!);
 
-      // Transform resolved data to WebSocket-compatible format
+      // Check for non-primitive values and warn
       if (queryResult) {
-        const transformedQuery: Record<string, string | null | undefined> = {};
         for (const [key, value] of Object.entries(queryResult)) {
-          if (value === null || value === undefined) {
-            transformedQuery[key] = value;
-          } else if (typeof value === "string") {
-            transformedQuery[key] = value;
-          } else if (typeof value === "number" || typeof value === "boolean") {
-            transformedQuery[key] = String(value);
-          } else {
-            transformedQuery[key] = JSON.stringify(value);
+          if (
+            value !== null &&
+            value !== undefined &&
+            typeof value !== "string" &&
+            typeof value !== "number" &&
+            typeof value !== "boolean"
+          ) {
+            console.warn(
+              `[useAgent] Query parameter "${key}" is an object and will be converted to "[object Object]". ` +
+                "Query parameters should be string, number, boolean, or null."
+            );
           }
         }
-        resolvedQuery = transformedQuery;
+        resolvedQuery = queryResult;
       }
     } else {
       // Sync query - use directly
