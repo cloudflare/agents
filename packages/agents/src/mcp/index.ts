@@ -69,7 +69,7 @@ export abstract class McpAgent<
     await this.ctx.storage.put("initializeRequest", initializeRequest);
   }
 
-  getInitializeRequest() {
+  async getInitializeRequest() {
     return this.ctx.storage.get<JSONRPCMessage>("initializeRequest");
   }
 
