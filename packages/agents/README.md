@@ -361,66 +361,6 @@ export class DialogueAgent extends AIChatAgent {
 
 The AI SDK provides native support for message metadata through the `messageMetadata` callback. This allows you to attach custom information to messages at the message level.
 
-##### Defining Metadata Types
-
-First, define your metadata type for type safety:
-
-```typescript
-import { UIMessage } from "ai";
-import { z } from "zod";
-
-// Define your metadata schema
-export const messageMetadataSchema = z.object({
-  createdAt: z.number().optional(),
-  model: z.string().optional(),
-  totalTokens: z.number().optional()
-});
-
-export type MessageMetadata = z.infer<typeof messageMetadataSchema>;
-
-// Create a typed UIMessage
-export type MyUIMessage = UIMessage<MessageMetadata>;
-```
-
-##### Sending Metadata from the Server
-
-Use the `messageMetadata` callback in `toUIMessageStreamResponse` to send metadata at different streaming stages:
-
-```typescript
-import { openai } from "@ai-sdk/openai";
-import { convertToModelMessages, streamText } from "ai";
-import type { MyUIMessage } from "@/types";
-
-export async function POST(req: Request) {
-  const { messages }: { messages: MyUIMessage[] } = await req.json();
-
-  const result = streamText({
-    model: openai("gpt-4o"),
-    messages: convertToModelMessages(messages)
-  });
-
-  return result.toUIMessageStreamResponse({
-    originalMessages: messages, // pass this in for type-safe return objects
-    messageMetadata: ({ part }) => {
-      // Send metadata when streaming starts
-      if (part.type === "start") {
-        return {
-          createdAt: Date.now(),
-          model: "gpt-4o"
-        };
-      }
-
-      // Send additional metadata when streaming completes
-      if (part.type === "finish") {
-        return {
-          totalTokens: part.totalUsage.totalTokens
-        };
-      }
-    }
-  });
-}
-```
-
 ##### AIChatAgent Integration
 
 In the context of `AIChatAgent`, you can use metadata like this:
@@ -508,30 +448,7 @@ export default function Chat() {
 }
 ```
 
-##### Common Use Cases
-
-Message metadata is ideal for:
-
-- **Timestamps**: When messages were created or completed
-- **Model Information**: Which AI model was used
-- **Token Usage**: Track costs and usage limits
-- **User Context**: User IDs, session information
-- **Performance Metrics**: Generation time, time to first token
-- **Quality Indicators**: Finish reason, confidence scores
-
 For more details, see the [AI SDK Message Metadata documentation](https://ai-sdk.dev/docs/ai-sdk-ui/message-metadata).
-
-##### Security Considerations
-
-- **Sensitive Information**: Avoid including sensitive data (API keys, user PII) in metadata
-- **Header Size Limits**: Metadata is limited to 4KB to prevent header overflow issues
-  {{ ... }}
-  }
-
-````
-- **Client Exposure**: All metadata is visible to clients - only include public information
-- **Token Usage**: Be mindful that token counts could reveal usage patterns
-- **Validation**: Always validate metadata on the client side before using it
 
 #### Creating the Interface
 
@@ -589,7 +506,7 @@ function ChatInterface() {
     </div>
   );
 }
-````
+```
 
 This creates:
 
