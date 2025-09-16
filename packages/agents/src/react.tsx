@@ -201,36 +201,7 @@ type AgentStub<T> = {
 type UntypedAgentStub = Record<string, Method>;
 
 /**
- * React hook for connecting to an Agent with support for both sync and async queries
- *
- * This hook automatically detects whether you're using a static query object or an async function
- * and handles both cases seamlessly with proper caching and Suspense integration.
- *
- * @example
- * // Sync query (existing pattern)
- * const agent = useAgent({
- *   agent: "MyAgent",
- *   query: { token: "abc123", userId: "user1" }
- * });
- *
- * @example
- * // Async query (new pattern)
- * const agent = useAgent({
- *   agent: "MyAgent",
- *   query: async () => ({ token: await getAuthToken(), userId: await getUserId() }),
- *   queryDeps: [userId] // Dependencies for caching
- * });
- *
- * @example
- * // No query (existing pattern)
- * const agent = useAgent({
- *   agent: "MyAgent"
- * });
- *
- * @template State Type of the Agent's state
- * @template Agent Type of the Agent
- * @param options Connection options with optional sync/async query
- * @returns WebSocket connection with setState and call methods
+ * React hook for connecting to an Agent
  */
 export function useAgent<State = unknown>(
   options: UseAgentOptions<State>
