@@ -5,11 +5,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
-    "ai": "5.0.39",
+    "ai": "5.0.44",
     "cron-schedule": "^5.0.4",
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.5",
-    "partyserver": "^0.0.73",
+    "partyserver": "^0.0.74",
     "partysocket": "1.1.5",
     "zod": "^3.25.76"
   },
@@ -18,8 +18,7 @@
   },
   "description": "A home for your AI agents",
   "devDependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.0.6",
-    "alchemy": "^0.62.3",
+    "@cloudflare/workers-oauth-provider": "^0.0.8",
     "react": "*",
     "vitest-browser-react": "^1.0.1"
   },

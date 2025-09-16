@@ -65,13 +65,12 @@ export abstract class McpAgent<
    * Helpers
    */
 
-  async setInitialized() {
-    // TODO: move to sync api once https://github.com/cloudflare/workerd/pull/4895 lands
-    await this.ctx.storage.put("initialized", true);
+  async setInitializeRequest(initializeRequest: JSONRPCMessage) {
+    await this.ctx.storage.put("initializeRequest", initializeRequest);
   }
 
-  async isInitialized() {
-    return (await this.ctx.storage.get("initialized")) === true;
+  async getInitializeRequest() {
+    return this.ctx.storage.get<JSONRPCMessage>("initializeRequest");
   }
 
   /** Read the transport type for this agent.
@@ -153,6 +152,14 @@ export abstract class McpAgent<
     // Connect to the MCP server
     this._transport = this.initTransport();
     await server.connect(this._transport);
+
+    // If the agent was previously initialized, we have to populate
+    // the server again by sending the initialize request to make
+    // client information available to the server.
+    const initializeRequest = await this.getInitializeRequest();
+    if (initializeRequest) {
+      this._transport.onmessage?.(initializeRequest);
+    }
   }
 
   /** Validates new WebSocket connections. */

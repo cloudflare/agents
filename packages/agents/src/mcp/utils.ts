@@ -135,11 +135,11 @@ export const createStreamingHttpHandler = (
         // Before we pass the messages to the agent, there's another error condition we need to enforce
         // Check if this is an initialization request
         // https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle/
-        const isInitializationRequest = messages.some(
+        const maybeInitializeRequest = messages.find(
           (msg) => InitializeRequestSchema.safeParse(msg).success
         );
 
-        if (isInitializationRequest && sessionId) {
+        if (!!maybeInitializeRequest && sessionId) {
           const body = JSON.stringify({
             error: {
               code: -32600,
@@ -153,7 +153,7 @@ export const createStreamingHttpHandler = (
         }
 
         // The initialization request must be the only request in the batch
-        if (isInitializationRequest && messages.length > 1) {
+        if (!!maybeInitializeRequest && messages.length > 1) {
           const body = JSON.stringify({
             error: {
               code: -32600,
@@ -169,7 +169,7 @@ export const createStreamingHttpHandler = (
         // If an Mcp-Session-Id is returned by the server during initialization,
         // clients using the Streamable HTTP transport MUST include it
         // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
-        if (!isInitializationRequest && !sessionId) {
+        if (!maybeInitializeRequest && !sessionId) {
           const body = JSON.stringify({
             error: {
               code: -32000,
@@ -191,10 +191,10 @@ export const createStreamingHttpHandler = (
           `streamable-http:${sessionId}`,
           { props: ctx.props }
         );
-        const isInitialized = await agent.isInitialized();
+        const isInitialized = await agent.getInitializeRequest();
 
-        if (isInitializationRequest) {
-          await agent.setInitialized();
+        if (maybeInitializeRequest) {
+          await agent.setInitializeRequest(maybeInitializeRequest);
         } else if (!isInitialized) {
           // if we have gotten here, then a session id that was never initialized
           // was provided
@@ -291,7 +291,7 @@ export const createStreamingHttpHandler = (
               // If we have received all the responses, close the connection
               if (requestIds.size === 0) {
                 ws?.close();
-                await writer.close();
+                await writer.close().catch(() => {});
               }
             } catch (error) {
               console.error("Error forwarding message to SSE:", error);
@@ -303,11 +303,7 @@ export const createStreamingHttpHandler = (
         // Handle WebSocket errors
         ws.addEventListener("error", (error) => {
           async function onError(_error: Event) {
-            try {
-              await writer.close();
-            } catch (_e) {
-              // Ignore errors when closing
-            }
+            await writer.close().catch(() => {});
           }
           onError(error).catch(console.error);
         });
@@ -315,11 +311,7 @@ export const createStreamingHttpHandler = (
         // Handle WebSocket closure
         ws.addEventListener("close", () => {
           async function onClose() {
-            try {
-              await writer.close();
-            } catch (error) {
-              console.error("Error closing SSE connection:", error);
-            }
+            await writer.close().catch(() => {});
           }
           onClose().catch(console.error);
         });
@@ -382,7 +374,7 @@ export const createStreamingHttpHandler = (
         }
 
         // Require sessionId
-        const sessionId = url.searchParams.get("sessionId");
+        const sessionId = request.headers.get("mcp-session-id");
         if (!sessionId)
           return new Response("Missing sessionId", { status: 400 });
 
@@ -396,7 +388,7 @@ export const createStreamingHttpHandler = (
           `streamable-http:${sessionId}`,
           { props: ctx.props }
         );
-        const isInitialized = await agent.isInitialized();
+        const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
           return new Response(
             JSON.stringify({
@@ -496,7 +488,7 @@ export const createStreamingHttpHandler = (
           namespace,
           `streamable-http:${sessionId}`
         );
-        const isInitialized = await agent.isInitialized();
+        const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
           return new Response(
             JSON.stringify({
