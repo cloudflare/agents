@@ -2,20 +2,20 @@
 
 A minimal example showing an `McpAgent` running in Wrangler, being accessed from the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
 
-## Instructions
+## Instruction
 
 ```sh
 npm install
 npm start
 ```
 
-You should have the MCP running on http://localhost:5174/sse and your Agent on http://localhost:5174
+This will start an MCP server on `http://localhost:5174/mcp` and open the MCP inspector in your browser.
 
-Set your **Transport Type** to **SSE** and your **URL** to `http://localhost:5174/sse`, then click **Connect**. You should see the following:
+Set your **Transport Type** to **Streamable HTTP** and your **URL** to `http://localhost:5174/mcp`, then click **Connect**. You should see the following:
 
-![Image](https://github.com/user-attachments/assets/86ec7df4-71fd-40e9-b9f6-32f2f5e003e5)
+![Image](https://github.com/user-attachments/assets/ef31b754-755d-4022-9549-382854a19f77)
 
-Inside your `McpAgent`'s `async init()` method, you can use the MCP SDK to define resources, tools, etc:
+Inside your `McpAgent`'s `init()` method, you can define resources, tools, etc:
 
 ```ts
 export class MyMCP extends McpAgent<Env> {
@@ -25,15 +25,15 @@ export class MyMCP extends McpAgent<Env> {
   });
 
   async init() {
-    this.server.resource(`counter`, `mcp://resource/counter`, (uri) => {
+    this.server.resource("counter", "mcp://resource/counter", (uri) => {
       // ...
     });
 
     this.server.tool(
       "add",
-      "Add two numbers together",
-      { a: z.number(), b: z.number() },
-      async ({ a, b }) => {
+      "Add to the counter, stored in the MCP",
+      { a: z.number() },
+      async ({ a }) => {
         // ...
       }
     );
