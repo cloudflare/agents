@@ -1,0 +1,25 @@
+{
+  "name": "http-reusable-chat-example",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 5175",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "agents": "workspace:*",
+    "ai": "^4.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241106.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0",
+    "wrangler": "^3.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "http-reusable-chat-example",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-11-06",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "HttpChatAgent",
+        "class_name": "HttpChatAgent"
+      }
+    ]
+  },
+  "vars": {
+    "ENVIRONMENT": "development"
+  }
+}
