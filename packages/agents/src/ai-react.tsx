@@ -474,14 +474,28 @@ export function useAgentChat<
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
     async (args) => {
       const { toolCallId } = args;
-      const pending = pendingConfirmationsRef.current.toolCallIds;
+
+      await useChatHelpers.addToolResult(args);
+
+      if (!autoSendAfterAllConfirmationsResolved) {
+        // always send immediately
+        useChatHelpers.sendMessage();
+        return;
+      }
+
+      // wait for all confirmations
+      const pending = pendingConfirmationsRef.current?.toolCallIds;
+      if (!pending) {
+        useChatHelpers.sendMessage();
+        return;
+      }
+
       const wasLast = pending.size === 1 && pending.has(toolCallId);
       if (pending.has(toolCallId)) {
-        // Optimistically update our local tracker
         pending.delete(toolCallId);
       }
-      await useChatHelpers.addToolResult(args);
-      if (autoSendAfterAllConfirmationsResolved && wasLast) {
+
+      if (wasLast || pending.size === 0) {
         useChatHelpers.sendMessage();
       }
     };
