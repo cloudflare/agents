@@ -8,7 +8,7 @@ import type {
 } from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
-import { use, useEffect, useMemo, useRef } from "react";
+import { use, useEffect, useRef } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
@@ -338,10 +338,11 @@ export function useAgentChat<
 
   const processedToolCalls = useRef(new Set<string>());
 
-  // Track pending confirmations for the latest assistant message
-  const pendingConfirmations = useMemo(() => {
-    const lastMessage =
-      useChatHelpers.messages[useChatHelpers.messages.length - 1];
+  // Calculate pending confirmations for the latest assistant message
+  const lastMessage =
+    useChatHelpers.messages[useChatHelpers.messages.length - 1];
+
+  const pendingConfirmations = (() => {
     if (!lastMessage || lastMessage.role !== "assistant") {
       return { messageId: undefined, toolCallIds: new Set<string>() };
     }
@@ -357,7 +358,7 @@ export function useAgentChat<
       }
     }
     return { messageId: lastMessage.id, toolCallIds: pendingIds };
-  }, [useChatHelpers.messages, toolsRequiringConfirmation]);
+  })();
 
   const pendingConfirmationsRef = useRef(pendingConfirmations);
   pendingConfirmationsRef.current = pendingConfirmations;
