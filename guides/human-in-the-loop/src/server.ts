@@ -6,7 +6,8 @@ import {
   createUIMessageStream,
   createUIMessageStreamResponse,
   type StreamTextOnFinishCallback,
-  streamText
+  streamText,
+  stepCountIs
 } from "ai";
 import { tools } from "./tools";
 import {
@@ -43,7 +44,8 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
       messages: convertToModelMessages(this.messages),
       model: openai("gpt-4o"),
       onFinish,
-      tools
+      tools,
+      stopWhen: stepCountIs(5)
     });
 
     return result.toUIMessageStreamResponse({
