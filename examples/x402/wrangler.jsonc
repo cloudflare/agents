@@ -1,0 +1,27 @@
+{
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "PayMCP",
+        "name": "PAY_MCP"
+      },
+      {
+        "class_name": "PayAgent",
+        "name": "PAY_AGENT"
+      }
+    ]
+  },
+  "main": "src/index.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["PayMCP", "PayAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "x402-demo"
+}

@@ -1,15 +1,15 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type {
-  CallToolRequest,
+import {
   CallToolResultSchema,
-  CompatibilityCallToolResultSchema,
-  GetPromptRequest,
-  Prompt,
-  ReadResourceRequest,
-  Resource,
-  ResourceTemplate,
-  Tool
+  type CallToolRequest,
+  type CompatibilityCallToolResultSchema,
+  type GetPromptRequest,
+  type Prompt,
+  type ReadResourceRequest,
+  type Resource,
+  type ResourceTemplate,
+  type Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { type ToolSet, jsonSchema } from "ai";
 import { nanoid } from "nanoid";
@@ -17,6 +17,18 @@ import {
   MCPClientConnection,
   type MCPTransportOptions
 } from "./client-connection";
+import { createWalletClient, http, type Account, type Address } from "viem";
+import { base, baseSepolia } from "viem/chains";
+import { createPaymentHeader } from "x402/client";
+import type { PaymentRequirements, Wallet } from "x402/types";
+
+type X402ClientConfig = {
+  network: "base" | "base-sepolia"; // TODO: look into which are supported
+  account: Account | Address;
+  maxPaymentValue?: bigint; // TODO: look into atomic units
+  headerName?: string;
+  version?: number;
+};
 
 /**
  * Utility class that aggregates multiple MCP clients into one
@@ -25,6 +37,62 @@ export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   private _callbackUrls: string[] = [];
   private _didWarnAboutUnstableGetAITools = false;
+  private _x402?: {
+    network: "base" | "base-sepolia";
+    walletClient: ReturnType<typeof createWalletClient>;
+    maxPaymentValue: bigint;
+    headerName: string;
+    version: number;
+  };
+
+  enableX402Payments(cfg: X402ClientConfig) {
+    const chain = cfg.network === "base" ? base : baseSepolia;
+    const account = typeof cfg.account === "string" ? cfg.account : cfg.account; // works for Address or Account
+    const walletClient = createWalletClient({
+      account,
+      chain,
+      transport: http()
+    });
+    this._x402 = {
+      network: cfg.network,
+      walletClient,
+      maxPaymentValue: cfg.maxPaymentValue ?? 100_000n, // $0.10 in USDC (6 dp)
+      headerName: cfg.headerName ?? "X-PAYMENT",
+      version: cfg.version ?? 1
+    };
+  }
+
+  private async _maybeCreateX402Token(
+    accepts: PaymentRequirements[]
+  ): Promise<string | null> {
+    if (!this._x402) return null;
+    if (!Array.isArray(accepts) || accepts.length === 0) return null;
+
+    // Pick the first exact-scheme requirement that matches our network
+    // (we're only setting one on the McpAgent side for now)
+    const req =
+      accepts.find(
+        (a) => a?.scheme === "exact" && a?.network === this._x402!.network
+      ) ?? accepts[0];
+
+    if (!req || req.scheme !== "exact") return null;
+
+    const maxAmountRequired = BigInt(req.maxAmountRequired);
+    if (maxAmountRequired > this._x402.maxPaymentValue) {
+      throw new Error(
+        `Payment exceeds client cap: ${maxAmountRequired} > ${this._x402.maxPaymentValue}`
+      );
+    }
+
+    // Let x402/client produce the opaque header
+    const token = await createPaymentHeader(
+      this._x402.walletClient as unknown as Wallet, // viem wallet client is compatible
+      this._x402.version,
+      req
+    );
+    return token;
+  }
+
   /**
    * @param _name Name of the MCP client
    * @param _version Version of the MCP Client
@@ -105,6 +173,30 @@ export class MCPClientManager {
     return {
       id
     };
+  }
+
+  private async _callToolWithMeta(
+    serverId: string,
+    name: string,
+    args: Record<string, unknown> | undefined,
+    meta: Record<string, unknown>,
+    resultSchema:
+      | typeof CallToolResultSchema
+      | typeof CompatibilityCallToolResultSchema,
+    options?: RequestOptions
+  ) {
+    const c = this.mcpConnections[serverId].client;
+
+    // We need to set either _meta or X-PAYMENT header to pay for the tool call
+    // and it's not available through `toolCall(...)`
+    return c.request(
+      {
+        method: "tools/call",
+        params: { name, arguments: args, _meta: meta }
+      },
+      resultSchema,
+      options
+    );
   }
 
   isCallbackRequest(req: Request): boolean {
@@ -272,15 +364,18 @@ export class MCPClientManager {
   /**
    * Namespaced version of callTool
    */
-  callTool(
+  async callTool(
     params: CallToolRequest["params"] & { serverId: string },
     resultSchema?:
       | typeof CallToolResultSchema
       | typeof CompatibilityCallToolResultSchema,
-    options?: RequestOptions
+    options?: RequestOptions & { headers?: Record<string, string> }
   ) {
     const unqualifiedName = params.name.replace(`${params.serverId}.`, "");
-    return this.mcpConnections[params.serverId].client.callTool(
+    const conn = this.mcpConnections[params.serverId];
+    const client = conn.client;
+
+    let res = await client.callTool(
       {
         ...params,
         name: unqualifiedName
@@ -288,6 +383,37 @@ export class MCPClientManager {
       resultSchema,
       options
     );
+
+    // TODO: move this to use structuredContent
+    const accepts = (() => {
+      try {
+        const txt = (res.content as { text: string }[])[0].text;
+        const parsed = txt ? JSON.parse(txt) : null;
+        return parsed?.accepts;
+      } catch {
+        return undefined;
+      }
+    })();
+
+    const isPaymentRequired =
+      res?.isError && Array.isArray(accepts) && accepts.length > 0;
+
+    // Handle retry for x402 tools
+    if (isPaymentRequired && this._x402) {
+      const token = await this._maybeCreateX402Token(accepts);
+      if (!token) return res; // can't satisfy, return original error
+
+      res = await this._callToolWithMeta(
+        params.serverId,
+        unqualifiedName,
+        params.arguments,
+        { "x402.payment": token },
+        resultSchema ?? CallToolResultSchema,
+        options
+      );
+    }
+
+    return res;
   }
 
   /**

@@ -11,6 +11,7 @@
     "nanoid": "^5.1.5",
     "partyserver": "^0.0.74",
     "partysocket": "1.1.5",
+    "x402": "^0.6.1",
     "zod": "^3.25.76"
   },
   "publishConfig": {

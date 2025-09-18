@@ -20,7 +20,8 @@ async function main() {
       "ai",
       "react",
       "zod",
-      "@modelcontextprotocol/sdk"
+      "@modelcontextprotocol/sdk",
+      "x402"
     ],
     format: "esm",
     sourcemap: true,
