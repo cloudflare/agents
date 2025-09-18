@@ -13,11 +13,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { getCurrentAgent, type Connection } from "..";
 import type { McpAgent } from ".";
 import { MessageType } from "../ai-types";
-import {
-  MCP_HTTP_METHOD_HEADER,
-  MCP_MESSAGE_HEADER,
-  STANDALONE_SSE_MARKER
-} from "./utils";
+import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
 export class McpSSETransport implements Transport {
   sessionId?: string;
@@ -109,7 +105,6 @@ export interface StreamableHTTPServerTransportOptions {
  * Besides these points, the implementation is the same and should be updated to match the original as new features are added.
  */
 export class StreamableHTTPServerTransport implements Transport {
-  // when sessionId is not set (undefined), it means the transport is in stateless mode
   private _started = false;
   private _eventStore?: EventStore;
 
@@ -124,11 +119,12 @@ export class StreamableHTTPServerTransport implements Transport {
   onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
   constructor(options: StreamableHTTPServerTransportOptions) {
-    // CF override. We always use the provided sessionId that comes from the Agent.
     const { agent } = getCurrentAgent<McpAgent>();
     if (!agent)
       throw new Error("McpAgent was not found in Transport constructor");
 
+    // Initialization is handled in `McpAgent.serve()` and agents are addressed by sessionId,
+    // so we'll always have this available.
     this.sessionId = agent.getSessionId();
     this._eventStore = options.eventStore;
   }
@@ -163,7 +159,7 @@ export class StreamableHTTPServerTransport implements Transport {
     }
 
     connection.setState({
-      role: STANDALONE_SSE_MARKER
+      _standaloneSse: true
     });
   }
 
@@ -313,9 +309,8 @@ export class StreamableHTTPServerTransport implements Transport {
       }
 
       let standaloneConnection: Connection | undefined;
-      for (const conn of agent.getConnections<{ role?: string }>()) {
-        if (conn.state?.role === STANDALONE_SSE_MARKER)
-          standaloneConnection = conn;
+      for (const conn of agent.getConnections<{ _standaloneSse?: boolean }>()) {
+        if (conn.state?._standaloneSse) standaloneConnection = conn;
       }
 
       if (standaloneConnection === undefined) {

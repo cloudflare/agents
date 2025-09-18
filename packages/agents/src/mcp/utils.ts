@@ -11,13 +11,6 @@ import type { CORSOptions } from "./types";
 import { MessageType } from "../ai-types";
 
 /**
- * Tag placed in `connection.state.role` to mark the WebSocket that carries
- * the standalone SSE stream for a session. We use it to recover the connection
- * after hibernation.
- */
-export const STANDALONE_SSE_MARKER = "standalone-sse";
-
-/**
  * Since we use WebSockets to bridge the client to the
  * MCP transport in the Agent, we use this header to signal
  * the method of the original request the user made, while
