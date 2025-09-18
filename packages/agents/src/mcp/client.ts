@@ -23,6 +23,7 @@ import { createPaymentHeader } from "x402/client";
 import type { PaymentRequirements, Wallet } from "x402/types";
 
 type X402ClientConfig = {
+  confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
   network: "base" | "base-sepolia"; // TODO: look into which are supported
   account: Account | Address;
   maxPaymentValue?: bigint; // TODO: look into atomic units
@@ -43,6 +44,7 @@ export class MCPClientManager {
     maxPaymentValue: bigint;
     headerName: string;
     version: number;
+    confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
   };
 
   enableX402Payments(cfg: X402ClientConfig) {
@@ -56,9 +58,10 @@ export class MCPClientManager {
     this._x402 = {
       network: cfg.network,
       walletClient,
-      maxPaymentValue: cfg.maxPaymentValue ?? 100_000n, // $0.10 in USDC (6 dp)
+      maxPaymentValue: cfg.maxPaymentValue ?? 100_000n, // $0.10 in USDC
       headerName: cfg.headerName ?? "X-PAYMENT",
-      version: cfg.version ?? 1
+      version: cfg.version ?? 1,
+      confirmationCallback: cfg.confirmationCallback
     };
   }
 
@@ -385,7 +388,7 @@ export class MCPClientManager {
     );
 
     // TODO: move this to use structuredContent
-    const accepts = (() => {
+    const accepts: PaymentRequirements[] | undefined = (() => {
       try {
         const txt = (res.content as { text: string }[])[0].text;
         const parsed = txt ? JSON.parse(txt) : null;
@@ -400,6 +403,13 @@ export class MCPClientManager {
 
     // Handle retry for x402 tools
     if (isPaymentRequired && this._x402) {
+      const { confirmationCallback } = this._x402;
+      if (confirmationCallback && !(await confirmationCallback(accepts))) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "User declined payment" }]
+        };
+      }
       const token = await this._maybeCreateX402Token(accepts);
       if (!token) return res; // can't satisfy, return original error
 
