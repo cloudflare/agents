@@ -8,7 +8,7 @@ import type {
 } from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
-import { use, useEffect, useRef } from "react";
+import { use, useCallback, useEffect, useMemo, useRef } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
@@ -125,6 +125,12 @@ export function useAgentChat<
   agentUrl.searchParams.delete("_pk");
   const agentUrlString = agentUrl.toString();
 
+  // Keep a ref to always point to the latest agent instance
+  const agentRef = useRef(agent);
+  useEffect(() => {
+    agentRef.current = agent;
+  }, [agent]);
+
   async function defaultGetInitialMessagesFetch({
     url
   }: GetInitialMessagesOptions) {
@@ -193,142 +199,148 @@ export function useAgentChat<
     };
   }, [agentUrlString, initialMessagesPromise]);
 
-  async function aiFetch(
-    request: RequestInfo | URL,
-    options: RequestInit = {}
-  ) {
-    const {
-      method,
-      keepalive,
-      headers,
-      body,
-      redirect,
-      integrity,
-      signal,
-      credentials,
-      mode,
-      referrer,
-      referrerPolicy,
-      window
-    } = options;
-    const id = nanoid(8);
-    const abortController = new AbortController();
-    let controller: ReadableStreamDefaultController;
-    let isToolCallInProgress = false;
+  const aiFetch = useCallback(
+    async (request: RequestInfo | URL, options: RequestInit = {}) => {
+      const {
+        method,
+        keepalive,
+        headers,
+        body,
+        redirect,
+        integrity,
+        signal,
+        credentials,
+        mode,
+        referrer,
+        referrerPolicy,
+        window
+      } = options;
+      const id = nanoid(8);
+      const abortController = new AbortController();
+      let controller: ReadableStreamDefaultController;
+      let isToolCallInProgress = false;
+      const currentAgent = agentRef.current;
 
-    signal?.addEventListener("abort", () => {
-      agent.send(
-        JSON.stringify({
-          id,
-          type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
-        })
-      );
+      signal?.addEventListener("abort", () => {
+        currentAgent.send(
+          JSON.stringify({
+            id,
+            type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
+          })
+        );
 
-      // NOTE - If we wanted to, we could preserve the "interrupted" message here, with the code below
-      //        However, I think it might be the responsibility of the library user to implement that behavior manually?
-      //        Reasoning: This code could be subject to collisions, as it "force saves" the messages we have locally
-      //
-      // agent.send(JSON.stringify({
-      //   type: MessageType.CF_AGENT_CHAT_MESSAGES,
-      //   messages: ... /* some way of getting current messages ref? */
-      // }))
+        // NOTE - If we wanted to, we could preserve the "interrupted" message here, with the code below
+        //        However, I think it might be the responsibility of the library user to implement that behavior manually?
+        //        Reasoning: This code could be subject to collisions, as it "force saves" the messages we have locally
+        //
+        // agent.send(JSON.stringify({
+        //   type: MessageType.CF_AGENT_CHAT_MESSAGES,
+        //   messages: ... /* some way of getting current messages ref? */
+        // }))
 
-      abortController.abort();
-      // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
-      if (!isToolCallInProgress) {
-        controller.close();
-      }
-    });
-
-    agent.addEventListener(
-      "message",
-      (event) => {
-        let data: OutgoingMessage<ChatMessage>;
-        try {
-          data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
-        } catch (_error) {
-          // silently ignore invalid messages for now
-          // TODO: log errors with log levels
-          return;
+        abortController.abort();
+        // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
+        if (!isToolCallInProgress) {
+          controller.close();
         }
-        if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
-          if (data.id === id) {
-            if (data.error) {
-              controller.error(new Error(data.body));
-              abortController.abort();
-            } else {
-              // Only enqueue non-empty data to prevent JSON parsing errors
-              if (data.body?.trim()) {
-                if (data.body.includes('"tool_calls"')) {
-                  isToolCallInProgress = true;
-                }
-                controller.enqueue(
-                  new TextEncoder().encode(`data: ${data.body}\n\n`)
-                );
-              }
-              if (data.done && !isToolCallInProgress) {
-                controller.close();
+      });
+
+      currentAgent.addEventListener(
+        "message",
+        (event) => {
+          let data: OutgoingMessage<ChatMessage>;
+          try {
+            data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
+          } catch (_error) {
+            // silently ignore invalid messages for now
+            // TODO: log errors with log levels
+            return;
+          }
+          if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
+            if (data.id === id) {
+              if (data.error) {
+                controller.error(new Error(data.body));
                 abortController.abort();
+              } else {
+                // Only enqueue non-empty data to prevent JSON parsing errors
+                if (data.body?.trim()) {
+                  if (data.body.includes('"tool_calls"')) {
+                    isToolCallInProgress = true;
+                  }
+                  controller.enqueue(
+                    new TextEncoder().encode(`data: ${data.body}\n\n`)
+                  );
+                }
+                if (data.done && !isToolCallInProgress) {
+                  controller.close();
+                  abortController.abort();
+                }
               }
             }
           }
-        }
-      },
-      { signal: abortController.signal }
-    );
-
-    const stream = new ReadableStream({
-      start(c) {
-        controller = c;
-      }
-    });
-
-    agent.send(
-      JSON.stringify({
-        id,
-        init: {
-          body,
-          credentials,
-          headers,
-          integrity,
-          keepalive,
-          method,
-          mode,
-          redirect,
-          referrer,
-          referrerPolicy,
-          window
         },
-        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
-        url: request.toString()
-      })
-    );
+        { signal: abortController.signal }
+      );
 
-    return new Response(stream);
-  }
-
-  const customTransport: ChatTransport<ChatMessage> = {
-    sendMessages: async (
-      options: Parameters<typeof DefaultChatTransport.prototype.sendMessages>[0]
-    ) => {
-      const transport = new DefaultChatTransport<ChatMessage>({
-        api: agentUrlString,
-        fetch: aiFetch
+      const stream = new ReadableStream({
+        start(c) {
+          controller = c;
+        }
       });
-      return transport.sendMessages(options);
+
+      currentAgent.send(
+        JSON.stringify({
+          id,
+          init: {
+            body,
+            credentials,
+            headers,
+            integrity,
+            keepalive,
+            method,
+            mode,
+            redirect,
+            referrer,
+            referrerPolicy,
+            window
+          },
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          url: request.toString()
+        })
+      );
+
+      return new Response(stream);
     },
-    reconnectToStream: async (
-      options: Parameters<
-        typeof DefaultChatTransport.prototype.reconnectToStream
-      >[0]
-    ) => {
-      const transport = new DefaultChatTransport<ChatMessage>({
-        api: agentUrlString,
-        fetch: aiFetch
-      });
-      return transport.reconnectToStream(options);
-    }
-  };
+    []
+  );
+
+  const customTransport: ChatTransport<ChatMessage> = useMemo(
+    () => ({
+      sendMessages: async (
+        options: Parameters<
+          typeof DefaultChatTransport.prototype.sendMessages
+        >[0]
+      ) => {
+        const transport = new DefaultChatTransport<ChatMessage>({
+          api: agentUrlString,
+          fetch: aiFetch
+        });
+        return transport.sendMessages(options);
+      },
+      reconnectToStream: async (
+        options: Parameters<
+          typeof DefaultChatTransport.prototype.reconnectToStream
+        >[0]
+      ) => {
+        const transport = new DefaultChatTransport<ChatMessage>({
+          api: agentUrlString,
+          fetch: aiFetch
+        });
+        return transport.reconnectToStream(options);
+      }
+    }),
+    [agentUrlString, aiFetch]
+  );
 
   const useChatHelpers = useChat<ChatMessage>({
     ...rest,
