@@ -93,30 +93,21 @@ export interface EventStore {
  */
 export interface StreamableHTTPServerTransportOptions {
   /**
-   * A callback for session close events
-   * This is called when the server closes a session due to a DELETE request.
-   * Useful in cases when you need to clean up resources associated with the session.
-   * Note that this is different from the transport closing, if you are handling
-   * HTTP requests from multiple nodes you might want to close each
-   * StreamableHTTPServerTransport after a request is completed while still keeping the
-   * session open/running.
-   */
-  onsessionclosed?: () => void | Promise<void>;
-
-  /**
-   * If true, the server will return JSON responses instead of starting an SSE stream.
-   * This can be useful for simple request/response scenarios without streaming.
-   * Default is false (SSE streams are preferred).
-   */
-  enableJsonResponse?: boolean;
-
-  /**
    * Event store for resumability support
    * If provided, resumability will be enabled, allowing clients to reconnect and resume messages
    */
   eventStore?: EventStore;
 }
 
+/**
+ * Adapted from: https://github.com/modelcontextprotocol/typescript-sdk/blob/main/src/client/streamableHttp.ts
+ * - Validation and initialization are removed as they're handled in `McpAgent.serve()` handler.
+ * - Replaces the Node-style `req`/`res` with Worker's `Request`.
+ * - Writes events as WS messages that the Worker forwards to the client as SSE events.
+ * - Replaces the in-memory maps that track requestID/stream by using `connection.setState()` and `agent.getConnections()`.
+ *
+ * Besides these points, the implementation is the same and should be updated to match the original as new features are added.
+ */
 export class StreamableHTTPServerTransport implements Transport {
   // when sessionId is not set (undefined), it means the transport is in stateless mode
   private _started = false;
@@ -171,8 +162,6 @@ export class StreamableHTTPServerTransport implements Transport {
       }
     }
 
-    // TODO: look into using getConnections() for this
-    // Assign the response to the standalone SSE stream
     connection.setState({
       role: STANDALONE_SSE_MARKER
     });
