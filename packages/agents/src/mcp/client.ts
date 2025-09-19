@@ -368,11 +368,16 @@ export class MCPClientManager {
    * Namespaced version of callTool
    */
   async callTool(
-    params: CallToolRequest["params"] & { serverId: string },
+    params: CallToolRequest["params"] & {
+      serverId: string;
+      confirmationCallback?: X402ClientConfig["confirmationCallback"];
+    },
     resultSchema?:
       | typeof CallToolResultSchema
       | typeof CompatibilityCallToolResultSchema,
-    options?: RequestOptions & { headers?: Record<string, string> }
+    options?: RequestOptions & {
+      headers?: Record<string, string>;
+    }
   ) {
     const unqualifiedName = params.name.replace(`${params.serverId}.`, "");
     const conn = this.mcpConnections[params.serverId];
@@ -403,7 +408,8 @@ export class MCPClientManager {
 
     // Handle retry for x402 tools
     if (isPaymentRequired && this._x402) {
-      const { confirmationCallback } = this._x402;
+      let { confirmationCallback } = this._x402; // use x402 default callback if exists
+      confirmationCallback = params.confirmationCallback; // use tool-level callback if provided
       if (confirmationCallback && !(await confirmationCallback(accepts))) {
         return {
           isError: true,
