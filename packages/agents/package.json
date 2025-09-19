@@ -139,6 +139,16 @@
       "types": "./dist/use-agent-chat-http.d.ts",
       "import": "./dist/use-agent-chat-http.js",
       "require": "./dist/use-agent-chat-http.js"
+    },
+    "./ai-chat-agent-resumable-http": {
+      "types": "./dist/ai-chat-agent-resumable-http.d.ts",
+      "import": "./dist/ai-chat-agent-resumable-http.js",
+      "require": "./dist/ai-chat-agent-resumable-http.js"
+    },
+    "./use-agent-chat-resumable-http": {
+      "types": "./dist/use-agent-chat-resumable-http.d.ts",
+      "import": "./dist/use-agent-chat-resumable-http.js",
+      "require": "./dist/use-agent-chat-resumable-http.js"
     }
   },
   "publishConfig": {

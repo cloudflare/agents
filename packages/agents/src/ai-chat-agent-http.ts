@@ -27,10 +27,13 @@ export class AIHttpChatAgent<
   private _activeStreams: Map<
     string,
     {
-      content: string;
-      position: number;
+      seq: number; // Current chunk sequence number
+      fetching: boolean; // Is upstream still fetching?
       completed: boolean;
       timestamp: number;
+      readers: Set<
+        WritableStreamDefaultWriter | ReadableStreamDefaultController
+      >; // Active readers/writers
     }
   >;
 
@@ -47,11 +50,21 @@ export class AIHttpChatAgent<
     // Initialize stream state table for resumable streams
     this.sql`create table if not exists cf_ai_http_chat_streams (
       stream_id text primary key,
-      content text not null,
-      position integer not null,
+      seq integer not null default 0,
+      fetching integer not null default 0,
       completed integer not null default 0,
+      headers text,
       created_at datetime default current_timestamp,
       updated_at datetime default current_timestamp
+    )`;
+
+    // Initialize stream chunks table
+    this.sql`create table if not exists cf_ai_http_chat_chunks (
+      stream_id text not null,
+      seq integer not null,
+      chunk blob not null,
+      created_at datetime default current_timestamp,
+      primary key (stream_id, seq)
     )`;
 
     // Load messages and automatically transform them to v5 format
@@ -173,8 +186,11 @@ export class AIHttpChatAgent<
    * Handle POST /chat - Send message and get streaming response
    */
   private async _handlePostChat(request: Request): Promise<Response> {
-    const body = (await request.json()) as { messages?: Message[] };
-    const { messages: incomingMessages } = body;
+    const body = (await request.json()) as {
+      messages?: Message[];
+      streamId?: string;
+    };
+    const { messages: incomingMessages, streamId: requestStreamId } = body;
 
     if (!Array.isArray(incomingMessages)) {
       return new Response(
@@ -192,49 +208,77 @@ export class AIHttpChatAgent<
     ) as Message[];
     await this.persistMessages(transformedMessages);
 
-    // Generate stream ID for this conversation
-    const streamId = `stream_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    // Generate or reuse stream ID
+    let streamId =
+      requestStreamId ||
+      `stream_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
-    // Call the user-defined chat message handler
-    const response = await this.onChatMessage(
-      async (_finishResult) => {
-        // Mark stream as completed
-        this._markStreamCompleted(streamId);
-      },
-      { streamId }
-    );
+    // Check if this stream already exists and is active
+    let streamState = this._activeStreams.get(streamId);
+    if (!streamState) {
+      const dbState = this.sql`
+        select * from cf_ai_http_chat_streams
+        where stream_id = ${streamId}
+      `[0] as { seq: number; fetching: number; completed: number } | undefined;
 
-    if (!response) {
-      return new Response(JSON.stringify({ error: "No response generated" }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
+      if (dbState) {
+        streamState = {
+          seq: dbState.seq,
+          fetching: Boolean(dbState.fetching),
+          completed: Boolean(dbState.completed),
+          timestamp: Date.now(),
+          readers: new Set()
+        };
+        this._activeStreams.set(streamId, streamState);
+      }
+    }
+
+    // Start upstream fetch once (in background) if not already fetching
+    if (!streamState || (!streamState.fetching && !streamState.completed)) {
+      // Use blockConcurrencyWhile to prevent race conditions
+      await this.ctx.blockConcurrencyWhile(async () => {
+        // Double-check after acquiring lock
+        streamState = this._activeStreams.get(streamId);
+        if (streamState?.fetching || streamState?.completed) {
+          return;
+        }
+
+        // Initialize stream state
+        this._activeStreams.set(streamId, {
+          seq: 0,
+          fetching: true,
+          completed: false,
+          timestamp: Date.now(),
+          readers: new Set()
+        });
+
+        // Initialize in database
+        this.sql`
+          insert into cf_ai_http_chat_streams (stream_id, seq, fetching, completed)
+          values (${streamId}, 0, 1, 0)
+          on conflict(stream_id) do update set
+            fetching = 1,
+            updated_at = current_timestamp
+        `;
+
+        // Start upstream fetch in background using waitUntil
+        this.ctx.waitUntil(this._startUpstreamFetch(streamId));
       });
     }
 
-    // Initialize stream state
-    this._initializeStream(streamId);
-
-    // Return streaming response with resumable stream headers
-    const headers = new Headers(response.headers);
-    headers.set("X-Stream-Id", streamId);
-    headers.set("X-Resumable", "true");
-
-    return new Response(this._createResumableStream(response, streamId), {
-      status: response.status,
-      headers
-    });
+    // Create response stream for this client
+    return this._createClientStream(streamId);
   }
 
   /**
    * Handle GET /stream/{streamId} - Resume interrupted stream
    */
   private async _handleResumeStream(streamId: string): Promise<Response> {
+    // Check if stream exists in database
     const streamState = this.sql`
-      select * from cf_ai_http_chat_streams 
+      select * from cf_ai_http_chat_streams
       where stream_id = ${streamId}
-    `[0] as
-      | { content: string; position: number; completed: number }
-      | undefined;
+    `[0] as { seq: number; fetching: number; completed: number } | undefined;
 
     if (!streamState) {
       return new Response(JSON.stringify({ error: "Stream not found" }), {
@@ -243,29 +287,8 @@ export class AIHttpChatAgent<
       });
     }
 
-    const { content, position, completed } = streamState;
-
-    if (completed) {
-      // Stream is completed, return remaining content
-      const remainingContent = content.slice(position);
-      return new Response(remainingContent, {
-        headers: {
-          "Content-Type": "text/plain",
-          "X-Stream-Id": streamId,
-          "X-Stream-Complete": "true"
-        }
-      });
-    }
-
-    // Stream is still active, return current content and continue streaming
-    const currentContent = content.slice(position);
-    return new Response(currentContent, {
-      headers: {
-        "Content-Type": "text/plain",
-        "X-Stream-Id": streamId,
-        "X-Stream-Position": position.toString()
-      }
-    });
+    // Create a new client stream that will replay stored chunks and join live if still fetching
+    return this._createClientStream(streamId);
   }
 
   /**
@@ -340,125 +363,331 @@ export class AIHttpChatAgent<
   }
 
   /**
-   * Initialize stream state for resumable streaming
+   * Start upstream fetch in background
    */
-  private _initializeStream(streamId: string): void {
-    this._activeStreams.set(streamId, {
-      content: "",
-      position: 0,
-      completed: false,
-      timestamp: Date.now()
+  private async _startUpstreamFetch(streamId: string): Promise<void> {
+    const response = await this.onChatMessage(
+      async (_finishResult) => {
+        // Mark stream as completed
+        this._markStreamCompleted(streamId);
+      },
+      { streamId }
+    );
+
+    if (!response || !response.body) {
+      this._markStreamCompleted(streamId);
+      return;
+    }
+
+    // Store response headers
+    const headers: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      headers[key] = value;
     });
 
     this.sql`
-      insert into cf_ai_http_chat_streams (stream_id, content, position, completed)
-      values (${streamId}, '', 0, 0)
-    `;
-  }
-
-  /**
-   * Create a resumable stream that persists content as it's generated
-   */
-  private _createResumableStream(
-    response: Response,
-    streamId: string
-  ): ReadableStream {
-    if (!response.body) {
-      return new ReadableStream({
-        start(controller) {
-          controller.close();
-        }
-      });
-    }
-
-    const reader = response.body.getReader();
-    let fullResponseText = "";
-    let persistenceCounter = 0;
-    const PERSISTENCE_INTERVAL = 100; // Persist every 100 characters
-
-    // Bind methods to maintain context
-    const markStreamCompleted = this._markStreamCompleted.bind(this);
-    const persistStreamState = this._persistStreamState.bind(this);
-
-    return new ReadableStream({
-      async start(controller) {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-
-            if (done) {
-              // Mark stream as completed and persist final state
-              markStreamCompleted(streamId, fullResponseText);
-              controller.close();
-              break;
-            }
-
-            const chunk = decoder.decode(value);
-            fullResponseText += chunk;
-            persistenceCounter += chunk.length;
-
-            // Persist stream state periodically
-            if (persistenceCounter >= PERSISTENCE_INTERVAL) {
-              persistStreamState(streamId, fullResponseText);
-              persistenceCounter = 0;
-            }
-
-            // Forward chunk to client
-            controller.enqueue(value);
-          }
-        } catch (error) {
-          console.error("[AIHttpChatAgent] Stream error:", error);
-          controller.error(error);
-        } finally {
-          reader.releaseLock();
-        }
-      }
-    });
-  }
-
-  /**
-   * Persist stream state to database
-   */
-  private _persistStreamState(streamId: string, content: string): void {
-    const streamState = this._activeStreams.get(streamId);
-    if (streamState) {
-      streamState.content = content;
-      streamState.position = content.length;
-      streamState.timestamp = Date.now();
-    }
-
-    this.sql`
-      update cf_ai_http_chat_streams 
-      set content = ${content}, position = ${content.length}, updated_at = current_timestamp
+      update cf_ai_http_chat_streams
+      set headers = ${JSON.stringify(headers)}
       where stream_id = ${streamId}
     `;
+
+    // Process the upstream response
+    await this._pipeUpstream(response, streamId);
+  }
+
+  /**
+   * Pipe upstream response and store chunks
+   */
+  private async _pipeUpstream(
+    response: Response,
+    streamId: string
+  ): Promise<void> {
+    if (!response.body) return;
+
+    const reader = response.body.getReader();
+    const streamState = this._activeStreams.get(streamId);
+    if (!streamState) return;
+
+    let assistantMessageText = "";
+    let buffer = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Store raw chunk with sequence number
+        const seq = streamState.seq++;
+        const chunkBase64 = btoa(String.fromCharCode(...value));
+        this.sql`
+          insert into cf_ai_http_chat_chunks (stream_id, seq, chunk)
+          values (${streamId}, ${seq}, ${chunkBase64})
+        `;
+
+        // Update sequence in stream state
+        this.sql`
+          update cf_ai_http_chat_streams
+          set seq = ${streamState.seq}, updated_at = current_timestamp
+          where stream_id = ${streamId}
+        `;
+
+        // Parse for assistant message content
+        const chunk = decoder.decode(value, { stream: true });
+        buffer += chunk;
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.trim() === "") continue;
+          if (line.startsWith("data: ")) {
+            const dataStr = line.slice(6);
+            if (dataStr === "[DONE]") continue;
+            try {
+              const data = JSON.parse(dataStr);
+              if (data.type === "text-delta" && data.delta) {
+                assistantMessageText += data.delta;
+              }
+            } catch (e) {
+              // Ignore parse errors
+            }
+          }
+        }
+
+        // Broadcast to all active readers (writers)
+        for (const writer of streamState.readers) {
+          try {
+            if (writer instanceof WritableStreamDefaultWriter) {
+              writer.write(value);
+            } else {
+              // Legacy support for ReadableStreamDefaultController
+              (writer as any).enqueue(value);
+            }
+          } catch (e) {
+            // Reader might be closed
+            streamState.readers.delete(writer);
+          }
+        }
+      }
+
+      // Save assistant message if we collected any text
+      if (assistantMessageText) {
+        const assistantMessage: Message = {
+          id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+          role: "assistant",
+          parts: [{ type: "text", text: assistantMessageText }]
+        } as unknown as Message;
+
+        await this.persistMessages([...this.messages, assistantMessage]);
+      }
+    } finally {
+      // Mark stream as completed
+      streamState.fetching = false;
+      streamState.completed = true;
+
+      this.sql`
+        update cf_ai_http_chat_streams
+        set fetching = 0, completed = 1, updated_at = current_timestamp
+        where stream_id = ${streamId}
+      `;
+
+      // Close all readers/writers
+      for (const readerOrWriter of streamState.readers) {
+        try {
+          if (readerOrWriter instanceof WritableStreamDefaultWriter) {
+            readerOrWriter.close();
+          } else {
+            (readerOrWriter as any).close();
+          }
+        } catch {}
+      }
+      streamState.readers.clear();
+    }
+  }
+
+  /**
+   * Create client stream that replays stored chunks and joins live if active
+   */
+  private _createClientStream(streamId: string): Response {
+    // Get or create stream state
+    let streamState = this._activeStreams.get(streamId);
+    if (!streamState) {
+      // Load from database
+      const dbState = this.sql`
+        select * from cf_ai_http_chat_streams
+        where stream_id = ${streamId}
+      `[0] as
+        | { seq: number; fetching: number; completed: number; headers: string }
+        | undefined;
+
+      if (!dbState) {
+        return new Response("Stream not found", { status: 404 });
+      }
+
+      streamState = {
+        seq: dbState.seq,
+        fetching: Boolean(dbState.fetching),
+        completed: Boolean(dbState.completed),
+        timestamp: Date.now(),
+        readers: new Set()
+      };
+      this._activeStreams.set(streamId, streamState);
+    }
+
+    // Create a TransformStream for this client
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+
+    // Fork the readable stream for cleanup monitoring
+    const [toClient, toDrain] = readable.tee();
+
+    // Track writer's last seen sequence
+    let lastSeenSeq = -1;
+
+    // Replay stored chunks and setup live streaming
+    (async () => {
+      try {
+        // 1. Replay stored chunks with concurrency control
+        await this.ctx.blockConcurrencyWhile(async () => {
+          const chunks = this.sql`
+            select seq, chunk from cf_ai_http_chat_chunks
+            where stream_id = ${streamId}
+            order by seq asc
+          `;
+
+          for (const row of chunks) {
+            // Decode base64 back to Uint8Array
+            const chunkBase64 = row.chunk as string;
+            const binaryString = atob(chunkBase64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+              bytes[i] = binaryString.charCodeAt(i);
+            }
+            await writer.write(bytes);
+            lastSeenSeq = row.seq as number;
+          }
+        });
+
+        // 2. If still fetching, add to live readers
+        const currentState = this._activeStreams.get(streamId);
+        if (currentState?.fetching) {
+          currentState.readers.add(writer);
+
+          // 3. Backfill any gaps that occurred during replay
+          await this._backfillGaps(streamId, writer, lastSeenSeq + 1);
+        } else {
+          // Stream is complete
+          await writer.close();
+        }
+      } catch (error) {
+        console.error("Error in client stream:", error);
+        try {
+          await writer.close();
+        } catch {}
+      }
+    })();
+
+    // Clean up writer when client disconnects
+    toDrain.pipeTo(new WritableStream()).catch(() => {
+      const state = this._activeStreams.get(streamId);
+      if (state) {
+        state.readers.delete(writer);
+      }
+    });
+
+    // Get stored headers
+    const dbHeaders = this.sql`
+      select headers from cf_ai_http_chat_streams
+      where stream_id = ${streamId}
+    `[0] as { headers: string } | undefined;
+
+    const headers = dbHeaders?.headers
+      ? JSON.parse(dbHeaders.headers)
+      : {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache"
+        };
+
+    // Add stream metadata headers
+    headers["X-Stream-Id"] = streamId;
+    headers["X-Resumable"] = "true";
+
+    return new Response(toClient, { headers });
+  }
+
+  /**
+   * Backfill any chunks that were written while this writer was joining
+   */
+  private async _backfillGaps(
+    streamId: string,
+    writer: WritableStreamDefaultWriter,
+    startSeq: number
+  ): Promise<void> {
+    const streamState = this._activeStreams.get(streamId);
+    if (!streamState) return;
+
+    let cursor = startSeq;
+    while (cursor < streamState.seq) {
+      const gaps = this.sql`
+        select seq, chunk from cf_ai_http_chat_chunks
+        where stream_id = ${streamId} and seq >= ${cursor} and seq < ${streamState.seq}
+        order by seq asc
+      `;
+
+      for (const row of gaps) {
+        try {
+          const chunkBase64 = row.chunk as string;
+          const binaryString = atob(chunkBase64);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          await writer.write(bytes);
+          cursor = (row.seq as number) + 1;
+        } catch {
+          // Writer closed
+          return;
+        }
+      }
+
+      // Check if more chunks arrived while we were backfilling
+      if (cursor >= streamState.seq) break;
+    }
   }
 
   /**
    * Mark stream as completed
    */
-  private _markStreamCompleted(streamId: string, finalContent?: string): void {
+  private _markStreamCompleted(streamId: string): void {
     const streamState = this._activeStreams.get(streamId);
     if (streamState) {
-      if (finalContent) {
-        streamState.content = finalContent;
-        streamState.position = finalContent.length;
-      }
+      streamState.fetching = false;
       streamState.completed = true;
       streamState.timestamp = Date.now();
+
+      // Close all readers/writers
+      for (const readerOrWriter of streamState.readers) {
+        try {
+          if (readerOrWriter instanceof WritableStreamDefaultWriter) {
+            readerOrWriter.close();
+          } else {
+            (readerOrWriter as any).close();
+          }
+        } catch {}
+      }
+      streamState.readers.clear();
     }
 
-    const content = finalContent || streamState?.content || "";
     this.sql`
-      update cf_ai_http_chat_streams 
-      set content = ${content}, position = ${content.length}, completed = 1, updated_at = current_timestamp
+      update cf_ai_http_chat_streams
+      set fetching = 0, completed = 1, updated_at = current_timestamp
       where stream_id = ${streamId}
     `;
 
-    // Clean up from memory after completion
+    // Clean up from memory after some time
     setTimeout(() => {
       this._activeStreams.delete(streamId);
-    }, 5000); // Keep in memory for 5 seconds after completion
+    }, 60000); // Keep in memory for 1 minute after completion
   }
 
   /**

@@ -1,0 +1,18 @@
+name = "resumable-chat"
+main = "./src/server.ts"
+compatibility_date = "2025-02-21"
+compatibility_flags = [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env",
+  ]
+
+assets = { directory = "public" }
+
+
+[[durable_objects.bindings]]
+name  = "ResumableChatAgent"
+class_name = "ResumableChatAgent"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ResumableChatAgent"]
