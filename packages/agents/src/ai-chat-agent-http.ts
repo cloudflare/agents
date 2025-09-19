@@ -8,13 +8,6 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 const decoder = new TextDecoder();
 
-/**
- * HTTP-based AI Chat Agent with reusable streams support
- * Drops WebSocket dependency in favor of HTTP requests for better AI SDK compatibility
- * @template Env Environment type containing bindings
- * @template State State type for the agent
- * @template Message Message type extending ChatMessage
- */
 export class AIHttpChatAgent<
   Env = unknown,
   State = unknown,
@@ -53,7 +46,6 @@ export class AIHttpChatAgent<
       seq integer not null default 0,
       fetching integer not null default 0,
       completed integer not null default 0,
-      headers text,
       created_at datetime default current_timestamp,
       updated_at datetime default current_timestamp
     )`;
@@ -65,6 +57,15 @@ export class AIHttpChatAgent<
       chunk blob not null,
       created_at datetime default current_timestamp,
       primary key (stream_id, seq)
+    )`;
+
+    // Initialize assistant messages table for accumulated text
+    this.sql`create table if not exists cf_ai_http_chat_assistant_messages (
+      stream_id text primary key,
+      content text not null,
+      message_id text not null,
+      created_at datetime default current_timestamp,
+      updated_at datetime default current_timestamp
     )`;
 
     // Load messages and automatically transform them to v5 format
@@ -149,10 +150,10 @@ export class AIHttpChatAgent<
   private async _handleGetMessages(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const limit = Math.min(
-      parseInt(url.searchParams.get("limit") || "50"),
+      Number.parseInt(url.searchParams.get("limit") || "50", 10),
       100
     );
-    const offset = parseInt(url.searchParams.get("offset") || "0");
+    const offset = Number.parseInt(url.searchParams.get("offset") || "0", 10);
 
     const messages = (
       this.sql`select * from cf_ai_http_chat_messages 
@@ -189,8 +190,13 @@ export class AIHttpChatAgent<
     const body = (await request.json()) as {
       messages?: Message[];
       streamId?: string;
+      includeMessages?: boolean;
     };
-    const { messages: incomingMessages, streamId: requestStreamId } = body;
+    const {
+      messages: incomingMessages,
+      streamId: requestStreamId,
+      includeMessages
+    } = body;
 
     if (!Array.isArray(incomingMessages)) {
       return new Response(
@@ -202,14 +208,16 @@ export class AIHttpChatAgent<
       );
     }
 
-    // Transform and persist incoming messages
-    const transformedMessages = autoTransformMessages(
-      incomingMessages
-    ) as Message[];
-    await this.persistMessages(transformedMessages);
+    // Transform and persist incoming messages (if not resuming)
+    if (incomingMessages.length > 0) {
+      const transformedMessages = autoTransformMessages(
+        incomingMessages
+      ) as Message[];
+      await this.persistMessages(transformedMessages);
+    }
 
     // Generate or reuse stream ID
-    let streamId =
+    const streamId =
       requestStreamId ||
       `stream_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
@@ -235,9 +243,7 @@ export class AIHttpChatAgent<
 
     // Start upstream fetch once (in background) if not already fetching
     if (!streamState || (!streamState.fetching && !streamState.completed)) {
-      // Use blockConcurrencyWhile to prevent race conditions
       await this.ctx.blockConcurrencyWhile(async () => {
-        // Double-check after acquiring lock
         streamState = this._activeStreams.get(streamId);
         if (streamState?.fetching || streamState?.completed) {
           return;
@@ -267,7 +273,7 @@ export class AIHttpChatAgent<
     }
 
     // Create response stream for this client
-    return this._createClientStream(streamId);
+    return this._createClientStream(streamId, includeMessages);
   }
 
   /**
@@ -287,7 +293,7 @@ export class AIHttpChatAgent<
       });
     }
 
-    // Create a new client stream that will replay stored chunks and join live if still fetching
+    // a new client stream that will replay stored chunks and join live if still fetching
     return this._createClientStream(streamId);
   }
 
@@ -409,6 +415,7 @@ export class AIHttpChatAgent<
     if (!streamState) return;
 
     let assistantMessageText = "";
+    const assistantMessageId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     let buffer = "";
 
     try {
@@ -448,7 +455,7 @@ export class AIHttpChatAgent<
               if (data.type === "text-delta" && data.delta) {
                 assistantMessageText += data.delta;
               }
-            } catch (e) {
+            } catch {
               // Ignore parse errors
             }
           }
@@ -461,9 +468,9 @@ export class AIHttpChatAgent<
               writer.write(value);
             } else {
               // Legacy support for ReadableStreamDefaultController
-              (writer as any).enqueue(value);
+              (writer as ReadableStreamDefaultController).enqueue(value);
             }
-          } catch (e) {
+          } catch {
             // Reader might be closed
             streamState.readers.delete(writer);
           }
@@ -473,12 +480,18 @@ export class AIHttpChatAgent<
       // Save assistant message if we collected any text
       if (assistantMessageText) {
         const assistantMessage: Message = {
-          id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+          id: assistantMessageId,
           role: "assistant",
           parts: [{ type: "text", text: assistantMessageText }]
         } as unknown as Message;
 
         await this.persistMessages([...this.messages, assistantMessage]);
+
+        // Store accumulated assistant message for quick resume
+        this.sql`
+          insert into cf_ai_http_chat_assistant_messages (stream_id, content, message_id)
+          values (${streamId}, ${assistantMessageText}, ${assistantMessageId})
+        `;
       }
     } finally {
       // Mark stream as completed
@@ -497,7 +510,7 @@ export class AIHttpChatAgent<
           if (readerOrWriter instanceof WritableStreamDefaultWriter) {
             readerOrWriter.close();
           } else {
-            (readerOrWriter as any).close();
+            (readerOrWriter as ReadableStreamDefaultController).close();
           }
         } catch {}
       }
@@ -508,22 +521,23 @@ export class AIHttpChatAgent<
   /**
    * Create client stream that replays stored chunks and joins live if active
    */
-  private _createClientStream(streamId: string): Response {
-    // Get or create stream state
+  private _createClientStream(
+    streamId: string,
+    includeMessages = false
+  ): Response {
+    // Load from database (single source of truth)
+    const dbState = this.sql`
+      select * from cf_ai_http_chat_streams
+      where stream_id = ${streamId}
+    `[0] as { seq: number; fetching: number; completed: number } | undefined;
+
+    if (!dbState) {
+      return new Response("Stream not found", { status: 404 });
+    }
+
+    // Get or create in-memory state for active readers tracking
     let streamState = this._activeStreams.get(streamId);
     if (!streamState) {
-      // Load from database
-      const dbState = this.sql`
-        select * from cf_ai_http_chat_streams
-        where stream_id = ${streamId}
-      `[0] as
-        | { seq: number; fetching: number; completed: number; headers: string }
-        | undefined;
-
-      if (!dbState) {
-        return new Response("Stream not found", { status: 404 });
-      }
-
       streamState = {
         seq: dbState.seq,
         fetching: Boolean(dbState.fetching),
@@ -572,8 +586,6 @@ export class AIHttpChatAgent<
         const currentState = this._activeStreams.get(streamId);
         if (currentState?.fetching) {
           currentState.readers.add(writer);
-
-          // 3. Backfill any gaps that occurred during replay
           await this._backfillGaps(streamId, writer, lastSeenSeq + 1);
         } else {
           // Stream is complete
@@ -595,22 +607,40 @@ export class AIHttpChatAgent<
       }
     });
 
-    // Get stored headers
-    const dbHeaders = this.sql`
-      select headers from cf_ai_http_chat_streams
-      where stream_id = ${streamId}
-    `[0] as { headers: string } | undefined;
-
-    const headers = dbHeaders?.headers
-      ? JSON.parse(dbHeaders.headers)
-      : {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache"
-        };
+    // Set standard SSE headers
+    const headers: Record<string, string> = {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive"
+    };
 
     // Add stream metadata headers
     headers["X-Stream-Id"] = streamId;
     headers["X-Resumable"] = "true";
+
+    // Include messages in header if requested
+    if (includeMessages) {
+      try {
+        const messages = this.messages;
+        // Use base64 encoding to avoid header encoding issues
+        headers["X-Messages"] = encodeURIComponent(JSON.stringify(messages));
+
+        // Include accumulated assistant message if exists
+        const assistantMsg = this.sql`
+          select content, message_id from cf_ai_http_chat_assistant_messages
+          where stream_id = ${streamId}
+        `[0] as { content: string; message_id: string } | undefined;
+
+        if (assistantMsg) {
+          headers["X-Assistant-Content"] = encodeURIComponent(
+            assistantMsg.content
+          );
+          headers["X-Assistant-Id"] = assistantMsg.message_id;
+        }
+      } catch (e) {
+        console.error("Failed to add messages to header:", e);
+      }
+    }
 
     return new Response(toClient, { headers });
   }
@@ -671,7 +701,7 @@ export class AIHttpChatAgent<
           if (readerOrWriter instanceof WritableStreamDefaultWriter) {
             readerOrWriter.close();
           } else {
-            (readerOrWriter as any).close();
+            (readerOrWriter as ReadableStreamDefaultController).close();
           }
         } catch {}
       }
@@ -736,7 +766,7 @@ export class AIHttpChatAgent<
   /**
    * Clean up old completed streams (call periodically)
    */
-  async cleanupOldStreams(maxAgeHours: number = 24): Promise<void> {
+  async cleanupOldStreams(maxAgeHours = 24): Promise<void> {
     const cutoffTime = new Date(
       Date.now() - maxAgeHours * 60 * 60 * 1000
     ).toISOString();

@@ -16,8 +16,7 @@ type Env = {
 
 export class ResumableChatAgent extends AIHttpChatAgent<Env> {
   async onChatMessage(
-    onFinish: StreamTextOnFinishCallback<ToolSet>,
-    options?: { streamId?: string }
+    onFinish: StreamTextOnFinishCallback<ToolSet>
   ): Promise<Response | undefined> {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {

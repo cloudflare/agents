@@ -8,12 +8,7 @@ import type {
 } from "ai";
 import { DefaultChatTransport } from "ai";
 import { use, useEffect, useRef, useState, useCallback } from "react";
-
-export type AITool<Input = unknown, Output = unknown> = {
-  description?: string;
-  inputSchema?: unknown;
-  execute?: (input: Input) => Output | Promise<Output>;
-};
+import { detectToolsRequiringConfirmation, type AITool } from "./ai-react";
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -29,7 +24,7 @@ type UseChatParams<M extends UIMessage = UIMessage> = ChatInit<M> &
  * Options for the useAgentChatHttp hook
  */
 type UseAgentChatHttpOptions<
-  State,
+  _State,
   ChatMessage extends UIMessage = UIMessage
 > = Omit<UseChatParams<ChatMessage>, "fetch"> & {
   /** Agent name for HTTP requests */
@@ -68,32 +63,6 @@ type UseAgentChatHttpOptions<
 const requestCache = new Map<string, Promise<Message[]>>();
 
 /**
- * Stream state for resumable streams
- */
-interface StreamState {
-  streamId: string;
-  position: number;
-  completed: boolean;
-  lastUpdate: number;
-}
-
-/**
- * Automatically detects which tools require confirmation based on their configuration.
- * Tools require confirmation if they have no execute function AND are not server-executed.
- * @param tools - Record of tool name to tool definition
- * @returns Array of tool names that require confirmation
- */
-export function detectToolsRequiringConfirmation(
-  tools?: Record<string, AITool<unknown, unknown>>
-): string[] {
-  if (!tools) return [];
-
-  return Object.entries(tools)
-    .filter(([_name, tool]) => !tool.execute)
-    .map(([name]) => name);
-}
-
-/**
  * HTTP-based React hook for building AI chat interfaces with resumable streams
  * Uses "poke and pull" pattern instead of WebSockets for real-time updates
  * @param options Chat options including the agent URL
@@ -106,7 +75,6 @@ export function useAgentChatHttp<
   options: UseAgentChatHttpOptions<State, ChatMessage>
 ): ReturnType<typeof useChat<ChatMessage>> & {
   clearChatHistory: () => Promise<void>;
-  activeStreams: StreamState[];
   resumeStream: (streamId: string) => Promise<void>;
   cancelStream: (streamId: string) => Promise<void>;
 } {
@@ -129,10 +97,9 @@ export function useAgentChatHttp<
   const toolsRequiringConfirmation =
     manualToolsRequiringConfirmation ?? detectToolsRequiringConfirmation(tools);
 
-  const [activeStreams, setActiveStreams] = useState<StreamState[]>([]);
+  const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const lastPollingTime = useRef<number>(0);
-  const [currentStreamId, setCurrentStreamId] = useState<string | null>(null);
   const chatHelpersRef = useRef<ReturnType<typeof useChat<ChatMessage>> | null>(
     null
   );
@@ -208,10 +175,9 @@ export function useAgentChatHttp<
    * Custom fetch function for HTTP-based chat
    */
   async function httpChatFetch(
-    request: RequestInfo | URL,
+    _request: RequestInfo | URL,
     options: RequestInit = {}
   ) {
-    const requestUrl = request.toString();
     const chatUrl = `${normalizedAgentUrl}/chat`;
 
     // Parse the request body to check if we should include a stream ID
@@ -219,7 +185,7 @@ export function useAgentChatHttp<
     if (options.body) {
       try {
         body = JSON.parse(options.body as string);
-      } catch (e) {
+      } catch {
         // Not JSON, use as is
       }
     }
@@ -252,19 +218,10 @@ export function useAgentChatHttp<
           sessionStorage.setItem(storageKey, streamId);
         }
 
-        // Track this stream for resumable functionality
-        setActiveStreams((prev) => [
-          ...prev.filter((s) => s.streamId !== streamId),
-          {
-            streamId,
-            position: 0,
-            completed: false,
-            lastUpdate: Date.now()
-          }
-        ]);
-
-        // Start polling for stream updates
-        startPolling();
+        // Start polling for stream updates if needed
+        if (pollingInterval > 0) {
+          startPolling();
+        }
       }
     }
 
@@ -353,49 +310,31 @@ export function useAgentChatHttp<
           }
         }
 
-        // Check active streams for updates
-        let hasActiveStreams = activeStreams.length > 0;
+        // Check if current stream is still active
+        if (enableResumableStreams && currentStreamId) {
+          try {
+            const statusResponse = await fetch(
+              `${normalizedAgentUrl}/stream/${currentStreamId}/status`,
+              { credentials, headers }
+            );
 
-        if (enableResumableStreams && activeStreams.length > 0) {
-          const updatedStreams = await Promise.all(
-            activeStreams.map(async (stream) => {
-              try {
-                const statusResponse = await fetch(
-                  `${normalizedAgentUrl}/stream/${stream.streamId}/status`,
-                  { credentials, headers }
-                );
+            if (statusResponse.ok) {
+              const status = (await statusResponse.json()) as {
+                position: number;
+                completed: boolean;
+              };
 
-                if (statusResponse.ok) {
-                  const status = (await statusResponse.json()) as {
-                    position: number;
-                    completed: boolean;
-                  };
-                  return {
-                    ...stream,
-                    position: status.position,
-                    completed: status.completed,
-                    lastUpdate: now
-                  };
-                }
-              } catch (error) {
-                console.warn(
-                  `Failed to check stream ${stream.streamId}:`,
-                  error
-                );
+              // Stop polling if stream is completed
+              if (status.completed) {
+                setCurrentStreamId(null);
+                stopPolling();
               }
-              return stream;
-            })
-          );
-
-          const activeUpdatedStreams = updatedStreams.filter(
-            (s: StreamState) => !s.completed
-          );
-          setActiveStreams(activeUpdatedStreams);
-          hasActiveStreams = activeUpdatedStreams.length > 0;
-        }
-
-        // Stop polling if no active streams
-        if (!hasActiveStreams) {
+            }
+          } catch (error) {
+            console.warn(`Failed to check stream ${currentStreamId}:`, error);
+          }
+        } else {
+          // No active stream, stop polling
           stopPolling();
         }
       } catch (error) {
@@ -408,7 +347,9 @@ export function useAgentChatHttp<
     credentials,
     headers,
     enableResumableStreams,
-    stopPolling
+    currentStreamId,
+    stopPolling,
+    useChatHelpers
   ]);
 
   /**
@@ -429,31 +370,12 @@ export function useAgentChatHttp<
         );
 
         if (response.ok) {
-          // Stream exists, update state
-          setActiveStreams((prev) => {
-            const existing = prev.find((s) => s.streamId === streamId);
-            if (!existing) {
-              return [
-                ...prev,
-                {
-                  streamId,
-                  position: 0,
-                  completed:
-                    response.headers.get("X-Stream-Complete") === "true",
-                  lastUpdate: Date.now()
-                }
-              ];
-            }
-            return prev.map((s) =>
-              s.streamId === streamId
-                ? {
-                    ...s,
-                    completed:
-                      response.headers.get("X-Stream-Complete") === "true"
-                  }
-                : s
-            );
-          });
+          // Stream exists, just track it
+          const isComplete =
+            response.headers.get("X-Stream-Complete") === "true";
+          if (!isComplete) {
+            setCurrentStreamId(streamId);
+          }
 
           // Consume the stream but don't process it here
           // Let the polling mechanism handle message updates
@@ -484,15 +406,15 @@ export function useAgentChatHttp<
         );
 
         if (response.ok) {
-          setActiveStreams((prev) =>
-            prev.filter((s) => s.streamId !== streamId)
-          );
+          if (currentStreamId === streamId) {
+            setCurrentStreamId(null);
+          }
         }
       } catch (error) {
         console.error(`Failed to cancel stream ${streamId}:`, error);
       }
     },
-    [normalizedAgentUrl, credentials, headers]
+    [normalizedAgentUrl, credentials, headers, currentStreamId]
   );
 
   const processedToolCalls = useRef(new Set<string>());
@@ -557,7 +479,8 @@ export function useAgentChatHttp<
     experimental_automaticToolResolution,
     useChatHelpers.addToolResult,
     useChatHelpers.sendMessage,
-    toolsRequiringConfirmation
+    toolsRequiringConfirmation,
+    tools
   ]);
 
   // Load persisted stream ID on mount and resume if active
@@ -571,24 +494,7 @@ export function useAgentChatHttp<
         // replaying the stored chunks
         (async () => {
           try {
-            // Get current messages first
-            const messagesResponse = await fetch(
-              `${normalizedAgentUrl}/messages`,
-              {
-                credentials,
-                headers
-              }
-            );
-
-            let existingMessages: ChatMessage[] = [];
-            if (messagesResponse.ok) {
-              const data = (await messagesResponse.json()) as {
-                messages?: ChatMessage[];
-              };
-              existingMessages = data.messages || [];
-            }
-
-            // Now reconnect to the stream
+            // Reconnect to the stream - server will provide messages in response
             const response = await fetch(`${normalizedAgentUrl}/chat`, {
               method: "POST",
               credentials,
@@ -597,8 +503,9 @@ export function useAgentChatHttp<
                 "Content-Type": "application/json"
               },
               body: JSON.stringify({
-                messages: existingMessages,
-                streamId: savedStreamId
+                messages: [], // Empty - server will use its persisted messages
+                streamId: savedStreamId,
+                includeMessages: true // Request server to include messages in metadata
               })
             });
 
@@ -607,31 +514,60 @@ export function useAgentChatHttp<
                 `Successfully reconnected to stream ${savedStreamId}`
               );
 
+              // Get messages from response header
+              const messagesHeader = response.headers.get("X-Messages");
+              let existingMessages: ChatMessage[] = [];
+              if (messagesHeader) {
+                try {
+                  existingMessages = JSON.parse(
+                    decodeURIComponent(messagesHeader)
+                  );
+                  chatHelpersRef.current?.setMessages(existingMessages);
+                } catch (e) {
+                  console.warn("Failed to parse messages from header:", e);
+                }
+              }
+
+              // Get assistant message if exists
+              const assistantContentHeader = response.headers.get(
+                "X-Assistant-Content"
+              );
+              const assistantIdHeader = response.headers.get("X-Assistant-Id");
+
+              let assistantContent = "";
+              let assistantMessageId = `assistant_${Date.now()}`;
+
+              if (assistantContentHeader && assistantIdHeader) {
+                // We have the complete assistant message from server
+                assistantContent = decodeURIComponent(assistantContentHeader);
+                assistantMessageId = assistantIdHeader;
+                console.log(
+                  `Resuming with complete assistant message ${assistantMessageId}: "${assistantContent.substring(0, 50)}..."`
+                );
+
+                // Add or update the assistant message in messages
+                const hasAssistant = existingMessages.some(
+                  (m) => m.id === assistantMessageId
+                );
+                if (!hasAssistant && assistantContent) {
+                  const updatedMessages = [
+                    ...existingMessages,
+                    {
+                      id: assistantMessageId,
+                      role: "assistant",
+                      parts: [{ type: "text", text: assistantContent }]
+                    } as unknown as ChatMessage
+                  ];
+                  chatHelpersRef.current?.setMessages(updatedMessages);
+                  existingMessages = updatedMessages;
+                }
+              }
+
               // Process the resumed stream
               const reader = response.body.getReader();
               const decoder = new TextDecoder();
               let buffer = "";
-              let assistantContent = "";
-              let isReplay = true;
-              let assistantMessageId = `assistant_${Date.now()}`;
-
-              // Check if there's already an assistant message in progress
-              const lastExistingMessage =
-                existingMessages[existingMessages.length - 1];
-              if (
-                lastExistingMessage &&
-                lastExistingMessage.role === "assistant"
-              ) {
-                const existingParts = (lastExistingMessage as any).parts || [];
-                const textPart = existingParts.find(
-                  (p: any) => p.type === "text"
-                );
-                assistantContent = textPart?.text || "";
-                assistantMessageId = lastExistingMessage.id;
-                console.log(
-                  `Resuming assistant message ${assistantMessageId} with existing content: "${assistantContent.substring(0, 50)}..."`
-                );
-              }
+              let isReplay = !assistantContentHeader; // If we have content, we're already past replay
 
               const processStream = async () => {
                 try {
@@ -684,10 +620,11 @@ export function useAgentChatHttp<
                               lastMessage &&
                               lastMessage.role === "assistant"
                             ) {
-                              const existingParts = lastMessage.parts || [];
-                              const textPart = existingParts.find(
-                                (p) => p.type === "text"
-                              );
+                              // const existingParts = lastMessage.parts || [];
+                              // Currently not used but kept for potential future use
+                              // const textPart = existingParts.find(
+                              //   (p) => p.type === "text"
+                              // );
 
                               updatedMessages[updatedMessages.length - 1] = {
                                 ...lastMessage,
@@ -773,7 +710,6 @@ export function useAgentChatHttp<
         headers
       });
       useChatHelpers.setMessages([]);
-      setActiveStreams([]);
       setCurrentStreamId(null);
       if (typeof window !== "undefined") {
         sessionStorage.removeItem(storageKey);
@@ -795,12 +731,10 @@ export function useAgentChatHttp<
     // Override with custom implementations
     addToolResult: addToolResultAndSendMessage,
     clearChatHistory,
-    activeStreams,
     resumeStream,
     cancelStream
   } as ReturnType<typeof useChat<ChatMessage>> & {
     clearChatHistory: () => Promise<void>;
-    activeStreams: StreamState[];
     resumeStream: (streamId: string) => Promise<void>;
     cancelStream: (streamId: string) => Promise<void>;
   };

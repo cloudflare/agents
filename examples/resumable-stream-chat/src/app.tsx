@@ -88,6 +88,8 @@ export default function Chat() {
                         {part.text}
                       </div>
                     );
+                  default:
+                    return null;
                 }
               })}
               <br />
