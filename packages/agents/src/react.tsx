@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, use, useMemo, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -27,18 +27,103 @@ function camelCaseToKebabCase(str: string): string {
   return kebabified.replace(/_/g, "-").replace(/-$/, "");
 }
 
+type QueryObject = Record<string, string | null>;
+
+const queryCache = new Map<
+  unknown[],
+  {
+    promise: Promise<QueryObject>;
+    refCount: number;
+    expiresAt: number;
+    cacheTtl?: number;
+  }
+>();
+
+function arraysEqual(a: unknown[], b: unknown[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+
+  for (let i = 0; i < a.length; i++) {
+    if (!Object.is(a[i], b[i])) return false;
+  }
+  return true;
+}
+
+function findCacheEntry(
+  targetKey: unknown[]
+): Promise<QueryObject> | undefined {
+  for (const [existingKey, entry] of queryCache.entries()) {
+    if (arraysEqual(existingKey, targetKey)) {
+      // Check if entry has expired
+      if (Date.now() > entry.expiresAt) {
+        queryCache.delete(existingKey);
+        return undefined;
+      }
+      entry.refCount++;
+      return entry.promise;
+    }
+  }
+  return undefined;
+}
+
+function setCacheEntry(
+  key: unknown[],
+  value: Promise<QueryObject>,
+  cacheTtl?: number
+): void {
+  // Remove any existing entry with matching members
+  for (const [existingKey] of queryCache.entries()) {
+    if (arraysEqual(existingKey, key)) {
+      queryCache.delete(existingKey);
+      break;
+    }
+  }
+
+  const expiresAt = cacheTtl
+    ? Date.now() + cacheTtl
+    : Date.now() + 5 * 60 * 1000; // Default 5 minutes
+  queryCache.set(key, { promise: value, refCount: 1, expiresAt, cacheTtl });
+}
+
+function decrementCacheEntry(targetKey: unknown[]): boolean {
+  for (const [existingKey, entry] of queryCache.entries()) {
+    if (arraysEqual(existingKey, targetKey)) {
+      entry.refCount--;
+      if (entry.refCount <= 0) {
+        queryCache.delete(existingKey);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+function createCacheKey(
+  agentNamespace: string,
+  name: string | undefined,
+  deps: unknown[]
+): unknown[] {
+  return [agentNamespace, name || "default", ...deps];
+}
+
 /**
  * Options for the useAgent hook
  * @template State Type of the Agent's state
  */
 export type UseAgentOptions<State = unknown> = Omit<
   Parameters<typeof usePartySocket>[0],
-  "party" | "room"
+  "party" | "room" | "query"
 > & {
   /** Name of the agent to connect to */
   agent: string;
   /** Name of the specific Agent instance */
   name?: string;
+  /** Query parameters - can be static object or async function */
+  query?: QueryObject | (() => Promise<QueryObject>);
+  /** Dependencies for async query caching */
+  queryDeps?: unknown[];
+  /** Cache TTL in milliseconds for auth tokens/time-sensitive data */
+  cacheTtl?: number;
   /** Called when the Agent's state is updated */
   onStateUpdate?: (state: State, source: "server" | "client") => void;
   /** Called when MCP server state is updated */
@@ -117,10 +202,6 @@ type UntypedAgentStub = Record<string, Method>;
 
 /**
  * React hook for connecting to an Agent
- * @template State Type of the Agent's state
- * @template Agent Type of the Agent
- * @param options Connection options
- * @returns WebSocket connection with setState and call methods
  */
 export function useAgent<State = unknown>(
   options: UseAgentOptions<State>
@@ -155,6 +236,8 @@ export function useAgent<State>(
   stub: UntypedAgentStub;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
+  const { query, queryDeps, cacheTtl, ...restOptions } = options;
+
   // Keep track of pending RPC calls
   const pendingCallsRef = useRef(
     new Map<
@@ -167,14 +250,82 @@ export function useAgent<State>(
     >()
   );
 
-  // TODO: if options.query is a function, then use
-  // "use()" to get the value and pass it
-  // as a query parameter to usePartySocket
+  // Handle both sync and async query patterns
+  const cacheKey = useMemo(() => {
+    const deps = queryDeps || [];
+    return createCacheKey(agentNamespace, options.name, deps);
+  }, [agentNamespace, options.name, queryDeps]);
+
+  const queryPromise = useMemo(() => {
+    if (!query || typeof query !== "function") {
+      return null;
+    }
+
+    const existingPromise = findCacheEntry(cacheKey);
+    if (existingPromise) {
+      return existingPromise;
+    }
+
+    const promise = query().catch((error) => {
+      console.error(
+        `[useAgent] Query failed for agent "${options.agent}":`,
+        error
+      );
+      decrementCacheEntry(cacheKey); // Remove failed promise from cache
+      throw error; // Re-throw for Suspense error boundary
+    });
+
+    setCacheEntry(cacheKey, promise, cacheTtl);
+
+    return promise;
+  }, [cacheKey, query, options.agent, cacheTtl]);
+
+  let resolvedQuery: QueryObject | undefined;
+
+  if (query) {
+    if (typeof query === "function") {
+      // Use React's use() to resolve the promise
+      const queryResult = use(queryPromise!);
+
+      // Check for non-primitive values and warn
+      if (queryResult) {
+        for (const [key, value] of Object.entries(queryResult)) {
+          if (
+            value !== null &&
+            value !== undefined &&
+            typeof value !== "string" &&
+            typeof value !== "number" &&
+            typeof value !== "boolean"
+          ) {
+            console.warn(
+              `[useAgent] Query parameter "${key}" is an object and will be converted to "[object Object]". ` +
+                "Query parameters should be string, number, boolean, or null."
+            );
+          }
+        }
+        resolvedQuery = queryResult;
+      }
+    } else {
+      // Sync query - use directly
+      resolvedQuery = query;
+    }
+  }
+
+  // Cleanup cache on unmount
+  useEffect(() => {
+    return () => {
+      if (queryPromise) {
+        decrementCacheEntry(cacheKey);
+      }
+    };
+  }, [cacheKey, queryPromise]);
+
   const agent = usePartySocket({
     party: agentNamespace,
     prefix: "agents",
     room: options.name || "default",
-    ...options,
+    query: resolvedQuery as Record<string, string | null | undefined>,
+    ...restOptions,
     onMessage: (message) => {
       if (typeof message.data === "string") {
         let parsedMessage: Record<string, unknown>;

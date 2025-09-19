@@ -101,3 +101,7 @@ button:hover {
   border-radius: 50%;
   background-color: #22c55e;
 }
+
+.auth-controls {
+  margin-bottom: 15px;
+}
