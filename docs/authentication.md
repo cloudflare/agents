@@ -1,10 +1,10 @@
-# Authentication
+# Cross-Domain Authentication
 
 When your Agents are deployed, to keep things secure, send a token from the client, then verify it on the server. This mirrors the shape used in PartyKit’s auth guide.
 
 ## WebSocket authentication
 
-WebSockets are not HTTP, so the handshake is limited.
+WebSockets are not HTTP, so the handshake is limited when making cross-domain connections.
 
 **What you cannot send**
 
@@ -42,7 +42,7 @@ function ChatComponent() {
     }
   });
 
-  return <div>Agent: {agent.agent}</div>;
+  // Use agent to make calls, access state, etc.
 }
 ```
 
@@ -69,7 +69,7 @@ function ChatComponent() {
     query: asyncQuery
   });
 
-  return <div>Agent: {agent.agent}</div>;
+  // Use agent to make calls, access state, etc.
 }
 
 <Suspense fallback={<div>Authenticating...</div>}>
@@ -79,17 +79,18 @@ function ChatComponent() {
 
 ### JWT refresh pattern
 
-Refresh the token when it expires, then reconnect with fresh credentials.
+Refresh the token when the connection fails due to authentication error.
 
 ```ts
 import { useAgent } from "agents/react";
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 
 function useJWTAgent(agentName: string) {
   const asyncQuery = useCallback(async () => {
     let token = localStorage.getItem("jwt");
 
-    if (!token || isTokenExpired(token)) {
+    // In practice, you'll only know the token expired when the call fails
+    if (!token) {
       token = await refreshToken();
       localStorage.setItem("jwt", token);
     }
@@ -100,12 +101,15 @@ function useJWTAgent(agentName: string) {
     };
   }, []);
 
-  return useAgent({
+  const agent = useAgent({
     agent: agentName,
     query: asyncQuery,
     queryDeps: [], // Run on mount
     debug: true
   });
+
+  // Handle authentication errors
+  // Token expired, refresh and reconnect
 }
 ```
 
@@ -128,7 +132,7 @@ function StaticCrossDomainAuth() {
     }
   });
 
-  return <div>Cross-domain agent: {agent.agent}</div>;
+  // Use agent to make calls, access state, etc.
 }
 
 // Async cross-domain auth
@@ -149,13 +153,13 @@ function AsyncCrossDomainAuth() {
     debug: true
   });
 
-  return <div>Cross-domain agent: {agent.agent}</div>;
+  // Use agent to make calls, access state, etc.
 }
 ```
 
 ## HTTP authentication
 
-For HTTP calls you can use headers and credentials.
+For HTTP calls made through `useAgentChat`, you can use headers and credentials.
 
 ```ts
 import { useAgentChat } from "agents/ai-react";
@@ -176,7 +180,7 @@ const chat = useAgentChat({
   }
 });
 
-// Session based
+// Session based (same-origin only)
 const chat = useAgentChat({
   agent,
   credentials: "include" // Sends cookies

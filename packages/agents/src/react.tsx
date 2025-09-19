@@ -27,7 +27,7 @@ function camelCaseToKebabCase(str: string): string {
   return kebabified.replace(/_/g, "-").replace(/-$/, "");
 }
 
-type QueryObject = Record<string, string | number | boolean | null>;
+type QueryObject = Record<string, string | null>;
 
 const queryCache = new Map<
   unknown[],
