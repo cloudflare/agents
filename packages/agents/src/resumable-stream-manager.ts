@@ -380,25 +380,77 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     const assistantMessageId = `assistant_${nanoid()}`;
     let buffer = "";
 
+    let completedNaturally = false;
     try {
       while (true) {
+        // Check if stream was completed by onFinish callback
+        const currentState = this._activeStreams.get(streamId);
+        if (currentState?.completed) {
+          // Ensure database state is synchronized
+          try {
+            this.sql`
+              update cf_ai_http_chat_streams
+              set fetching = 0, completed = 1, updated_at = current_timestamp
+              where stream_id = ${streamId}
+            `;
+          } catch (sqlError) {
+            console.error(
+              `[ResumableStreamManager] Error syncing completion state for ${streamId}:`,
+              sqlError
+            );
+          }
+
+          completedNaturally = true;
+          break;
+        }
+
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          completedNaturally = true;
+          break;
+        }
 
-        // Store raw chunk with sequence number
-        const seq = streamState.seq++;
+        // Store raw chunk with sequence number atomically
         const chunkBase64 = btoa(String.fromCharCode(...value));
-        this.sql`
-          insert into cf_ai_http_chat_chunks (stream_id, seq, chunk)
-          values (${streamId}, ${seq}, ${chunkBase64})
-        `;
 
-        // Update sequence in stream state
-        this.sql`
-          update cf_ai_http_chat_streams
-          set seq = ${streamState.seq}, updated_at = current_timestamp
-          where stream_id = ${streamId}
-        `;
+        try {
+          // Atomically get next sequence number and insert chunk
+          const seqResult = this.sql`
+            update cf_ai_http_chat_streams
+            set seq = seq + 1, updated_at = current_timestamp
+            where stream_id = ${streamId}
+            returning seq
+          `;
+
+          const seq = Number(seqResult[0]?.seq) || streamState.seq++;
+
+          this.sql`
+            insert into cf_ai_http_chat_chunks (stream_id, seq, chunk)
+            values (${streamId}, ${seq}, ${chunkBase64})
+          `;
+
+          // Update in-memory state to match database
+          streamState.seq = seq + 1;
+        } catch (sqlError) {
+          console.error(
+            `[ResumableStreamManager] SQL error for stream ${streamId}:`,
+            sqlError
+          );
+          // Fall back to in-memory sequence if SQL fails
+          const seq = streamState.seq++;
+          try {
+            this.sql`
+              insert into cf_ai_http_chat_chunks (stream_id, seq, chunk)
+              values (${streamId}, ${seq}, ${chunkBase64})
+            `;
+          } catch (fallbackError) {
+            console.error(
+              `[ResumableStreamManager] Fallback SQL error for stream ${streamId}:`,
+              fallbackError
+            );
+            // Continue processing even if storage fails
+          }
+        }
 
         // Parse for assistant message content
         const chunk = decoder.decode(value, { stream: true });
@@ -456,33 +508,28 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
         await persistMessages([...messages, assistantMessage]);
       }
     } finally {
-      // Mark stream as completed
-      streamState.fetching = false;
-      streamState.completed = true;
-
-      this.sql`
-        update cf_ai_http_chat_streams
-        set fetching = 0, completed = 1, updated_at = current_timestamp
-        where stream_id = ${streamId}
-      `;
-
-      // Close all readers/writers
-      for (const readerOrWriter of streamState.readers) {
+      // Only mark as completed if stream finished naturally, not if interrupted
+      if (completedNaturally) {
+        this._markStreamCompleted(streamId);
+      } else {
+        // Stream was interrupted - update fetching state but don't mark as completed
+        const currentState = this._activeStreams.get(streamId);
+        if (currentState) {
+          currentState.fetching = false;
+        }
         try {
-          if (readerOrWriter instanceof WritableStreamDefaultWriter) {
-            readerOrWriter.close();
-          } else {
-            // Handle ReadableStreamDefaultController
-            if (
-              "close" in readerOrWriter &&
-              typeof readerOrWriter.close === "function"
-            ) {
-              readerOrWriter.close();
-            }
-          }
-        } catch {}
+          this.sql`
+            update cf_ai_http_chat_streams
+            set fetching = 0, updated_at = current_timestamp
+            where stream_id = ${streamId}
+          `;
+        } catch (sqlError) {
+          console.error(
+            `[ResumableStreamManager] Error updating fetching state for ${streamId}:`,
+            sqlError
+          );
+        }
       }
-      streamState.readers.clear();
     }
   }
 
@@ -566,13 +613,29 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
           }
         });
 
-        // 2. If still fetching, add to live readers
+        // 2. Check if stream is truly complete by verifying both in-memory and database state
         const currentState = this._activeStreams.get(streamId);
-        if (currentState?.fetching) {
-          currentState.readers.add(writer);
+
+        // Get the latest database state to ensure consistency
+        const dbState = this.sql`
+          select fetching, completed from cf_ai_http_chat_streams
+          where stream_id = ${streamId}
+        `[0] as unknown as
+          | Pick<StreamStateRow, "fetching" | "completed">
+          | undefined;
+
+        const isStillFetching =
+          currentState?.fetching || dbState?.fetching === 1;
+        const isCompleted = currentState?.completed && dbState?.completed === 1;
+
+        if (isStillFetching && !isCompleted) {
+          // Stream is still active, join as live reader
+          if (currentState) {
+            currentState.readers.add(writer);
+          }
           await this._backfillGaps(streamId, writer, lastSeenSeq + 1);
         } else {
-          // Stream is complete
+          // Stream is complete, close writer
           await writer.close();
         }
       } catch (error) {
@@ -687,11 +750,20 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       streamState.readers.clear();
     }
 
-    this.sql`
-      update cf_ai_http_chat_streams
-      set fetching = 0, completed = 1, updated_at = current_timestamp
-      where stream_id = ${streamId}
-    `;
+    // Update database state with error handling
+    try {
+      this.sql`
+        update cf_ai_http_chat_streams
+        set fetching = 0, completed = 1, updated_at = current_timestamp
+        where stream_id = ${streamId}
+      `;
+    } catch (sqlError) {
+      console.error(
+        `[ResumableStreamManager] Error marking stream ${streamId} completed:`,
+        sqlError
+      );
+      // Stream is still marked as completed in memory even if SQL fails
+    }
 
     // Clean up from memory after some time
     setTimeout(() => {

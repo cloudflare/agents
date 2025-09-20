@@ -8,6 +8,11 @@
     "enable_nodejs_http_modules",
     "enable_nodejs_perf_hooks_module"
   ],
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "durable_objects": {
     "bindings": [
       {

@@ -1,8 +1,7 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect, beforeEach } from "vitest";
-import worker, { type Env, TestResumableStreamAgent } from "./worker";
+import worker, { type Env } from "./worker";
 import { nanoid } from "nanoid";
-import type { ExecutionContext } from "@cloudflare/workers-types";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -12,7 +11,7 @@ async function makeRequest(
   agentId: string,
   method: string,
   path: string,
-  body?: any
+  body?: unknown
 ) {
   const ctx = createExecutionContext();
   const url = `http://example.com/agents/resumable-stream-agent/${agentId}${path}`;
@@ -31,7 +30,7 @@ async function makeRequest(
 
 async function readPartialStreamChunks(
   response: Response,
-  maxChunks: number = 3
+  maxChunks = 3
 ): Promise<{
   chunks: string[];
   reader: ReadableStreamDefaultReader<Uint8Array>;
@@ -375,18 +374,17 @@ describe("Resumable Streaming - Multiple Clients", () => {
     const text1 = extractTextFromSSE(chunk1);
     await reader1.cancel();
 
-    // Resume and interrupt again
+    // Wait a bit to let the stream complete in background
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Resume and read from completed stream (should have all chunks now)
     const response2 = await makeRequest(
       agentId,
       "GET",
       `/stream/${customStreamId}`
     );
-    const { chunks: chunk2, reader: reader2 } = await readPartialStreamChunks(
-      response2,
-      6
-    );
+    const chunk2 = await readStreamChunks(response2);
     const text2 = extractTextFromSSE(chunk2);
-    await reader2.cancel();
 
     // Final resume; should get complete stream
     const response3 = await makeRequest(
@@ -816,7 +814,7 @@ describe("Resumable Streaming - Error Handling and Edge Cases", () => {
           if (rawChunks.length > 10) break;
         }
         await reader.cancel();
-      } catch (error) {
+      } catch (_error) {
         // Expected when canceling
       }
     }

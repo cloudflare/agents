@@ -11,7 +11,11 @@ import {
   type WSMessage
 } from "../index.ts";
 import { AIChatAgent } from "../ai-chat-agent.ts";
-import type { UIMessage as ChatMessage } from "ai";
+import type {
+  UIMessage as ChatMessage,
+  StreamTextOnFinishCallback,
+  ToolSet
+} from "ai";
 import type { MCPClientConnection } from "../mcp/client-connection";
 import { AIHttpChatAgent } from "../ai-chat-agent-http.ts";
 
@@ -404,7 +408,7 @@ export class TestResumableStreamAgent extends AIHttpChatAgent<
   // Track requests for testing
   requestHistory: Array<{ method: string; url: string; body?: unknown }> = [];
 
-  constructor(ctx: any, env: Env) {
+  constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
     // Set up some mock responses
@@ -420,7 +424,7 @@ export class TestResumableStreamAgent extends AIHttpChatAgent<
   }
 
   async onChatMessage(
-    onFinish: any,
+    onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: { streamId?: string }
   ): Promise<Response | undefined> {
     // Track the request
@@ -443,7 +447,7 @@ export class TestResumableStreamAgent extends AIHttpChatAgent<
       .join(" ");
 
     // Find mock response or use default
-    let responseText =
+    const responseText =
       this.mockResponses.get(content.toLowerCase()) || `Echo: ${content}`;
 
     // Create a streaming response
@@ -468,8 +472,22 @@ export class TestResumableStreamAgent extends AIHttpChatAgent<
         controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
         controller.close();
 
-        // Call onFinish
-        await onFinish();
+        // Call onFinish with mock result for testing
+        await onFinish({
+          text: responseText,
+          toolCalls: [],
+          toolResults: [],
+          finishReason: "stop",
+          usage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0
+          },
+          rawResponse: {
+            headers: {}
+          },
+          warnings: []
+        } as unknown as Parameters<typeof onFinish>[0]);
       }
     });
 
