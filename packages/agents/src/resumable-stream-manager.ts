@@ -5,17 +5,38 @@ import type {
 } from "ai";
 import type { AgentContext } from "./";
 
-// Type for SQL query function to avoid using 'any'
 type SqlQueryFunction = <T = Record<string, string | number | boolean | null>>(
   strings: TemplateStringsArray,
   ...values: (string | number | boolean | null)[]
 ) => T[];
 
+interface StreamStateRow {
+  stream_id: string;
+  seq: number;
+  fetching: number;
+  completed: number;
+  created_at?: string;
+  updated_at?: string;
+  headers?: string;
+}
+
+interface ChunkRow {
+  stream_id: string;
+  seq: number;
+  chunk: string;
+  created_at?: string;
+}
+
+interface StreamStatusRow {
+  content: string;
+  position: number;
+  completed: number;
+  created_at: string;
+  updated_at: string;
+}
+
 const decoder = new TextDecoder();
 
-/**
- * Manages resumable streaming functionality with persistence and resumption capabilities
- */
 export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
   /** Map of stream IDs to their current state for resumable streams */
   private _activeStreams: Map<
@@ -45,7 +66,6 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
    * Initialize database tables for resumable streaming
    */
   private _initializeTables(): void {
-    // Initialize stream state table for resumable streams
     this.sql`create table if not exists cf_ai_http_chat_streams (
       stream_id text primary key,
       seq integer not null default 0,
@@ -62,15 +82,6 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       chunk blob not null,
       created_at datetime default current_timestamp,
       primary key (stream_id, seq)
-    )`;
-
-    // Initialize assistant messages table for accumulated text
-    this.sql`create table if not exists cf_ai_http_chat_assistant_messages (
-      stream_id text primary key,
-      content text not null,
-      message_id text not null,
-      created_at datetime default current_timestamp,
-      updated_at datetime default current_timestamp
     )`;
   }
 
@@ -96,7 +107,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       const dbState = this.sql`
         select * from cf_ai_http_chat_streams
         where stream_id = ${actualStreamId}
-      `[0] as { seq: number; fetching: number; completed: number } | undefined;
+      `[0] as unknown as StreamStateRow | undefined;
 
       if (dbState) {
         console.log(
@@ -183,7 +194,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     const streamState = this.sql`
       select * from cf_ai_http_chat_streams
       where stream_id = ${streamId}
-    `[0] as { seq: number; fetching: number; completed: number } | undefined;
+    `[0] as unknown as StreamStateRow | undefined;
 
     if (!streamState) {
       return new Response(JSON.stringify({ error: "Stream not found" }), {
@@ -222,15 +233,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     const streamState = this.sql`
       select * from cf_ai_http_chat_streams 
       where stream_id = ${streamId}
-    `[0] as
-      | {
-          content: string;
-          position: number;
-          completed: number;
-          created_at: string;
-          updated_at: string;
-        }
-      | undefined;
+    `[0] as unknown as StreamStatusRow | undefined;
 
     if (!streamState) {
       return new Response(JSON.stringify({ error: "Stream not found" }), {
@@ -258,7 +261,6 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
   async clearStreams(): Promise<void> {
     this.sql`delete from cf_ai_http_chat_streams`;
     this.sql`delete from cf_ai_http_chat_chunks`;
-    this.sql`delete from cf_ai_http_chat_assistant_messages`;
     this._activeStreams.clear();
   }
 
@@ -277,14 +279,6 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
 
     this.sql`
       delete from cf_ai_http_chat_chunks 
-      where stream_id in (
-        select stream_id from cf_ai_http_chat_streams 
-        where completed = 1 and updated_at < ${cutoffTime}
-      )
-    `;
-
-    this.sql`
-      delete from cf_ai_http_chat_assistant_messages 
       where stream_id in (
         select stream_id from cf_ai_http_chat_streams 
         where completed = 1 and updated_at < ${cutoffTime}
@@ -310,7 +304,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       );
 
       const response = await onChatMessage(
-        async (_finishResult) => {
+        async () => {
           // Mark stream as completed
           console.log(`[ResumableStreamManager] Stream ${streamId} finished`);
           this._markStreamCompleted(streamId);
@@ -422,36 +416,36 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
         }
 
         // Broadcast to all active readers (writers)
-        for (const writer of streamState.readers) {
+        for (const readerOrWriter of streamState.readers) {
           try {
-            if (writer instanceof WritableStreamDefaultWriter) {
-              writer.write(value);
+            if (readerOrWriter instanceof WritableStreamDefaultWriter) {
+              readerOrWriter.write(value);
             } else {
-              // Legacy support for ReadableStreamDefaultController
-              (writer as ReadableStreamDefaultController).enqueue(value);
+              // Handle ReadableStreamDefaultController
+              if (
+                "enqueue" in readerOrWriter &&
+                typeof readerOrWriter.enqueue === "function"
+              ) {
+                readerOrWriter.enqueue(value);
+              }
             }
           } catch {
             // Reader might be closed
-            streamState.readers.delete(writer);
+            streamState.readers.delete(readerOrWriter);
           }
         }
       }
 
       // Save assistant message if we collected any text
       if (assistantMessageText) {
-        const assistantMessage: Message = {
+        // Create assistant message with proper typing
+        const assistantMessage = {
           id: assistantMessageId,
-          role: "assistant",
-          parts: [{ type: "text", text: assistantMessageText }]
-        } as unknown as Message;
+          role: "assistant" as const,
+          parts: [{ type: "text" as const, text: assistantMessageText }]
+        } as Message;
 
         await persistMessages([...messages, assistantMessage]);
-
-        // Store accumulated assistant message for quick resume
-        this.sql`
-          insert into cf_ai_http_chat_assistant_messages (stream_id, content, message_id)
-          values (${streamId}, ${assistantMessageText}, ${assistantMessageId})
-        `;
       }
     } finally {
       // Mark stream as completed
@@ -470,7 +464,13 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
           if (readerOrWriter instanceof WritableStreamDefaultWriter) {
             readerOrWriter.close();
           } else {
-            (readerOrWriter as ReadableStreamDefaultController).close();
+            // Handle ReadableStreamDefaultController
+            if (
+              "close" in readerOrWriter &&
+              typeof readerOrWriter.close === "function"
+            ) {
+              readerOrWriter.close();
+            }
           }
         } catch {}
       }
@@ -490,11 +490,10 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       `[ResumableStreamManager] Creating client stream for ${streamId}`
     );
 
-    // Load from database (single source of truth)
     const dbState = this.sql`
       select * from cf_ai_http_chat_streams
       where stream_id = ${streamId}
-    `[0] as { seq: number; fetching: number; completed: number } | undefined;
+    `[0] as unknown as StreamStateRow | undefined;
 
     console.log(`[ResumableStreamManager] DB state for ${streamId}:`, dbState);
 
@@ -503,7 +502,6 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       return new Response("Stream not found", { status: 404 });
     }
 
-    // Get or create in-memory state for active readers tracking
     let streamState = this._activeStreams.get(streamId);
     if (!streamState) {
       console.log(
@@ -545,18 +543,18 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
             select seq, chunk from cf_ai_http_chat_chunks
             where stream_id = ${streamId}
             order by seq asc
-          `;
+          ` as unknown as Pick<ChunkRow, "seq" | "chunk">[];
 
           for (const row of chunks) {
             // Decode base64 back to Uint8Array
-            const chunkBase64 = row.chunk as string;
+            const chunkBase64 = row.chunk;
             const binaryString = atob(chunkBase64);
             const bytes = new Uint8Array(binaryString.length);
             for (let i = 0; i < binaryString.length; i++) {
               bytes[i] = binaryString.charCodeAt(i);
             }
             await writer.write(bytes);
-            lastSeenSeq = row.seq as number;
+            lastSeenSeq = row.seq;
           }
         });
 
@@ -602,18 +600,8 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
         // Use base64 encoding to avoid header encoding issues
         headers["X-Messages"] = encodeURIComponent(JSON.stringify(messages));
 
-        // Include accumulated assistant message if exists
-        const assistantMsg = this.sql`
-          select content, message_id from cf_ai_http_chat_assistant_messages
-          where stream_id = ${streamId}
-        `[0] as { content: string; message_id: string } | undefined;
-
-        if (assistantMsg) {
-          headers["X-Assistant-Content"] = encodeURIComponent(
-            assistantMsg.content
-          );
-          headers["X-Assistant-Id"] = assistantMsg.message_id;
-        }
+        // Note: Assistant message content is delivered through the stream itself
+        // No need to duplicate it in headers since it's already available via persistMessages()
       } catch (e) {
         console.error("Failed to add messages to header:", e);
       }
@@ -639,18 +627,18 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
         select seq, chunk from cf_ai_http_chat_chunks
         where stream_id = ${streamId} and seq >= ${cursor} and seq < ${streamState.seq}
         order by seq asc
-      `;
+      ` as unknown as Pick<ChunkRow, "seq" | "chunk">[];
 
       for (const row of gaps) {
         try {
-          const chunkBase64 = row.chunk as string;
+          const chunkBase64 = row.chunk;
           const binaryString = atob(chunkBase64);
           const bytes = new Uint8Array(binaryString.length);
           for (let i = 0; i < binaryString.length; i++) {
             bytes[i] = binaryString.charCodeAt(i);
           }
           await writer.write(bytes);
-          cursor = (row.seq as number) + 1;
+          cursor = row.seq + 1;
         } catch {
           // Writer closed
           return;
@@ -678,7 +666,13 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
           if (readerOrWriter instanceof WritableStreamDefaultWriter) {
             readerOrWriter.close();
           } else {
-            (readerOrWriter as ReadableStreamDefaultController).close();
+            // Handle ReadableStreamDefaultController
+            if (
+              "close" in readerOrWriter &&
+              typeof readerOrWriter.close === "function"
+            ) {
+              readerOrWriter.close();
+            }
           }
         } catch {}
       }
