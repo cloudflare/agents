@@ -1,6 +1,7 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef } from "react";
+import { nanoid } from "nanoid";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -239,7 +240,7 @@ export function useAgent<State>(
       streamOptions?: StreamOptions
     ): Promise<T> => {
       return new Promise((resolve, reject) => {
-        const id = Math.random().toString(36).slice(2);
+        const id = nanoid();
         pendingCallsRef.current.set(id, {
           reject,
           resolve: resolve as (value: unknown) => void,

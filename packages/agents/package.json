@@ -82,6 +82,26 @@
       "types": "./dist/schedule.d.ts",
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
+    },
+    "./ai-chat-agent-http": {
+      "types": "./dist/ai-chat-agent-http.d.ts",
+      "import": "./dist/ai-chat-agent-http.js",
+      "require": "./dist/ai-chat-agent-http.js"
+    },
+    "./use-agent-chat-http": {
+      "types": "./dist/use-agent-chat-http.d.ts",
+      "import": "./dist/use-agent-chat-http.js",
+      "require": "./dist/use-agent-chat-http.js"
+    },
+    "./ai-chat-agent-resumable-http": {
+      "types": "./dist/ai-chat-agent-resumable-http.d.ts",
+      "import": "./dist/ai-chat-agent-resumable-http.js",
+      "require": "./dist/ai-chat-agent-resumable-http.js"
+    },
+    "./use-agent-chat-resumable-http": {
+      "types": "./dist/use-agent-chat-resumable-http.d.ts",
+      "import": "./dist/use-agent-chat-resumable-http.js",
+      "require": "./dist/use-agent-chat-resumable-http.js"
     }
   },
   "files": [
