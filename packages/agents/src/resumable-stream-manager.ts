@@ -344,17 +344,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
         return;
       }
 
-      // Store response headers
-      const headers: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        headers[key] = value;
-      });
-
-      this.sql`
-        update cf_ai_http_chat_streams
-        set headers = ${JSON.stringify(headers)}
-        where stream_id = ${streamId}
-      `;
+      // Headers are captured and handled in the response stream
 
       console.log(
         `[ResumableStreamManager] Starting to pipe upstream response for stream ${streamId}`

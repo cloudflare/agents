@@ -13,6 +13,7 @@ import {
 import { AIChatAgent } from "../ai-chat-agent.ts";
 import type { UIMessage as ChatMessage } from "ai";
 import type { MCPClientConnection } from "../mcp/client-connection";
+import { AIHttpChatAgent } from "../ai-chat-agent-http.ts";
 
 interface ToolCallPart {
   type: string;
@@ -30,6 +31,7 @@ export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
+  ResumableStreamAgent: DurableObjectNamespace<TestResumableStreamAgent>;
 };
 
 type State = unknown;
@@ -387,6 +389,118 @@ export class TestMcpJurisdiction extends McpAgent<Env> {
         content: [{ text: `Echo: ${message}`, type: "text" }]
       })
     );
+  }
+}
+
+// Test agent for resumable streaming functionality
+export class TestResumableStreamAgent extends AIHttpChatAgent<
+  Env,
+  unknown,
+  ChatMessage
+> {
+  // Mock AI response for testing
+  private mockResponses: Map<string, string> = new Map();
+
+  // Track requests for testing
+  requestHistory: Array<{ method: string; url: string; body?: unknown }> = [];
+
+  constructor(ctx: any, env: Env) {
+    super(ctx, env);
+
+    // Set up some mock responses
+    this.mockResponses.set("hello", "Hello! How can I help you today?");
+    this.mockResponses.set(
+      "test",
+      "This is a test response for resumable streaming."
+    );
+    this.mockResponses.set(
+      "long",
+      "This is a much longer response that will be streamed in multiple chunks. It contains enough text to demonstrate the chunking behavior of the resumable streaming system. The response continues with more content to ensure we have sufficient data for testing resumption scenarios."
+    );
+  }
+
+  async onChatMessage(
+    onFinish: any,
+    options?: { streamId?: string }
+  ): Promise<Response | undefined> {
+    // Track the request
+    this.requestHistory.push({
+      method: "chat",
+      url: options?.streamId || "unknown",
+      body: { messages: this.messages }
+    });
+
+    // Get the last user message
+    const lastMessage = this.messages.filter((m) => m.role === "user").pop();
+
+    if (!lastMessage || !lastMessage.parts) {
+      return new Response("No message content", { status: 400 });
+    }
+
+    const content = lastMessage.parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join(" ");
+
+    // Find mock response or use default
+    let responseText =
+      this.mockResponses.get(content.toLowerCase()) || `Echo: ${content}`;
+
+    // Create a streaming response
+    const stream = new ReadableStream({
+      async start(controller) {
+        const chunks = responseText.match(/.{1,10}/g) || [responseText];
+
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          const sseData = `data: ${JSON.stringify({
+            type: "text-delta",
+            delta: chunk
+          })}\n\n`;
+
+          controller.enqueue(new TextEncoder().encode(sseData));
+
+          // Small delay to simulate real streaming
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        // End the stream
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+
+        // Call onFinish
+        await onFinish();
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+      }
+    });
+  }
+
+  // Helper method to set mock response for testing
+  setMockResponse(input: string, response: string) {
+    this.mockResponses.set(input.toLowerCase(), response);
+  }
+
+  // Helper method to get request history for testing
+  getRequestHistory() {
+    return [...this.requestHistory];
+  }
+
+  // Helper method to clear history
+  clearHistory() {
+    this.requestHistory = [];
+    this.messages = [];
+  }
+
+  override onError(error: unknown): void {
+    // Don't console.error in tests to avoid queueMicrotask issues
+    throw error;
   }
 }
 
