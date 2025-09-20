@@ -3,12 +3,8 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
+import { nanoid } from "nanoid";
 import type { AgentContext } from "./";
-
-type SqlQueryFunction = <T = Record<string, string | number | boolean | null>>(
-  strings: TemplateStringsArray,
-  ...values: (string | number | boolean | null)[]
-) => T[];
 
 interface StreamStateRow {
   stream_id: string;
@@ -53,9 +49,18 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
   >;
 
   private ctx: AgentContext;
-  private sql: SqlQueryFunction;
+  private sql: <T = Record<string, string | number | boolean | null>>(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ) => T[];
 
-  constructor(ctx: AgentContext, sql: SqlQueryFunction) {
+  constructor(
+    ctx: AgentContext,
+    sql: <T = Record<string, string | number | boolean | null>>(
+      strings: TemplateStringsArray,
+      ...values: (string | number | boolean | null)[]
+    ) => T[]
+  ) {
     this.ctx = ctx;
     this.sql = sql;
     this._activeStreams = new Map();
@@ -265,6 +270,19 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
   }
 
   /**
+   * Destroy all resumable streaming
+   * Should be called during Agent destruction
+   */
+  async destroy(): Promise<void> {
+    // Clear in-memory state first
+    this._activeStreams.clear();
+
+    // Drop all tables
+    this.sql`DROP TABLE IF EXISTS cf_ai_http_chat_streams`;
+    this.sql`DROP TABLE IF EXISTS cf_ai_http_chat_chunks`;
+  }
+
+  /**
    * Clean up old completed streams (call periodically)
    */
   async cleanupOldStreams(maxAgeHours = 24): Promise<void> {
@@ -369,7 +387,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     if (!streamState) return;
 
     let assistantMessageText = "";
-    const assistantMessageId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const assistantMessageId = `assistant_${nanoid()}`;
     let buffer = "";
 
     try {

@@ -3,6 +3,7 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
+import { nanoid } from "nanoid";
 import { Agent, type AgentContext } from "./";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import { ResumableStreamManager } from "./resumable-stream-manager";
@@ -178,9 +179,7 @@ export class AIHttpChatAgent<
     }
 
     // Generate or reuse stream ID
-    const streamId =
-      requestStreamId ||
-      `stream_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const streamId = requestStreamId || `stream_${nanoid()}`;
 
     // Delegate to stream manager
     return this._streamManager.startStream(
@@ -275,5 +274,14 @@ export class AIHttpChatAgent<
    */
   async cleanupOldStreams(maxAgeHours = 24): Promise<void> {
     await this._streamManager.cleanupOldStreams(maxAgeHours);
+  }
+
+  /**
+   * Override destroy to properly clean up resumable streaming
+   */
+  override async destroy(): Promise<void> {
+    // Clean up resumable streaming first
+    await this._streamManager.destroy();
+    await super.destroy();
   }
 }

@@ -9,6 +9,7 @@ import {
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, ConnectionContext } from "../";
+import { nanoid } from "nanoid";
 import { Agent } from "../index";
 import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
 import {
@@ -224,7 +225,7 @@ export abstract class McpAgent<
     message: string;
     requestedSchema: unknown;
   }): Promise<ElicitResult> {
-    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+    const requestId = `elicit_${nanoid()}`;
 
     // Store pending request in durable storage
     await this.ctx.storage.put(`elicitation:${requestId}`, {
