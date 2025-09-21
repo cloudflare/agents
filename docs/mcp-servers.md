@@ -269,6 +269,343 @@ The auth flow prompts us for the password.
 ![model calls all 3 tools after authorization](https://github.com/user-attachments/assets/07e22fef-93de-47c2-af7e-9c361e460186)
 Once we've authenticated ourselves we can use all the tools!
 
+### Elicitation: Interactive User Input
+
+Elicitation allows your MCP server to request structured input from users through the client interface. This is useful for workflows requiring user decisions, form inputs, or confirmations.
+
+#### Basic Elicitation Example
+
+```typescript
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
+export class InteractiveMcp extends McpAgent {
+  server = new McpServer({ name: "Interactive MCP", version: "1.0.0" });
+
+  async init() {
+    this.server.registerTool(
+      "get_user_preferences",
+      {
+        title: "Get User Preferences",
+        description: "Collect user preferences via interactive form"
+      },
+      async () => {
+        // Check if client supports elicitation
+        const capabilities = this.server.server.getClientCapabilities();
+        if (!capabilities?.elicitation) {
+          return {
+            content: [
+              { type: "text", text: "Client does not support elicitation" }
+            ]
+          };
+        }
+
+        try {
+          // Request structured input from user
+          const result = await this.elicitInput({
+            message: "Please tell us your preferences:",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                theme: {
+                  type: "string",
+                  enum: ["light", "dark", "auto"],
+                  description: "Preferred theme"
+                },
+                notifications: {
+                  type: "boolean",
+                  description: "Enable notifications"
+                },
+                language: {
+                  type: "string",
+                  description: "Preferred language"
+                }
+              },
+              required: ["theme", "notifications"]
+            }
+          });
+
+          if (result.action === "accept") {
+            // User provided input - process it
+            const prefs = result.content;
+            await this.setState({
+              ...this.state,
+              userPreferences: prefs
+            });
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Preferences saved: ${JSON.stringify(prefs, null, 2)}`
+                }
+              ]
+            };
+          } else {
+            // User cancelled or rejected
+            return {
+              content: [
+                { type: "text", text: "Preference collection cancelled" }
+              ]
+            };
+          }
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error collecting preferences: ${error.message}`
+              }
+            ]
+          };
+        }
+      }
+    );
+  }
+}
+```
+
+#### Elicitation Request Schema
+
+The `requestedSchema` follows JSON Schema format and supports:
+
+- **Basic types**: `string`, `number`, `boolean`, `array`, `object`
+- **Validation**: `enum`, `pattern`, `minLength`, `maxLength`, etc.
+- **Descriptions**: Help text for each field
+- **Required fields**: Specify which fields are mandatory
+
+```typescript
+const schema = {
+  type: "object",
+  properties: {
+    email: {
+      type: "string",
+      format: "email",
+      description: "Your email address"
+    },
+    age: {
+      type: "number",
+      minimum: 0,
+      maximum: 150,
+      description: "Your age in years"
+    },
+    interests: {
+      type: "array",
+      items: { type: "string" },
+      description: "List of your interests"
+    }
+  },
+  required: ["email"]
+};
+```
+
+### Sampling: Client-Side LLM Generation
+
+Sampling allows your MCP server to request text generation from the client's LLM. This is useful for content creation, analysis, or any task requiring AI generation.
+
+#### Basic Sampling Example
+
+```typescript
+export class ContentMcp extends McpAgent {
+  server = new McpServer({ name: "Content MCP", version: "1.0.0" });
+
+  async init() {
+    this.server.registerTool(
+      "generate_content",
+      {
+        title: "Generate Content",
+        description: "Generate content using the client's LLM"
+      },
+      async () => {
+        // Check if client supports sampling
+        const capabilities = this.server.server.getClientCapabilities();
+        if (!capabilities?.sampling) {
+          return {
+            content: [
+              { type: "text", text: "Client does not support sampling" }
+            ]
+          };
+        }
+
+        try {
+          const result = await this.createMessage({
+            messages: [
+              {
+                role: "user",
+                content: {
+                  type: "text",
+                  text: "Write a creative short story about space exploration in exactly 200 words."
+                }
+              }
+            ],
+            systemPrompt:
+              "You are a creative writer specializing in science fiction.",
+            maxTokens: 300,
+            temperature: 0.8,
+            includeContext: "thisServer"
+          });
+
+          return {
+            content: [result.content]
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error generating content: ${error.message}`
+              }
+            ]
+          };
+        }
+      }
+    );
+
+    this.server.registerTool(
+      "analyze_sentiment",
+      {
+        title: "Analyze Sentiment",
+        description: "Analyze sentiment of user-provided text"
+      },
+      async ({ text }) => {
+        const capabilities = this.server.server.getClientCapabilities();
+        if (!capabilities?.sampling) {
+          return {
+            content: [{ type: "text", text: "Sampling not supported" }]
+          };
+        }
+
+        try {
+          const result = await this.createMessage({
+            messages: [
+              {
+                role: "user",
+                content: {
+                  type: "text",
+                  text: `Analyze the sentiment of this text and provide a brief explanation: "${text}"`
+                }
+              }
+            ],
+            systemPrompt:
+              "You are a sentiment analysis expert. Provide clear, concise analysis.",
+            maxTokens: 150,
+            temperature: 0.3,
+            modelPreferences: {
+              intelligencePriority: 0.8,
+              speedPriority: 0.5
+            }
+          });
+
+          return {
+            content: [result.content]
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Analysis failed: ${error.message}`
+              }
+            ]
+          };
+        }
+      }
+    );
+  }
+}
+```
+
+#### Sampling Parameters
+
+```typescript
+interface SamplingParams {
+  messages: Array<{
+    role: "user" | "assistant";
+    content:
+      | { type: "text"; text: string }
+      | { type: "image"; data: string; mimeType: string };
+  }>;
+  systemPrompt?: string;
+  maxTokens: number;
+  temperature?: number; // 0.0 to 1.0
+  stopSequences?: string[];
+  modelPreferences?: {
+    hints?: Array<{ name?: string }>;
+    costPriority?: number; // 0.0 to 1.0
+    speedPriority?: number; // 0.0 to 1.0
+    intelligencePriority?: number; // 0.0 to 1.0
+  };
+  includeContext?: "none" | "thisServer" | "allServers";
+  metadata?: Record<string, unknown>;
+}
+```
+
+### Client Capabilities
+
+Always check client capabilities before using these features:
+
+```typescript
+async init() {
+  this.server.registerTool(
+    "get_capabilities",
+    {
+      title: "Get Client Capabilities",
+      description: "Show what the client supports"
+    },
+    async () => {
+      const capabilities = this.server.server.getClientCapabilities();
+
+      const features = {
+        elicitation: !!capabilities?.elicitation,
+        sampling: !!capabilities?.sampling,
+        roots: !!capabilities?.roots,
+        experimental: capabilities?.experimental || {}
+      };
+
+      return {
+        content: [{
+          type: "text",
+          text: `Client capabilities:\n${JSON.stringify(features, null, 2)}`
+        }]
+      };
+    }
+  );
+}
+```
+
+#### Timeout Handling
+
+```typescript
+async safeElicitInput(params: any, timeoutMs = 30000) {
+  try {
+    // The framework automatically handles 60-second timeouts
+    // but you can implement additional logic
+    const result = await this.elicitInput(params);
+    return result;
+  } catch (error) {
+    if (error.message.includes("timed out")) {
+      // Handle timeout specifically
+      return {
+        action: "cancel" as const,
+        content: { error: "Request timed out - please try again" }
+      };
+    }
+    throw error; // Re-throw other errors
+  }
+}
+```
+
+### Hibernation
+
+Your MCP server can be evicted from memory during long-running requests and will automatically restore state when responses arrive.
+
+The framework automatically:
+
+- Stores pending requests in durable storage
+- Restores request promises after hibernation
+- Handles timeouts and cleanup
+- Maintains request/response mapping across hibernation cycles
+
 ### Read more
 
 To find out how to use your favorite providers for your authorization flow and more complex examples, have a look at the demos [here](https://github.com/cloudflare/ai/tree/main/demos).

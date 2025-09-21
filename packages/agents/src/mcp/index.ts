@@ -10,6 +10,7 @@ import {
   isJSONRPCResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
+import { nanoid } from "nanoid";
 import type {
   AgentContext,
   Connection,
@@ -85,6 +86,10 @@ export abstract class McpAgent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
+  private static readonly REQUEST_TIMEOUT_MS = 60000; // 60 seconds
+  private static readonly ELICITATION_REQUESTS_KEY = "pending_elicitations";
+  private static readonly SAMPLING_REQUESTS_KEY = "pending_samplings";
+
   private _transport?: Transport;
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
   // The connection ID for server-sent requests/notifications
@@ -105,9 +110,6 @@ export abstract class McpAgent<
       timeout: ReturnType<typeof setTimeout>;
     }
   >();
-
-  private static readonly ELICITATION_REQUESTS_KEY = "pending_elicitations";
-  private static readonly SAMPLING_REQUESTS_KEY = "pending_samplings";
   props?: Props;
 
   abstract server: MaybePromise<McpServer | Server>;
@@ -193,7 +195,7 @@ export abstract class McpAgent<
     removeMethod: (requestId: string) => Promise<void>
   ): Promise<void> {
     const currentTime = Date.now();
-    const timeoutMs = 60000; // 60 second timeout
+    const timeoutMs = McpAgent.REQUEST_TIMEOUT_MS;
 
     const storedRequests = await this._getStoredRequests<T>(storageKey);
 
@@ -550,7 +552,7 @@ export abstract class McpAgent<
     message: string;
     requestedSchema: unknown;
   }): Promise<ElicitResult> {
-    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+    const requestId = `elicit_${nanoid(8)}`;
 
     // Store request in durable storage
     const storedRequest: StoredElicitationRequest = {
@@ -562,10 +564,10 @@ export abstract class McpAgent<
     };
     await this._storeRequest(storedRequest, McpAgent.ELICITATION_REQUESTS_KEY);
 
-    // Create promise with full timeout (60 seconds)
+    // Create promise with full timeout
     const elicitPromise = this._createPromise<ElicitResult>(
       requestId,
-      60000,
+      McpAgent.REQUEST_TIMEOUT_MS,
       this._pendingElicitations,
       (id) =>
         this._removeRequest<StoredElicitationRequest>(
@@ -597,7 +599,9 @@ export abstract class McpAgent<
           McpAgent.ELICITATION_REQUESTS_KEY,
           "elicitation"
         );
-        throw new Error("No active connections available for elicitation");
+        throw new Error(
+          "No active WebSocket connections available for elicitation request"
+        );
       }
 
       const connectionList = Array.from(connections);
@@ -665,7 +669,7 @@ export abstract class McpAgent<
     stopSequences?: string[];
     metadata?: Record<string, unknown>;
   }): Promise<SamplingResult> {
-    const requestId = `sample_${Math.random().toString(36).substring(2, 11)}`;
+    const requestId = `sample_${nanoid(8)}`;
 
     // Store request in durable storage
     const storedRequest: StoredSamplingRequest = {
@@ -676,10 +680,10 @@ export abstract class McpAgent<
     };
     await this._storeRequest(storedRequest, McpAgent.SAMPLING_REQUESTS_KEY);
 
-    // Create promise with full timeout (60 seconds)
+    // Create promise with full timeout
     const samplingPromise = this._createPromise<SamplingResult>(
       requestId,
-      60000,
+      McpAgent.REQUEST_TIMEOUT_MS,
       this._pendingSamplings,
       (id) =>
         this._removeRequest<StoredSamplingRequest>(
@@ -708,7 +712,9 @@ export abstract class McpAgent<
           McpAgent.SAMPLING_REQUESTS_KEY,
           "sampling"
         );
-        throw new Error("No active connections available for sampling");
+        throw new Error(
+          "No active WebSocket connections available for sampling request"
+        );
       }
 
       const connectionList = Array.from(connections);

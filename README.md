@@ -61,6 +61,7 @@ npm install agents
 For comprehensive documentation and guides:
 
 - [Core Framework](packages/agents/README.md)
+- [MCP Server Development](docs/mcp-servers.md)
 - [The Anthropic Patterns for building effective agents](guides/anthropic-patterns/README.md)
 - [Human in the Loop](guides/human-in-the-loop/README.md)
 - [Playground](examples/playground/README.md)
