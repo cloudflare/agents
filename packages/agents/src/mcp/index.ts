@@ -16,6 +16,7 @@ import type {
   ConnectionContext,
   WSMessage
 } from "../";
+import { nanoid } from "nanoid";
 import { Agent } from "../index";
 import type {
   MaybeConnectionTag,
@@ -303,7 +304,7 @@ export abstract class McpAgent<
     message: string;
     requestedSchema: unknown;
   }): Promise<ElicitResult> {
-    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
+    const requestId = `elicit_${nanoid()}`;
 
     // Store pending request in durable storage
     await this.ctx.storage.put(`elicitation:${requestId}`, {

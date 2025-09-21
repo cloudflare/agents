@@ -3,6 +3,7 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
+import { nanoid } from "nanoid";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import {
   MessageType,
@@ -400,7 +401,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         await this.persistMessages([
           ...this.messages,
           {
-            id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+            id: `assistant_${nanoid()}`,
             role: "assistant",
             parts: messageParts
           }

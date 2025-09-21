@@ -3,6 +3,7 @@ import {
   PartySocket,
   type PartySocketOptions
 } from "partysocket";
+import { nanoid } from "nanoid";
 import type { RPCRequest, RPCResponse } from "./";
 import type {
   SerializableReturnValue,
@@ -181,7 +182,7 @@ export class AgentClient<State = unknown> extends PartySocket {
     streamOptions?: StreamOptions
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const id = Math.random().toString(36).slice(2);
+      const id = nanoid();
       this._pendingCalls.set(id, {
         reject,
         resolve: (value: unknown) => resolve(value as T),
