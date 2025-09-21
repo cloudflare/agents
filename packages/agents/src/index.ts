@@ -468,7 +468,7 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          if (this.mcp.isCallbackRequest(request)) {
+          if (await this.mcp.isCallbackRequest(request)) {
             await this.mcp.handleCallbackRequest(request);
 
             // after the MCP connection handshake, we can send updated mcp state

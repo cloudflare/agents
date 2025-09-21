@@ -107,13 +107,24 @@ export class MCPClientManager {
     };
   }
 
-  isCallbackRequest(req: Request): boolean {
-    return (
-      req.method === "GET" &&
-      !!this._callbackUrls.find((url) => {
-        return req.url.startsWith(url);
-      })
-    );
+  async isCallbackRequest(req: Request): Promise<boolean> {
+    // Problem:
+    //   this._callbackUrls is instantiated in _connectToMcpServerInternal each time the agent is started (OnStart).
+    //   But sometimes, _connectToMcpServerInternal is too slow and doesn't have time to update _callbackUrls when it arrives here.
+    //   It then incorrectly concludes that it isn't a callback.
+    // Temporary workaround: a timeout if we receive a callback from the authentication server
+    const reqUrl = new URL(req.url);
+    if (reqUrl.pathname.includes("/callback")) {
+      const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+      await sleep(2000);
+
+      return (
+        req.method === "GET" &&
+        this._callbackUrls.some((url) => req.url.startsWith(url))
+      );
+    } else {
+      return false;
+    }
   }
 
   async handleCallbackRequest(req: Request) {
