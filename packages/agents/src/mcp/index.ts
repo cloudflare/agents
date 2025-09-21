@@ -420,7 +420,12 @@ export abstract class McpAgent<
 // Export client transport classes
 export { SSEEdgeClientTransport } from "./sse-edge";
 export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
-export { withX402, type X402Config } from "./x402";
+export {
+  withX402,
+  withX402Client,
+  type X402Config,
+  type X402ClientConfig
+} from "./x402";
 
 // Export elicitation types and schemas
 export {

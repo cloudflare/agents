@@ -1,15 +1,15 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import {
+import type {
   CallToolResultSchema,
-  type CallToolRequest,
-  type CompatibilityCallToolResultSchema,
-  type GetPromptRequest,
-  type Prompt,
-  type ReadResourceRequest,
-  type Resource,
-  type ResourceTemplate,
-  type Tool
+  CallToolRequest,
+  CompatibilityCallToolResultSchema,
+  GetPromptRequest,
+  Prompt,
+  ReadResourceRequest,
+  Resource,
+  ResourceTemplate,
+  Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { type ToolSet, jsonSchema } from "ai";
 import { nanoid } from "nanoid";
@@ -176,30 +176,6 @@ export class MCPClientManager {
     return {
       id
     };
-  }
-
-  private async _callToolWithMeta(
-    serverId: string,
-    name: string,
-    args: Record<string, unknown> | undefined,
-    meta: Record<string, unknown>,
-    resultSchema:
-      | typeof CallToolResultSchema
-      | typeof CompatibilityCallToolResultSchema,
-    options?: RequestOptions
-  ) {
-    const c = this.mcpConnections[serverId].client;
-
-    // We need to set either _meta or X-PAYMENT header to pay for the tool call
-    // and it's not available through `toolCall(...)`
-    return c.request(
-      {
-        method: "tools/call",
-        params: { name, arguments: args, _meta: meta }
-      },
-      resultSchema,
-      options
-    );
   }
 
   isCallbackRequest(req: Request): boolean {
@@ -408,8 +384,12 @@ export class MCPClientManager {
 
     // Handle retry for x402 tools
     if (isPaymentRequired && this._x402) {
-      let { confirmationCallback } = this._x402; // use x402 default callback if exists
-      confirmationCallback = params.confirmationCallback; // use tool-level callback if provided
+      // use x402 default callback if exists
+      const { confirmationCallback: defaultConfirmationCallback } = this._x402;
+
+      // use tool-level callback if provided
+      const confirmationCallback =
+        params.confirmationCallback ?? defaultConfirmationCallback;
       if (confirmationCallback && !(await confirmationCallback(accepts))) {
         return {
           isError: true,
@@ -419,12 +399,16 @@ export class MCPClientManager {
       const token = await this._maybeCreateX402Token(accepts);
       if (!token) return res; // can't satisfy, return original error
 
-      res = await this._callToolWithMeta(
-        params.serverId,
-        unqualifiedName,
-        params.arguments,
-        { "x402.payment": token },
-        resultSchema ?? CallToolResultSchema,
+      res = await client.callTool(
+        {
+          ...params,
+          name: unqualifiedName,
+          _meta: {
+            ...params._meta,
+            "x402.payment": token
+          }
+        },
+        resultSchema,
         options
       );
     }
