@@ -23,6 +23,53 @@ import type {
   ServeOptions,
   TransportType
 } from "./types";
+
+interface SamplingResult {
+  model: string;
+  stopReason?: "endTurn" | "stopSequence" | "maxTokens" | string;
+  role: "user" | "assistant";
+  content:
+    | { type: "text"; text: string }
+    | { type: "image"; data: string; mimeType: string };
+}
+
+// Hibernation-safe storage types for pending requests
+interface BaseStoredRequest {
+  requestId: string;
+  timestamp: number;
+}
+
+interface StoredElicitationRequest extends BaseStoredRequest {
+  type: "elicitation";
+  message: string;
+  requestedSchema: unknown;
+}
+
+interface StoredSamplingRequest extends BaseStoredRequest {
+  type: "sampling";
+  params: {
+    messages: Array<{
+      role: "user" | "assistant";
+      content:
+        | { type: "text"; text: string }
+        | { type: "image"; data: string; mimeType: string };
+    }>;
+    modelPreferences?: {
+      hints?: Array<{ name?: string }>;
+      costPriority?: number;
+      speedPriority?: number;
+      intelligencePriority?: number;
+    };
+    systemPrompt?: string;
+    includeContext?: "none" | "thisServer" | "allServers";
+    temperature?: number;
+    maxTokens: number;
+    stopSequences?: string[];
+    metadata?: Record<string, unknown>;
+  };
+}
+
+type StoredRequest = StoredElicitationRequest | StoredSamplingRequest;
 import {
   createLegacySseHandler,
   createStreamingHttpHandler,
@@ -42,6 +89,25 @@ export abstract class McpAgent<
   private _requestIdToConnectionId: Map<string | number, string> = new Map();
   // The connection ID for server-sent requests/notifications
   private _standaloneSseConnectionId?: string;
+  private _pendingElicitations = new Map<
+    string,
+    {
+      resolve: (result: ElicitResult) => void;
+      reject: (error: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private _pendingSamplings = new Map<
+    string,
+    {
+      resolve: (result: SamplingResult) => void;
+      reject: (error: Error) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  private static readonly ELICITATION_REQUESTS_KEY = "pending_elicitations";
+  private static readonly SAMPLING_REQUESTS_KEY = "pending_samplings";
   props?: Props;
 
   abstract server: MaybePromise<McpServer | Server>;
@@ -64,6 +130,174 @@ export abstract class McpAgent<
   /*
    * Helpers
    */
+
+  /** Clean up all pending requests / hibernation safety */
+  private async _cleanupAllPendingRequests(): Promise<void> {
+    // Clear in-memory maps (hibernation recovery)
+    for (const [requestId] of this._pendingElicitations) {
+      await this._cleanupRequest<StoredElicitationRequest, ElicitResult>(
+        requestId,
+        this._pendingElicitations,
+        McpAgent.ELICITATION_REQUESTS_KEY,
+        "elicitation"
+      );
+    }
+
+    for (const [requestId] of this._pendingSamplings) {
+      await this._cleanupRequest<StoredSamplingRequest, SamplingResult>(
+        requestId,
+        this._pendingSamplings,
+        McpAgent.SAMPLING_REQUESTS_KEY,
+        "sampling"
+      );
+    }
+
+    // Restore any persisted requests from before hibernation
+    await this._restorePendingRequests();
+  }
+
+  private async _storeRequest<T extends StoredRequest>(
+    request: T,
+    storageKey: string
+  ): Promise<void> {
+    const stored =
+      (await this.ctx.storage.get<Record<string, T>>(storageKey)) || {};
+    stored[request.requestId] = request;
+    await this.ctx.storage.put(storageKey, stored);
+  }
+
+  private async _removeRequest<T extends StoredRequest>(
+    requestId: string,
+    storageKey: string
+  ): Promise<void> {
+    const stored =
+      (await this.ctx.storage.get<Record<string, T>>(storageKey)) || {};
+    delete stored[requestId];
+
+    if (Object.keys(stored).length === 0) {
+      await this.ctx.storage.delete(storageKey);
+    } else {
+      await this.ctx.storage.put(storageKey, stored);
+    }
+  }
+
+  private async _getStoredRequests<T extends StoredRequest>(
+    storageKey: string
+  ): Promise<Record<string, T> | null> {
+    return (await this.ctx.storage.get<Record<string, T>>(storageKey)) || null;
+  }
+
+  private async _restoreRequestsOfType<T extends StoredRequest>(
+    storageKey: string,
+    createPromiseMethod: (requestId: string, timeoutMs: number) => void,
+    removeMethod: (requestId: string) => Promise<void>
+  ): Promise<void> {
+    const currentTime = Date.now();
+    const timeoutMs = 60000; // 60 second timeout
+
+    const storedRequests = await this._getStoredRequests<T>(storageKey);
+
+    if (storedRequests) {
+      for (const [requestId, request] of Object.entries(storedRequests)) {
+        // Check if request has expired
+        if (currentTime - request.timestamp > timeoutMs) {
+          await removeMethod(requestId);
+          continue;
+        }
+
+        // Recreate promise for this request, it will timeout naturally
+        const remainingTime = Math.max(
+          0,
+          timeoutMs - (currentTime - request.timestamp)
+        );
+        createPromiseMethod(requestId, remainingTime);
+      }
+    }
+  }
+
+  /** Restore pending requests after hibernation and recreate promises */
+  private async _restorePendingRequests(): Promise<void> {
+    // Restore elicitation requests
+    await this._restoreRequestsOfType<StoredElicitationRequest>(
+      McpAgent.ELICITATION_REQUESTS_KEY,
+      (requestId, timeoutMs) => {
+        this._createPromise<ElicitResult>(
+          requestId,
+          timeoutMs,
+          this._pendingElicitations,
+          (id) =>
+            this._removeRequest<StoredElicitationRequest>(
+              id,
+              McpAgent.ELICITATION_REQUESTS_KEY
+            ),
+          "Elicitation request timed out"
+        );
+      },
+      (requestId) =>
+        this._removeRequest<StoredElicitationRequest>(
+          requestId,
+          McpAgent.ELICITATION_REQUESTS_KEY
+        )
+    );
+
+    // Restore sampling requests
+    await this._restoreRequestsOfType<StoredSamplingRequest>(
+      McpAgent.SAMPLING_REQUESTS_KEY,
+      (requestId, timeoutMs) => {
+        this._createPromise<SamplingResult>(
+          requestId,
+          timeoutMs,
+          this._pendingSamplings,
+          (id) =>
+            this._removeRequest<StoredSamplingRequest>(
+              id,
+              McpAgent.SAMPLING_REQUESTS_KEY
+            ),
+          "Sampling request timed out"
+        );
+      },
+      (requestId) =>
+        this._removeRequest<StoredSamplingRequest>(
+          requestId,
+          McpAgent.SAMPLING_REQUESTS_KEY
+        )
+    );
+  }
+
+  private _createPromise<T>(
+    requestId: string,
+    timeoutMs: number,
+    pendingMap: Map<
+      string,
+      {
+        resolve: (result: T) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    >,
+    removeStorageMethod: (requestId: string) => Promise<void>,
+    timeoutMessage: string
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(async () => {
+        pendingMap.delete(requestId);
+        await removeStorageMethod(requestId);
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
+
+      pendingMap.set(requestId, {
+        resolve: async (result: T) => {
+          await removeStorageMethod(requestId);
+          resolve(result);
+        },
+        reject: async (error: Error) => {
+          await removeStorageMethod(requestId);
+          reject(error);
+        },
+        timeout
+      });
+    });
+  }
 
   async setInitializeRequest(initializeRequest: JSONRPCMessage) {
     await this.ctx.storage.put("initializeRequest", initializeRequest);
@@ -146,6 +380,9 @@ export abstract class McpAgent<
     // If onStart was passed props, save them in storage
     if (props) await this.updateProps(props);
     this.props = await this.ctx.storage.get("props");
+
+    // restore any pending requests from storage
+    await this._cleanupAllPendingRequests();
 
     await this.init();
     const server = await this.server;
@@ -233,6 +470,11 @@ export abstract class McpAgent<
       return; // Message was handled by elicitation system
     }
 
+    // Check if this is a sampling response before passing to transport
+    if (await this._handleSamplingResponse(message)) {
+      return; // Message was handled by sampling system
+    }
+
     // We need to map every incoming message to the connection that it came in on
     // so that we can send relevant responses and notifications back on the same connection
     if (isJSONRPCRequest(message)) {
@@ -289,6 +531,11 @@ export abstract class McpAgent<
         return null; // Message was handled by elicitation system
       }
 
+      // Check if this is a sampling response before passing to transport
+      if (await this._handleSamplingResponse(parsedMessage)) {
+        return null; // Message was handled by sampling system
+      }
+
       this._transport?.onmessage?.(parsedMessage);
       return null;
     } catch (error) {
@@ -305,12 +552,28 @@ export abstract class McpAgent<
   }): Promise<ElicitResult> {
     const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
 
-    // Store pending request in durable storage
-    await this.ctx.storage.put(`elicitation:${requestId}`, {
+    // Store request in durable storage
+    const storedRequest: StoredElicitationRequest = {
+      requestId,
+      timestamp: Date.now(),
+      type: "elicitation",
       message: params.message,
-      requestedSchema: params.requestedSchema,
-      timestamp: Date.now()
-    });
+      requestedSchema: params.requestedSchema
+    };
+    await this._storeRequest(storedRequest, McpAgent.ELICITATION_REQUESTS_KEY);
+
+    // Create promise with full timeout (60 seconds)
+    const elicitPromise = this._createPromise<ElicitResult>(
+      requestId,
+      60000,
+      this._pendingElicitations,
+      (id) =>
+        this._removeRequest<StoredElicitationRequest>(
+          id,
+          McpAgent.ELICITATION_REQUESTS_KEY
+        ),
+      "Elicitation request timed out"
+    );
 
     const elicitRequest = {
       jsonrpc: "2.0" as const,
@@ -328,7 +591,12 @@ export abstract class McpAgent<
     } else {
       const connections = this.getConnections();
       if (!connections || Array.from(connections).length === 0) {
-        await this.ctx.storage.delete(`elicitation:${requestId}`);
+        await this._cleanupRequest<StoredElicitationRequest, ElicitResult>(
+          requestId,
+          this._pendingElicitations,
+          McpAgent.ELICITATION_REQUESTS_KEY,
+          "elicitation"
+        );
         throw new Error("No active connections available for elicitation");
       }
 
@@ -342,43 +610,120 @@ export abstract class McpAgent<
       }
     }
 
-    // Wait for response through MCP
-    return this._waitForElicitationResponse(requestId);
+    // Return the promise that will be resolved by _handleElicitationResponse
+    return elicitPromise;
   }
 
-  /** Wait for elicitation response through storage polling */
-  private async _waitForElicitationResponse(
-    requestId: string
-  ): Promise<ElicitResult> {
-    const startTime = Date.now();
-    const timeout = 60000; // 60 second timeout
-
-    try {
-      while (Date.now() - startTime < timeout) {
-        // Check if response has been stored
-        const response = await this.ctx.storage.get<ElicitResult>(
-          `elicitation:response:${requestId}`
+  private async _cleanupRequest<T extends StoredRequest, R = unknown>(
+    requestId: string,
+    pendingMap: Map<
+      string,
+      {
+        resolve: (result: R) => void;
+        reject: (error: Error) => void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    >,
+    storageKey: string,
+    requestType: string
+  ): Promise<void> {
+    const pending = pendingMap.get(requestId);
+    if (pending) {
+      try {
+        clearTimeout(pending.timeout);
+      } catch (error) {
+        console.warn(
+          `Failed to clear ${requestType} timeout for ${requestId}:`,
+          error
         );
-        if (response) {
-          // Immediately clean up both request and response
-          await this.ctx.storage.delete(`elicitation:${requestId}`);
-          await this.ctx.storage.delete(`elicitation:response:${requestId}`);
-          return response;
-        }
+      }
+      pendingMap.delete(requestId);
+    }
 
-        // Sleep briefly before checking again
-        await new Promise((resolve) => setTimeout(resolve, 100));
+    // Also remove from durable storage
+    await this._removeRequest<T>(requestId, storageKey);
+  }
+
+  /** Create a message using client's LLM (sampling) */
+  async createMessage(params: {
+    messages: Array<{
+      role: "user" | "assistant";
+      content:
+        | { type: "text"; text: string }
+        | { type: "image"; data: string; mimeType: string };
+    }>;
+    modelPreferences?: {
+      hints?: Array<{ name?: string }>;
+      costPriority?: number;
+      speedPriority?: number;
+      intelligencePriority?: number;
+    };
+    systemPrompt?: string;
+    includeContext?: "none" | "thisServer" | "allServers";
+    temperature?: number;
+    maxTokens: number;
+    stopSequences?: string[];
+    metadata?: Record<string, unknown>;
+  }): Promise<SamplingResult> {
+    const requestId = `sample_${Math.random().toString(36).substring(2, 11)}`;
+
+    // Store request in durable storage
+    const storedRequest: StoredSamplingRequest = {
+      requestId,
+      timestamp: Date.now(),
+      type: "sampling",
+      params
+    };
+    await this._storeRequest(storedRequest, McpAgent.SAMPLING_REQUESTS_KEY);
+
+    // Create promise with full timeout (60 seconds)
+    const samplingPromise = this._createPromise<SamplingResult>(
+      requestId,
+      60000,
+      this._pendingSamplings,
+      (id) =>
+        this._removeRequest<StoredSamplingRequest>(
+          id,
+          McpAgent.SAMPLING_REQUESTS_KEY
+        ),
+      "Sampling request timed out"
+    );
+
+    const samplingRequest = {
+      jsonrpc: "2.0" as const,
+      id: requestId,
+      method: "sampling/createMessage",
+      params
+    };
+
+    // Send through MCP transport
+    if (this._transport) {
+      await this._transport.send(samplingRequest);
+    } else {
+      const connections = this.getConnections();
+      if (!connections || Array.from(connections).length === 0) {
+        await this._cleanupRequest<StoredSamplingRequest, SamplingResult>(
+          requestId,
+          this._pendingSamplings,
+          McpAgent.SAMPLING_REQUESTS_KEY,
+          "sampling"
+        );
+        throw new Error("No active connections available for sampling");
       }
 
-      throw new Error("Elicitation request timed out");
-    } finally {
-      // Always clean up on timeout or error
-      await this.ctx.storage.delete(`elicitation:${requestId}`);
-      await this.ctx.storage.delete(`elicitation:response:${requestId}`);
+      const connectionList = Array.from(connections);
+      for (const connection of connectionList) {
+        try {
+          connection.send(JSON.stringify(samplingRequest));
+        } catch (error) {
+          console.error("Failed to send sampling request:", error);
+        }
+      }
     }
+
+    return samplingPromise;
   }
 
-  /** Handle elicitation responses */
   private async _handleElicitationResponse(
     message: JSONRPCMessage
   ): Promise<boolean> {
@@ -387,17 +732,21 @@ export abstract class McpAgent<
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
-      // Check if we have a pending request for this ID
-      const pendingRequest = await this.ctx.storage.get(
-        `elicitation:${requestId}`
-      );
-      if (!pendingRequest) return false;
+      const pending = this._pendingElicitations.get(requestId);
+      if (!pending) {
+        console.warn(
+          `Received elicitation response for unknown request: ${requestId}`
+        );
+        return false;
+      }
 
-      // Store the response in durable storage
-      await this.ctx.storage.put(
-        `elicitation:response:${requestId}`,
-        message.result as ElicitResult
+      await this._cleanupRequest<StoredElicitationRequest, ElicitResult>(
+        requestId,
+        this._pendingElicitations,
+        McpAgent.ELICITATION_REQUESTS_KEY,
+        "elicitation"
       );
+      pending.resolve(message.result as ElicitResult);
       return true;
     }
 
@@ -406,22 +755,85 @@ export abstract class McpAgent<
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
-      // Check if we have a pending request for this ID
-      const pendingRequest = await this.ctx.storage.get(
-        `elicitation:${requestId}`
-      );
-      if (!pendingRequest) return false;
+      // Get pending promise
+      const pending = this._pendingElicitations.get(requestId);
+      if (!pending) {
+        console.warn(
+          `Received elicitation error for unknown request: ${requestId}`
+        );
+        return false;
+      }
 
-      // Store error response
+      // Resolve with error result
+      await this._cleanupRequest<StoredElicitationRequest, ElicitResult>(
+        requestId,
+        this._pendingElicitations,
+        McpAgent.ELICITATION_REQUESTS_KEY,
+        "elicitation"
+      );
       const errorResult: ElicitResult = {
         action: "cancel",
         content: {
           error: message.error.message || "Elicitation request failed"
         }
       };
-      await this.ctx.storage.put(
-        `elicitation:response:${requestId}`,
-        errorResult
+      pending.resolve(errorResult);
+      return true;
+    }
+
+    return false;
+  }
+
+  /** Handle sampling responses*/
+  private async _handleSamplingResponse(
+    message: JSONRPCMessage
+  ): Promise<boolean> {
+    // Check if this is a response to a sampling request
+    if (isJSONRPCResponse(message) && message.result) {
+      const requestId = message.id?.toString();
+      if (!requestId || !requestId.startsWith("sample_")) return false;
+
+      const pending = this._pendingSamplings.get(requestId);
+      if (!pending) {
+        console.warn(
+          `Received sampling response for unknown request: ${requestId}`
+        );
+        return false;
+      }
+
+      // Resolve the promise immediately
+      await this._cleanupRequest<StoredSamplingRequest, SamplingResult>(
+        requestId,
+        this._pendingSamplings,
+        McpAgent.SAMPLING_REQUESTS_KEY,
+        "sampling"
+      );
+      pending.resolve(message.result as unknown as SamplingResult);
+      return true;
+    }
+
+    // Check if this is an error response to a sampling request
+    if (isJSONRPCError(message)) {
+      const requestId = message.id?.toString();
+      if (!requestId || !requestId.startsWith("sample_")) return false;
+
+      const pending = this._pendingSamplings.get(requestId);
+      if (!pending) {
+        console.warn(
+          `Received sampling error for unknown request: ${requestId}`
+        );
+        return false;
+      }
+
+      // Reject with error
+      await this._cleanupRequest<StoredSamplingRequest, SamplingResult>(
+        requestId,
+        this._pendingSamplings,
+        McpAgent.SAMPLING_REQUESTS_KEY,
+        "sampling"
+      );
+      pending.reject(
+        new Error(message.error.message || "Sampling request failed")
       );
       return true;
     }

@@ -31,11 +31,124 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   async init() {
     // Register resource - Note: Current MCP SDK doesn't support icons in resource method yet
     // Icons are supported at the server implementation level
+
+    this.server.registerTool(
+      "get_client_capabilities",
+      {
+        title: "Get client capabilities",
+        description: "Get the client capabilities"
+      },
+      async () => {
+        const capabilities = this.server.server.getClientCapabilities();
+        if (!capabilities) {
+          return { content: [{ type: "text", text: "No capabilities" }] };
+        }
+        return {
+          content: [
+            { type: "text", text: JSON.stringify(capabilities, null, 2) }
+          ]
+        };
+      }
+    );
+
     this.server.resource("counter", "mcp://resource/counter", (uri) => {
       return {
         contents: [{ text: String(this.state.counter), uri: uri.href }]
       };
     });
+
+    this.server.registerTool(
+      "ask_for_poem",
+      {
+        title: "Ask for poem",
+        description: "Ask for a poem"
+      },
+      async () => {
+        const capabilities = this.server.server.getClientCapabilities();
+        if (!capabilities?.sampling) {
+          return {
+            content: [{ type: "text", text: "You do not support sampling" }]
+          };
+        }
+
+        console.log("Starting sampling");
+
+        const result = await this.server.server.createMessage({
+          systemPrompt: "You are good at poetry and really like dogs",
+          messages: [
+            {
+              role: "user",
+              content: {
+                type: "text",
+                text: "Please write me a poem"
+              }
+            }
+          ],
+          maxTokens: 100
+        });
+
+        return { content: [result.content] };
+      }
+    );
+
+    this.server.registerTool(
+      "elicit_feedback",
+      {
+        title: "Elicit feedback",
+        description: "Elicit feedback from the user"
+      },
+      async () => {
+        const capabilities = this.server.server.getClientCapabilities();
+        console.log(
+          "[ElicitTool] Client capabilities:",
+          JSON.stringify(capabilities, null, 2)
+        );
+
+        if (!capabilities?.elicitation) {
+          console.log(
+            "[ElicitTool] Elicitation not supported. Full capabilities:",
+            capabilities
+          );
+          return {
+            content: [{ type: "text", text: "You do not support elicitation" }]
+          };
+        }
+
+        console.log("Starting elicitation");
+        console.log("this.elicitInput type:", typeof this.elicitInput);
+        console.log("this.elicitInput:", !!this.elicitInput);
+
+        const result = await this.elicitInput({
+          message: "Do you like cheese?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              like_cheese: {
+                type: "boolean",
+                description: "Whether you like cheese"
+              }
+            }
+          }
+        });
+
+        if (result.action !== "accept") {
+          return {
+            content: [{ type: "text", text: "You didn't respond" }]
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.content?.like_cheese
+                ? "You like cheese"
+                : "You do not like cheese"
+            }
+          ]
+        };
+      }
+    );
 
     // Register tool - Note: Current MCP SDK doesn't support icons in tool method yet
     // Icons are supported at the server implementation level
