@@ -88,6 +88,41 @@ export class MCPClientManager {
       }
     );
 
+    //---
+    // Problem: "Invalid PKCE code_verifier" message when requesting a token from the MCP server.
+    //   If the MCP server implements OAuth 2.1, PKCE is required for all OAuth clients using the authorization code flow.
+    //   When requesting a token, the MCP server checks that the PKCE code_verifier is the same as the one used during the authorization request.
+    //   However, currently, a new code_verifier is generated each time you connect to the @modelcontextprotocol.sdk library (connect)
+    // Temporary workaround:
+    // Do not reconnect to the MCP SDK between generating the authUrl and receiving the callback with a code and before the token request.
+
+    const tokens = await options.transport?.authProvider?.tokens();
+    if (
+      options.reconnect &&
+      !options.reconnect.oauthCode &&
+      !tokens?.access_token
+    ) {
+      // Authentication URL generated.
+      // Waiting to receive the callback with a code from the authentication server.
+      // the token is not yet received.
+      // --> We prevent the connection in the SDK library @modelcontextprotocol
+      this.mcpConnections[id].connectionState = "authenticating";
+
+      options.transport?.authProvider;
+
+      if (options.transport?.authProvider?.redirectUrl) {
+        this._callbackUrls.push(
+          options.transport.authProvider.redirectUrl.toString()
+        );
+      }
+      return {
+        authUrl: "TBD",
+        clientId: options.transport?.authProvider?.clientId,
+        id
+      };
+    }
+    //--- end of workaround
+
     await this.mcpConnections[id].init(options.reconnect?.oauthCode);
 
     const authUrl = options.transport?.authProvider?.authUrl;
