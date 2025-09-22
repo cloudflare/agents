@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.1.6
+
+### Patch Changes
+
+- [#492](https://github.com/cloudflare/agents/pull/492) [`00ba881`](https://github.com/cloudflare/agents/commit/00ba88115d62b608564e783faac18754dc8a79cc) Thanks [@threepointone](https://github.com/threepointone)! - fix: this.mcp.getAITools now includes outputSchema
+
+- [#494](https://github.com/cloudflare/agents/pull/494) [`ecbd795`](https://github.com/cloudflare/agents/commit/ecbd7950dd0656e27ca3fcd8cdf69aa7292ec5ba) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
 ## 0.1.5
 
 ### Patch Changes

@@ -191,7 +191,7 @@ export const createStreamingHttpHandler = (
         const agent = await getAgentByName(
           namespace,
           `streamable-http:${sessionId}`,
-          { props: ctx.props }
+          { props: ctx.props as Record<string, unknown> | undefined }
         );
         const isInitialized = await agent.getInitializeRequest();
 
@@ -232,7 +232,7 @@ export const createStreamingHttpHandler = (
             Upgrade: "websocket"
           }
         });
-        if (ctx.props) agent.updateProps(ctx.props);
+        if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
         const response = await agent.fetch(req);
 
         // Get the WebSocket
@@ -367,7 +367,7 @@ export const createStreamingHttpHandler = (
         const agent = await getAgentByName(
           namespace,
           `streamable-http:${sessionId}`,
-          { props: ctx.props }
+          { props: ctx.props as Record<string, unknown> | undefined }
         );
         const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
@@ -386,7 +386,7 @@ export const createStreamingHttpHandler = (
           existingHeaders[k] = v;
         });
 
-        if (ctx.props) agent.updateProps(ctx.props);
+        if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
         const response = await agent.fetch(
           new Request(request.url, {
             headers: {
@@ -537,7 +537,7 @@ export const createLegacySseHandler = (
 
       // Get the Durable Object
       const agent = await getAgentByName(namespace, `sse:${sessionId}`, {
-        props: ctx.props
+        props: ctx.props as Record<string, unknown> | undefined
       });
 
       // Connect to the Durable Object via WebSocket
@@ -545,7 +545,7 @@ export const createLegacySseHandler = (
       request.headers.forEach((value, key) => {
         existingHeaders[key] = value;
       });
-      if (ctx.props) agent.updateProps(ctx.props);
+      if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
       const response = await agent.fetch(
         new Request(request.url, {
           headers: {
@@ -660,7 +660,7 @@ export const createLegacySseHandler = (
 
       // Get the Durable Object
       const agent = await getAgentByName(namespace, `sse:${sessionId}`, {
-        props: ctx.props
+        props: ctx.props as Record<string, unknown> | undefined
       });
 
       const messageBody = await request.json();
