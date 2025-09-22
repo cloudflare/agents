@@ -76,17 +76,20 @@ export class MCPClientManager {
       }
     }
 
-    this.mcpConnections[id] = new MCPClientConnection(
-      new URL(url),
-      {
-        name: this._name,
-        version: this._version
-      },
-      {
-        client: options.client ?? {},
-        transport: options.transport ?? {}
-      }
-    );
+    // During OAuth reconnect, reuse existing connection to preserve state
+    if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
+      this.mcpConnections[id] = new MCPClientConnection(
+        new URL(url),
+        {
+          name: this._name,
+          version: this._version
+        },
+        {
+          client: options.client ?? {},
+          transport: options.transport ?? {}
+        }
+      );
+    }
 
     await this.mcpConnections[id].init(options.reconnect?.oauthCode);
 
