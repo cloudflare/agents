@@ -176,6 +176,27 @@ export class MCPClientManager {
   }
 
   /**
+   * Register a callback URL for OAuth handling
+   * @param url The callback URL to register
+   */
+  registerCallbackUrl(url: string): void {
+    if (!this._callbackUrls.includes(url)) {
+      this._callbackUrls.push(url);
+    }
+  }
+
+  /**
+   * Unregister a callback URL
+   * @param serverId The server ID whose callback URL should be removed
+   */
+  unregisterCallbackUrl(serverId: string): void {
+    // Remove callback URLs that end with this serverId
+    this._callbackUrls = this._callbackUrls.filter(
+      (url) => !url.endsWith(`/${serverId}`)
+    );
+  }
+
+  /**
    * @returns namespaced list of tools
    */
   listTools(): NamespacedData["tools"] {

@@ -648,6 +648,13 @@ export class Agent<
 
             // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
             if (servers && Array.isArray(servers) && servers.length > 0) {
+              // Restore callback URLs for OAuth-enabled servers
+              servers.forEach((server) => {
+                if (server.callback_url) {
+                  this.mcp.registerCallbackUrl(server.callback_url);
+                }
+              });
+
               servers.forEach((server) => {
                 this._connectToMcpServerInternal(
                   server.name,
@@ -1525,6 +1532,7 @@ export class Agent<
 
   async removeMcpServer(id: string) {
     this.mcp.closeConnection(id);
+    this.mcp.unregisterCallbackUrl(id);
     this.sql`
       DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
     `;
