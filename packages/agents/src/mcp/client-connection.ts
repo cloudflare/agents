@@ -311,29 +311,35 @@ export class MCPClientConnection {
     }
   }
 
-  async tryConnect(transportType: MCPTransportOptions["type"], code?: string) {
+  private async tryConnect(
+    transportType: MCPTransportOptions["type"],
+    code?: string
+  ) {
     // When completing OAuth (with code), use the transport that initiated OAuth
+    let effectiveTransportType = transportType;
     if (code && this.options.transport.authProvider) {
       const savedTransport =
         await this.options.transport.authProvider.getOAuthTransport();
       if (savedTransport) {
-        transportType = savedTransport as TransportType;
-        console.log(`Using saved OAuth transport: ${transportType}`);
+        effectiveTransportType = savedTransport as TransportType;
+        console.log(`Using saved OAuth transport: ${effectiveTransportType}`);
       }
     }
 
     const transports: TransportType[] =
-      transportType === "auto" ? ["streamable-http", "sse"] : [transportType];
+      effectiveTransportType === "auto"
+        ? ["streamable-http", "sse"]
+        : [effectiveTransportType];
 
     for (const currentTransportType of transports) {
       const isLastTransport =
         currentTransportType === transports[transports.length - 1];
       const hasFallback =
-        transportType === "auto" &&
+        effectiveTransportType === "auto" &&
         currentTransportType === "streamable-http" &&
         !isLastTransport;
 
-      const transport = await this.getTransport(currentTransportType);
+      const transport = this.getTransport(currentTransportType);
 
       if (code) {
         await transport.finishAuth(code);
