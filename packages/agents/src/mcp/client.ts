@@ -205,7 +205,10 @@ export class MCPClientManager {
               }
               return result;
             },
-            inputSchema: jsonSchema(tool.inputSchema)
+            inputSchema: jsonSchema(tool.inputSchema),
+            outputSchema: tool.outputSchema
+              ? jsonSchema(tool.outputSchema)
+              : undefined
           }
         ];
       })
