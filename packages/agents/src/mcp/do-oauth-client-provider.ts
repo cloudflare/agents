@@ -12,6 +12,10 @@ export interface AgentsOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
   serverId: string | undefined;
+  // Transport tracking for OAuth flow
+  saveOAuthTransport(transportType: string): Promise<void>;
+  getOAuthTransport(): Promise<string | undefined>;
+  clearOAuthTransport(): Promise<void>;
 }
 
 export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
@@ -136,7 +140,16 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   async saveCodeVerifier(verifier: string): Promise<void> {
-    await this.storage.put(this.codeVerifierKey(this.clientId), verifier);
+    const key = this.codeVerifierKey(this.clientId);
+
+    // Don't overwrite existing verifier to preserve first PKCE verifier
+    const existing = await this.storage.get<string>(key);
+    if (existing) {
+      console.log(`Preserving existing PKCE verifier for ${this.clientId}`);
+      return;
+    }
+
+    await this.storage.put(key, verifier);
   }
 
   async codeVerifier(): Promise<string> {
@@ -147,5 +160,22 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
       throw new Error("No code verifier found");
     }
     return codeVerifier;
+  }
+
+  /** Transport tracking for OAuth flow */
+  oauthTransportKey() {
+    return `/${this.clientName}/${this.serverId}/oauth_transport`;
+  }
+
+  async saveOAuthTransport(transportType: string): Promise<void> {
+    await this.storage.put(this.oauthTransportKey(), transportType);
+  }
+
+  async getOAuthTransport(): Promise<string | undefined> {
+    return await this.storage.get<string>(this.oauthTransportKey());
+  }
+
+  async clearOAuthTransport(): Promise<void> {
+    await this.storage.delete(this.oauthTransportKey());
   }
 }

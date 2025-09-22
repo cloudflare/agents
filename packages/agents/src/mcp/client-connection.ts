@@ -287,15 +287,23 @@ export class MCPClientConnection {
    * @returns The transport for the client
    */
   getTransport(transportType: TransportType) {
+    // Create transport URL by appending endpoint to base URL
+    // Use URL constructor properly to handle path joining
+    const endpoint = transportType === "streamable-http" ? "mcp" : "sse";
+    const transportUrl = new URL(
+      endpoint,
+      this.url.href + (this.url.pathname.endsWith("/") ? "" : "/")
+    );
+
     switch (transportType) {
       case "streamable-http":
         return new StreamableHTTPEdgeClientTransport(
-          this.url,
+          transportUrl,
           this.options.transport as StreamableHTTPClientTransportOptions
         );
       case "sse":
         return new SSEEdgeClientTransport(
-          this.url,
+          transportUrl,
           this.options.transport as SSEClientTransportOptions
         );
       default:
@@ -304,6 +312,16 @@ export class MCPClientConnection {
   }
 
   async tryConnect(transportType: MCPTransportOptions["type"], code?: string) {
+    // When completing OAuth (with code), use the transport that initiated OAuth
+    if (code && this.options.transport.authProvider) {
+      const savedTransport =
+        await this.options.transport.authProvider.getOAuthTransport();
+      if (savedTransport) {
+        transportType = savedTransport as TransportType;
+        console.log(`Using saved OAuth transport: ${transportType}`);
+      }
+    }
+
     const transports: TransportType[] =
       transportType === "auto" ? ["streamable-http", "sse"] : [transportType];
 
@@ -323,9 +341,32 @@ export class MCPClientConnection {
 
       try {
         await this.client.connect(transport);
+
+        // Clear saved transport after successful OAuth completion
+        if (code && this.options.transport.authProvider) {
+          await this.options.transport.authProvider.clearOAuthTransport();
+        }
+
         break;
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
+
+        // Save transport type when OAuth is needed (Unauthorized error)
+        // This must happen BEFORE we throw or continue
+        if (
+          !code &&
+          error.message.includes("Unauthorized") &&
+          this.options.transport.authProvider &&
+          currentTransportType
+        ) {
+          await this.options.transport.authProvider.saveOAuthTransport(
+            currentTransportType
+          );
+          console.log(
+            `Saved OAuth transport for unauthorized: ${currentTransportType}`
+          );
+          throw e; // Re-throw after storing transport
+        }
 
         if (
           hasFallback &&

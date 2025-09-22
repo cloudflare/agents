@@ -537,7 +537,10 @@ describe("MCP Client Connection Integration", () => {
               saveClientInformation: vi.fn(),
               redirectToAuthorization: vi.fn(),
               saveCodeVerifier: vi.fn(),
-              codeVerifier: vi.fn()
+              codeVerifier: vi.fn(),
+              saveOAuthTransport: vi.fn(),
+              getOAuthTransport: vi.fn(),
+              clearOAuthTransport: vi.fn()
             }
           },
           client: {}
