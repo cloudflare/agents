@@ -17,19 +17,6 @@ import {
   MCPClientConnection,
   type MCPTransportOptions
 } from "./client-connection";
-import { createWalletClient, http, type Account, type Address } from "viem";
-import { base, baseSepolia } from "viem/chains";
-import { createPaymentHeader } from "x402/client";
-import type { PaymentRequirements, Wallet } from "x402/types";
-
-type X402ClientConfig = {
-  confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
-  network: "base" | "base-sepolia"; // TODO: look into which are supported
-  account: Account | Address;
-  maxPaymentValue?: bigint; // TODO: look into atomic units
-  headerName?: string;
-  version?: number;
-};
 
 /**
  * Utility class that aggregates multiple MCP clients into one
@@ -38,63 +25,6 @@ export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   private _callbackUrls: string[] = [];
   private _didWarnAboutUnstableGetAITools = false;
-  private _x402?: {
-    network: "base" | "base-sepolia";
-    walletClient: ReturnType<typeof createWalletClient>;
-    maxPaymentValue: bigint;
-    headerName: string;
-    version: number;
-    confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
-  };
-
-  enableX402Payments(cfg: X402ClientConfig) {
-    const chain = cfg.network === "base" ? base : baseSepolia;
-    const account = typeof cfg.account === "string" ? cfg.account : cfg.account; // works for Address or Account
-    const walletClient = createWalletClient({
-      account,
-      chain,
-      transport: http()
-    });
-    this._x402 = {
-      network: cfg.network,
-      walletClient,
-      maxPaymentValue: cfg.maxPaymentValue ?? 100_000n, // $0.10 in USDC
-      headerName: cfg.headerName ?? "X-PAYMENT",
-      version: cfg.version ?? 1,
-      confirmationCallback: cfg.confirmationCallback
-    };
-  }
-
-  private async _maybeCreateX402Token(
-    accepts: PaymentRequirements[]
-  ): Promise<string | null> {
-    if (!this._x402) return null;
-    if (!Array.isArray(accepts) || accepts.length === 0) return null;
-
-    // Pick the first exact-scheme requirement that matches our network
-    // (we're only setting one on the McpAgent side for now)
-    const req =
-      accepts.find(
-        (a) => a?.scheme === "exact" && a?.network === this._x402!.network
-      ) ?? accepts[0];
-
-    if (!req || req.scheme !== "exact") return null;
-
-    const maxAmountRequired = BigInt(req.maxAmountRequired);
-    if (maxAmountRequired > this._x402.maxPaymentValue) {
-      throw new Error(
-        `Payment exceeds client cap: ${maxAmountRequired} > ${this._x402.maxPaymentValue}`
-      );
-    }
-
-    // Let x402/client produce the opaque header
-    const token = await createPaymentHeader(
-      this._x402.walletClient as unknown as Wallet, // viem wallet client is compatible
-      this._x402.version,
-      req
-    );
-    return token;
-  }
 
   /**
    * @param _name Name of the MCP client
@@ -344,22 +274,14 @@ export class MCPClientManager {
    * Namespaced version of callTool
    */
   async callTool(
-    params: CallToolRequest["params"] & {
-      serverId: string;
-      confirmationCallback?: X402ClientConfig["confirmationCallback"];
-    },
+    params: CallToolRequest["params"] & { serverId: string },
     resultSchema?:
       | typeof CallToolResultSchema
       | typeof CompatibilityCallToolResultSchema,
-    options?: RequestOptions & {
-      headers?: Record<string, string>;
-    }
+    options?: RequestOptions
   ) {
     const unqualifiedName = params.name.replace(`${params.serverId}.`, "");
-    const conn = this.mcpConnections[params.serverId];
-    const client = conn.client;
-
-    let res = await client.callTool(
+    return this.mcpConnections[params.serverId].client.callTool(
       {
         ...params,
         name: unqualifiedName
@@ -367,53 +289,6 @@ export class MCPClientManager {
       resultSchema,
       options
     );
-
-    // TODO: move this to use structuredContent
-    const accepts: PaymentRequirements[] | undefined = (() => {
-      try {
-        const txt = (res.content as { text: string }[])[0].text;
-        const parsed = txt ? JSON.parse(txt) : null;
-        return parsed?.accepts;
-      } catch {
-        return undefined;
-      }
-    })();
-
-    const isPaymentRequired =
-      res?.isError && Array.isArray(accepts) && accepts.length > 0;
-
-    // Handle retry for x402 tools
-    if (isPaymentRequired && this._x402) {
-      // use x402 default callback if exists
-      const { confirmationCallback: defaultConfirmationCallback } = this._x402;
-
-      // use tool-level callback if provided
-      const confirmationCallback =
-        params.confirmationCallback ?? defaultConfirmationCallback;
-      if (confirmationCallback && !(await confirmationCallback(accepts))) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: "User declined payment" }]
-        };
-      }
-      const token = await this._maybeCreateX402Token(accepts);
-      if (!token) return res; // can't satisfy, return original error
-
-      res = await client.callTool(
-        {
-          ...params,
-          name: unqualifiedName,
-          _meta: {
-            ...params._meta,
-            "x402.payment": token
-          }
-        },
-        resultSchema,
-        options
-      );
-    }
-
-    return res;
   }
 
   /**

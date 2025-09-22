@@ -1,6 +1,11 @@
 import { Agent, getAgentByName, type Connection, type WSMessage } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent, withX402, type X402Config } from "agents/mcp";
+import {
+  McpAgent,
+  withX402,
+  withX402Client,
+  type X402Config
+} from "agents/mcp";
 import { z } from "zod";
 import type { PaymentRequirements } from "x402/types";
 import { privateKeyToAccount } from "viem/accounts";
@@ -9,7 +14,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 export class PayAgent extends Agent<Env> {
   confirmations: Record<string, (res: boolean) => void> = {};
-  squareMcpId?: string;
+  x402Client?: ReturnType<typeof withX402Client>;
 
   async onPaymentRequired(paymentRequirements: PaymentRequirements[]) {
     const confirmationId = crypto.randomUUID().slice(0, 4);
@@ -29,24 +34,22 @@ export class PayAgent extends Agent<Env> {
   }
 
   async onStart() {
-    const agentAccount = privateKeyToAccount(
+    const account = privateKeyToAccount(
       process.env.CLIENT_TEST_PK as `0x${string}`
     );
-    console.log("Agent will pay from this address:", agentAccount.address);
-
-    this.mcp.enableX402Payments({
-      network: "base-sepolia",
-      account: agentAccount,
-      confirmationCallback: this.onPaymentRequired.bind(this)
-    });
+    console.log("Agent will pay from this address:", account.address);
 
     const { id } = await this.mcp.connect("http://localhost:8787/mcp");
-    this.squareMcpId = id;
+
+    // Build the x402 MCP client
+    this.x402Client = withX402Client(this.mcp.mcpConnections[id].client, {
+      network: "base-sepolia",
+      account
+    });
   }
 
   async onMessage(conn: Connection, message: WSMessage) {
     if (typeof message === "string") {
-      // NEW: prefer JSON commands
       try {
         const parsed = JSON.parse(message as string);
         if (parsed?.type) {
@@ -63,28 +66,22 @@ export class PayAgent extends Agent<Env> {
                 parsed.type === "square"
                   ? { number: parsed.number }
                   : { message: parsed.message };
-              const res = (await this.mcp.callTool({
-                serverId: this.squareMcpId!,
-                name: parsed.type,
-                arguments: input
-              })) as CallToolResult;
 
-              const text = res?.content?.[0]?.text ?? "";
-              if (res.isError) {
-                conn.send(
-                  JSON.stringify({
-                    event: "tool_error",
-                    tool: "square",
-                    output: text
-                  })
-                );
-                return;
-              }
+              // The first parameter becomes the confirmation callback.
+              // We can set it to `null` if we want the agent to pay automatically.
+              const res = (await this.x402Client!.callTool(
+                this.onPaymentRequired.bind(this),
+                {
+                  name: parsed.type,
+                  arguments: input
+                }
+              )) as CallToolResult;
+
               conn.send(
                 JSON.stringify({
-                  event: "tool_result",
-                  tool: "square",
-                  output: text
+                  event: res.isError ? "tool_error" : "tool_result",
+                  tool: parsed.type,
+                  output: res.content[0]?.text ?? ""
                 })
               );
             }
@@ -116,9 +113,7 @@ export class PayMCP extends McpAgent<Env> {
       "square",
       "Squares a number",
       0.01, // USD
-      {
-        number: z.number()
-      },
+      { number: z.number() },
       {},
       async ({ number }) => {
         return { content: [{ type: "text", text: String(number ** 2) }] };
@@ -129,11 +124,8 @@ export class PayMCP extends McpAgent<Env> {
     this.server.tool(
       "echo",
       "Echo a message",
-      {
-        message: z.string()
-      },
-      async ({ message }, extra) => {
-        console.log("Extra:", extra._meta);
+      { message: z.string() },
+      async ({ message }) => {
         return { content: [{ type: "text", text: message }] };
       }
     );
