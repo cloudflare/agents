@@ -1,5 +1,4 @@
 import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
-import { MCPClientManager } from "agents/mcp/client";
 
 type Env = {
   MyAgent: AgentNamespace<MyAgent>;
@@ -7,8 +6,6 @@ type Env = {
 };
 
 export class MyAgent extends Agent<Env, never> {
-  mcp = new MCPClientManager("my-agent", "1.0.0");
-
   async onRequest(request: Request): Promise<Response> {
     const reqUrl = new URL(request.url);
     if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {
