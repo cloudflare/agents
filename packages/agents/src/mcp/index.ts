@@ -11,19 +11,9 @@ import {
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import { nanoid } from "nanoid";
-import type {
-  AgentContext,
-  Connection,
-  ConnectionContext,
-  WSMessage
-} from "../";
+import type { Connection, ConnectionContext, WSMessage } from "../";
 import { Agent } from "../index";
-import type {
-  MaybeConnectionTag,
-  MaybePromise,
-  ServeOptions,
-  TransportType
-} from "./types";
+import type { MaybePromise, ServeOptions, TransportType } from "./types";
 
 interface SamplingResult {
   model: string;
@@ -71,15 +61,20 @@ interface StoredSamplingRequest extends BaseStoredRequest {
 }
 
 type StoredRequest = StoredElicitationRequest | StoredSamplingRequest;
+
+// Constants for standalone SSE handling
+const STANDALONE_SSE_METHOD = "standalone-sse-setup";
+const STANDALONE_SSE_MARKER = "standalone-sse";
+
 import {
   createLegacySseHandler,
   createStreamingHttpHandler,
   handleCORS,
   isDurableObjectNamespace,
-  STANDALONE_SSE_MARKER,
-  STANDALONE_SSE_METHOD
+  MCP_HTTP_METHOD_HEADER,
+  MCP_MESSAGE_HEADER
 } from "./utils";
-import { McpSSETransport, McpStreamableHttpTransport } from "./transport";
+import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 
 export abstract class McpAgent<
   Env = unknown,
@@ -114,20 +109,6 @@ export abstract class McpAgent<
 
   abstract server: MaybePromise<McpServer | Server>;
   abstract init(): Promise<void>;
-
-  constructor(ctx: AgentContext, env: Env) {
-    super(ctx, env);
-
-    // Re-set the standalone SSE connection ID if
-    // coming out of hibernation
-    for (const connection of this.getConnections<MaybeConnectionTag>()) {
-      const meta = connection.state;
-      if (meta?.role === STANDALONE_SSE_MARKER) {
-        this._standaloneSseConnectionId = connection.id;
-        return;
-      }
-    }
-  }
 
   /*
    * Helpers
@@ -327,10 +308,18 @@ export abstract class McpAgent<
     }
   }
 
-  /** Get the WebSocket for the standalone SSE if any. Streamable HTTP only. */
-  private getWebSocketForStandaloneSse(): WebSocket | null {
-    if (!this._standaloneSseConnectionId) return null;
-    return this.getConnection(this._standaloneSseConnectionId) ?? null;
+  /** Read the sessionId for this agent.
+   * This relies on the naming scheme being `sse:${sessionId}`
+   * or `streamable-http:${sessionId}`.
+   */
+  getSessionId(): string {
+    const [_, sessionId] = this.name.split(":");
+    if (!sessionId) {
+      throw new Error(
+        "Invalid session id. McpAgent must be addressed with a valid session id."
+      );
+    }
+    return sessionId;
   }
 
   /** Get the unique WebSocket. SSE transport only. */
@@ -342,15 +331,6 @@ export abstract class McpAgent<
     return websockets[0];
   }
 
-  /** Get the corresponding WebSocket for a responseId. Streamable HTTP only. */
-  private getWebSocketForResponseID(id: string): WebSocket | null {
-    const connectionId = this._requestIdToConnectionId.get(id);
-    if (connectionId === undefined) {
-      return null;
-    }
-    return this.getConnection(connectionId) ?? null;
-  }
-
   /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
@@ -358,11 +338,7 @@ export abstract class McpAgent<
         return new McpSSETransport(() => this.getWebSocket());
       }
       case "streamable-http": {
-        return new McpStreamableHttpTransport(
-          (id) => this.getWebSocketForResponseID(id),
-          (id) => this._requestIdToConnectionId.delete(id),
-          () => this.getWebSocketForStandaloneSse()
-        );
+        return new StreamableHTTPServerTransport({});
       }
     }
   }
@@ -371,6 +347,16 @@ export abstract class McpAgent<
   async updateProps(props?: Props) {
     await this.ctx.storage.put("props", props ?? {});
     this.props = props;
+  }
+
+  async reinitializeServer() {
+    // If the agent was previously initialized, we have to populate
+    // the server again by sending the initialize request to make
+    // client information available to the server.
+    const initializeRequest = await this.getInitializeRequest();
+    if (initializeRequest) {
+      this._transport?.onmessage?.(initializeRequest);
+    }
   }
 
   /*
@@ -392,17 +378,38 @@ export abstract class McpAgent<
     this._transport = this.initTransport();
     await server.connect(this._transport);
 
-    // If the agent was previously initialized, we have to populate
-    // the server again by sending the initialize request to make
-    // client information available to the server.
-    const initializeRequest = await this.getInitializeRequest();
-    if (initializeRequest) {
-      this._transport.onmessage?.(initializeRequest);
+    // Intercept transport messages for elicitation/sampling handling
+    this._wrapTransportOnMessage();
+
+    await this.reinitializeServer();
+  }
+
+  /** Intercept transport messages to handle elicitation/sampling responses */
+  private _wrapTransportOnMessage() {
+    if (this._transport?.onmessage) {
+      const originalOnMessage = this._transport.onmessage;
+      this._transport.onmessage = async (message, extra) => {
+        // Check if this is an elicitation response before passing to MCP server
+        if (await this._handleElicitationResponse(message)) {
+          return; // Message was handled by elicitation system
+        }
+
+        // Check if this is a sampling response before passing to MCP server
+        if (await this._handleSamplingResponse(message)) {
+          return; // Message was handled by sampling system
+        }
+
+        // Pass through to original MCP server handler
+        originalOnMessage(message, extra);
+      };
     }
   }
 
   /** Validates new WebSocket connections. */
-  async onConnect(conn: Connection, _: ConnectionContext): Promise<void> {
+  async onConnect(
+    conn: Connection,
+    { request: req }: ConnectionContext
+  ): Promise<void> {
     switch (this.getTransportType()) {
       case "sse": {
         // For SSE connections, we can only have one open connection per session
@@ -415,22 +422,26 @@ export abstract class McpAgent<
         break;
       }
       case "streamable-http":
+        if (this._transport instanceof StreamableHTTPServerTransport) {
+          switch (req.headers.get(MCP_HTTP_METHOD_HEADER)) {
+            case "POST": {
+              // This returns the repsonse directly to the client
+              const payloadHeader = req.headers.get(MCP_MESSAGE_HEADER);
+              const parsedBody = await JSON.parse(payloadHeader ?? "{}");
+              this._transport?.handlePostRequest(req, parsedBody);
+              break;
+            }
+            case "GET":
+              this._transport?.handleGetRequest(req);
+              break;
+          }
+        }
         break;
     }
   }
 
-  /** Handles MCP Messages for Streamable HTTP. */
+  /** Handles MCP Messages for both SSE and Streamable HTTP. */
   async onMessage(connection: Connection, event: WSMessage) {
-    // Since we address the DO via both the protocol and the session id,
-    // this should never happen, but let's enforce it just in case
-    if (this.getTransportType() !== "streamable-http") {
-      const err = new Error(
-        "Internal Server Error: Expected streamable-http protocol"
-      );
-      this._transport?.onerror?.(err);
-      return;
-    }
-
     let message: JSONRPCMessage;
     try {
       // Ensure event is a string
@@ -439,31 +450,6 @@ export abstract class McpAgent<
       message = JSONRPCMessageSchema.parse(JSON.parse(data));
     } catch (error) {
       this._transport?.onerror?.(error as Error);
-      return;
-    }
-
-    // Check if message is our control frame for the standalone SSE stream.
-    if (
-      isJSONRPCNotification(message) &&
-      message.method === STANDALONE_SSE_METHOD
-    ) {
-      if (
-        this._standaloneSseConnectionId &&
-        this._standaloneSseConnectionId !== connection.id
-      ) {
-        // If the standalone SSE was already set, we close the old
-        // socket to avoid dangling connections.
-        const standaloneSseSocket = this.getConnection(
-          this._standaloneSseConnectionId
-        );
-        standaloneSseSocket?.close(1000, "replaced");
-      }
-      connection.setState({
-        role: STANDALONE_SSE_MARKER
-      });
-
-      this._standaloneSseConnectionId = connection.id;
-      // This is internal, so we don't forward the message to the server.
       return;
     }
 
@@ -477,10 +463,38 @@ export abstract class McpAgent<
       return; // Message was handled by sampling system
     }
 
-    // We need to map every incoming message to the connection that it came in on
-    // so that we can send relevant responses and notifications back on the same connection
-    if (isJSONRPCRequest(message)) {
-      this._requestIdToConnectionId.set(message.id.toString(), connection.id);
+    // Handle streamable-http specific logic
+    if (this.getTransportType() === "streamable-http") {
+      // Check if message is our control frame for the standalone SSE stream.
+      if (
+        isJSONRPCNotification(message) &&
+        message.method === STANDALONE_SSE_METHOD
+      ) {
+        if (
+          this._standaloneSseConnectionId &&
+          this._standaloneSseConnectionId !== connection.id
+        ) {
+          // If the standalone SSE was already set, we close the old
+          // socket to avoid dangling connections.
+          const standaloneSseSocket = this.getConnection(
+            this._standaloneSseConnectionId
+          );
+          standaloneSseSocket?.close(1000, "replaced");
+        }
+        connection.setState({
+          role: STANDALONE_SSE_MARKER
+        });
+
+        this._standaloneSseConnectionId = connection.id;
+        // This is internal, so we don't forward the message to the server.
+        return;
+      }
+
+      // We need to map every incoming message to the connection that it came in on
+      // so that we can send relevant responses and notifications back on the same connection
+      if (isJSONRPCRequest(message)) {
+        this._requestIdToConnectionId.set(message.id.toString(), connection.id);
+      }
     }
 
     this._transport?.onmessage?.(message);
