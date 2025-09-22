@@ -27,8 +27,9 @@
     "logs": {
       "enabled": true
     }
-  },
-  "vars": {
-    "HOST": "<DEPLOYED_HOSTNAME>"
   }
+  // Optional: Override the auto-detected host
+  // "vars": {
+  //   "HOST": "<DEPLOYED_HOSTNAME>"
+  // }
 }

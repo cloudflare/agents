@@ -1406,8 +1406,9 @@ export class Agent<
   /**
    * Connect to a new MCP Server
    *
+   * @param serverName Name of the MCP server
    * @param url MCP Server SSE URL
-   * @param callbackHost Base host for the agent, used for the redirect URI.
+   * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request.
    * @param agentsPrefix agents routing prefix if not using `agents`
    * @param options MCP client and transport (header) options
    * @returns authUrl
@@ -1415,7 +1416,7 @@ export class Agent<
   async addMcpServer(
     serverName: string,
     url: string,
-    callbackHost: string,
+    callbackHost?: string,
     agentsPrefix = "agents",
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
@@ -1424,7 +1425,22 @@ export class Agent<
       };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    const callbackUrl = `${callbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    // If callbackHost is not provided, derive it from the current request
+    let resolvedCallbackHost = callbackHost;
+    if (!resolvedCallbackHost) {
+      const { request } = getCurrentAgent();
+      if (!request) {
+        throw new Error(
+          "callbackHost is required when not called within a request context"
+        );
+      }
+
+      // Extract the origin from the request
+      const requestUrl = new URL(request.url);
+      resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
+    }
+
+    const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
     const result = await this._connectToMcpServerInternal(
       serverName,

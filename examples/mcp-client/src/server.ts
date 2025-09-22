@@ -2,7 +2,7 @@ import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
 
 type Env = {
   MyAgent: AgentNamespace<MyAgent>;
-  HOST: string;
+  HOST?: string; // Optional - will be derived from request if not provided
 };
 
 export class MyAgent extends Agent<Env, never> {
@@ -10,6 +10,7 @@ export class MyAgent extends Agent<Env, never> {
     const reqUrl = new URL(request.url);
     if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {
       const mcpServer = (await request.json()) as { url: string; name: string };
+      // Use HOST if provided, otherwise it will be derived from the request
       await this.addMcpServer(mcpServer.name, mcpServer.url, this.env.HOST);
       return new Response("Ok", { status: 200 });
     }
