@@ -1,11 +1,7 @@
 import { Agent, getAgentByName, type Connection, type WSMessage } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  McpAgent,
-  withX402,
-  withX402Client,
-  type X402Config
-} from "agents/mcp";
+import { McpAgent } from "agents/mcp";
+import { withX402, withX402Client, type X402Config } from "agents/x402";
 import { z } from "zod";
 import type { PaymentRequirements } from "x402/types";
 import { privateKeyToAccount } from "viem/accounts";
