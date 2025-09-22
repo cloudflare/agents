@@ -1514,12 +1514,21 @@ export class Agent<
       };
     }
 
+    // Detect transport type from URL pattern
+    let transportType: "sse" | "streamable-http" | "auto" = "auto";
+    if (url.endsWith("/sse")) {
+      transportType = "sse";
+    } else if (url.endsWith("/mcp")) {
+      transportType = "streamable-http";
+    }
+
     const { id, authUrl, clientId } = await this.mcp.connect(url, {
       client: options?.client,
       reconnect,
       transport: {
         ...headerTransportOpts,
-        authProvider
+        authProvider,
+        type: transportType
       }
     });
 
