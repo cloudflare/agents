@@ -71,14 +71,18 @@ describe("Auto Transport Mode", () => {
       expect(connection.connectionState).toBe("failed");
     });
 
-    it("should fail when asking for an incorrect transport type", async () => {
+    it("should succeed when using different transport than URL endpoint suggests", async () => {
+      // This test verifies that URL normalization allows transport flexibility
       const connection = await initializeMCPClientConnection(
-        "http://example.com/mcp",
-        "sse"
+        "http://example.com/mcp", // URL suggests streamable-http
+        "sse" // but we explicitly request SSE
       );
 
-      await expect(connection.init()).rejects.toThrow();
-      expect(connection.connectionState).toBe("failed");
+      await connection.init();
+
+      // Should succeed because URL normalization strips /mcp and tries /sse
+      expect(connection.connectionState).toBe("ready");
+      expect(connection.tools).toBeDefined();
     });
   });
 });

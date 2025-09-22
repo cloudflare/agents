@@ -1404,25 +1404,6 @@ export class Agent<
   }
 
   /**
-   * Normalize server URL to extract base URL only
-   * @param url The URL to normalize (may include /mcp or /sse endpoints)
-   * @returns Base server URL without transport-specific endpoints
-   */
-  private _normalizeServerUrl(url: string): string {
-    // Remove trailing slash for consistent handling
-    let normalized = url.endsWith("/") ? url.slice(0, -1) : url;
-
-    // Remove any transport-specific endpoints to get base URL
-    if (normalized.endsWith("/sse")) {
-      normalized = normalized.slice(0, -4);
-    } else if (normalized.endsWith("/mcp")) {
-      normalized = normalized.slice(0, -4);
-    }
-
-    return normalized;
-  }
-
-  /**
    * Connect to a new MCP Server
    *
    * @param serverName Name of the MCP server
@@ -1444,9 +1425,6 @@ export class Agent<
       };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    // Normalize and add endpoint to URL
-    const normalizedUrl = this._normalizeServerUrl(url);
-
     // If callbackHost is not provided, derive it from the current request
     let resolvedCallbackHost = callbackHost;
     if (!resolvedCallbackHost) {
@@ -1466,7 +1444,7 @@ export class Agent<
 
     const result = await this._connectToMcpServerInternal(
       serverName,
-      normalizedUrl,
+      url,
       callbackUrl,
       options
     );
@@ -1476,7 +1454,7 @@ export class Agent<
       VALUES (
         ${result.id},
         ${serverName},
-        ${normalizedUrl},
+        ${url},
         ${result.clientId ?? null},
         ${result.authUrl ?? null},
         ${callbackUrl},
@@ -1521,9 +1499,6 @@ export class Agent<
     authUrl: string | undefined;
     clientId: string | undefined;
   }> {
-    // Backward compatibility: normalize URLs that might be stored in DB from older versions
-    const normalizedUrl = this._normalizeServerUrl(url);
-
     const authProvider = new DurableObjectOAuthClientProvider(
       this.ctx.storage,
       this.name,
@@ -1559,7 +1534,7 @@ export class Agent<
     // This provides consistent behavior regardless of input URL format
     const transportType = "auto";
 
-    const { id, authUrl, clientId } = await this.mcp.connect(normalizedUrl, {
+    const { id, authUrl, clientId } = await this.mcp.connect(url, {
       client: options?.client,
       reconnect,
       transport: {

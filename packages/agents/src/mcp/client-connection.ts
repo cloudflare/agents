@@ -59,6 +59,9 @@ export class MCPClientConnection {
       client: ConstructorParameters<typeof Client>[1];
     } = { client: {}, transport: {} }
   ) {
+    // Normalize URL to remove transport-specific endpoints
+    this.url = this._normalizeUrl(url);
+
     const clientOptions = {
       ...options.client,
       capabilities: {
@@ -68,6 +71,29 @@ export class MCPClientConnection {
     };
 
     this.client = new Client(info, clientOptions);
+  }
+
+  /**
+   * Normalize URL to extract base URL only
+   * @param url The URL to normalize (may include /mcp or /sse endpoints)
+   * @returns Base server URL without transport-specific endpoints
+   */
+  private _normalizeUrl(url: URL): URL {
+    let pathname = url.pathname;
+
+    // Remove transport-specific endpoints to get base URL
+    if (pathname.endsWith("/sse")) {
+      pathname = pathname.slice(0, -4);
+    } else if (pathname.endsWith("/mcp")) {
+      pathname = pathname.slice(0, -4);
+    }
+
+    // Remove trailing slash for consistent handling
+    if (pathname.endsWith("/") && pathname !== "/") {
+      pathname = pathname.slice(0, -1);
+    }
+
+    return new URL(pathname, url.origin);
   }
 
   /**
