@@ -8,8 +8,8 @@
     "start": "vite dev"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.18.0",
-    "nanoid": "^5.1.5"
+    "@modelcontextprotocol/sdk": "^1.18.1",
+    "nanoid": "^5.1.6"
   },
   "keywords": []
 }

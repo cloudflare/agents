@@ -1,8 +1,8 @@
 {
   "author": "",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.18.0",
-    "nanoid": "^5.1.5",
+    "@modelcontextprotocol/sdk": "^1.18.1",
+    "nanoid": "^5.1.6",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "zod": "^3.25.76"
