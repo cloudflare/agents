@@ -42,7 +42,7 @@ export async function registerClient(base: URL) {
       response_types: ["token", "code"]
     })
   });
-  const j = await res.json<{ client_id: string }>();
+  const j = (await res.json()) as { client_id: string };
   return j.client_id;
 }
 
@@ -59,7 +59,7 @@ export async function headlessImplicitToken(
   u.searchParams.set("email", email);
   u.searchParams.set("password", "x");
 
-  const res = await (await fetch(u)).json<{ fragment?: string }>();
+  const res = (await (await fetch(u)).json()) as { fragment?: string };
   const params = new URLSearchParams(res.fragment);
   const token = params.get("access_token");
   if (!token) throw new Error("No access_token in FRAGMENT");
