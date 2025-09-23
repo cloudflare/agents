@@ -145,7 +145,6 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     // Don't overwrite existing verifier to preserve first PKCE verifier
     const existing = await this.storage.get<string>(key);
     if (existing) {
-      console.log(`Preserving existing PKCE verifier for ${this.clientId}`);
       return;
     }
 

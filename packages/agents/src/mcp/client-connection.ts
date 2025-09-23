@@ -59,8 +59,7 @@ export class MCPClientConnection {
       client: ConstructorParameters<typeof Client>[1];
     } = { client: {}, transport: {} }
   ) {
-    // Normalize URL to remove transport-specific endpoints
-    this.url = this._normalizeUrl(url);
+    this.url = url;
 
     const clientOptions = {
       ...options.client,
@@ -71,29 +70,6 @@ export class MCPClientConnection {
     };
 
     this.client = new Client(info, clientOptions);
-  }
-
-  /**
-   * Normalize URL to extract base URL only
-   * @param url The URL to normalize (may include /mcp or /sse endpoints)
-   * @returns Base server URL without transport-specific endpoints
-   */
-  private _normalizeUrl(url: URL): URL {
-    let pathname = url.pathname;
-
-    // Remove transport-specific endpoints to get base URL
-    if (pathname.endsWith("/sse")) {
-      pathname = pathname.slice(0, -4);
-    } else if (pathname.endsWith("/mcp")) {
-      pathname = pathname.slice(0, -4);
-    }
-
-    // Remove trailing slash for consistent handling
-    if (pathname.endsWith("/") && pathname !== "/") {
-      pathname = pathname.slice(0, -1);
-    }
-
-    return new URL(pathname, url.origin);
   }
 
   /**
@@ -313,23 +289,15 @@ export class MCPClientConnection {
    * @returns The transport for the client
    */
   getTransport(transportType: TransportType) {
-    // Create transport URL by appending endpoint to base URL
-    // Use URL constructor properly to handle path joining
-    const endpoint = transportType === "streamable-http" ? "mcp" : "sse";
-    const transportUrl = new URL(
-      endpoint,
-      this.url.href + (this.url.pathname.endsWith("/") ? "" : "/")
-    );
-
     switch (transportType) {
       case "streamable-http":
         return new StreamableHTTPEdgeClientTransport(
-          transportUrl,
+          this.url,
           this.options.transport as StreamableHTTPClientTransportOptions
         );
       case "sse":
         return new SSEEdgeClientTransport(
-          transportUrl,
+          this.url,
           this.options.transport as SSEClientTransportOptions
         );
       default:
@@ -348,7 +316,6 @@ export class MCPClientConnection {
         await this.options.transport.authProvider.getOAuthTransport();
       if (savedTransport) {
         effectiveTransportType = savedTransport as TransportType;
-        console.log(`Using saved OAuth transport: ${effectiveTransportType}`);
       }
     }
 
@@ -393,9 +360,6 @@ export class MCPClientConnection {
         ) {
           await this.options.transport.authProvider.saveOAuthTransport(
             currentTransportType
-          );
-          console.log(
-            `Saved OAuth transport for unauthorized: ${currentTransportType}`
           );
           throw e; // Re-throw after storing transport
         }

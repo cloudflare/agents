@@ -1530,9 +1530,8 @@ export class Agent<
       };
     }
 
-    // Always use auto transport to try /mcp first, then fallback to /sse
-    // This provides consistent behavior regardless of input URL format
-    const transportType = "auto";
+    // Use the transport type specified in options, or default to "auto"
+    const transportType = options?.transport?.type || "auto";
 
     const { id, authUrl, clientId } = await this.mcp.connect(url, {
       client: options?.client,
