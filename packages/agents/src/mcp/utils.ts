@@ -1,28 +1,30 @@
 import {
   JSONRPCMessageSchema,
+  type JSONRPCMessage,
   InitializeRequestSchema,
   isJSONRPCResponse,
-  isJSONRPCError,
-  isJSONRPCNotification,
-  isJSONRPCRequest
+  isJSONRPCNotification
 } from "@modelcontextprotocol/sdk/types.js";
-import type { JSONRPCMessage } from "ai";
 import type { McpAgent } from ".";
 import { getAgentByName } from "..";
 import type { CORSOptions } from "./types";
+import { MessageType } from "../ai-types";
 
 /**
- * Tag placed in `connection.state.role` to mark the WebSocket that carries
- * the standalone SSE stream for a session. We use it to recover the connection
- * after hibernation.
+ * Since we use WebSockets to bridge the client to the
+ * MCP transport in the Agent, we use this header to signal
+ * the method of the original request the user made, while
+ * leaving the WS Upgrade request as GET.
  */
-export const STANDALONE_SSE_MARKER = "standalone-sse";
+export const MCP_HTTP_METHOD_HEADER = "cf-mcp-method";
 
 /**
- * Internal JSON-RPC notif method to attach current a
- * connection as the standalone SSE.
+ * Since we use WebSockets to bridge the client to the
+ * MCP transport in the Agent, we use this header to include
+ * the original request body.
  */
-export const STANDALONE_SSE_METHOD = "cf/standalone_sse/attach";
+export const MCP_MESSAGE_HEADER = "cf-mcp-message";
+
 const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
 export const createStreamingHttpHandler = (
@@ -135,11 +137,11 @@ export const createStreamingHttpHandler = (
         // Before we pass the messages to the agent, there's another error condition we need to enforce
         // Check if this is an initialization request
         // https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/lifecycle/
-        const isInitializationRequest = messages.some(
+        const maybeInitializeRequest = messages.find(
           (msg) => InitializeRequestSchema.safeParse(msg).success
         );
 
-        if (isInitializationRequest && sessionId) {
+        if (!!maybeInitializeRequest && sessionId) {
           const body = JSON.stringify({
             error: {
               code: -32600,
@@ -153,7 +155,7 @@ export const createStreamingHttpHandler = (
         }
 
         // The initialization request must be the only request in the batch
-        if (isInitializationRequest && messages.length > 1) {
+        if (!!maybeInitializeRequest && messages.length > 1) {
           const body = JSON.stringify({
             error: {
               code: -32600,
@@ -169,7 +171,7 @@ export const createStreamingHttpHandler = (
         // If an Mcp-Session-Id is returned by the server during initialization,
         // clients using the Streamable HTTP transport MUST include it
         // in the Mcp-Session-Id header on all of their subsequent HTTP requests.
-        if (!isInitializationRequest && !sessionId) {
+        if (!maybeInitializeRequest && !sessionId) {
           const body = JSON.stringify({
             error: {
               code: -32000,
@@ -189,12 +191,12 @@ export const createStreamingHttpHandler = (
         const agent = await getAgentByName(
           namespace,
           `streamable-http:${sessionId}`,
-          { props: ctx.props }
+          { props: ctx.props as Record<string, unknown> | undefined }
         );
-        const isInitialized = await agent.isInitialized();
+        const isInitialized = await agent.getInitializeRequest();
 
-        if (isInitializationRequest) {
-          await agent.setInitialized();
+        if (maybeInitializeRequest) {
+          await agent.setInitializeRequest(maybeInitializeRequest);
         } else if (!isInitialized) {
           // if we have gotten here, then a session id that was never initialized
           // was provided
@@ -225,10 +227,12 @@ export const createStreamingHttpHandler = (
         const req = new Request(request.url, {
           headers: {
             ...existingHeaders,
+            [MCP_HTTP_METHOD_HEADER]: "POST",
+            [MCP_MESSAGE_HEADER]: JSON.stringify(messages),
             Upgrade: "websocket"
           }
         });
-        if (ctx.props) agent.updateProps(ctx.props);
+        if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
         const response = await agent.fetch(req);
 
         // Get the WebSocket
@@ -248,11 +252,6 @@ export const createStreamingHttpHandler = (
           return new Response(body, { status: 500 });
         }
 
-        // Keep track of the request ids that we have sent to the server
-        // so that we can close the connection once we have received
-        // all the responses
-        const requestIds: Set<string | number> = new Set();
-
         // Accept the WebSocket
         ws.accept();
 
@@ -266,32 +265,18 @@ export const createStreamingHttpHandler = (
                   : new TextDecoder().decode(event.data);
               const message = JSON.parse(data);
 
-              // validate that the message is a valid JSONRPC message
-              const result = JSONRPCMessageSchema.safeParse(message);
-              if (!result.success) {
-                // The message was not a valid JSONRPC message, so we will drop it
-                // PartyKit will broadcast state change messages to all connected clients
-                // and we need to filter those out so they are not passed to MCP clients
+              // We only forward events from the MCP server
+              if (message.type !== MessageType.CF_MCP_AGENT_EVENT) {
                 return;
               }
 
-              // If the message is a response or an error, remove the id from the set of
-              // request ids
-              if (
-                isJSONRPCResponse(result.data) ||
-                isJSONRPCError(result.data)
-              ) {
-                requestIds.delete(result.data.id);
-              }
-
               // Send the message as an SSE event
-              const messageText = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
-              await writer.write(encoder.encode(messageText));
+              await writer.write(encoder.encode(message.event));
 
               // If we have received all the responses, close the connection
-              if (requestIds.size === 0) {
+              if (message.close) {
                 ws?.close();
-                await writer.close();
+                await writer.close().catch(() => {});
               }
             } catch (error) {
               console.error("Error forwarding message to SSE:", error);
@@ -303,11 +288,7 @@ export const createStreamingHttpHandler = (
         // Handle WebSocket errors
         ws.addEventListener("error", (error) => {
           async function onError(_error: Event) {
-            try {
-              await writer.close();
-            } catch (_e) {
-              // Ignore errors when closing
-            }
+            await writer.close().catch(() => {});
           }
           onError(error).catch(console.error);
         });
@@ -315,11 +296,7 @@ export const createStreamingHttpHandler = (
         // Handle WebSocket closure
         ws.addEventListener("close", () => {
           async function onClose() {
-            try {
-              await writer.close();
-            } catch (error) {
-              console.error("Error closing SSE connection:", error);
-            }
+            await writer.close().catch(() => {});
           }
           onClose().catch(console.error);
         });
@@ -330,10 +307,6 @@ export const createStreamingHttpHandler = (
           (msg) => isJSONRPCNotification(msg) || isJSONRPCResponse(msg)
         );
         if (hasOnlyNotificationsOrResponses) {
-          for (const message of messages) {
-            ws.send(JSON.stringify(message));
-          }
-
           // closing the websocket will also close the SSE connection
           ws.close();
 
@@ -341,16 +314,6 @@ export const createStreamingHttpHandler = (
             headers: corsHeaders(request, corsOptions),
             status: 202
           });
-        }
-
-        for (const message of messages) {
-          if (isJSONRPCRequest(message)) {
-            // add each request id that we send off to a set
-            // so that we can keep track of which requests we
-            // still need a response for
-            requestIds.add(message.id);
-          }
-          ws.send(JSON.stringify(message));
         }
 
         // Return the SSE response. We handle closing the stream in the ws "message"
@@ -382,9 +345,19 @@ export const createStreamingHttpHandler = (
         }
 
         // Require sessionId
-        const sessionId = url.searchParams.get("sessionId");
+        const sessionId = request.headers.get("mcp-session-id");
         if (!sessionId)
-          return new Response("Missing sessionId", { status: 400 });
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: -32000,
+                message: "Bad Request: Mcp-Session-Id header is required"
+              },
+              id: null,
+              jsonrpc: "2.0"
+            }),
+            { status: 400 }
+          );
 
         // Create SSE stream
         const { readable, writable } = new TransformStream();
@@ -394,9 +367,9 @@ export const createStreamingHttpHandler = (
         const agent = await getAgentByName(
           namespace,
           `streamable-http:${sessionId}`,
-          { props: ctx.props }
+          { props: ctx.props as Record<string, unknown> | undefined }
         );
-        const isInitialized = await agent.isInitialized();
+        const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
           return new Response(
             JSON.stringify({
@@ -413,11 +386,12 @@ export const createStreamingHttpHandler = (
           existingHeaders[k] = v;
         });
 
-        if (ctx.props) agent.updateProps(ctx.props);
+        if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
         const response = await agent.fetch(
           new Request(request.url, {
             headers: {
               ...existingHeaders,
+              [MCP_HTTP_METHOD_HEADER]: "GET",
               Upgrade: "websocket"
             }
           })
@@ -432,15 +406,6 @@ export const createStreamingHttpHandler = (
         }
         ws.accept();
 
-        // Signal the DO to use this connection as the standalone SSE stream
-        ws.send(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            method: STANDALONE_SSE_METHOD,
-            params: {}
-          })
-        );
-
         // Forward DO messages as SSE
         ws.addEventListener("message", (event) => {
           try {
@@ -449,10 +414,13 @@ export const createStreamingHttpHandler = (
                 typeof ev.data === "string"
                   ? ev.data
                   : new TextDecoder().decode(ev.data);
-              const parsed = JSONRPCMessageSchema.safeParse(JSON.parse(data));
-              if (!parsed.success) return;
-              const frame = `event: message\ndata: ${JSON.stringify(parsed.data)}\n\n`;
-              await writer.write(encoder.encode(frame));
+              const message = JSON.parse(data);
+
+              // We only forward events from the MCP server
+              if (message.type !== MessageType.CF_MCP_AGENT_EVENT) {
+                return;
+              }
+              await writer.write(encoder.encode(message.event));
             }
             onMessage(event).catch(console.error);
           } catch (e) {
@@ -496,7 +464,7 @@ export const createStreamingHttpHandler = (
           namespace,
           `streamable-http:${sessionId}`
         );
-        const isInitialized = await agent.isInitialized();
+        const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
           return new Response(
             JSON.stringify({
@@ -569,7 +537,7 @@ export const createLegacySseHandler = (
 
       // Get the Durable Object
       const agent = await getAgentByName(namespace, `sse:${sessionId}`, {
-        props: ctx.props
+        props: ctx.props as Record<string, unknown> | undefined
       });
 
       // Connect to the Durable Object via WebSocket
@@ -577,7 +545,7 @@ export const createLegacySseHandler = (
       request.headers.forEach((value, key) => {
         existingHeaders[key] = value;
       });
-      if (ctx.props) agent.updateProps(ctx.props);
+      if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
       const response = await agent.fetch(
         new Request(request.url, {
           headers: {
@@ -692,7 +660,7 @@ export const createLegacySseHandler = (
 
       // Get the Durable Object
       const agent = await getAgentByName(namespace, `sse:${sessionId}`, {
-        props: ctx.props
+        props: ctx.props as Record<string, unknown> | undefined
       });
 
       const messageBody = await request.json();

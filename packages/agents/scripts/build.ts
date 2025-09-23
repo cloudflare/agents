@@ -11,6 +11,7 @@ async function main() {
       "src/mcp/index.ts",
       "src/mcp/client.ts",
       "src/mcp/do-oauth-client-provider.ts",
+      "src/mcp/x402.ts",
       "src/observability/index.ts"
     ],
     external: [
@@ -20,7 +21,8 @@ async function main() {
       "ai",
       "react",
       "zod",
-      "@modelcontextprotocol/sdk"
+      "@modelcontextprotocol/sdk",
+      "x402"
     ],
     format: "esm",
     sourcemap: true,

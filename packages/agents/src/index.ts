@@ -411,8 +411,11 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    // Auto-wrap custom methods with agent context
-    this._autoWrapCustomMethods();
+    if (!wrappedClasses.has(this.constructor)) {
+      // Auto-wrap custom methods with agent context
+      this._autoWrapCustomMethods();
+      wrappedClasses.add(this.constructor);
+    }
 
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
@@ -1563,6 +1566,9 @@ export class Agent<
     return mcpState;
   }
 }
+
+// A set of classes that have been wrapped with agent context
+const wrappedClasses = new Set<typeof Agent.prototype.constructor>();
 
 /**
  * Namespace for creating Agent instances

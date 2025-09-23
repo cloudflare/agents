@@ -185,7 +185,10 @@ export async function openStandaloneSSE(
   baseUrl = "http://example.com/mcp"
 ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
   const request = new Request(`${baseUrl}?sessionId=${sessionId}`, {
-    headers: { Accept: "application/json, text/event-stream" },
+    headers: {
+      Accept: "application/json, text/event-stream",
+      "mcp-session-id": sessionId
+    },
 
     method: "GET"
   });

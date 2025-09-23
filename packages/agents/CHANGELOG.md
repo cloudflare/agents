@@ -1,5 +1,39 @@
 # @cloudflare/agents
 
+## 0.1.6
+
+### Patch Changes
+
+- [#492](https://github.com/cloudflare/agents/pull/492) [`00ba881`](https://github.com/cloudflare/agents/commit/00ba88115d62b608564e783faac18754dc8a79cc) Thanks [@threepointone](https://github.com/threepointone)! - fix: this.mcp.getAITools now includes outputSchema
+
+- [#494](https://github.com/cloudflare/agents/pull/494) [`ecbd795`](https://github.com/cloudflare/agents/commit/ecbd7950dd0656e27ca3fcd8cdf69aa7292ec5ba) Thanks [@threepointone](https://github.com/threepointone)! - update deps
+
+## 0.1.5
+
+### Patch Changes
+
+- [#478](https://github.com/cloudflare/agents/pull/478) [`8234d41`](https://github.com/cloudflare/agents/commit/8234d413538add212738d4e9436ace3d0fd222d1) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Refactor streamable HTTP transport
+
+- [#486](https://github.com/cloudflare/agents/pull/486) [`4abd78a`](https://github.com/cloudflare/agents/commit/4abd78af111d297fc1a3a7763728ca36b14a0a29) Thanks [@threepointone](https://github.com/threepointone)! - fix: don't context wrap methods on Agents that have already been wrapped
+
+- [#480](https://github.com/cloudflare/agents/pull/480) [`23db655`](https://github.com/cloudflare/agents/commit/23db65588effe698a77cc9514857dd9611def927) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Update mcp tools and client for x402 support
+
+## 0.1.4
+
+### Patch Changes
+
+- [#470](https://github.com/cloudflare/agents/pull/470) [`28013ba`](https://github.com/cloudflare/agents/commit/28013ba700f6c2c0ce09dd3406f6da95569d68bf) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Store initialize requests and set them in onStart
+
+- [#467](https://github.com/cloudflare/agents/pull/467) [`b8eba58`](https://github.com/cloudflare/agents/commit/b8eba582af89cc119ff15f155636fe7ba05d8534) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Silently handle writer close errors
+
+- [`bfc9c75`](https://github.com/cloudflare/agents/commit/bfc9c75bbe8be4f078051cab9a4b95d3cab73ffc) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - add response metadata
+
+- [#469](https://github.com/cloudflare/agents/pull/469) [`fac1fe8`](https://github.com/cloudflare/agents/commit/fac1fe879892711b6e91760c45780fcbfc56f602) Thanks [@umgefahren](https://github.com/umgefahren)! - Include reasoning parts in finalized and persistet message.
+
+- [#472](https://github.com/cloudflare/agents/pull/472) [`2d0d2e1`](https://github.com/cloudflare/agents/commit/2d0d2e1e1a0883bd71c6e250da5f007a2dce0229) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - use header for session ids in streamable http GET streams
+
+- [`7d9b939`](https://github.com/cloudflare/agents/commit/7d9b9398e982737b4caa7f99c3a521e36df4961d) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
 ## 0.1.3
 
 ### Patch Changes

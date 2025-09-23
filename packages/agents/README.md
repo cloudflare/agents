@@ -342,15 +342,113 @@ export class DialogueAgent extends AIChatAgent {
     //   messages: this.messages,
     // });
     //
-    // // Optional: you can call onFinish here for custom side effects. Message
-    // // persistence is still handled automatically by AIChatAgent.
-    // await onFinish?.(result);
-    // return new Response(result.text, {
-    //   headers: { 'Content-Type': 'text/plain' }
+    // // For non-streaming with metadata, use toUIMessage:
+    // const message = result.toUIMessage({
+    //   metadata: {
+    //     model: 'gpt-4o',
+    //     totalTokens: result.usage?.totalTokens,
+    //   }
+    // });
+    //
+    // return new Response(JSON.stringify(message), {
+    //   headers: { 'Content-Type': 'application/json' }
     // });
   }
 }
 ```
+
+#### Metadata Support
+
+The AI SDK provides native support for message metadata through the `messageMetadata` callback. This allows you to attach custom information to messages at the message level.
+
+##### AIChatAgent Integration
+
+In the context of `AIChatAgent`, you can use metadata like this:
+
+```typescript
+import { AIChatAgent } from "agents/ai-chat-agent";
+import { streamText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+export class MyAgent extends AIChatAgent<Env> {
+  async onChatMessage(onFinish) {
+    const startTime = Date.now();
+
+    const result = streamText({
+      model: openai("gpt-4o"),
+      messages: this.messages,
+      onFinish
+    });
+
+    return result.toUIMessageStreamResponse({
+      messageMetadata: ({ part }) => {
+        if (part.type === "start") {
+          return {
+            model: "gpt-4o",
+            createdAt: Date.now(),
+            messageCount: this.messages.length
+          };
+        }
+        if (part.type === "finish") {
+          return {
+            responseTime: Date.now() - startTime,
+            totalTokens: part.totalUsage?.totalTokens
+          };
+        }
+      }
+    });
+  }
+}
+```
+
+##### Accessing Metadata on the Client
+
+Access metadata through the `message.metadata` property:
+
+```typescript
+'use client';
+
+import { useChat } from '@ai-sdk/react';
+import { DefaultChatTransport } from 'ai';
+import type { MyUIMessage } from '@/types';
+
+export default function Chat() {
+  const { messages } = useChat<MyUIMessage>({
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+    }),
+  });
+
+  return (
+    <div>
+      {messages.map(message => (
+        <div key={message.id}>
+          <div>
+            {message.role === 'user' ? 'User: ' : 'AI: '}
+            {message.metadata?.createdAt && (
+              <span className="text-sm text-gray-500">
+                {new Date(message.metadata.createdAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+          {/* Render message content */}
+          {message.parts.map((part, index) =>
+            part.type === 'text' ? <div key={index}>{part.text}</div> : null,
+          )}
+          {/* Display additional metadata */}
+          {message.metadata?.totalTokens && (
+            <div className="text-xs text-gray-400">
+              {message.metadata.totalTokens} tokens
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+For more details, see the [AI SDK Message Metadata documentation](https://ai-sdk.dev/docs/ai-sdk-ui/message-metadata).
 
 #### Creating the Interface
 

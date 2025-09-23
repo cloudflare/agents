@@ -61,6 +61,12 @@ type UseAgentChatOptions<
    * If not provided, will auto-detect from tools object.
    */
   toolsRequiringConfirmation?: string[];
+  /**
+   * When true (default), automatically sends the next message only after
+   * all pending confirmation-required tool calls have been resolved.
+   * @default true
+   */
+  autoSendAfterAllConfirmationsResolved?: boolean;
 };
 
 const requestCache = new Map<string, Promise<Message[]>>();
@@ -101,6 +107,7 @@ export function useAgentChat<
     experimental_automaticToolResolution,
     tools,
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
+    autoSendAfterAllConfirmationsResolved = true,
     ...rest
   } = options;
 
@@ -343,6 +350,31 @@ export function useAgentChat<
 
   const processedToolCalls = useRef(new Set<string>());
 
+  // Calculate pending confirmations for the latest assistant message
+  const lastMessage =
+    useChatHelpers.messages[useChatHelpers.messages.length - 1];
+
+  const pendingConfirmations = (() => {
+    if (!lastMessage || lastMessage.role !== "assistant") {
+      return { messageId: undefined, toolCallIds: new Set<string>() };
+    }
+
+    const pendingIds = new Set<string>();
+    for (const part of lastMessage.parts ?? []) {
+      if (
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
+        toolsRequiringConfirmation.includes(getToolName(part))
+      ) {
+        pendingIds.add(part.toolCallId);
+      }
+    }
+    return { messageId: lastMessage.id, toolCallIds: pendingIds };
+  })();
+
+  const pendingConfirmationsRef = useRef(pendingConfirmations);
+  pendingConfirmationsRef.current = pendingConfirmations;
+
   // tools can be a different object everytime it's called,
   // which might lead to this effect being called multiple times with different tools objects.
   // we need to fix this, but that's a bigger refactor.
@@ -397,7 +429,13 @@ export function useAgentChat<
               });
             }
           }
-          useChatHelpers.sendMessage();
+          // If there are NO pending confirmations for the latest assistant message,
+          // we can continue the conversation. Otherwise, wait for the UI to resolve
+          // those confirmations; the addToolResult wrapper will send when the last
+          // pending confirmation is resolved.
+          if (pendingConfirmationsRef.current.toolCallIds.size === 0) {
+            useChatHelpers.sendMessage();
+          }
         }
       })();
     }
@@ -445,12 +483,35 @@ export function useAgentChat<
     };
   }, [agent, useChatHelpers.setMessages]);
 
-  const { addToolResult } = useChatHelpers;
+  // Wrapper that sends only when the last pending confirmation is resolved
+  const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
+    async (args) => {
+      const { toolCallId } = args;
 
-  const addToolResultAndSendMessage: typeof addToolResult = async (...args) => {
-    await addToolResult(...args);
-    useChatHelpers.sendMessage();
-  };
+      await useChatHelpers.addToolResult(args);
+
+      if (!autoSendAfterAllConfirmationsResolved) {
+        // always send immediately
+        useChatHelpers.sendMessage();
+        return;
+      }
+
+      // wait for all confirmations
+      const pending = pendingConfirmationsRef.current?.toolCallIds;
+      if (!pending) {
+        useChatHelpers.sendMessage();
+        return;
+      }
+
+      const wasLast = pending.size === 1 && pending.has(toolCallId);
+      if (pending.has(toolCallId)) {
+        pending.delete(toolCallId);
+      }
+
+      if (wasLast || pending.size === 0) {
+        useChatHelpers.sendMessage();
+      }
+    };
 
   return {
     ...useChatHelpers,

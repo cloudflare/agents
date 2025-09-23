@@ -175,6 +175,7 @@ export default {
     const url = new URL(request.url);
 
     // set some props that should be passed init
+    // @ts-expect-error - this is fine for now
     ctx.props = {
       testValue: "123"
     };

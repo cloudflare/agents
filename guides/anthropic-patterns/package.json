@@ -1,7 +1,7 @@
 {
   "author": "",
   "dependencies": {
-    "nanoid": "^5.1.5"
+    "nanoid": "^5.1.6"
   },
   "description": "The anthropic patterns, implemented with cloudflare agents",
   "keywords": [],
