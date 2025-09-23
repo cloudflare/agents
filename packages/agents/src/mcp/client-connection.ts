@@ -7,13 +7,10 @@ import {
   type ListResourceTemplatesResult,
   type ListResourcesResult,
   type ListToolsResult,
-  type Prompt,
   PromptListChangedNotificationSchema,
-  type Resource,
   ResourceListChangedNotificationSchema,
   type ResourceTemplate,
   type ServerCapabilities,
-  type Tool,
   ToolListChangedNotificationSchema,
   ElicitRequestSchema,
   type ElicitRequest,
@@ -22,6 +19,12 @@ import {
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+// Import types directly from MCP SDK
+import type {
+  Tool,
+  Resource,
+  Prompt
+} from "@modelcontextprotocol/sdk/types.js";
 
 export type MCPTransportOptions = (
   | SSEClientTransportOptions

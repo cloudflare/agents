@@ -1,6 +1,6 @@
 ### 🧠 `agents` - A Framework for Digital Intelligence
 
-![agents-header](https://github.com/user-attachments/assets/f6d99eeb-1803-4495-9c5e-3cf07a37b402)
+![npm install agents](../../assets/npm-install-agents.svg)
 
 Welcome to a new chapter in software development, where AI agents persist, think, and act with purpose. The `agents` framework creates an environment where artificial intelligence can flourish - maintaining state, engaging in meaningful interactions, and evolving over time.
 
@@ -317,23 +317,138 @@ Create meaningful conversations with intelligence:
 ```ts
 import { AIChatAgent } from "agents/ai-chat-agent";
 import { openai } from "@ai-sdk/openai";
+import { streamText, generateText, createDataStreamResponse } from "ai";
 
 export class DialogueAgent extends AIChatAgent {
   async onChatMessage(onFinish) {
+    // Option 1: Streaming responses (recommended for real-time interaction)
     return createDataStreamResponse({
       execute: async (dataStream) => {
         const stream = streamText({
           model: openai("gpt-4o"),
           messages: this.messages,
-          onFinish // call onFinish so that messages get saved
+          // Optional: onFinish is invoked by the AI SDK when generation completes.
+          // Persistence is handled automatically by AIChatAgent after streaming completes.
+          onFinish
         });
 
         stream.mergeIntoDataStream(dataStream);
       }
     });
+
+    // Option 2: Non-streaming responses (simpler, but no real-time updates)
+    // const result = await generateText({
+    //   model: openai("gpt-4o"),
+    //   messages: this.messages,
+    // });
+    //
+    // // For non-streaming with metadata, use toUIMessage:
+    // const message = result.toUIMessage({
+    //   metadata: {
+    //     model: 'gpt-4o',
+    //     totalTokens: result.usage?.totalTokens,
+    //   }
+    // });
+    //
+    // return new Response(JSON.stringify(message), {
+    //   headers: { 'Content-Type': 'application/json' }
+    // });
   }
 }
 ```
+
+#### Metadata Support
+
+The AI SDK provides native support for message metadata through the `messageMetadata` callback. This allows you to attach custom information to messages at the message level.
+
+##### AIChatAgent Integration
+
+In the context of `AIChatAgent`, you can use metadata like this:
+
+```typescript
+import { AIChatAgent } from "agents/ai-chat-agent";
+import { streamText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
+export class MyAgent extends AIChatAgent<Env> {
+  async onChatMessage(onFinish) {
+    const startTime = Date.now();
+
+    const result = streamText({
+      model: openai("gpt-4o"),
+      messages: this.messages,
+      onFinish
+    });
+
+    return result.toUIMessageStreamResponse({
+      messageMetadata: ({ part }) => {
+        if (part.type === "start") {
+          return {
+            model: "gpt-4o",
+            createdAt: Date.now(),
+            messageCount: this.messages.length
+          };
+        }
+        if (part.type === "finish") {
+          return {
+            responseTime: Date.now() - startTime,
+            totalTokens: part.totalUsage?.totalTokens
+          };
+        }
+      }
+    });
+  }
+}
+```
+
+##### Accessing Metadata on the Client
+
+Access metadata through the `message.metadata` property:
+
+```typescript
+'use client';
+
+import { useChat } from '@ai-sdk/react';
+import { DefaultChatTransport } from 'ai';
+import type { MyUIMessage } from '@/types';
+
+export default function Chat() {
+  const { messages } = useChat<MyUIMessage>({
+    transport: new DefaultChatTransport({
+      api: '/api/chat',
+    }),
+  });
+
+  return (
+    <div>
+      {messages.map(message => (
+        <div key={message.id}>
+          <div>
+            {message.role === 'user' ? 'User: ' : 'AI: '}
+            {message.metadata?.createdAt && (
+              <span className="text-sm text-gray-500">
+                {new Date(message.metadata.createdAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+          {/* Render message content */}
+          {message.parts.map((part, index) =>
+            part.type === 'text' ? <div key={index}>{part.text}</div> : null,
+          )}
+          {/* Display additional metadata */}
+          {message.metadata?.totalTokens && (
+            <div className="text-xs text-gray-400">
+              {message.metadata.totalTokens} tokens
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+For more details, see the [AI SDK Message Metadata documentation](https://ai-sdk.dev/docs/ai-sdk-ui/message-metadata).
 
 #### Creating the Interface
 
@@ -363,7 +478,14 @@ function ChatInterface() {
         {messages.map((message) => (
           <div key={message.id} className="message">
             <div className="role">{message.role}</div>
-            <div className="content">{message.content}</div>
+            <div className="content">
+              {message.parts.map((part, i) => {
+                if (part.type === "text")
+                  return <span key={i}>{part.text}</span>;
+                // Render other part types (e.g., files, tool calls) as desired
+                return null;
+              })}
+            </div>
           </div>
         ))}
       </div>

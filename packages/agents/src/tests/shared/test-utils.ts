@@ -176,6 +176,54 @@ export async function establishSSEConnection(
 }
 
 /**
+ * Helper to establish the standalone SSE connection for
+ * server-sent requests and notifications with streaming HTTP
+ */
+export async function openStandaloneSSE(
+  ctx: ExecutionContext,
+  sessionId: string,
+  baseUrl = "http://example.com/mcp"
+): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+  const request = new Request(`${baseUrl}?sessionId=${sessionId}`, {
+    headers: {
+      Accept: "application/json, text/event-stream",
+      "mcp-session-id": sessionId
+    },
+
+    method: "GET"
+  });
+  const response = await worker.fetch(request, env, ctx);
+
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("text/event-stream");
+  expect(response.headers.get("mcp-session-id")).toBe(sessionId);
+
+  const reader = response.body?.getReader();
+  expect(reader).toBeTruthy();
+  if (!reader) throw new Error("No reader available for standalone SSE");
+  return reader;
+}
+
+/**
+ * Read a single SSE event, or return null if nothing arrives within `ms`.
+ * Used to assert that certain actions DO NOT produce messages on the stream.
+ */
+export async function readSSEEventWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ms = 50
+): Promise<string | null> {
+  const timeout = new Promise<null>((resolve) =>
+    setTimeout(() => resolve(null), ms)
+  );
+  const read = reader.read().then(({ done, value }) => {
+    if (done || !value) return "";
+    return new TextDecoder().decode(value);
+  });
+  const result = await Promise.race([read, timeout]);
+  return result === null ? null : (result as string);
+}
+
+/**
  * Common test assertions for tool listing results
  */
 export function expectValidToolsList(result: unknown): void {

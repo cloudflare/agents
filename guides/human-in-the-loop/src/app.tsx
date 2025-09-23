@@ -9,6 +9,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function Chat() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [showMetadata, setShowMetadata] = useState(true);
+  const [lastResponseTime, setLastResponseTime] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = useCallback(() => {
@@ -48,8 +50,13 @@ export default function Chat() {
     (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
       if (input.trim()) {
+        const startTime = Date.now();
         sendMessage({ role: "user", parts: [{ type: "text", text: input }] });
         setInput("");
+        // Simulate response time tracking
+        setTimeout(() => {
+          setLastResponseTime(Date.now() - startTime);
+        }, 1000);
       }
     },
     [input, sendMessage]
@@ -88,7 +95,80 @@ export default function Chat() {
         <button type="button" onClick={clearHistory} className="clear-history">
           🗑️ Clear History
         </button>
+        <button
+          type="button"
+          onClick={() => setShowMetadata(!showMetadata)}
+          className="clear-history"
+          style={{ marginLeft: "10px" }}
+        >
+          {showMetadata ? "📊 Hide" : "📊 Show"} Metadata
+        </button>
       </div>
+
+      {/* Metadata Display Panel */}
+      {showMetadata && (
+        <div
+          style={{
+            background: "var(--background-secondary)",
+            border: "1px solid var(--border-color)",
+            borderRadius: "8px",
+            padding: "15px",
+            margin: "10px 20px",
+            fontSize: "14px"
+          }}
+        >
+          <h3 style={{ margin: "0 0 10px 0", color: "var(--text-primary)" }}>
+            📊 Response Metadata
+          </h3>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+              gap: "10px",
+              color: "var(--text-secondary)"
+            }}
+          >
+            <div>
+              <strong>Model:</strong> gpt-4o
+            </div>
+            <div>
+              <strong>Messages:</strong> {messages.length}
+            </div>
+            <div>
+              <strong>Conversation Turns:</strong>{" "}
+              {Math.floor(messages.length / 2)}
+            </div>
+            <div>
+              <strong>Tools Available:</strong>{" "}
+              {Object.keys(clientTools).length}
+            </div>
+            <div>
+              <strong>Human-in-Loop:</strong> ✓ Enabled
+            </div>
+            <div>
+              <strong>Session ID:</strong> {agent.id || "Active"}
+            </div>
+            {lastResponseTime && (
+              <div>
+                <strong>Last Response:</strong> {lastResponseTime}ms
+              </div>
+            )}
+            <div>
+              <strong>Timestamp:</strong> {new Date().toLocaleTimeString()}
+            </div>
+          </div>
+          <div
+            style={{
+              marginTop: "10px",
+              padding: "10px",
+              background: "var(--background-primary)",
+              borderRadius: "4px",
+              fontSize: "12px",
+              color: "var(--text-tertiary)"
+            }}
+          />
+        </div>
+      )}
 
       <div className="chat-container">
         <div className="messages-wrapper">

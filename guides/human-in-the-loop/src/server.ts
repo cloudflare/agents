@@ -6,7 +6,8 @@ import {
   createUIMessageStream,
   createUIMessageStreamResponse,
   type StreamTextOnFinishCallback,
-  streamText
+  streamText,
+  stepCountIs
 } from "ai";
 import { tools } from "./tools";
 import {
@@ -21,31 +22,50 @@ type Env = {
 
 export class HumanInTheLoop extends AIChatAgent<Env> {
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
-    const stream = createUIMessageStream({
-      execute: async ({ writer }) => {
-        const lastMessage = this.messages[this.messages.length - 1];
+    const startTime = Date.now();
 
-        if (hasToolConfirmation(lastMessage)) {
-          // Process tool confirmations and return early if any tool was executed
+    const lastMessage = this.messages[this.messages.length - 1];
+
+    if (hasToolConfirmation(lastMessage)) {
+      // Process tool confirmations using UI stream
+      const stream = createUIMessageStream({
+        execute: async ({ writer }) => {
           await processToolCalls(
             { writer, messages: this.messages, tools },
             { getWeatherInformation }
           );
-          return;
         }
+      });
+      return createUIMessageStreamResponse({ stream });
+    }
 
-        const result = streamText({
-          messages: convertToModelMessages(this.messages),
-          model: openai("gpt-4o"),
-          onFinish,
-          tools
-        });
-
-        writer.merge(result.toUIMessageStream());
-      }
+    // Use streamText directly and return with metadata
+    const result = streamText({
+      messages: convertToModelMessages(this.messages),
+      model: openai("gpt-4o"),
+      onFinish,
+      tools,
+      stopWhen: stepCountIs(5)
     });
 
-    return createUIMessageStreamResponse({ stream });
+    return result.toUIMessageStreamResponse({
+      messageMetadata: ({ part }) => {
+        // This is optional, purely for demo purposes in this example
+        if (part.type === "start") {
+          return {
+            model: "gpt-4o",
+            createdAt: Date.now(),
+            messageCount: this.messages.length
+          };
+        }
+        if (part.type === "finish") {
+          return {
+            responseTime: Date.now() - startTime,
+            totalTokens: part.totalUsage?.totalTokens
+          };
+        }
+      }
+    });
   }
 }
 

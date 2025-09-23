@@ -290,7 +290,13 @@ function withAgentContext<T extends (...args: any[]) => any>(
   method: T
 ): (this: Agent<unknown, unknown>, ...args: Parameters<T>) => ReturnType<T> {
   return function (...args: Parameters<T>): ReturnType<T> {
-    const { connection, request, email } = getCurrentAgent();
+    const { connection, request, email, agent } = getCurrentAgent();
+
+    if (agent === this) {
+      // already wrapped, so we can just call the method
+      return method.apply(this, args);
+    }
+    // not wrapped, so we need to wrap it
     return agentContext.run({ agent: this, connection, request, email }, () => {
       return method.apply(this, args);
     });
@@ -302,7 +308,11 @@ function withAgentContext<T extends (...args: any[]) => any>(
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
  */
-export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
+export class Agent<
+  Env = typeof env,
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
+> extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
 
   private _ParentClass: typeof Agent<Env, State> =
@@ -401,8 +411,11 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    // Auto-wrap custom methods with agent context
-    this._autoWrapCustomMethods();
+    if (!wrappedClasses.has(this.constructor)) {
+      // Auto-wrap custom methods with agent context
+      this._autoWrapCustomMethods();
+      wrappedClasses.add(this.constructor);
+    }
 
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
@@ -612,7 +625,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     };
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async () => {
+    this.onStart = async (props?: Props) => {
       return agentContext.run(
         {
           agent: this,
@@ -672,7 +685,7 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
                   });
               });
             }
-            return _onStart();
+            return _onStart(props);
           });
         }
       );
@@ -848,42 +861,37 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
     while (proto && proto !== Object.prototype && depth < 10) {
       const methodNames = Object.getOwnPropertyNames(proto);
       for (const methodName of methodNames) {
-        // Skip if it's a private method or not a function or a getter
+        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
+
+        // Skip if it's a private method, a base method, a getter, or not a function,
         if (
           baseMethods.has(methodName) ||
           methodName.startsWith("_") ||
-          typeof this[methodName as keyof this] !== "function" ||
-          !!Object.getOwnPropertyDescriptor(proto, methodName)?.get
+          !descriptor ||
+          !!descriptor.get ||
+          typeof descriptor.value !== "function"
         ) {
           continue;
         }
-        // If the method doesn't exist in base prototypes, it's a custom method
-        if (!baseMethods.has(methodName)) {
-          const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
-          if (descriptor && typeof descriptor.value === "function") {
-            // Wrap the custom method with context
 
-            const wrappedFunction = withAgentContext(
-              // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
-              this[methodName as keyof this] as (...args: any[]) => any
-              // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
-            ) as any;
+        // Now, methodName is confirmed to be a custom method/function
+        // Wrap the custom method with context
+        const wrappedFunction = withAgentContext(
+          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+          this[methodName as keyof this] as (...args: any[]) => any
+          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+        ) as any;
 
-            // if the method is callable, copy the metadata from the original method
-            if (this._isCallable(methodName)) {
-              callableMetadata.set(
-                wrappedFunction,
-                callableMetadata.get(
-                  this[methodName as keyof this] as Function
-                )!
-              );
-            }
-
-            // set the wrapped function on the prototype
-            this.constructor.prototype[methodName as keyof this] =
-              wrappedFunction;
-          }
+        // if the method is callable, copy the metadata from the original method
+        if (this._isCallable(methodName)) {
+          callableMetadata.set(
+            wrappedFunction,
+            callableMetadata.get(this[methodName as keyof this] as Function)!
+          );
         }
+
+        // set the wrapped function on the prototype
+        this.constructor.prototype[methodName as keyof this] = wrappedFunction;
       }
 
       proto = Object.getPrototypeOf(proto);
@@ -1559,6 +1567,9 @@ export class Agent<Env = typeof env, State = unknown> extends Server<Env> {
   }
 }
 
+// A set of classes that have been wrapped with agent context
+const wrappedClasses = new Set<typeof Agent.prototype.constructor>();
+
 /**
  * Namespace for creating Agent instances
  * @template Agentic Type of the Agent class
@@ -1874,12 +1885,17 @@ export type EmailSendOptions = {
  * @param options Options for Agent creation
  * @returns Promise resolving to an Agent instance stub
  */
-export async function getAgentByName<Env, T extends Agent<Env>>(
+export async function getAgentByName<
+  Env,
+  T extends Agent<Env>,
+  Props extends Record<string, unknown> = Record<string, unknown>
+>(
   namespace: AgentNamespace<T>,
   name: string,
   options?: {
     jurisdiction?: DurableObjectJurisdiction;
     locationHint?: DurableObjectLocationHint;
+    props?: Props;
   }
 ) {
   return getServerByName<Env, T>(namespace, name, options);

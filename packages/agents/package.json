@@ -4,13 +4,14 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.5",
-    "ai": "5.0.30",
+    "@modelcontextprotocol/sdk": "^1.18.1",
+    "ai": "5.0.48",
     "cron-schedule": "^5.0.4",
     "mimetext": "^3.0.27",
-    "nanoid": "^5.1.5",
-    "partyserver": "^0.0.73",
+    "nanoid": "^5.1.6",
+    "partyserver": "^0.0.74",
     "partysocket": "1.1.5",
+    "x402": "^0.6.1",
     "zod": "^3.25.76"
   },
   "publishConfig": {
@@ -18,6 +19,7 @@
   },
   "description": "A home for your AI agents",
   "devDependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.0.10",
     "react": "*",
     "vitest-browser-react": "^1.0.1"
   },
@@ -81,6 +83,11 @@
       "types": "./dist/schedule.d.ts",
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
+    },
+    "./x402": {
+      "types": "./dist/mcp/x402.d.ts",
+      "import": "./dist/mcp/x402.js",
+      "require": "./dist/mcp/x402.js"
     }
   },
   "files": [
@@ -106,9 +113,10 @@
     "check:test:workers": "vitest -r src/tests --watch false",
     "evals": "(cd evals; evalite)",
     "test": "vitest -r src/tests",
-    "test:react": "vitest -r src/react-tests"
+    "test:react": "vitest -r src/react-tests",
+    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent"
   },
   "type": "module",
   "types": "dist/index.d.ts",
-  "version": "0.0.113"
+  "version": "0.1.6"
 }

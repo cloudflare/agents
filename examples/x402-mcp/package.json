@@ -1,0 +1,14 @@
+{
+  "author": "",
+  "keywords": [],
+  "name": "@cloudflare/agents-x402-mcp-example",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types --include-runtime false"
+  },
+  "type": "module",
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.1"
+  }
+}

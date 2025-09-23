@@ -1,6 +1,6 @@
 # 🧠 Cloudflare Agents
 
-![agents-header](https://github.com/user-attachments/assets/f6d99eeb-1803-4495-9c5e-3cf07a37b402)
+![npm install agents](assets/npm-install-agents.svg)
 
 _This project is in active development. Join us in shaping the future of intelligent agents._
 
