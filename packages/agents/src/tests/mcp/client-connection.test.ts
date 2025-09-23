@@ -572,7 +572,7 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.connectionState).toBe("ready");
     });
 
-    it("should save OAuth transport when unauthorized during auto-fallback", async () => {
+    it("should defer OAuth transport saving during auto-fallback discovery", async () => {
       const mockAuthProvider = {
         authUrl: undefined,
         clientId: undefined,
@@ -625,23 +625,26 @@ describe("MCP Client Connection Integration", () => {
         return originalGetTransport.call(connection, transportType);
       });
 
-      // Mock client.connect to throw Unauthorized on first transport only
+      // Mock client.connect to throw Unauthorized on both transports
+      // With auto-fallback, it should try both before throwing
       connection.client.connect = vi
         .fn()
-        .mockRejectedValueOnce(new Error("Unauthorized"))
-        .mockResolvedValue(undefined);
+        .mockRejectedValueOnce(new Error("Unauthorized")) // streamable-http
+        .mockRejectedValueOnce(new Error("Unauthorized")); // sse
 
       try {
         await connection.init();
       } catch (error) {
-        // Expect unauthorized error to be thrown
+        // Expect unauthorized error to be thrown after trying both transports
         expect((error as Error).message).toContain("Unauthorized");
       }
 
-      // Verify OAuth transport was saved for the failing transport
-      expect(mockAuthProvider.saveOAuthTransport).toHaveBeenCalledWith(
-        "streamable-http"
-      );
+      // Critical: Verify OAuth transport is NOT saved during discovery phase
+      // The transport will be saved later by MCPClientManager when OAuth is initiated
+      expect(mockAuthProvider.saveOAuthTransport).not.toHaveBeenCalled();
+
+      // Verify the last attempted transport (sse) is tracked for later use
+      expect(connection.getLastAttemptedTransport()).toBe("sse");
     });
 
     it("should use saved OAuth transport during OAuth completion", async () => {
@@ -778,6 +781,71 @@ describe("MCP Client Connection Integration", () => {
         2,
         "should-be-ignored"
       );
+    });
+
+    it("should track transport correctly with explicit transport type (no fallback)", async () => {
+      const mockAuthProvider = {
+        authUrl: undefined,
+        clientId: undefined,
+        serverId: undefined,
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          client_uri: "http://localhost:3000",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn().mockResolvedValue({ access_token: "test-token" }),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn(),
+        saveOAuthTransport: vi.fn(),
+        getOAuthTransport: vi.fn().mockResolvedValue(undefined),
+        clearOAuthTransport: vi.fn()
+      };
+
+      const connection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: {
+            type: "sse", // Explicit transport type
+            authProvider: mockAuthProvider
+          },
+          client: {}
+        }
+      );
+
+      // Mock getTransport
+      const mockSSETransport = {
+        finishAuth: vi.fn(),
+        connect: vi.fn()
+      };
+
+      connection.getTransport = vi.fn().mockImplementation((transportType) => {
+        if (transportType === "sse") return mockSSETransport;
+        throw new Error(`Unexpected transport type: ${transportType}`);
+      });
+
+      // SSE gets 401
+      connection.client.connect = vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Unauthorized"));
+
+      try {
+        await connection.init();
+      } catch (error) {
+        expect((error as Error).message).toContain("Unauthorized");
+      }
+
+      // Should only try SSE, not streamable-http
+      expect(connection.getTransport).toHaveBeenCalledTimes(1);
+      expect(connection.getTransport).toHaveBeenCalledWith("sse");
+
+      // Should track the transport
+      expect(connection.getLastAttemptedTransport()).toBe("sse");
     });
   });
 

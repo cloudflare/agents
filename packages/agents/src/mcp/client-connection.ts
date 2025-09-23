@@ -49,6 +49,7 @@ export class MCPClientConnection {
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
   serverCapabilities: ServerCapabilities | undefined;
+  private lastAttemptedTransport?: BaseTransportType;
 
   constructor(
     public url: URL,
@@ -282,10 +283,19 @@ export class MCPClientConnection {
       "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
     );
   }
+
   /**
-   * Get the transport for the client
+   * Get the transport that was last attempted (for OAuth tracking)
+   */
+  getLastAttemptedTransport(): BaseTransportType | undefined {
+    return this.lastAttemptedTransport;
+  }
+
+  /**
+   * Get the transport for the client.
+   *
    * @param transportType - The transport type to get
-   * @returns The transport for the client
+   * @returns The transport instance for the specified type
    */
   getTransport(transportType: BaseTransportType) {
     switch (transportType) {
@@ -304,6 +314,35 @@ export class MCPClientConnection {
     }
   }
 
+  /**
+   * Attempts to connect using the specified transport type, handling OAuth flow if needed.
+   *
+   * @description
+   * This method handles two distinct scenarios that must be coordinated carefully:
+   *
+   * **1. Transport Discovery (auto mode):** MCP servers may support different transports
+   * at different endpoints. Auto mode tries multiple transports to find one that works.
+   *
+   * **2. OAuth Authentication:** A 401 response indicates the server requires OAuth.
+   * PKCE security requires that the same verifier/challenge pair is used throughout.
+   *
+   * **Key Design Decision:** When both scenarios combine (auto mode + OAuth), we must
+   * complete discovery first to identify the correct transport, but defer OAuth setup
+   * until we know which transport to use. This is why we track but don't save the
+   * transport immediately on 401.
+   *
+   * **Important for maintainers:**
+   * - The transport is saved by the caller (MCPClientManager) after OAuth initiation
+   * - PKCE verifier preservation happens in DurableObjectOAuthClientProvider
+   * - Always use the saved transport when reconnecting with an auth code
+   * - Don't modify the discovery order without considering OAuth implications
+   *
+   * @see {@link getLastAttemptedTransport} - Provides discovered transport to caller
+   *
+   * @param transportType - The transport type to use for connection
+   * @param code - Optional OAuth authorization code for completing authentication
+   * @private
+   */
   private async tryConnect(transportType: TransportType, code?: string) {
     // When completing OAuth (with code), use the transport that initiated OAuth
     let effectiveTransportType = transportType;
@@ -337,6 +376,9 @@ export class MCPClientConnection {
       try {
         await this.client.connect(transport);
 
+        // Track successful transport
+        this.lastAttemptedTransport = currentTransportType;
+
         // Clear saved transport after successful OAuth completion
         if (code && this.options.transport.authProvider) {
           await this.options.transport.authProvider.clearOAuthTransport();
@@ -346,18 +388,19 @@ export class MCPClientConnection {
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
 
-        // Save transport type when OAuth is needed (Unauthorized error)
-        // This must happen BEFORE we throw or continue
-        if (
-          !code &&
-          error.message.includes("Unauthorized") &&
-          this.options.transport.authProvider &&
-          currentTransportType
-        ) {
-          await this.options.transport.authProvider.saveOAuthTransport(
-            currentTransportType
-          );
-          throw e; // Re-throw after storing transport
+        // Handle OAuth (401) errors
+        if (!code && error.message.includes("Unauthorized")) {
+          // In auto mode with fallback remaining, continue trying other transports
+          // The correct transport for this endpoint will also get 401 and trigger OAuth
+          if (hasFallback) {
+            continue; // Try SSE next
+          }
+
+          // No fallback or explicit transport - this transport needs OAuth
+          if (this.options.transport.authProvider && currentTransportType) {
+            this.lastAttemptedTransport = currentTransportType;
+            throw e; // Re-throw to trigger OAuth flow
+          }
         }
 
         if (

@@ -126,6 +126,12 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
    * and require user interact to initiate the redirect flow
    */
   async redirectToAuthorization(authUrl: URL): Promise<void> {
+    // If we already have an auth URL, don't overwrite it
+    // This preserves the first auth URL which matches the preserved PKCE verifier
+    if (this._authUrl_) {
+      return;
+    }
+
     // We want to track the client ID in state here because the typescript SSE client sometimes does
     // a dynamic client registration AFTER generating this redirect URL.
     const client_id = authUrl.searchParams.get("client_id");
@@ -176,5 +182,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
 
   async clearOAuthTransport(): Promise<void> {
     await this.storage.delete(this.oauthTransportKey());
+    // Also clear the auth URL so a fresh one can be generated next time
+    this._authUrl_ = undefined;
   }
 }

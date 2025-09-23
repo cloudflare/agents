@@ -96,6 +96,17 @@ export class MCPClientManager {
 
     const authUrl = options.transport?.authProvider?.authUrl;
     if (authUrl && options.transport?.authProvider?.redirectUrl) {
+      // OAuth was successfully initiated - NOW save the transport that will handle it
+      const transport = this.mcpConnections[id].getLastAttemptedTransport();
+      if (
+        transport &&
+        options.transport.authProvider &&
+        !options.reconnect?.oauthCode
+      ) {
+        // Only save transport during initial OAuth flow, not during reconnection
+        await options.transport.authProvider.saveOAuthTransport(transport);
+      }
+
       this._callbackUrls.push(
         options.transport.authProvider.redirectUrl.toString()
       );
