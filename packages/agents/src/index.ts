@@ -23,8 +23,8 @@ import {
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager } from "./mcp/client";
-// import type { MCPClientConnection } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
+import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { MessageType } from "./ai-types";
 
@@ -196,6 +196,8 @@ function getNextCronTime(cron: string) {
   const interval = parseCronExpression(cron);
   return interval.getNextDate();
 }
+
+export type { TransportType } from "./mcp/types";
 
 /**
  * MCP Server state update message from server -> Client
@@ -1488,6 +1490,7 @@ export class Agent<
        */
       transport?: {
         headers?: HeadersInit;
+        type?: TransportType;
       };
     },
     reconnect?: {

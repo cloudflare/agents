@@ -10,7 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, ConnectionContext } from "../";
 import { Agent } from "../index";
-import type { MaybePromise, ServeOptions, TransportType } from "./types";
+import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
 import {
   createLegacySseHandler,
   createStreamingHttpHandler,
@@ -48,7 +48,7 @@ export abstract class McpAgent<
    * This relies on the naming scheme being `sse:${sessionId}`
    * or `streamable-http:${sessionId}`.
    */
-  getTransportType(): TransportType {
+  getTransportType(): BaseTransportType {
     const [t, ..._] = this.name.split(":");
     switch (t) {
       case "sse":

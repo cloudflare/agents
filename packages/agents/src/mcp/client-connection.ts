@@ -18,6 +18,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { SSEEdgeClientTransport } from "./sse-edge";
+import type { BaseTransportType, TransportType } from "./types";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
 // Import types directly from MCP SDK
 import type {
@@ -31,10 +32,8 @@ export type MCPTransportOptions = (
   | StreamableHTTPClientTransportOptions
 ) & {
   authProvider?: AgentsOAuthProvider;
-  type?: "sse" | "streamable-http" | "auto";
+  type?: TransportType;
 };
-
-type TransportType = Exclude<MCPTransportOptions["type"], "auto">;
 
 export class MCPClientConnection {
   client: Client;
@@ -288,7 +287,7 @@ export class MCPClientConnection {
    * @param transportType - The transport type to get
    * @returns The transport for the client
    */
-  getTransport(transportType: TransportType) {
+  getTransport(transportType: BaseTransportType) {
     switch (transportType) {
       case "streamable-http":
         return new StreamableHTTPEdgeClientTransport(
@@ -305,10 +304,7 @@ export class MCPClientConnection {
     }
   }
 
-  private async tryConnect(
-    transportType: MCPTransportOptions["type"],
-    code?: string
-  ) {
+  private async tryConnect(transportType: TransportType, code?: string) {
     // When completing OAuth (with code), use the transport that initiated OAuth
     let effectiveTransportType = transportType;
     if (code && this.options.transport.authProvider) {
@@ -319,7 +315,7 @@ export class MCPClientConnection {
       }
     }
 
-    const transports: TransportType[] =
+    const transports: BaseTransportType[] =
       effectiveTransportType === "auto"
         ? ["streamable-http", "sse"]
         : [effectiveTransportType];

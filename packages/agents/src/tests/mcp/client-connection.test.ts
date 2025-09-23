@@ -719,7 +719,7 @@ describe("MCP Client Connection Integration", () => {
 
     it("should preserve PKCE verifier during multiple saveCodeVerifier calls", async () => {
       // Mock storage to simulate DurableObject storage behavior
-      const storageData = new Map<string, any>();
+      const storageData = new Map<string, unknown>();
 
       // This test verifies the PKCE preservation logic in DurableObjectOAuthClientProvider
       const mockAuthProvider = {
@@ -753,7 +753,7 @@ describe("MCP Client Connection Integration", () => {
         codeVerifier: vi.fn().mockImplementation(async () => {
           const stored = storageData.get("verifier-key");
           if (!stored) throw new Error("No code verifier found");
-          return stored;
+          return stored as string;
         }),
         saveOAuthTransport: vi.fn(),
         getOAuthTransport: vi.fn().mockResolvedValue(undefined),

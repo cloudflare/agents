@@ -1,7 +1,8 @@
 export type MaybePromise<T> = T | Promise<T>;
 export type MaybeConnectionTag = { role: string } | undefined;
 
-export type TransportType = "sse" | "streamable-http";
+export type BaseTransportType = "sse" | "streamable-http";
+export type TransportType = BaseTransportType | "auto";
 
 export interface CORSOptions {
   origin?: string;
@@ -14,5 +15,5 @@ export interface CORSOptions {
 export interface ServeOptions {
   binding?: string;
   corsOptions?: CORSOptions;
-  transport?: TransportType;
+  transport?: BaseTransportType;
 }
