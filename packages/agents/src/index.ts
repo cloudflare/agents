@@ -1476,11 +1476,7 @@ export class Agent<
     authUrl: string | undefined;
     clientId: string | undefined;
   }> {
-    const authProvider = new DurableObjectOAuthClientProvider(
-      this.ctx.storage,
-      this.name,
-      callbackUrl
-    );
+    const authProvider = this.createOAuthProvider(callbackUrl);
 
     if (reconnect) {
       authProvider.serverId = reconnect.id;
@@ -1564,6 +1560,14 @@ export class Agent<
     }
 
     return mcpState;
+  }
+
+  createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+    return new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      callbackUrl
+    );
   }
 }
 
