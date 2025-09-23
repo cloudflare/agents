@@ -1,7 +1,16 @@
-import type {
-  UIMessage as ChatMessage,
-  StreamTextOnFinishCallback,
-  ToolSet
+import {
+  getToolName,
+  isToolUIPart,
+  parsePartialJson,
+  type UIMessage as ChatMessage,
+  type DynamicToolUIPart,
+  type ProviderMetadata,
+  type ReasoningUIPart,
+  type StreamTextOnFinishCallback,
+  type TextUIPart,
+  type ToolSet,
+  type ToolUIPart,
+  type UIMessageChunk
 } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import {
@@ -251,22 +260,181 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }
 
       const reader = response.body.getReader();
-      let fullResponseText = ""; // Accumulate the assistant's response text
-      let fullReasoningText = ""; // Accumulate the assistant's reasoning
-      // Track tool calls by toolCallid, so we can persist them as parts later
-      const toolCalls = new Map<
+
+      // Parsing state adapted from:
+      // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
+      const message: ChatMessage = {
+        id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, // default
+        role: "assistant",
+        parts: []
+      };
+      let activeTextParts: Record<string, TextUIPart> = {};
+      let activeReasoningParts: Record<string, ReasoningUIPart> = {};
+      const partialToolCalls: Record<
         string,
-        {
-          type: string;
-          state: string;
-          toolCallId: string;
+        { text: string; index: number; toolName: string; dynamic?: boolean }
+      > = {};
+
+      function updateDynamicToolPart(
+        options: {
           toolName: string;
-          input?: unknown;
-          output?: unknown;
-          isError?: boolean;
-          errorText?: string;
+          toolCallId: string;
+          providerExecuted?: boolean;
+        } & (
+          | {
+              state: "input-streaming";
+              input: unknown;
+            }
+          | {
+              state: "input-available";
+              input: unknown;
+              providerMetadata?: ProviderMetadata;
+            }
+          | {
+              state: "output-available";
+              input: unknown;
+              output: unknown;
+              preliminary: boolean | undefined;
+            }
+          | {
+              state: "output-error";
+              input: unknown;
+              errorText: string;
+              providerMetadata?: ProviderMetadata;
+            }
+        )
+      ) {
+        const part = message.parts.find(
+          (part) =>
+            part.type === "dynamic-tool" &&
+            part.toolCallId === options.toolCallId
+        ) as DynamicToolUIPart | undefined;
+
+        const anyOptions = options as Record<string, unknown>;
+        const anyPart = part as Record<string, unknown>;
+
+        if (part != null) {
+          part.state = options.state;
+          anyPart.toolName = options.toolName;
+          anyPart.input = anyOptions.input;
+          anyPart.output = anyOptions.output;
+          anyPart.errorText = anyOptions.errorText;
+          anyPart.rawInput = anyOptions.rawInput ?? anyPart.rawInput;
+          anyPart.preliminary = anyOptions.preliminary;
+
+          if (
+            anyOptions.providerMetadata != null &&
+            part.state === "input-available"
+          ) {
+            part.callProviderMetadata =
+              anyOptions.providerMetadata as ProviderMetadata;
+          }
+        } else {
+          message.parts.push({
+            type: "dynamic-tool",
+            toolName: options.toolName,
+            toolCallId: options.toolCallId,
+            state: options.state,
+            input: anyOptions.input,
+            output: anyOptions.output,
+            errorText: anyOptions.errorText,
+            preliminary: anyOptions.preliminary,
+            ...(anyOptions.providerMetadata != null
+              ? { callProviderMetadata: anyOptions.providerMetadata }
+              : {})
+          } as DynamicToolUIPart);
         }
-      >();
+      }
+
+      function updateToolPart(
+        options: {
+          toolName: string;
+          toolCallId: string;
+          providerExecuted?: boolean;
+        } & (
+          | {
+              state: "input-streaming";
+              input: unknown;
+              providerExecuted?: boolean;
+            }
+          | {
+              state: "input-available";
+              input: unknown;
+              providerExecuted?: boolean;
+              providerMetadata?: ProviderMetadata;
+            }
+          | {
+              state: "output-available";
+              input: unknown;
+              output: unknown;
+              providerExecuted?: boolean;
+              preliminary?: boolean;
+            }
+          | {
+              state: "output-error";
+              input: unknown;
+              rawInput?: unknown;
+              errorText: string;
+              providerExecuted?: boolean;
+              providerMetadata?: ProviderMetadata;
+            }
+        )
+      ) {
+        const part = message.parts.find(
+          (part) => isToolUIPart(part) && part.toolCallId === options.toolCallId
+        ) as ToolUIPart | undefined;
+
+        const anyOptions = options as Record<string, unknown>;
+        const anyPart = part as Record<string, unknown>;
+
+        if (part != null) {
+          part.state = options.state;
+          anyPart.input = anyOptions.input;
+          anyPart.output = anyOptions.output;
+          anyPart.errorText = anyOptions.errorText;
+          anyPart.rawInput = anyOptions.rawInput;
+          anyPart.preliminary = anyOptions.preliminary;
+
+          // once providerExecuted is set, it stays for streaming
+          anyPart.providerExecuted =
+            anyOptions.providerExecuted ?? part.providerExecuted;
+
+          if (
+            anyOptions.providerMetadata != null &&
+            part.state === "input-available"
+          ) {
+            part.callProviderMetadata =
+              anyOptions.providerMetadata as ProviderMetadata;
+          }
+        } else {
+          message.parts.push({
+            type: `tool-${options.toolName}`,
+            toolCallId: options.toolCallId,
+            state: options.state,
+            input: anyOptions.input,
+            output: anyOptions.output,
+            rawInput: anyOptions.rawInput,
+            errorText: anyOptions.errorText,
+            providerExecuted: anyOptions.providerExecuted,
+            preliminary: anyOptions.preliminary,
+            ...(anyOptions.providerMetadata != null
+              ? { callProviderMetadata: anyOptions.providerMetadata }
+              : {})
+          } as ToolUIPart);
+        }
+      }
+
+      async function updateMessageMetadata(metadata: unknown) {
+        if (metadata != null) {
+          const mergedMetadata =
+            message.metadata != null
+              ? { ...message.metadata, ...metadata } // TODO: do proper merging
+              : metadata;
+
+          message.metadata = mergedMetadata;
+        }
+      }
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -287,48 +455,358 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           const contentType = response.headers.get("content-type") || "";
           const isSSE = contentType.includes("text/event-stream");
 
+          // After streaming is complete, persist the complete assistant's response
           if (isSSE) {
             // Parse AI SDK v5 SSE format and extract text deltas
             const lines = chunk.split("\n");
             for (const line of lines) {
               if (line.startsWith("data: ") && line !== "data: [DONE]") {
                 try {
-                  const data = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
-
+                  const data: UIMessageChunk = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
                   switch (data.type) {
-                    // SSE event signaling the tool input is ready. We track by
-                    // `toolCallId` so we can persist it as a tool part in the message.
-                    case "tool-input-available": {
-                      const { toolCallId, toolName, input } = data;
-                      toolCalls.set(toolCallId, {
-                        toolCallId,
-                        toolName,
-                        input,
-                        type: toolName ? `tool-${toolName}` : "dynamic-tool",
-                        state: "input-available"
-                      });
+                    case "text-start": {
+                      const textPart: TextUIPart = {
+                        type: "text",
+                        text: "",
+                        providerMetadata: data.providerMetadata,
+                        state: "streaming"
+                      };
+                      activeTextParts[data.id] = textPart;
+                      message.parts.push(textPart);
                       break;
                     }
 
-                    // SSE event signaling the tool output is ready. We should've
-                    // already received the input in a previous event so an entry
-                    // with `toolCallId` should already be present
-                    case "tool-output-available": {
-                      const { toolCallId, output, isError, errorText } = data;
-                      const toolPart = toolCalls.get(toolCallId);
-                      if (toolPart)
-                        toolCalls.set(toolCallId, {
-                          ...toolPart,
-                          output,
-                          isError,
-                          errorText,
-                          state: "output-available"
+                    case "text-delta": {
+                      const textPart = activeTextParts[data.id];
+                      textPart.text += data.delta;
+                      textPart.providerMetadata =
+                        data.providerMetadata ?? textPart.providerMetadata;
+                      break;
+                    }
+
+                    case "text-end": {
+                      const textPart = activeTextParts[data.id];
+                      textPart.state = "done";
+                      textPart.providerMetadata =
+                        data.providerMetadata ?? textPart.providerMetadata;
+                      delete activeTextParts[data.id];
+                      break;
+                    }
+
+                    case "reasoning-start": {
+                      const reasoningPart: ReasoningUIPart = {
+                        type: "reasoning",
+                        text: "",
+                        providerMetadata: data.providerMetadata,
+                        state: "streaming"
+                      };
+                      activeReasoningParts[data.id] = reasoningPart;
+                      message.parts.push(reasoningPart);
+                      break;
+                    }
+
+                    case "reasoning-delta": {
+                      const reasoningPart = activeReasoningParts[data.id];
+                      reasoningPart.text += data.delta;
+                      reasoningPart.providerMetadata =
+                        data.providerMetadata ?? reasoningPart.providerMetadata;
+                      break;
+                    }
+
+                    case "reasoning-end": {
+                      const reasoningPart = activeReasoningParts[data.id];
+                      reasoningPart.providerMetadata =
+                        data.providerMetadata ?? reasoningPart.providerMetadata;
+                      reasoningPart.state = "done";
+                      delete activeReasoningParts[data.id];
+
+                      break;
+                    }
+
+                    case "file": {
+                      message.parts.push({
+                        type: "file",
+                        mediaType: data.mediaType,
+                        url: data.url
+                      });
+
+                      break;
+                    }
+
+                    case "source-url": {
+                      message.parts.push({
+                        type: "source-url",
+                        sourceId: data.sourceId,
+                        url: data.url,
+                        title: data.title,
+                        providerMetadata: data.providerMetadata
+                      });
+
+                      break;
+                    }
+
+                    case "source-document": {
+                      message.parts.push({
+                        type: "source-document",
+                        sourceId: data.sourceId,
+                        mediaType: data.mediaType,
+                        title: data.title,
+                        filename: data.filename,
+                        providerMetadata: data.providerMetadata
+                      });
+
+                      break;
+                    }
+
+                    case "tool-input-start": {
+                      const toolInvocations =
+                        message.parts.filter(isToolUIPart);
+
+                      // add the partial tool call to the map
+                      partialToolCalls[data.toolCallId] = {
+                        text: "",
+                        toolName: data.toolName,
+                        index: toolInvocations.length,
+                        dynamic: data.dynamic
+                      };
+
+                      if (data.dynamic) {
+                        updateDynamicToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: data.toolName,
+                          state: "input-streaming",
+                          input: undefined
                         });
+                      } else {
+                        updateToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: data.toolName,
+                          state: "input-streaming",
+                          input: undefined
+                        });
+                      }
+
+                      break;
+                    }
+
+                    case "tool-input-delta": {
+                      const partialToolCall = partialToolCalls[data.toolCallId];
+
+                      partialToolCall.text += data.inputTextDelta;
+
+                      const { value: partialArgs } = await parsePartialJson(
+                        partialToolCall.text
+                      );
+
+                      if (partialToolCall.dynamic) {
+                        updateDynamicToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: partialToolCall.toolName,
+                          state: "input-streaming",
+                          input: partialArgs
+                        });
+                      } else {
+                        updateToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: partialToolCall.toolName,
+                          state: "input-streaming",
+                          input: partialArgs
+                        });
+                      }
+
+                      break;
+                    }
+
+                    case "tool-input-available": {
+                      if (data.dynamic) {
+                        updateDynamicToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: data.toolName,
+                          state: "input-available",
+                          input: data.input,
+                          providerMetadata: data.providerMetadata
+                        });
+                      } else {
+                        updateToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: data.toolName,
+                          state: "input-available",
+                          input: data.input,
+                          providerExecuted: data.providerExecuted,
+                          providerMetadata: data.providerMetadata
+                        });
+                      }
+
+                      // TODO: Do we want to expose onToolCall?
+
+                      // invoke the onToolCall callback if it exists. This is blocking.
+                      // In the future we should make this non-blocking, which
+                      // requires additional state management for error handling etc.
+                      // Skip calling onToolCall for provider-executed tools since they are already executed
+                      // if (onToolCall && !data.providerExecuted) {
+                      //   await onToolCall({
+                      //     toolCall: data
+                      //   });
+                      // }
+                      break;
+                    }
+
+                    case "tool-input-error": {
+                      if (data.dynamic) {
+                        updateDynamicToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: data.toolName,
+                          state: "output-error",
+                          input: data.input,
+                          errorText: data.errorText,
+                          providerMetadata: data.providerMetadata
+                        });
+                      } else {
+                        updateToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: data.toolName,
+                          state: "output-error",
+                          input: undefined,
+                          rawInput: data.input,
+                          errorText: data.errorText,
+                          providerExecuted: data.providerExecuted,
+                          providerMetadata: data.providerMetadata
+                        });
+                      }
+
+                      break;
+                    }
+
+                    case "tool-output-available": {
+                      if (data.dynamic) {
+                        const toolInvocations = message.parts.filter(
+                          (part) => part.type === "dynamic-tool"
+                        ) as DynamicToolUIPart[];
+
+                        const toolInvocation = toolInvocations.find(
+                          (invocation) =>
+                            invocation.toolCallId === data.toolCallId
+                        );
+
+                        if (!toolInvocation)
+                          throw new Error("Tool invocation not found");
+
+                        updateDynamicToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: toolInvocation.toolName,
+                          state: "output-available",
+                          input: toolInvocation.input,
+                          output: data.output,
+                          preliminary: data.preliminary
+                        });
+                      } else {
+                        const toolInvocations =
+                          message.parts.filter(isToolUIPart);
+
+                        const toolInvocation = toolInvocations.find(
+                          (invocation) =>
+                            invocation.toolCallId === data.toolCallId
+                        );
+
+                        if (!toolInvocation)
+                          throw new Error("Tool invocation not found");
+
+                        updateToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: getToolName(toolInvocation),
+                          state: "output-available",
+                          input: toolInvocation.input,
+                          output: data.output,
+                          providerExecuted: data.providerExecuted,
+                          preliminary: data.preliminary
+                        });
+                      }
+
+                      break;
+                    }
+
+                    case "tool-output-error": {
+                      if (data.dynamic) {
+                        const toolInvocations = message.parts.filter(
+                          (part) => part.type === "dynamic-tool"
+                        ) as DynamicToolUIPart[];
+
+                        const toolInvocation = toolInvocations.find(
+                          (invocation) =>
+                            invocation.toolCallId === data.toolCallId
+                        );
+
+                        if (!toolInvocation)
+                          throw new Error("Tool invocation not found");
+
+                        updateDynamicToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: toolInvocation.toolName,
+                          state: "output-error",
+                          input: toolInvocation.input,
+                          errorText: data.errorText
+                        });
+                      } else {
+                        const toolInvocations =
+                          message.parts.filter(isToolUIPart);
+
+                        const toolInvocation = toolInvocations.find(
+                          (invocation) =>
+                            invocation.toolCallId === data.toolCallId
+                        );
+
+                        if (!toolInvocation)
+                          throw new Error("Tool invocation not found");
+                        updateToolPart({
+                          toolCallId: data.toolCallId,
+                          toolName: getToolName(toolInvocation),
+                          state: "output-error",
+                          input: toolInvocation.input,
+                          rawInput:
+                            "rawInput" in toolInvocation
+                              ? toolInvocation.rawInput
+                              : undefined,
+                          errorText: data.errorText
+                        });
+                      }
+
+                      break;
+                    }
+
+                    case "start-step": {
+                      // add a step boundary part to the message
+                      message.parts.push({ type: "step-start" });
+                      break;
+                    }
+
+                    case "finish-step": {
+                      // reset the current text and reasoning parts
+                      activeTextParts = {};
+                      activeReasoningParts = {};
+                      break;
+                    }
+
+                    case "start": {
+                      if (data.messageId != null) {
+                        message.id = data.messageId;
+                      }
+
+                      await updateMessageMetadata(data.messageMetadata);
+
+                      break;
+                    }
+
+                    case "finish": {
+                      await updateMessageMetadata(data.messageMetadata);
+                      break;
+                    }
+
+                    case "message-metadata": {
+                      await updateMessageMetadata(data.messageMetadata);
                       break;
                     }
 
                     case "error": {
-                      // Non-tool errors, we set `error: true` and terminate early
                       this._broadcastChatMessage({
                         error: true,
                         body: data.errorText ?? JSON.stringify(data),
@@ -336,18 +814,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                         id,
                         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
                       });
-                      return;
-                    }
 
-                    case "reasoning-delta": {
-                      if (data.delta) fullReasoningText += data.delta;
                       break;
                     }
-
-                    case "text-delta": {
-                      if (data.delta) fullResponseText += data.delta;
-                      break;
-                    }
+                    // Do we want to handle data parts?
                   }
 
                   // Always forward the raw part to the client
@@ -366,7 +836,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             // Handle plain text responses (e.g., from generateText)
             // Treat the entire chunk as a text delta to preserve exact formatting
             if (chunk.length > 0) {
-              fullResponseText += chunk;
+              message.parts.push({ type: "text", text: chunk });
               // Synthesize a text-delta event so clients can stream-render
               this._broadcastChatMessage({
                 body: JSON.stringify({ type: "text-delta", delta: chunk }),
@@ -381,30 +851,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         reader.releaseLock();
       }
 
-      // After streaming is complete, persist the complete assistant's response
-      const messageParts: ChatMessage["parts"] = [];
-
-      Array.from(toolCalls.values()).forEach((t) => {
-        messageParts.push(t as ChatMessage["parts"][number]);
-      });
-
-      if (fullReasoningText.trim()) {
-        messageParts.push({ type: "reasoning", text: fullReasoningText });
-      }
-
-      if (fullResponseText.trim()) {
-        messageParts.push({ type: "text", text: fullResponseText });
-      }
-
-      if (messageParts.length > 0) {
-        await this.persistMessages([
-          ...this.messages,
-          {
-            id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
-            role: "assistant",
-            parts: messageParts
-          }
-        ]);
+      if (message.parts.length > 0) {
+        await this.persistMessages([...this.messages, message]);
       }
     });
   }
@@ -463,3 +911,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     await super.destroy();
   }
 }
+function updateToolPart(opts: {
+  toolCallId: any;
+  toolName: any;
+  state: string;
+  input: undefined;
+  providerExecuted: any;
+}) {}
