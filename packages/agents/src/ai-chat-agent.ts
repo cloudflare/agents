@@ -911,10 +911,3 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     await super.destroy();
   }
 }
-function updateToolPart(opts: {
-  toolCallId: any;
-  toolName: any;
-  state: string;
-  input: undefined;
-  providerExecuted: any;
-}) {}
