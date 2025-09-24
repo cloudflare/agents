@@ -1,0 +1,17 @@
+NOTICE
+
+This project incorporates code and inspiration from the following open source projects:
+
+1. Coinbase x402
+   - License: Apache License 2.0
+   - Repository: https://github.com/coinbase/x402
+   - Copyright: Coinbase, Inc.
+
+2. ethanniser/x402-mcp
+   - License: MIT License
+   - Repository: https://github.com/ethanniser/x402-mcp
+   - Copyright: @ethanniser
+
+The original licenses and copyright notices from these projects are preserved and should be included with any distribution of this software. 
+
+For a complete list of third-party licenses, see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
