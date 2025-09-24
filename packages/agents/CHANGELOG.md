@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.2
+
+### Patch Changes
+
+- [#504](https://github.com/cloudflare/agents/pull/504) [`da56baa`](https://github.com/cloudflare/agents/commit/da56baa831781ee1f31026daabf2f79c51e3c897) Thanks [@threepointone](https://github.com/threepointone)! - fix attribution
+
 ## 0.2.1
 
 ### Patch Changes
