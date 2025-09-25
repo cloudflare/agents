@@ -25,7 +25,6 @@ async function getCurrentUser(): Promise<{ id: string; name: string }> {
 
 function AsyncAuthApp() {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Async authentication query
@@ -46,7 +45,6 @@ function AsyncAuthApp() {
     agent: "my-agent",
     host: "http://localhost:8787",
     query: asyncQuery, // Async function - automatically detected and cached
-    onClose: () => setIsConnected(false),
     onMessage: (message: MessageEvent) => {
       const newMessage: Message = {
         id: Math.random().toString(36).substring(7),
@@ -56,10 +54,8 @@ function AsyncAuthApp() {
       };
       setMessages((prev) => [...prev, newMessage]);
     },
-    onOpen: () => setIsConnected(true),
     onError: (error: Event) => {
       console.error("WebSocket error:", error);
-      setIsConnected(false);
     }
   });
 
@@ -145,11 +141,8 @@ function AsyncAuthApp() {
           ref={inputRef}
           className="message-input"
           placeholder="Type your message..."
-          disabled={!isConnected}
         />
-        <button type="submit" disabled={!isConnected}>
-          Send WebSocket Message
-        </button>
+        <button type="submit">Send WebSocket Message</button>
       </form>
 
       <button
@@ -193,7 +186,6 @@ function AsyncAuthApp() {
 function StaticAuthApp() {
   const [authToken, setAuthToken] = useState("demo-token-123");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const tokenInputRef = useRef<HTMLInputElement>(null);
 
@@ -205,7 +197,6 @@ function StaticAuthApp() {
       token: authToken, // Authentication token (demo-token-123)
       userId: "demo-user" // User identifier for server validation
     },
-    onClose: () => setIsConnected(false),
     onMessage: (message) => {
       const newMessage: Message = {
         id: Math.random().toString(36).substring(7),
@@ -215,10 +206,8 @@ function StaticAuthApp() {
       };
       setMessages((prev) => [...prev, newMessage]);
     },
-    onOpen: () => setIsConnected(true),
     onError: (error) => {
       console.error("WebSocket auth error:", error);
-      setIsConnected(false);
     }
   });
 
@@ -320,11 +309,8 @@ function StaticAuthApp() {
           ref={inputRef}
           className="message-input"
           placeholder="Type your message..."
-          disabled={!isConnected}
         />
-        <button type="submit" disabled={!isConnected}>
-          Send WebSocket Message
-        </button>
+        <button type="submit">Send WebSocket Message</button>
       </form>
 
       <button
