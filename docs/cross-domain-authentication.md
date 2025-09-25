@@ -85,6 +85,24 @@ Refresh the token when the connection fails due to authentication error.
 import { useAgent } from "agents/react";
 import { useCallback, useEffect } from "react";
 
+const validateToken = async (token: string) => {
+  // An example of how you might implement this
+  const res = await fetch(`${API_HOST}/api/users/me`, {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  return res.ok;
+};
+
+const refreshToken = () => {
+  // Depends on implementation:
+  // - You could use a longer-lived token to refresh the expired token
+  // - De-auth the app and prompt the user to log in manually
+  // - ...
+};
+
 function useJWTAgent(agentName: string) {
   const asyncQuery = useCallback(async () => {
     let token = localStorage.getItem("jwt");
@@ -106,9 +124,6 @@ function useJWTAgent(agentName: string) {
     query: asyncQuery,
     queryDeps: [] // Run on mount
   });
-
-  // Handle authentication errors
-  // Token expired, refresh and reconnect
 }
 ```
 
@@ -148,42 +163,9 @@ function AsyncCrossDomainAuth() {
   const agent = useAgent({
     agent: "my-agent",
     host: "http://localhost:8788",
-    query: asyncQuery,
-    debug: true
+    query: asyncQuery
   });
 
   // Use agent to make calls, access state, etc.
 }
 ```
-
-## HTTP authentication
-
-`useAgentChat` will use the same authentication provided to `useAgent`. To further authenticate the HTTP requests `useAgentChat` can make (e.g. in `getInitialMessages`), you can use headers and credentials.
-
-```ts
-import { useAgentChat } from "agents/ai-react";
-
-// Bearer token
-const chat = useAgentChat({
-  agent,
-  headers: {
-    Authorization: `Bearer ${token}`
-  }
-});
-
-// API key
-const chat = useAgentChat({
-  agent,
-  headers: {
-    "X-API-Key": apiKey
-  }
-});
-
-// Session based (same-origin only)
-const chat = useAgentChat({
-  agent,
-  credentials: "include" // Sends cookies
-});
-```
-
-\

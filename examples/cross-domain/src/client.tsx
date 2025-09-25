@@ -123,29 +123,6 @@ function AsyncAuthApp() {
     <div className="chat-container">
       <div className="auth-section">
         <h2>Cross-Domain Authentication Demo (Async)</h2>
-        <div className="status-indicator">
-          <div className={`status-dot ${isConnected ? "connected" : ""}`} />
-          <div className="connection-status">
-            {"readyState" in agent &&
-              agent.readyState === WebSocket.CONNECTING &&
-              "🔄 Connecting..."}
-            {"readyState" in agent &&
-              agent.readyState === WebSocket.OPEN &&
-              "✅ Connected to server"}
-            {"readyState" in agent &&
-              agent.readyState === WebSocket.CLOSING &&
-              "🔄 Retrying authentication..."}
-            {"readyState" in agent &&
-              agent.readyState === WebSocket.CLOSED &&
-              "❌ Connection failed (auto-retry enabled)"}
-          </div>
-          {"readyState" in agent &&
-            agent.readyState === WebSocket.CONNECTING && (
-              <div className="retry-info">
-                <span>🔄 Automatic retry in progress...</span>
-              </div>
-            )}
-        </div>
         <div className="auth-info">
           <p>
             <strong>🚀 Async Authentication:</strong>
@@ -315,10 +292,6 @@ function StaticAuthApp() {
         <button type="button" onClick={updateAuthToken}>
           Update Token
         </button>
-        <div className="status-indicator">
-          <div className={`status-dot ${isConnected ? "connected" : ""}`} />
-          {isConnected ? "Connected to server" : "Disconnected"}
-        </div>
         <div className="auth-info">
           <p>
             <strong>🌐 Cross-Domain Setup:</strong>
