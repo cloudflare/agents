@@ -142,22 +142,22 @@ export class MCPClientConnection {
       throw new Error("Transport type must be specified");
     }
 
-    const tryFinish = async (base: BaseTransportType) => {
+    const finishAuth = async (base: BaseTransportType) => {
       const transport = this.getTransport(base);
       await transport.finishAuth(code);
     };
 
     if (configuredType === "sse" || configuredType === "streamable-http") {
-      await tryFinish(configuredType);
+      await finishAuth(configuredType);
       return;
     }
 
     // For "auto" mode, try streamable-http first, then fall back to SSE
     try {
-      await tryFinish("streamable-http");
+      await finishAuth("streamable-http");
     } catch (e) {
       if (isTransportNotImplemented(e)) {
-        await tryFinish("sse");
+        await finishAuth("sse");
         return;
       }
       throw e;
@@ -212,12 +212,11 @@ export class MCPClientConnection {
 
   /**
    * Discover server capabilities and register tools, resources, prompts, and templates
-   * This is shared logic between init() and establishConnection()
    */
   private async discoverAndRegister(): Promise<void> {
     this.connectionState = "discovering";
 
-    this.serverCapabilities = await this.client.getServerCapabilities();
+    this.serverCapabilities = this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
       throw new Error("The MCP Server failed to return server capabilities");
     }
@@ -246,11 +245,12 @@ export class MCPClientConnection {
 
     for (const { name, result } of operations) {
       if (result.status === "rejected") {
+        const url = this.url.toString();
         this._onObservabilityEvent.fire({
           type: "mcp:client:discover",
-          displayMessage: `Failed to initialize ${name} for ${this.url.toString()}`,
+          displayMessage: `Failed to discover ${name} for ${url}`,
           payload: {
-            url: this.url.toString(),
+            url,
             capability: name,
             error: result.reason
           },
