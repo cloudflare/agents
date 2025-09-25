@@ -174,9 +174,6 @@ function AsyncAuthApp() {
           <p>
             <strong>Room:</strong> {agent.name}
           </p>
-          <p>
-            <strong>WebSocket Ready State:</strong> {agent.readyState}
-          </p>
         </div>
       </div>
     </div>
