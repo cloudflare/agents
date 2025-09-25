@@ -1,0 +1,47 @@
+{
+  "name": "codemode-demo",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-09-25",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "experimental",
+    "enable_ctx_exports"
+  ],
+  "assets": {
+    "directory": "public"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "Codemode",
+        "class_name": "Codemode"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Codemode"]
+    }
+  ],
+  "services": [
+    {
+      "binding": "globalOutbound",
+      "service": "codemode-demo",
+      "entrypoint": "globalOutbound"
+    },
+    {
+      "binding": "CodeModeProxy",
+      "service": "codemode-demo",
+      "entrypoint": "CodeModeProxy"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ]
+}

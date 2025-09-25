@@ -5,21 +5,23 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.1",
-    "ai": "5.0.48",
+    "ai": "5.0.52",
     "cron-schedule": "^5.0.4",
+    "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.6",
     "partyserver": "^0.0.74",
     "partysocket": "1.1.5",
     "x402": "^0.6.1",
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "zod-to-ts": "^1.2.0"
   },
   "publishConfig": {
     "access": "public"
   },
   "description": "A home for your AI agents",
   "devDependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.0.10",
+    "@cloudflare/workers-oauth-provider": "^0.0.11",
     "react": "*",
     "vitest-browser-react": "^1.0.1"
   },
@@ -53,6 +55,11 @@
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js",
       "require": "./dist/client.js"
+    },
+    "./codemode/ai": {
+      "types": "./dist/codemode/ai.d.ts",
+      "import": "./dist/codemode/ai.js",
+      "require": "./dist/codemode/ai.js"
     },
     "./mcp": {
       "types": "./dist/mcp/index.d.ts",

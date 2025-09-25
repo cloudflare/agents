@@ -1,0 +1,12 @@
+{
+  "name": "@cloudflare/agents-codemode-example",
+  "author": "Sunil Pai <spai@cloudflare.com>",
+  "type": "module",
+  "keywords": [],
+  "private": true,
+  "scripts": {
+    "start": "vite dev",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "deploy": "vite build && wrangler deploy"
+  }
+}

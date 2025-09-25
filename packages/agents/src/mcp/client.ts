@@ -354,9 +354,12 @@ export class MCPClientManager {
               }
               return result;
             },
+            // @ts-expect-error drift between ai and mcp types
             inputSchema: jsonSchema(tool.inputSchema),
+
             outputSchema: tool.outputSchema
-              ? jsonSchema(tool.outputSchema)
+              ? // @ts-expect-error drift between ai and mcp types
+                jsonSchema(tool.outputSchema)
               : undefined
           }
         ];
