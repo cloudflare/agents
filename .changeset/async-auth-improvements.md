@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 Add unified async authentication support to useAgent hook
