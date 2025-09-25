@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
+import "./styles.css";
 
 function App() {
   const agent = useAgent({
