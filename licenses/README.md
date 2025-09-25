@@ -12,8 +12,10 @@ This directory contains the full license texts for third-party dependencies.
 
 ## Current Licenses
 
+- `mit-anthropic-mcp-ts-sdk.txt` - Anthropic MCP TS SDK (MIT)
 - `apache-2.0-coinbase-x402.txt` - Coinbase x402 (Apache 2.0)
 - `mit-ethanniser-x402-mcp.txt` - ethanniser/x402-mcp (MIT)
+- `apache-2.0-vercel-ai-sdk.txt` - Vercel AI SDK (Apache 2.0)
 
 ## Adding New Licenses
 

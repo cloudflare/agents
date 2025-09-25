@@ -4,6 +4,13 @@ This project incorporates code from the following open-source projects.
 
 ## Dependencies
 
+### Anthropic MCP TS SDK
+
+- **License**: Apache License 2.0
+- **Repository**: https://github.com/modelcontextprotocol/typescript-sdk
+- **Copyright**: Copyright 2024 Anthropic, PBC
+- **Full License**: [licenses/mit-anthropic-mcp-ts-sdk.txt](licenses/mit-anthropic-mcp-ts-sdk.txt)
+
 ### Coinbase x402
 
 - **License**: Apache License 2.0
@@ -33,5 +40,28 @@ This project incorporates code from the following open-source projects.
 - **Repository**: https://github.com/ethanniser/x402-mcp
 - **Copyright**: Copyright (c) 2025 Ethan Niser
 - **Full License**: [licenses/mit-ethanniser-x402-mcp.txt](licenses/mit-ethanniser-x402-mcp.txt)
+
+### Vercel AI SDK
+
+- **License**: Apache License 2.0
+- **Repository**: https://github.com/vercel/ai
+- **Copyright**: Copyright 2023 Vercel, Inc.
+- **Full License**: [licenses/apache-2.0-vercel-ai-sdk.txt](licenses/apache-2.0-vercel-ai-sdk.txt)
+- **Notice**:
+  > Apache-2.0 License
+  >
+  > Copyright 2023 Vercel, Inc.
+  >
+  > Licensed under the Apache License, Version 2.0 (the "License");
+  > you may not use this file except in compliance with the License.
+  > You may obtain a copy of the License at
+  >
+  > http://www.apache.org/licenses/LICENSE-2.0
+  >
+  > Unless required by applicable law or agreed to in writing, software
+  > distributed under the License is distributed on an "AS IS" BASIS,
+  > WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  > See the License for the specific language governing permissions and
+  > limitations under the License.
 
 ---
