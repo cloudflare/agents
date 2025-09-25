@@ -573,12 +573,10 @@ describe("MCP Client Connection Integration", () => {
       await connection.init();
       expect(connection.connectionState).toBe("authenticating");
 
-      const successfulTransport =
-        await connection.completeAuthorization(authCode);
+      await connection.completeAuthorization(authCode);
       expect(connection.connectionState).toBe("connecting");
-      expect(successfulTransport).toBe("streamable-http"); // or whatever transport succeeded
 
-      await connection.establishConnection(successfulTransport);
+      await connection.establishConnection();
       expect(connection.connectionState).toBe("ready");
     });
 

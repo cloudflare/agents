@@ -17,7 +17,7 @@ import {
   MCPClientConnection,
   type MCPTransportOptions
 } from "./client-connection";
-import type { BaseTransportType, TransportType } from "./types";
+import type { TransportType } from "./types";
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
