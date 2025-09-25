@@ -60,8 +60,7 @@ function AsyncAuthApp() {
     onError: (error: Event) => {
       console.error("WebSocket error:", error);
       setIsConnected(false);
-    },
-    debug: true
+    }
   });
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -264,6 +263,12 @@ function StaticAuthApp() {
   };
 
   const handleFetchRequest = async () => {
+    const newMessage: Message = {
+      id: Math.random().toString(36).substring(7),
+      text: "",
+      timestamp: new Date(),
+      type: "incoming"
+    };
     try {
       // Cross-domain HTTP request with header-based authentication
       const response = await fetch(
@@ -271,36 +276,23 @@ function StaticAuthApp() {
         {
           method: "GET",
           headers: {
-            Authorization: `Bearer ${authToken}`, // Bearer token authentication
-            "X-API-Key": "demo-api-key" // API key for additional validation
+            Authorization: `Bearer ${authToken}` // Bearer token authentication
           }
         }
       );
       const data = await response.text();
-      const newMessage: Message = {
-        id: Math.random().toString(36).substring(7),
-        text: `HTTP Response: ${data}`,
-        timestamp: new Date(),
-        type: "incoming"
-      };
-      setMessages((prev) => [...prev, newMessage]);
+      newMessage.text = `HTTP Response: ${data}`;
     } catch (error) {
       console.error("Error fetching from server:", error);
-      const errorMessage: Message = {
-        id: Math.random().toString(36).substring(7),
-        text: `HTTP Error: ${error}`,
-        timestamp: new Date(),
-        type: "incoming"
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      newMessage.text = `HTTP Error: ${error}`;
+    } finally {
+      setMessages((prev) => [...prev, newMessage]);
     }
   };
 
   const updateAuthToken = () => {
     if (tokenInputRef.current?.value) {
       setAuthToken(tokenInputRef.current.value);
-      // Note: Changing the token will require reconnecting the WebSocket
-      window.location.reload();
     }
   };
 

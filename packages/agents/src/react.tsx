@@ -324,7 +324,7 @@ export function useAgent<State>(
     party: agentNamespace,
     prefix: "agents",
     room: options.name || "default",
-    query: resolvedQuery as Record<string, string | null | undefined>,
+    query: resolvedQuery,
     ...restOptions,
     onMessage: (message) => {
       if (typeof message.data === "string") {

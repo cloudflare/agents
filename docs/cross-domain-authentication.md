@@ -89,23 +89,22 @@ function useJWTAgent(agentName: string) {
   const asyncQuery = useCallback(async () => {
     let token = localStorage.getItem("jwt");
 
-    // In practice, you'll only know the token expired when the call fails
-    if (!token) {
+    // If no token OR the token is no longer valid
+    // request a fresh token
+    if (!token && !(await validateToken(token))) {
       token = await refreshToken();
       localStorage.setItem("jwt", token);
     }
 
     return {
-      token,
-      userId: "demo-user"
+      token
     };
   }, []);
 
   const agent = useAgent({
     agent: agentName,
     query: asyncQuery,
-    queryDeps: [], // Run on mount
-    debug: true
+    queryDeps: [] // Run on mount
   });
 
   // Handle authentication errors
@@ -159,7 +158,7 @@ function AsyncCrossDomainAuth() {
 
 ## HTTP authentication
 
-For HTTP calls made through `useAgentChat`, you can use headers and credentials.
+`useAgentChat` will use the same authentication provided to `useAgent`. To further authenticate the HTTP requests `useAgentChat` can make (e.g. in `getInitialMessages`), you can use headers and credentials.
 
 ```ts
 import { useAgentChat } from "agents/ai-react";
