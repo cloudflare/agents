@@ -27,6 +27,7 @@ import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
+import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
@@ -317,6 +318,7 @@ export class Agent<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
+  private _disposables = new DisposableStore();
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -424,9 +426,18 @@ export class Agent<
     }
 
     // Broadcast server state after background connects (for OAuth servers)
-    this.mcp.onConnected(async () => {
-      this.broadcastMcpServers();
-    });
+    this._disposables.add(
+      this.mcp.onConnected(async () => {
+        this.broadcastMcpServers();
+      })
+    );
+
+    // Emit MCP observability events
+    this._disposables.add(
+      this.mcp.onObservabilityEvent((event) => {
+        this.observability?.emit(event);
+      })
+    );
 
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
@@ -489,7 +500,7 @@ export class Agent<
             if (result.authSuccess) {
               // Start background connection if auth was successful
               this.mcp
-                .establishConnectionInBackground(result.serverId)
+                .establishConnection(result.serverId)
                 .catch((error) => {
                   console.error("Background connection failed:", error);
                 })
@@ -1383,6 +1394,8 @@ export class Agent<
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+    this._disposables.dispose();
+    await this.mcp.dispose?.();
     this.ctx.abort("destroyed"); // enforce that the agent is evicted
 
     this.observability?.emit(

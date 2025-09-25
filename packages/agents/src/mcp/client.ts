@@ -1,8 +1,8 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
-  CallToolResultSchema,
   CallToolRequest,
+  CallToolResultSchema,
   CompatibilityCallToolResultSchema,
   GetPromptRequest,
   Prompt,
@@ -13,10 +13,13 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { type ToolSet, jsonSchema } from "ai";
 import { nanoid } from "nanoid";
+import { Emitter, type Event, DisposableStore } from "../core/events";
+import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
   MCPClientConnection,
   type MCPTransportOptions
 } from "./client-connection";
+import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
 
 export type MCPClientOAuthCallbackConfig = {
@@ -39,7 +42,14 @@ export class MCPClientManager {
   private _callbackUrls: string[] = [];
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
-  private _onConnected?: (serverId: string) => void | Promise<void>;
+  private _connectionDisposables = new Map<string, DisposableStore>();
+
+  private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
+  public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
+    this._onObservabilityEvent.event;
+
+  private readonly _onConnected = new Emitter<string>();
+  public readonly onConnected: Event<string> = this._onConnected.event;
 
   /**
    * @param _name Name of the MCP client
@@ -50,13 +60,6 @@ export class MCPClientManager {
     private _name: string,
     private _version: string
   ) {}
-
-  /**
-   * Register a callback invoked after a connection is successfully established
-   */
-  onConnected(handler: (serverId: string) => void | Promise<void>): void {
-    this._onConnected = handler;
-  }
 
   /**
    * Connect to and register an MCP server
@@ -86,11 +89,7 @@ export class MCPClientManager {
   }> {
     const id = options.reconnect?.id ?? nanoid(8);
 
-    if (!options.transport?.authProvider) {
-      console.warn(
-        "No authProvider provided in the transport options. This client will only support unauthenticated remote MCP Servers"
-      );
-    } else {
+    if (options.transport?.authProvider) {
       options.transport.authProvider.serverId = id;
       // reconnect with auth
       if (options.reconnect?.oauthClientId) {
@@ -117,6 +116,19 @@ export class MCPClientManager {
           transport: normalizedTransport
         }
       );
+
+      // Pipe connection-level observability events to the manager-level emitter
+      // and track the subscription for cleanup.
+      const store = new DisposableStore();
+      // If we somehow already had disposables for this id, clear them first
+      const existing = this._connectionDisposables.get(id);
+      if (existing) existing.dispose();
+      this._connectionDisposables.set(id, store);
+      store.add(
+        this.mcpConnections[id].onObservabilityEvent((event) => {
+          this._onObservabilityEvent.fire(event);
+        })
+      );
     }
 
     // Initialize connection first
@@ -130,10 +142,18 @@ export class MCPClientManager {
         );
         await this.mcpConnections[id].establishConnection();
       } catch (error) {
-        console.error(
-          `Failed to complete OAuth reconnection for ${id}:`,
-          error
-        );
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:connect",
+          displayMessage: `Failed to complete OAuth reconnection for ${id} for ${url}`,
+          payload: {
+            url: url,
+            transport: options.transport?.type ?? "auto",
+            state: this.mcpConnections[id].connectionState,
+            error: toErrorMessage(error)
+          },
+          timestamp: Date.now(),
+          id
+        });
         // Re-throw to signal failure to the caller
         throw error;
       }
@@ -235,28 +255,36 @@ export class MCPClientManager {
    * This method is called asynchronously and doesn't block the OAuth callback response
    * @param serverId The server ID to establish connection for
    */
-  async establishConnectionInBackground(serverId: string): Promise<void> {
+  async establishConnection(serverId: string): Promise<void> {
     const conn = this.mcpConnections[serverId];
     if (!conn) {
-      console.error(`Connection not found for serverId: ${serverId}`);
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:preconnect",
+        displayMessage: `Connection not found for serverId: ${serverId}`,
+        payload: { serverId },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
       return;
     }
 
     try {
       await conn.establishConnection();
-      console.log(
-        `Successfully established connection for server: ${serverId}`
-      );
-      if (this._onConnected) {
-        await this._onConnected(serverId);
-      }
+      this._onConnected.fire(serverId);
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      console.error(
-        `Failed to establish connection for server ${serverId}:`,
-        errorMessage
-      );
+      const url = conn.url.toString();
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:connect",
+        displayMessage: `Failed to establish connection to server ${serverId} with url ${url}`,
+        payload: {
+          url,
+          transport: conn.options.transport.type ?? "auto",
+          state: conn.connectionState,
+          error: toErrorMessage(error)
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
     }
   }
 
@@ -354,11 +382,19 @@ export class MCPClientManager {
    * Closes all connections to MCP servers
    */
   async closeAllConnections() {
-    return Promise.all(
-      Object.values(this.mcpConnections).map(async (connection) => {
-        await connection.client.close();
+    const ids = Object.keys(this.mcpConnections);
+    await Promise.all(
+      ids.map(async (id) => {
+        await this.mcpConnections[id].client.close();
       })
     );
+    // Dispose all per-connection subscriptions
+    for (const id of ids) {
+      const store = this._connectionDisposables.get(id);
+      if (store) store.dispose();
+      this._connectionDisposables.delete(id);
+      delete this.mcpConnections[id];
+    }
   }
 
   /**
@@ -371,6 +407,23 @@ export class MCPClientManager {
     }
     await this.mcpConnections[id].client.close();
     delete this.mcpConnections[id];
+
+    const store = this._connectionDisposables.get(id);
+    if (store) store.dispose();
+    this._connectionDisposables.delete(id);
+  }
+
+  /**
+   * Dispose the manager and all resources.
+   */
+  async dispose(): Promise<void> {
+    try {
+      await this.closeAllConnections();
+    } finally {
+      // Dispose manager-level emitters
+      this._onConnected.dispose();
+      this._onObservabilityEvent.dispose();
+    }
   }
 
   /**

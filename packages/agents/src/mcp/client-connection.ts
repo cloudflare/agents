@@ -1,8 +1,17 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+// Import types directly from MCP SDK
+import type {
+  Prompt,
+  Resource,
+  Tool
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   type ClientCapabilities,
+  type ElicitRequest,
+  ElicitRequestSchema,
+  type ElicitResult,
   type ListPromptsResult,
   type ListResourceTemplatesResult,
   type ListResourcesResult,
@@ -11,22 +20,20 @@ import {
   ResourceListChangedNotificationSchema,
   type ResourceTemplate,
   type ServerCapabilities,
-  ToolListChangedNotificationSchema,
-  ElicitRequestSchema,
-  type ElicitRequest,
-  type ElicitResult
+  ToolListChangedNotificationSchema
 } from "@modelcontextprotocol/sdk/types.js";
+import { nanoid } from "nanoid";
+import { Emitter, type Event } from "../core/events";
+import type { MCPObservabilityEvent } from "../observability/mcp";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import {
+  isTransportNotImplemented,
+  isUnauthorized,
+  toErrorMessage
+} from "./errors";
 import { SSEEdgeClientTransport } from "./sse-edge";
-import type { BaseTransportType, TransportType } from "./types";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
-// Import types directly from MCP SDK
-import type {
-  Tool,
-  Resource,
-  Prompt
-} from "@modelcontextprotocol/sdk/types.js";
-import { isTransportNotImplemented, isUnauthorized } from "./errors";
+import type { BaseTransportType, TransportType } from "./types";
 
 /**
  * Connection state for MCP client connections
@@ -57,6 +64,10 @@ export class MCPClientConnection {
   resourceTemplates: ResourceTemplate[] = [];
   serverCapabilities: ServerCapabilities | undefined;
 
+  private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
+  public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
+    this._onObservabilityEvent.event;
+
   constructor(
     public url: URL,
     info: ConstructorParameters<typeof Client>[0],
@@ -82,14 +93,14 @@ export class MCPClientConnection {
    * @returns
    */
   async init() {
+    const transportType = this.options.transport.type;
+    if (!transportType) {
+      throw new Error("Transport type must be specified");
+    }
+
     try {
-      const transportType = this.options.transport.type;
-      if (!transportType) {
-        throw new Error("Transport type must be specified");
-      }
       await this.tryConnect(transportType);
-      // biome-ignore lint/suspicious/noExplicitAny: allow for the error check here
-    } catch (e: any) {
+    } catch (e) {
       if (isUnauthorized(e)) {
         // unauthorized, we should wait for the user to authenticate
         this.connectionState = "authenticating";
@@ -97,7 +108,18 @@ export class MCPClientConnection {
       }
       // For explicit transport mismatches or other errors, mark as failed
       // and do not throw to avoid bubbling errors to the client runtime.
-      console.error("Connection initialization failed:", e);
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:connect",
+        displayMessage: `Connection initialization failed for ${this.url.toString()}`,
+        payload: {
+          url: this.url.toString(),
+          transport: transportType,
+          state: this.connectionState,
+          error: toErrorMessage(e)
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
       this.connectionState = "failed";
       return;
     }
@@ -224,7 +246,17 @@ export class MCPClientConnection {
 
     for (const { name, result } of operations) {
       if (result.status === "rejected") {
-        console.error(`Failed to initialize ${name}:`, result.reason);
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:discover",
+          displayMessage: `Failed to initialize ${name} for ${this.url.toString()}`,
+          payload: {
+            url: this.url.toString(),
+            capability: name,
+            error: result.reason
+          },
+          timestamp: Date.now(),
+          id: nanoid()
+        });
       }
     }
 
@@ -315,7 +347,7 @@ export class MCPClientConnection {
         .listTools({
           cursor: toolsResult.nextCursor
         })
-        .catch(capabilityErrorHandler({ tools: [] }, "tools/list"));
+        .catch(this._capabilityErrorHandler({ tools: [] }, "tools/list"));
       toolsAgg = toolsAgg.concat(toolsResult.tools);
     } while (toolsResult.nextCursor);
     return toolsAgg;
@@ -329,7 +361,9 @@ export class MCPClientConnection {
         .listResources({
           cursor: resourcesResult.nextCursor
         })
-        .catch(capabilityErrorHandler({ resources: [] }, "resources/list"));
+        .catch(
+          this._capabilityErrorHandler({ resources: [] }, "resources/list")
+        );
       resourcesAgg = resourcesAgg.concat(resourcesResult.resources);
     } while (resourcesResult.nextCursor);
     return resourcesAgg;
@@ -343,7 +377,7 @@ export class MCPClientConnection {
         .listPrompts({
           cursor: promptsResult.nextCursor
         })
-        .catch(capabilityErrorHandler({ prompts: [] }, "prompts/list"));
+        .catch(this._capabilityErrorHandler({ prompts: [] }, "prompts/list"));
       promptsAgg = promptsAgg.concat(promptsResult.prompts);
     } while (promptsResult.nextCursor);
     return promptsAgg;
@@ -360,7 +394,7 @@ export class MCPClientConnection {
           cursor: templatesResult.nextCursor
         })
         .catch(
-          capabilityErrorHandler(
+          this._capabilityErrorHandler(
             { resourceTemplates: [] },
             "resources/templates/list"
           )
@@ -422,9 +456,18 @@ export class MCPClientConnection {
       try {
         await this.client.connect(transport);
         this.lastConnectedTransport = currentTransportType;
-        console.log(
-          `Connected successfully using ${currentTransportType} transport`
-        );
+        const url = this.url.toString();
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:connect",
+          displayMessage: `Connected successfully using ${currentTransportType} transport for ${url}`,
+          payload: {
+            url,
+            transport: currentTransportType,
+            state: this.connectionState
+          },
+          timestamp: Date.now(),
+          id: nanoid()
+        });
         break;
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
@@ -436,9 +479,18 @@ export class MCPClientConnection {
 
         if (hasFallback && isTransportNotImplemented(error)) {
           // Try the next transport silently
-          console.log(
-            `${currentTransportType} transport not available, trying ${transports[transports.indexOf(currentTransportType) + 1]}`
-          );
+          const url = this.url.toString();
+          this._onObservabilityEvent.fire({
+            type: "mcp:client:connect",
+            displayMessage: `${currentTransportType} transport not available, trying ${transports[transports.indexOf(currentTransportType) + 1]} for ${url}`,
+            payload: {
+              url,
+              transport: currentTransportType,
+              state: this.connectionState
+            },
+            timestamp: Date.now(),
+            id: nanoid()
+          });
           continue;
         }
 
@@ -454,17 +506,26 @@ export class MCPClientConnection {
       }
     );
   }
-}
 
-function capabilityErrorHandler<T>(empty: T, method: string) {
-  return (e: { code: number }) => {
-    // server is badly behaved and returning invalid capabilities. This commonly occurs for resource templates
-    if (e.code === -32601) {
-      console.error(
-        `The server advertised support for the capability ${method.split("/")[0]}, but returned "Method not found" for '${method}'.`
-      );
-      return empty;
-    }
-    throw e;
-  };
+  private _capabilityErrorHandler<T>(empty: T, method: string) {
+    return (e: { code: number }) => {
+      // server is badly behaved and returning invalid capabilities. This commonly occurs for resource templates
+      if (e.code === -32601) {
+        const url = this.url.toString();
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:discover",
+          displayMessage: `The server advertised support for the capability ${method.split("/")[0]}, but returned "Method not found" for '${method}' for ${url}`,
+          payload: {
+            url,
+            capability: method.split("/")[0],
+            error: toErrorMessage(e)
+          },
+          timestamp: Date.now(),
+          id: nanoid()
+        });
+        return empty;
+      }
+      throw e;
+    };
+  }
 }

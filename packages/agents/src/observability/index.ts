@@ -1,65 +1,21 @@
 import { getCurrentAgent } from "../index";
-
-type BaseEvent<
-  T extends string,
-  Payload extends Record<string, unknown> = {}
-> = {
-  type: T;
-  /**
-   * The unique identifier for the event
-   */
-  id: string;
-  /**
-   * The message to display in the logs for this event, should the implementation choose to display
-   * a human-readable message.
-   */
-  displayMessage: string;
-  /**
-   * The payload of the event
-   */
-  payload: Payload;
-  /**
-   * The timestamp of the event in milliseconds since epoch
-   */
-  timestamp: number;
-};
+import type { AgentObservabilityEvent } from "./agent";
+import type { MCPObservabilityEvent } from "./mcp";
 
 /**
- * The type of events that can be emitted by an Agent
+ * Union of all observability event types from different domains
  */
 export type ObservabilityEvent =
-  | BaseEvent<"state:update", {}>
-  | BaseEvent<
-      "rpc",
-      {
-        method: string;
-        streaming?: boolean;
-      }
-    >
-  | BaseEvent<"message:request" | "message:response", {}>
-  | BaseEvent<"message:clear">
-  | BaseEvent<
-      "schedule:create" | "schedule:execute" | "schedule:cancel",
-      {
-        callback: string;
-        id: string;
-      }
-    >
-  | BaseEvent<"destroy">
-  | BaseEvent<
-      "connect",
-      {
-        connectionId: string;
-      }
-    >;
+  | AgentObservabilityEvent
+  | MCPObservabilityEvent;
 
 export interface Observability {
   /**
    * Emit an event for the Agent's observability implementation to handle.
    * @param event - The event to emit
-   * @param ctx - The execution context of the invocation
+   * @param ctx - The execution context of the invocation (optional)
    */
-  emit(event: ObservabilityEvent, ctx: DurableObjectState): void;
+  emit(event: ObservabilityEvent, ctx?: DurableObjectState): void;
 }
 
 /**
