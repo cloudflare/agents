@@ -8,7 +8,7 @@ type Env = {
 
 export class MyAgent extends Agent<Env, never> {
   onStart() {
-    // Configure OAuth callback to use popup-closing behavior
+    // Optionally configure OAuth callback. Here we use popup-closing behavior since we're opening a window on the client 
     this.mcp.configureOAuthCallback({
       customHandler: (result: MCPClientOAuthResult) => {
         if (result.authSuccess) {
