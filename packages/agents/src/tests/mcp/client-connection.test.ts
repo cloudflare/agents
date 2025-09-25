@@ -6,6 +6,7 @@ import type {
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
+import type { MCPObservabilityEvent } from "../../observability/mcp";
 
 /**
  * Mock MCP server for testing different scenarios
@@ -95,7 +96,7 @@ describe("MCP Client Connection Integration", () => {
 
       // Mock all client methods to avoid real network calls
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({
         tools: { listChanged: true },
         resources: { listChanged: true },
         prompts: { listChanged: true }
@@ -175,7 +176,7 @@ describe("MCP Client Connection Integration", () => {
       );
 
       // Mock getServerCapabilities to return null
-      const mockGetCapabilities = vi.fn().mockResolvedValue(null);
+      const mockGetCapabilities = vi.fn().mockReturnValue(null);
       connection.client.getServerCapabilities = mockGetCapabilities;
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
 
@@ -198,7 +199,7 @@ describe("MCP Client Connection Integration", () => {
 
       // Mock successful responses
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({
         tools: { listChanged: true }
       });
       connection.client.getInstructions = vi
@@ -243,7 +244,7 @@ describe("MCP Client Connection Integration", () => {
 
       // Mock server with no tools capability
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({
         resources: { listChanged: true },
         prompts: { listChanged: true }
       });
@@ -282,7 +283,7 @@ describe("MCP Client Connection Integration", () => {
       // Mock method not found error for tools
       const methodNotFoundError = { code: -32601, message: "Method not found" };
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({
         tools: { listChanged: true }
       });
       connection.client.getInstructions = vi
@@ -306,11 +307,57 @@ describe("MCP Client Connection Integration", () => {
 
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toEqual([]);
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "The server advertised support for the capability tools"
-        )
+
+      // Collect observability events during initialization
+      const observabilityEvents: MCPObservabilityEvent[] = [];
+      // We need to set up the listener before init to catch events
+      const newConnection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http" },
+          client: {}
+        }
       );
+
+      // Set up event listener before init
+      newConnection.onObservabilityEvent((event) => {
+        observabilityEvents.push(event);
+      });
+
+      // Mock the same error scenario
+      newConnection.client.connect = vi.fn().mockResolvedValue(undefined);
+      newConnection.client.getServerCapabilities = vi.fn().mockReturnValue({
+        tools: { listChanged: true }
+      });
+      newConnection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Test instructions");
+      newConnection.client.listTools = vi
+        .fn()
+        .mockRejectedValue({ code: -32601, message: "Method not found" });
+      newConnection.client.listResources = vi
+        .fn()
+        .mockResolvedValue({ resources: [] });
+      newConnection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      newConnection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
+      newConnection.client.setNotificationHandler = vi.fn();
+
+      await newConnection.init();
+
+      // Now verify the observability event was fired (filter for discover events only)
+      const discoverEvents = observabilityEvents.filter(
+        (e) => e.type === "mcp:client:discover"
+      );
+      expect(discoverEvents).toHaveLength(1);
+      expect(discoverEvents[0].displayMessage).toContain(
+        "The server advertised support for the capability tools"
+      );
+      expect(discoverEvents[0].payload.capability).toBe("tools");
     });
   });
 
@@ -327,7 +374,7 @@ describe("MCP Client Connection Integration", () => {
 
       // Mock mixed success/failure scenario
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({
         tools: { listChanged: true },
         resources: { listChanged: true },
         prompts: { listChanged: true }
@@ -381,16 +428,74 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.prompts[0].name).toBe("working-prompt");
       expect(connection.resourceTemplates).toEqual([]);
 
-      // Should log failures
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize instructions:",
-        expect.any(Error)
+      // Verify observability events for failures
+      const testConnection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http" },
+          client: {}
+        }
       );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize resources:",
-        expect.any(Error)
+
+      const observabilityEvents: MCPObservabilityEvent[] = [];
+      testConnection.onObservabilityEvent((event) => {
+        observabilityEvents.push(event);
+      });
+
+      // Re-setup the same failure scenario
+      testConnection.client.connect = vi.fn().mockResolvedValue(undefined);
+      testConnection.client.getServerCapabilities = vi.fn().mockReturnValue({
+        tools: { listChanged: true },
+        resources: { listChanged: true },
+        prompts: { listChanged: true }
+      });
+      testConnection.client.getInstructions = vi
+        .fn()
+        .mockRejectedValue(new Error("Instructions service down"));
+      testConnection.client.listTools = vi.fn().mockResolvedValue({
+        tools: [
+          {
+            name: "working-tool",
+            description: "A working tool",
+            inputSchema: { type: "object" }
+          }
+        ]
+      });
+      testConnection.client.setNotificationHandler = vi.fn();
+      testConnection.client.listResources = vi
+        .fn()
+        .mockRejectedValue(new Error("Resources service down"));
+      testConnection.client.listPrompts = vi.fn().mockResolvedValue({
+        prompts: [{ name: "working-prompt", description: "A working prompt" }]
+      });
+      testConnection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
+
+      await testConnection.init();
+
+      // Should have fired events for the two failures (filter for discover events)
+      const discoverEvents = observabilityEvents.filter(
+        (e) => e.type === "mcp:client:discover"
       );
-      expect(consoleSpy).toHaveBeenCalledTimes(2);
+      expect(discoverEvents).toHaveLength(2);
+
+      const instructionsEvent = discoverEvents.find(
+        (e) => e.payload?.capability === "instructions"
+      );
+      expect(instructionsEvent).toBeDefined();
+      expect(instructionsEvent?.displayMessage).toContain(
+        "Failed to discover instructions"
+      );
+
+      const resourcesEvent = discoverEvents.find(
+        (e) => e.payload?.capability === "resources"
+      );
+      expect(resourcesEvent).toBeDefined();
+      expect(resourcesEvent?.displayMessage).toContain(
+        "Failed to discover resources"
+      );
     });
 
     it("should handle all capabilities failing", async () => {
@@ -405,7 +510,7 @@ describe("MCP Client Connection Integration", () => {
 
       // Mock all capabilities failing
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({
         tools: { listChanged: true },
         resources: { listChanged: true },
         prompts: { listChanged: true }
@@ -433,28 +538,62 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.prompts).toEqual([]);
       expect(connection.resourceTemplates).toEqual([]);
 
-      // Should log all failures
-      expect(consoleSpy).toHaveBeenCalledTimes(5);
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize instructions:",
-        serviceError
+      // Verify all failures are reported via observability events
+      const testConn = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http" },
+          client: {}
+        }
       );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize tools:",
-        serviceError
+
+      const events: MCPObservabilityEvent[] = [];
+      testConn.onObservabilityEvent((event) => {
+        events.push(event);
+      });
+
+      const allServicesError = new Error("All services down");
+      testConn.client.connect = vi.fn().mockResolvedValue(undefined);
+      testConn.client.getServerCapabilities = vi.fn().mockReturnValue({
+        tools: { listChanged: true },
+        resources: { listChanged: true },
+        prompts: { listChanged: true }
+      });
+      testConn.client.getInstructions = vi
+        .fn()
+        .mockRejectedValue(allServicesError);
+      testConn.client.listTools = vi.fn().mockRejectedValue(allServicesError);
+      testConn.client.listResources = vi
+        .fn()
+        .mockRejectedValue(allServicesError);
+      testConn.client.listPrompts = vi.fn().mockRejectedValue(allServicesError);
+      testConn.client.listResourceTemplates = vi
+        .fn()
+        .mockRejectedValue(allServicesError);
+      testConn.client.setNotificationHandler = vi.fn();
+
+      await testConn.init();
+
+      // Should have events for all 5 failures (filter for discover events)
+      const discoverEvents = events.filter(
+        (e) => e.type === "mcp:client:discover"
       );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize resources:",
-        serviceError
-      );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize prompts:",
-        serviceError
-      );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize resource templates:",
-        serviceError
-      );
+      expect(discoverEvents).toHaveLength(5);
+
+      // Check each capability failure was reported
+      const capabilities = [
+        "instructions",
+        "tools",
+        "resources",
+        "prompts",
+        "resource templates"
+      ];
+      capabilities.forEach((cap) => {
+        const event = discoverEvents.find((e) => e.payload?.capability === cap);
+        expect(event).toBeDefined();
+        expect(event?.displayMessage).toContain(`Failed to discover ${cap}`);
+      });
     });
 
     it("should handle mixed error types gracefully", async () => {
@@ -468,7 +607,7 @@ describe("MCP Client Connection Integration", () => {
       );
 
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({
         tools: { listChanged: true },
         resources: { listChanged: true }
       });
@@ -499,16 +638,67 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.resources).toEqual([]);
       expect(connection.prompts).toEqual([]);
 
-      // Should log both types of errors
-      // Note: Method not found errors are handled by capabilityErrorHandler and logged differently
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "The server advertised support for the capability tools"
-        )
+      // Verify mixed error types are reported correctly via observability
+      const mixedErrorConn = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http" },
+          client: {}
+        }
       );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Failed to initialize resources:",
-        expect.any(Error)
+
+      const collectedEvents: MCPObservabilityEvent[] = [];
+      mixedErrorConn.onObservabilityEvent((event) => {
+        collectedEvents.push(event);
+      });
+
+      mixedErrorConn.client.connect = vi.fn().mockResolvedValue(undefined);
+      mixedErrorConn.client.getServerCapabilities = vi.fn().mockReturnValue({
+        tools: { listChanged: true },
+        resources: { listChanged: true }
+      });
+      mixedErrorConn.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Working instructions");
+      mixedErrorConn.client.listTools = vi
+        .fn()
+        .mockRejectedValue({ code: -32601, message: "Method not found" });
+      mixedErrorConn.client.listResources = vi
+        .fn()
+        .mockRejectedValue(new Error("Network error"));
+      mixedErrorConn.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      mixedErrorConn.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
+      mixedErrorConn.client.setNotificationHandler = vi.fn();
+
+      await mixedErrorConn.init();
+
+      // Should have events for both error types (filter for discover events)
+      const discoverEvents = collectedEvents.filter(
+        (e) => e.type === "mcp:client:discover"
+      );
+      expect(discoverEvents).toHaveLength(2);
+
+      // Method not found error should have specific message
+      const toolsEvent = discoverEvents.find(
+        (e) => e.payload?.capability === "tools"
+      );
+      expect(toolsEvent).toBeDefined();
+      expect(toolsEvent?.displayMessage).toContain(
+        "The server advertised support for the capability tools"
+      );
+
+      // Regular error for resources
+      const resourcesEvent = discoverEvents.find(
+        (e) => e.payload?.capability === "resources"
+      );
+      expect(resourcesEvent).toBeDefined();
+      expect(resourcesEvent?.displayMessage).toContain(
+        "Failed to discover resources"
       );
     });
   });
