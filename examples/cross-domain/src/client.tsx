@@ -344,9 +344,6 @@ function StaticAuthApp() {
             <strong>Room:</strong> {agent.name}
           </p>
           <p>
-            <strong>WebSocket Ready State:</strong> {agent.readyState}
-          </p>
-          <p>
             <strong>Auth Token:</strong> {authToken}
           </p>
         </div>
