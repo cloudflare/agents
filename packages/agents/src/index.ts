@@ -22,7 +22,8 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
-import { MCPClientManager } from "./mcp/client";
+import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
@@ -223,7 +224,7 @@ export type MCPServer = {
   // This state is specifically about the temporary process of getting a token (if needed).
   // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
   // to communicate a change to a non-ready state.
-  state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
+  state: MCPConnectionState;
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
@@ -422,6 +423,11 @@ export class Agent<
       wrappedClasses.add(this.constructor);
     }
 
+    // Broadcast server state after background connects (for OAuth servers)
+    this.mcp.onConnected(async () => {
+      this.broadcastMcpServers();
+    });
+
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
@@ -477,21 +483,24 @@ export class Agent<
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
           if (this.mcp.isCallbackRequest(request)) {
-            await this.mcp.handleCallbackRequest(request);
+            const result = await this.mcp.handleCallbackRequest(request);
+            this.broadcastMcpServers();
 
-            // after the MCP connection handshake, we can send updated mcp state
-            this.broadcast(
-              JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: MessageType.CF_AGENT_MCP_SERVERS
-              })
-            );
+            if (result.authSuccess) {
+              // Start background connection if auth was successful
+              this.mcp
+                .establishConnectionInBackground(result.serverId)
+                .catch((error) => {
+                  console.error("Background connection failed:", error);
+                })
+                .finally(() => {
+                  // Broadcast after background connection resolves (success/failure)
+                  this.broadcastMcpServers();
+                });
+            }
 
-            // We probably should let the user configure this response/redirect, but this is fine for now.
-            return new Response("<script>window.close();</script>", {
-              headers: { "content-type": "text/html" },
-              status: 200
-            });
+            // Handle OAuth callback response using MCPClientManager configuration
+            return this.handleOAuthCallbackResponse(result, request);
           }
 
           return this._tryCatch(() => _onRequest(request));
@@ -644,19 +653,17 @@ export class Agent<
             SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
           `;
 
-            this.broadcast(
-              JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: MessageType.CF_AGENT_MCP_SERVERS
-              })
-            );
+            this.broadcastMcpServers();
 
             // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
             if (servers && Array.isArray(servers) && servers.length > 0) {
               // Restore callback URLs for OAuth-enabled servers
               servers.forEach((server) => {
                 if (server.callback_url) {
-                  this.mcp.registerCallbackUrl(server.callback_url);
+                  // Register the full redirect URL including serverId to avoid ambiguous matches
+                  this.mcp.registerCallbackUrl(
+                    `${server.callback_url}/${server.id}`
+                  );
                 }
               });
 
@@ -675,12 +682,7 @@ export class Agent<
                 )
                   .then(() => {
                     // Broadcast updated MCP servers state after each server connects
-                    this.broadcast(
-                      JSON.stringify({
-                        mcp: this.getMcpServers(),
-                        type: MessageType.CF_AGENT_MCP_SERVERS
-                      })
-                    );
+                    this.broadcastMcpServers();
                   })
                   .catch((error) => {
                     console.error(
@@ -688,12 +690,7 @@ export class Agent<
                       error
                     );
                     // Still broadcast even if connection fails, so clients know about the failure
-                    this.broadcast(
-                      JSON.stringify({
-                        mcp: this.getMcpServers(),
-                        type: MessageType.CF_AGENT_MCP_SERVERS
-                      })
-                    );
+                    this.broadcastMcpServers();
                   });
               });
             }
@@ -1415,7 +1412,7 @@ export class Agent<
    * @param url MCP Server SSE URL
    * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request.
    * @param agentsPrefix agents routing prefix if not using `agents`
-   * @param options MCP client and transport (header) options
+   * @param options MCP client and transport options
    * @returns authUrl
    */
   async addMcpServer(
@@ -1426,7 +1423,8 @@ export class Agent<
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
       transport?: {
-        headers: HeadersInit;
+        headers?: HeadersInit;
+        type?: TransportType;
       };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
@@ -1453,6 +1451,7 @@ export class Agent<
       callbackUrl,
       options
     );
+
     this.sql`
         INSERT
         OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -1467,17 +1466,12 @@ export class Agent<
         );
     `;
 
-    this.broadcast(
-      JSON.stringify({
-        mcp: this.getMcpServers(),
-        type: MessageType.CF_AGENT_MCP_SERVERS
-      })
-    );
+    this.broadcastMcpServers();
 
     return result;
   }
 
-  async _connectToMcpServerInternal(
+  private async _connectToMcpServerInternal(
     _serverName: string,
     url: string,
     callbackUrl: string,
@@ -1518,6 +1512,9 @@ export class Agent<
       }
     }
 
+    // Use the transport type specified in options, or default to "auto"
+    const transportType: TransportType = options?.transport?.type ?? "auto";
+
     // allows passing through transport headers if necessary
     // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
     let headerTransportOpts: SSEClientTransportOptions = {};
@@ -1535,9 +1532,6 @@ export class Agent<
         }
       };
     }
-
-    // Use the transport type specified in options, or default to "auto"
-    const transportType = options?.transport?.type || "auto";
 
     const { id, authUrl, clientId } = await this.mcp.connect(url, {
       client: options?.client,
@@ -1562,12 +1556,7 @@ export class Agent<
     this.sql`
       DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
     `;
-    this.broadcast(
-      JSON.stringify({
-        mcp: this.getMcpServers(),
-        type: MessageType.CF_AGENT_MCP_SERVERS
-      })
-    );
+    this.broadcastMcpServers();
   }
 
   getMcpServers(): MCPServersState {
@@ -1598,6 +1587,48 @@ export class Agent<
     }
 
     return mcpState;
+  }
+
+  private broadcastMcpServers() {
+    this.broadcast(
+      JSON.stringify({
+        mcp: this.getMcpServers(),
+        type: MessageType.CF_AGENT_MCP_SERVERS
+      })
+    );
+  }
+
+  /**
+   * Handle OAuth callback response using MCPClientManager configuration
+   * @param result OAuth callback result
+   * @param request The original request (needed for base URL)
+   * @returns Response for the OAuth callback
+   */
+  private handleOAuthCallbackResponse(
+    result: MCPClientOAuthResult,
+    request: Request
+  ): Response {
+    const config = this.mcp.getOAuthCallbackConfig();
+
+    // Use custom handler if configured
+    if (config?.customHandler) {
+      return config.customHandler(result);
+    }
+
+    // Use redirect URLs if configured
+    if (config?.successRedirect && result.authSuccess) {
+      return Response.redirect(config.successRedirect);
+    }
+
+    if (config?.errorRedirect && !result.authSuccess) {
+      return Response.redirect(
+        `${config.errorRedirect}?error=${encodeURIComponent(result.authError || "Unknown error")}`
+      );
+    }
+
+    // Default behavior - redirect to base URL
+    const baseUrl = new URL(request.url).origin;
+    return Response.redirect(baseUrl);
   }
 }
 

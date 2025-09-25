@@ -12,10 +12,6 @@ export interface AgentsOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
   serverId: string | undefined;
-  // Transport tracking for OAuth flow
-  saveOAuthTransport(transportType: string): Promise<void>;
-  getOAuthTransport(): Promise<string | undefined>;
-  clearOAuthTransport(): Promise<void>;
 }
 
 export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
@@ -159,22 +155,5 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
       throw new Error("No code verifier found");
     }
     return codeVerifier;
-  }
-
-  /** Transport tracking for OAuth flow */
-  oauthTransportKey() {
-    return `/${this.clientName}/${this.serverId}/oauth_transport`;
-  }
-
-  async saveOAuthTransport(transportType: string): Promise<void> {
-    await this.storage.put(this.oauthTransportKey(), transportType);
-  }
-
-  async getOAuthTransport(): Promise<string | undefined> {
-    return await this.storage.get<string>(this.oauthTransportKey());
-  }
-
-  async clearOAuthTransport(): Promise<void> {
-    await this.storage.delete(this.oauthTransportKey());
   }
 }

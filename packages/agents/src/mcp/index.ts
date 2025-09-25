@@ -427,3 +427,9 @@ export {
   type ElicitRequest,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
+
+// Export OAuth-related types
+export type {
+  MCPClientOAuthResult,
+  MCPClientOAuthCallbackConfig
+} from "./client";

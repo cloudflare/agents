@@ -115,10 +115,7 @@ describe("MCPClientManager OAuth Integration", () => {
         saveClientInformation: vi.fn(),
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn(),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi.fn(),
-        clearOAuthTransport: vi.fn()
+        codeVerifier: vi.fn()
       };
 
       const connection = new MCPClientConnection(
@@ -137,16 +134,11 @@ describe("MCPClientManager OAuth Integration", () => {
 
       manager.mcpConnections[serverId] = connection;
 
-      // Mock the connect method for OAuth completion
-      const connectSpy = vi
-        .spyOn(manager, "connect")
+      // Mock the completeAuthorization method for OAuth completion
+      const completeAuthSpy = vi
+        .spyOn(connection, "completeAuthorization")
         .mockImplementation(async () => {
-          connection.connectionState = "ready";
-          return {
-            id: serverId,
-            authUrl: undefined,
-            clientId: undefined
-          };
+          connection.connectionState = "connecting";
         });
 
       // Create callback request
@@ -158,19 +150,18 @@ describe("MCPClientManager OAuth Integration", () => {
       const result = await manager.handleCallbackRequest(callbackRequest);
 
       expect(result.serverId).toBe(serverId);
+      expect(result.authSuccess).toBe(true);
 
-      // Verify connect was called with OAuth parameters
-      expect(connectSpy).toHaveBeenCalledWith(connection.url.toString(), {
-        reconnect: {
-          id: serverId,
-          oauthClientId: clientId,
-          oauthCode: authCode
-        },
-        transport: connection.options.transport,
-        client: connection.options.client
-      });
+      // Verify completeAuthorization was called with the OAuth code
+      expect(completeAuthSpy).toHaveBeenCalledWith(authCode);
 
-      connectSpy.mockRestore();
+      // Verify the auth provider was set up correctly
+      expect(connection.options.transport.authProvider?.clientId).toBe(
+        clientId
+      );
+      expect(connection.options.transport.authProvider?.serverId).toBe(
+        serverId
+      );
     });
 
     it("should throw error for callback without matching URL", async () => {

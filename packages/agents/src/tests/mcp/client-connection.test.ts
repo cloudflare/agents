@@ -160,7 +160,7 @@ describe("MCP Client Connection Integration", () => {
         .mockRejectedValue(new Error("Connection failed"));
       connection.client.connect = mockConnect;
 
-      await expect(connection.init()).rejects.toThrow("Connection failed");
+      await connection.init();
       expect(connection.connectionState).toBe("failed");
     });
 
@@ -514,7 +514,7 @@ describe("MCP Client Connection Integration", () => {
   });
 
   describe("OAuth Authentication Flow", () => {
-    it("should handle OAuth code during initialization", async () => {
+    it("should handle OAuth completion and connection establishment", async () => {
       const connection = new MCPClientConnection(
         new URL(serverUrl),
         { name: "test-client", version: "1.0.0" },
@@ -537,25 +537,27 @@ describe("MCP Client Connection Integration", () => {
               saveClientInformation: vi.fn(),
               redirectToAuthorization: vi.fn(),
               saveCodeVerifier: vi.fn(),
-              codeVerifier: vi.fn(),
-              saveOAuthTransport: vi.fn(),
-              getOAuthTransport: vi.fn(),
-              clearOAuthTransport: vi.fn()
+              codeVerifier: vi.fn()
             }
           },
           client: {}
         }
       );
 
-      // Mock the init method to test the auth code path without real network calls
-      const _originalInit = connection.init.bind(connection);
-      connection.init = vi.fn().mockImplementation(async (code?: string) => {
-        // Simulate the auth code being passed through
-        if (code) {
-          expect(code).toBe("test-auth-code");
-        }
+      // Mock the methods to test the two-phase auth flow
+      connection.init = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "authenticating";
+      });
 
-        // Set up successful state
+      connection.completeAuthorization = vi
+        .fn()
+        .mockImplementation(async (code: string) => {
+          expect(code).toBe("test-auth-code");
+          connection.connectionState = "connecting";
+          return "streamable-http"; // Return the successful transport
+        });
+
+      connection.establishConnection = vi.fn().mockImplementation(async () => {
         connection.connectionState = "ready";
         connection.serverCapabilities = {};
         connection.instructions = "Test instructions";
@@ -566,155 +568,18 @@ describe("MCP Client Connection Integration", () => {
       });
 
       const authCode = "test-auth-code";
-      await connection.init(authCode);
 
-      expect(connection.init).toHaveBeenCalledWith(authCode);
+      // Test the two-phase flow
+      await connection.init();
+      expect(connection.connectionState).toBe("authenticating");
+
+      const successfulTransport =
+        await connection.completeAuthorization(authCode);
+      expect(connection.connectionState).toBe("connecting");
+      expect(successfulTransport).toBe("streamable-http"); // or whatever transport succeeded
+
+      await connection.establishConnection(successfulTransport);
       expect(connection.connectionState).toBe("ready");
-    });
-
-    it("should save OAuth transport when unauthorized during auto-fallback", async () => {
-      const mockAuthProvider = {
-        authUrl: undefined,
-        clientId: undefined,
-        serverId: undefined,
-        redirectUrl: "http://localhost:3000/callback",
-        clientMetadata: {
-          client_name: "test-client",
-          client_uri: "http://localhost:3000",
-          redirect_uris: ["http://localhost:3000/callback"]
-        },
-        tokens: vi.fn().mockResolvedValue({ access_token: "test-token" }),
-        saveTokens: vi.fn(),
-        clientInformation: vi.fn(),
-        saveClientInformation: vi.fn(),
-        redirectToAuthorization: vi.fn(),
-        saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn(),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi.fn().mockResolvedValue(undefined),
-        clearOAuthTransport: vi.fn()
-      };
-
-      const connection = new MCPClientConnection(
-        new URL(serverUrl),
-        { name: "test-client", version: "1.0.0" },
-        {
-          transport: {
-            type: "auto",
-            authProvider: mockAuthProvider
-          },
-          client: {}
-        }
-      );
-
-      // Mock streamable-http transport to fail with Unauthorized
-      const mockStreamableTransport = {
-        finishAuth: vi.fn(),
-        connect: vi.fn()
-      };
-      const mockSSETransport = {
-        finishAuth: vi.fn(),
-        connect: vi.fn()
-      };
-
-      // Mock getTransport to return our mock transports
-      const originalGetTransport = connection.getTransport;
-      connection.getTransport = vi.fn().mockImplementation((transportType) => {
-        if (transportType === "streamable-http") return mockStreamableTransport;
-        if (transportType === "sse") return mockSSETransport;
-        return originalGetTransport.call(connection, transportType);
-      });
-
-      // Mock client.connect to throw Unauthorized on first transport only
-      connection.client.connect = vi
-        .fn()
-        .mockRejectedValueOnce(new Error("Unauthorized"))
-        .mockResolvedValue(undefined);
-
-      try {
-        await connection.init();
-      } catch (error) {
-        // Expect unauthorized error to be thrown
-        expect((error as Error).message).toContain("Unauthorized");
-      }
-
-      // Verify OAuth transport was saved for the failing transport
-      expect(mockAuthProvider.saveOAuthTransport).toHaveBeenCalledWith(
-        "streamable-http"
-      );
-    });
-
-    it("should use saved OAuth transport during OAuth completion", async () => {
-      const mockAuthProvider = {
-        authUrl: undefined,
-        clientId: undefined,
-        serverId: undefined,
-        redirectUrl: "http://localhost:3000/callback",
-        clientMetadata: {
-          client_name: "test-client",
-          client_uri: "http://localhost:3000",
-          redirect_uris: ["http://localhost:3000/callback"]
-        },
-        tokens: vi.fn().mockResolvedValue({ access_token: "test-token" }),
-        saveTokens: vi.fn(),
-        clientInformation: vi.fn(),
-        saveClientInformation: vi.fn(),
-        redirectToAuthorization: vi.fn(),
-        saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn(),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi.fn().mockResolvedValue("sse"), // Simulate saved transport
-        clearOAuthTransport: vi.fn()
-      };
-
-      const connection = new MCPClientConnection(
-        new URL(serverUrl),
-        { name: "test-client", version: "1.0.0" },
-        {
-          transport: {
-            type: "auto",
-            authProvider: mockAuthProvider
-          },
-          client: {}
-        }
-      );
-
-      // Mock transports
-      const mockSSETransport = {
-        finishAuth: vi.fn(),
-        connect: vi.fn()
-      };
-
-      connection.getTransport = vi.fn().mockImplementation((transportType) => {
-        if (transportType === "sse") return mockSSETransport;
-        throw new Error(`Unexpected transport type: ${transportType}`);
-      });
-
-      // Mock successful connection
-      connection.client.connect = vi.fn().mockResolvedValue(undefined);
-      connection.client.getServerCapabilities = vi.fn().mockResolvedValue({});
-      connection.client.getInstructions = vi
-        .fn()
-        .mockResolvedValue("Test instructions");
-      connection.client.listTools = vi.fn().mockResolvedValue({ tools: [] });
-      connection.client.listResources = vi
-        .fn()
-        .mockResolvedValue({ resources: [] });
-      connection.client.listPrompts = vi
-        .fn()
-        .mockResolvedValue({ prompts: [] });
-      connection.client.listResourceTemplates = vi
-        .fn()
-        .mockResolvedValue({ resourceTemplates: [] });
-
-      const authCode = "test-auth-code";
-      await connection.init(authCode);
-
-      // Verify saved transport was retrieved and used
-      expect(mockAuthProvider.getOAuthTransport).toHaveBeenCalled();
-      expect(connection.getTransport).toHaveBeenCalledWith("sse");
-      expect(mockSSETransport.finishAuth).toHaveBeenCalledWith(authCode);
-      expect(mockAuthProvider.clearOAuthTransport).toHaveBeenCalled();
     });
 
     it("should preserve PKCE verifier during multiple saveCodeVerifier calls", async () => {
@@ -754,10 +619,7 @@ describe("MCP Client Connection Integration", () => {
           const stored = storageData.get("verifier-key");
           if (!stored) throw new Error("No code verifier found");
           return stored as string;
-        }),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi.fn().mockResolvedValue(undefined),
-        clearOAuthTransport: vi.fn()
+        })
       };
 
       // Test the PKCE preservation logic - this tests EXPECTED behavior
@@ -782,7 +644,7 @@ describe("MCP Client Connection Integration", () => {
   });
 
   describe("OAuth Error Scenarios", () => {
-    it("should handle OAuth failure during transport connection", async () => {
+    it("should handle OAuth failure during authorization completion", async () => {
       const mockAuthProvider = {
         authUrl: undefined,
         clientId: undefined,
@@ -799,10 +661,7 @@ describe("MCP Client Connection Integration", () => {
         saveClientInformation: vi.fn(),
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn(),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi.fn().mockResolvedValue(undefined),
-        clearOAuthTransport: vi.fn()
+        codeVerifier: vi.fn()
       };
 
       const connection = new MCPClientConnection(
@@ -817,59 +676,20 @@ describe("MCP Client Connection Integration", () => {
         }
       );
 
-      // Mock client.connect to throw OAuth-related error
-      connection.client.connect = vi
-        .fn()
-        .mockRejectedValue(new Error("OAuth token expired"));
-
-      await expect(connection.init("invalid-auth-code")).rejects.toThrow();
-      expect(connection.connectionState).toBe("failed");
-    });
-
-    it("should handle OAuth transport retrieval failure", async () => {
-      const mockAuthProvider = {
-        authUrl: undefined,
-        clientId: undefined,
-        serverId: undefined,
-        redirectUrl: "http://localhost:3000/callback",
-        clientMetadata: {
-          client_name: "test-client",
-          client_uri: "http://localhost:3000",
-          redirect_uris: ["http://localhost:3000/callback"]
-        },
-        tokens: vi.fn().mockResolvedValue({ access_token: "test-token" }),
-        saveTokens: vi.fn(),
-        clientInformation: vi.fn(),
-        saveClientInformation: vi.fn(),
-        redirectToAuthorization: vi.fn(),
-        saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn(),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi
-          .fn()
-          .mockRejectedValue(new Error("Storage error")),
-        clearOAuthTransport: vi.fn()
+      // Mock transport to throw OAuth-related error during finishAuth
+      const mockTransport = {
+        finishAuth: vi.fn().mockRejectedValue(new Error("OAuth token expired"))
       };
 
-      const connection = new MCPClientConnection(
-        new URL(serverUrl),
-        { name: "test-client", version: "1.0.0" },
-        {
-          transport: {
-            type: "auto",
-            authProvider: mockAuthProvider
-          },
-          client: {}
-        }
-      );
+      connection.getTransport = vi.fn().mockReturnValue(mockTransport);
 
-      // Mock client.connect to succeed
-      connection.client.connect = vi.fn().mockResolvedValue(undefined);
+      // Set connection to authenticating state first
+      connection.connectionState = "authenticating";
 
-      // Should handle OAuth transport retrieval error gracefully
-      await expect(connection.init("test-auth-code")).rejects.toThrow(
-        "Storage error"
-      );
+      await expect(
+        connection.completeAuthorization("invalid-auth-code")
+      ).rejects.toThrow();
+      expect(connection.connectionState).toBe("failed");
     });
 
     it("should not save OAuth transport when no authProvider", async () => {
@@ -895,7 +715,7 @@ describe("MCP Client Connection Integration", () => {
       // (The OAuth transport saving logic requires an authProvider to be present)
     });
 
-    it("should handle network failure during OAuth", async () => {
+    it("should handle network failure during OAuth completion", async () => {
       const mockAuthProvider = {
         authUrl: undefined,
         clientId: undefined,
@@ -912,10 +732,7 @@ describe("MCP Client Connection Integration", () => {
         saveClientInformation: vi.fn(),
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn(),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi.fn().mockResolvedValue("streamable-http"),
-        clearOAuthTransport: vi.fn()
+        codeVerifier: vi.fn()
       };
 
       const connection = new MCPClientConnection(
@@ -923,66 +740,27 @@ describe("MCP Client Connection Integration", () => {
         { name: "test-client", version: "1.0.0" },
         {
           transport: {
-            type: "auto",
+            type: "streamable-http",
             authProvider: mockAuthProvider
           },
           client: {}
         }
       );
 
-      // Mock client.connect to throw network error
-      connection.client.connect = vi
-        .fn()
-        .mockRejectedValue(new Error("Network timeout"));
+      // Mock transport to throw network error during finishAuth
+      const mockTransport = {
+        finishAuth: vi.fn().mockRejectedValue(new Error("Network timeout"))
+      };
 
-      await expect(connection.init("test-auth-code")).rejects.toThrow();
+      connection.getTransport = vi.fn().mockReturnValue(mockTransport);
+
+      // Set connection to authenticating state first
+      connection.connectionState = "authenticating";
+
+      await expect(
+        connection.completeAuthorization("test-auth-code")
+      ).rejects.toThrow();
       expect(connection.connectionState).toBe("failed");
-    });
-
-    it("should handle OAuth without saving transport on non-Unauthorized errors", async () => {
-      const mockAuthProvider = {
-        authUrl: undefined,
-        clientId: undefined,
-        serverId: undefined,
-        redirectUrl: "http://localhost:3000/callback",
-        clientMetadata: {
-          client_name: "test-client",
-          client_uri: "http://localhost:3000",
-          redirect_uris: ["http://localhost:3000/callback"]
-        },
-        tokens: vi.fn().mockResolvedValue({ access_token: "test-token" }),
-        saveTokens: vi.fn(),
-        clientInformation: vi.fn(),
-        saveClientInformation: vi.fn(),
-        redirectToAuthorization: vi.fn(),
-        saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn(),
-        saveOAuthTransport: vi.fn(),
-        getOAuthTransport: vi.fn().mockResolvedValue(undefined),
-        clearOAuthTransport: vi.fn()
-      };
-
-      const connection = new MCPClientConnection(
-        new URL(serverUrl),
-        { name: "test-client", version: "1.0.0" },
-        {
-          transport: {
-            type: "auto",
-            authProvider: mockAuthProvider
-          },
-          client: {}
-        }
-      );
-
-      // Mock client.connect to throw non-Unauthorized error (without OAuth code)
-      connection.client.connect = vi
-        .fn()
-        .mockRejectedValue(new Error("Server unavailable"));
-
-      await expect(connection.init()).rejects.toThrow("Server unavailable");
-
-      // Verify OAuth transport was NOT saved for non-Unauthorized errors
-      expect(mockAuthProvider.saveOAuthTransport).not.toHaveBeenCalled();
     });
   });
 });

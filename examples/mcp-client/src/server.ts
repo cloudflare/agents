@@ -1,4 +1,5 @@
 import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
+import type { MCPClientOAuthResult } from "agents/mcp";
 
 type Env = {
   MyAgent: AgentNamespace<MyAgent>;
@@ -6,6 +7,28 @@ type Env = {
 };
 
 export class MyAgent extends Agent<Env, never> {
+  onStart() {
+    // Configure OAuth callback to use popup-closing behavior
+    this.mcp.configureOAuthCallback({
+      customHandler: (result: MCPClientOAuthResult) => {
+        if (result.authSuccess) {
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" },
+            status: 200
+          });
+        } else {
+          return new Response(
+            `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
+            {
+              headers: { "content-type": "text/html" },
+              status: 200
+            }
+          );
+        }
+      }
+    });
+  }
+
   async onRequest(request: Request): Promise<Response> {
     const reqUrl = new URL(request.url);
     if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {

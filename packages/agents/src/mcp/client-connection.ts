@@ -26,6 +26,17 @@ import type {
   Resource,
   Prompt
 } from "@modelcontextprotocol/sdk/types.js";
+import { isTransportNotImplemented, isUnauthorized } from "./errors";
+
+/**
+ * Connection state for MCP client connections
+ */
+export type MCPConnectionState =
+  | "authenticating"
+  | "connecting"
+  | "ready"
+  | "discovering"
+  | "failed";
 
 export type MCPTransportOptions = (
   | SSEClientTransportOptions
@@ -37,12 +48,8 @@ export type MCPTransportOptions = (
 
 export class MCPClientConnection {
   client: Client;
-  connectionState:
-    | "authenticating"
-    | "connecting"
-    | "ready"
-    | "discovering"
-    | "failed" = "connecting";
+  connectionState: MCPConnectionState = "connecting";
+  lastConnectedTransport: BaseTransportType | undefined;
   instructions?: string;
   tools: Tool[] = [];
   prompts: Prompt[] = [];
@@ -58,8 +65,6 @@ export class MCPClientConnection {
       client: ConstructorParameters<typeof Client>[1];
     } = { client: {}, transport: {} }
   ) {
-    this.url = url;
-
     const clientOptions = {
       ...options.client,
       capabilities: {
@@ -74,24 +79,120 @@ export class MCPClientConnection {
   /**
    * Initialize a client connection
    *
-   * @param code Optional OAuth code to initialize the connection with if auth hasn't been initialized
    * @returns
    */
-  async init(code?: string) {
+  async init() {
     try {
-      const transportType = this.options.transport.type || "streamable-http";
-      await this.tryConnect(transportType, code);
+      const transportType = this.options.transport.type;
+      if (!transportType) {
+        throw new Error("Transport type must be specified");
+      }
+      await this.tryConnect(transportType);
       // biome-ignore lint/suspicious/noExplicitAny: allow for the error check here
     } catch (e: any) {
-      if (e.toString().includes("Unauthorized")) {
+      if (isUnauthorized(e)) {
         // unauthorized, we should wait for the user to authenticate
         this.connectionState = "authenticating";
         return;
       }
+      // For explicit transport mismatches or other errors, mark as failed
+      // and do not throw to avoid bubbling errors to the client runtime.
+      console.error("Connection initialization failed:", e);
       this.connectionState = "failed";
-      throw e;
+      return;
     }
 
+    await this.discoverAndRegister();
+  }
+
+  /**
+   * Finish OAuth by probing transports based on configured type.
+   * - Explicit: finish on that transport
+   * - Auto: try streamable-http, then sse on 404/405/Not Implemented
+   */
+  private async finishAuthProbe(code: string): Promise<void> {
+    if (!this.options.transport.authProvider) {
+      throw new Error("No auth provider configured");
+    }
+
+    const configuredType = this.options.transport.type;
+    if (!configuredType) {
+      throw new Error("Transport type must be specified");
+    }
+
+    const tryFinish = async (base: BaseTransportType) => {
+      const transport = this.getTransport(base);
+      await transport.finishAuth(code);
+    };
+
+    if (configuredType === "sse" || configuredType === "streamable-http") {
+      await tryFinish(configuredType);
+      return;
+    }
+
+    // For "auto" mode, try streamable-http first, then fall back to SSE
+    try {
+      await tryFinish("streamable-http");
+    } catch (e) {
+      if (isTransportNotImplemented(e)) {
+        await tryFinish("sse");
+        return;
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Complete OAuth authorization
+   */
+  async completeAuthorization(code: string): Promise<void> {
+    if (this.connectionState !== "authenticating") {
+      throw new Error(
+        "Connection must be in authenticating state to complete authorization"
+      );
+    }
+
+    try {
+      // Finish OAuth by probing transports per configuration
+      await this.finishAuthProbe(code);
+
+      // Mark as connecting
+      this.connectionState = "connecting";
+    } catch (error) {
+      this.connectionState = "failed";
+      throw error;
+    }
+  }
+
+  /**
+   * Establish connection after successful authorization
+   */
+  async establishConnection(): Promise<void> {
+    if (this.connectionState !== "connecting") {
+      throw new Error(
+        "Connection must be in connecting state to establish connection"
+      );
+    }
+
+    try {
+      const transportType = this.options.transport.type;
+      if (!transportType) {
+        throw new Error("Transport type must be specified");
+      }
+      await this.tryConnect(transportType);
+
+      await this.discoverAndRegister();
+    } catch (error) {
+      this.connectionState = "failed";
+      throw error;
+    }
+  }
+
+  /**
+   * Discover server capabilities and register tools, resources, prompts, and templates
+   * This is shared logic between init() and establishConnection()
+   */
+  private async discoverAndRegister(): Promise<void> {
     this.connectionState = "discovering";
 
     this.serverCapabilities = await this.client.getServerCapabilities();
@@ -304,67 +405,40 @@ export class MCPClientConnection {
     }
   }
 
-  private async tryConnect(transportType: TransportType, code?: string) {
-    // When completing OAuth (with code), use the transport that initiated OAuth
-    let effectiveTransportType = transportType;
-    if (code && this.options.transport.authProvider) {
-      const savedTransport =
-        await this.options.transport.authProvider.getOAuthTransport();
-      if (savedTransport) {
-        effectiveTransportType = savedTransport as TransportType;
-      }
-    }
-
+  private async tryConnect(transportType: TransportType) {
     const transports: BaseTransportType[] =
-      effectiveTransportType === "auto"
-        ? ["streamable-http", "sse"]
-        : [effectiveTransportType];
+      transportType === "auto" ? ["streamable-http", "sse"] : [transportType];
 
     for (const currentTransportType of transports) {
       const isLastTransport =
         currentTransportType === transports[transports.length - 1];
       const hasFallback =
-        effectiveTransportType === "auto" &&
+        transportType === "auto" &&
         currentTransportType === "streamable-http" &&
         !isLastTransport;
 
       const transport = this.getTransport(currentTransportType);
 
-      if (code) {
-        await transport.finishAuth(code);
-      }
-
       try {
         await this.client.connect(transport);
-
-        // Clear saved transport after successful OAuth completion
-        if (code && this.options.transport.authProvider) {
-          await this.options.transport.authProvider.clearOAuthTransport();
-        }
-
+        this.lastConnectedTransport = currentTransportType;
+        console.log(
+          `Connected successfully using ${currentTransportType} transport`
+        );
         break;
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
 
-        // Save transport type when OAuth is needed (Unauthorized error)
-        // This must happen BEFORE we throw or continue
-        if (
-          !code &&
-          error.message.includes("Unauthorized") &&
-          this.options.transport.authProvider &&
-          currentTransportType
-        ) {
-          await this.options.transport.authProvider.saveOAuthTransport(
-            currentTransportType
-          );
-          throw e; // Re-throw after storing transport
+        // If unauthorized, bubble up for proper auth handling
+        if (isUnauthorized(error)) {
+          throw e;
         }
 
-        if (
-          hasFallback &&
-          (error.message.includes("404") || error.message.includes("405"))
-        ) {
-          // try the next transport if we have a fallback
+        if (hasFallback && isTransportNotImplemented(error)) {
+          // Try the next transport silently
+          console.log(
+            `${currentTransportType} transport not available, trying ${transports[transports.indexOf(currentTransportType) + 1]}`
+          );
           continue;
         }
 

@@ -17,6 +17,19 @@ import {
   MCPClientConnection,
   type MCPTransportOptions
 } from "./client-connection";
+import type { BaseTransportType, TransportType } from "./types";
+
+export type MCPClientOAuthCallbackConfig = {
+  successRedirect?: string;
+  errorRedirect?: string;
+  customHandler?: (result: MCPClientOAuthResult) => Response;
+};
+
+export type MCPClientOAuthResult = {
+  serverId: string;
+  authSuccess: boolean;
+  authError?: string;
+};
 
 /**
  * Utility class that aggregates multiple MCP clients into one
@@ -25,6 +38,8 @@ export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   private _callbackUrls: string[] = [];
   private _didWarnAboutUnstableGetAITools = false;
+  private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
+  private _onConnected?: (serverId: string) => void | Promise<void>;
 
   /**
    * @param _name Name of the MCP client
@@ -35,6 +50,13 @@ export class MCPClientManager {
     private _name: string,
     private _version: string
   ) {}
+
+  /**
+   * Register a callback invoked after a connection is successfully established
+   */
+  onConnected(handler: (serverId: string) => void | Promise<void>): void {
+    this._onConnected = handler;
+  }
 
   /**
    * Connect to and register an MCP server
@@ -79,6 +101,11 @@ export class MCPClientManager {
 
     // During OAuth reconnect, reuse existing connection to preserve state
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
+      const normalizedTransport = {
+        ...options.transport,
+        type: options.transport?.type ?? ("auto" as TransportType)
+      };
+
       this.mcpConnections[id] = new MCPClientConnection(
         new URL(url),
         {
@@ -87,15 +114,38 @@ export class MCPClientManager {
         },
         {
           client: options.client ?? {},
-          transport: options.transport ?? {}
+          transport: normalizedTransport
         }
       );
     }
 
-    await this.mcpConnections[id].init(options.reconnect?.oauthCode);
+    // Initialize connection first
+    await this.mcpConnections[id].init();
 
+    // Handle OAuth completion if we have a reconnect code
+    if (options.reconnect?.oauthCode) {
+      try {
+        await this.mcpConnections[id].completeAuthorization(
+          options.reconnect.oauthCode
+        );
+        await this.mcpConnections[id].establishConnection();
+      } catch (error) {
+        console.error(
+          `Failed to complete OAuth reconnection for ${id}:`,
+          error
+        );
+        // Re-throw to signal failure to the caller
+        throw error;
+      }
+    }
+
+    // If connection is in authenticating state, return auth URL for OAuth flow
     const authUrl = options.transport?.authProvider?.authUrl;
-    if (authUrl && options.transport?.authProvider?.redirectUrl) {
+    if (
+      this.mcpConnections[id].connectionState === "authenticating" &&
+      authUrl &&
+      options.transport?.authProvider?.redirectUrl
+    ) {
       this._callbackUrls.push(
         options.transport.authProvider.redirectUrl.toString()
       );
@@ -158,25 +208,56 @@ export class MCPClientManager {
       );
     }
 
+    // Set the OAuth credentials
     conn.options.transport.authProvider.clientId = clientId;
     conn.options.transport.authProvider.serverId = serverId;
 
-    // reconnect to server with authorization
-    const serverUrl = conn.url.toString();
-    await this.connect(serverUrl, {
-      reconnect: {
-        id: serverId,
-        oauthClientId: clientId,
-        oauthCode: code
-      },
-      ...conn.options
-    });
+    try {
+      await conn.completeAuthorization(code);
+      return {
+        serverId,
+        authSuccess: true
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
 
-    if (this.mcpConnections[serverId].connectionState === "authenticating") {
-      throw new Error("Failed to authenticate: client failed to initialize");
+      return {
+        serverId,
+        authSuccess: false,
+        authError: errorMessage
+      };
+    }
+  }
+
+  /**
+   * Establish connection in the background after OAuth completion
+   * This method is called asynchronously and doesn't block the OAuth callback response
+   * @param serverId The server ID to establish connection for
+   */
+  async establishConnectionInBackground(serverId: string): Promise<void> {
+    const conn = this.mcpConnections[serverId];
+    if (!conn) {
+      console.error(`Connection not found for serverId: ${serverId}`);
+      return;
     }
 
-    return { serverId };
+    try {
+      await conn.establishConnection();
+      console.log(
+        `Successfully established connection for server: ${serverId}`
+      );
+      if (this._onConnected) {
+        await this._onConnected(serverId);
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      console.error(
+        `Failed to establish connection for server ${serverId}:`,
+        errorMessage
+      );
+    }
   }
 
   /**
@@ -198,6 +279,22 @@ export class MCPClientManager {
     this._callbackUrls = this._callbackUrls.filter(
       (url) => !url.endsWith(`/${serverId}`)
     );
+  }
+
+  /**
+   * Configure OAuth callback handling
+   * @param config OAuth callback configuration
+   */
+  configureOAuthCallback(config: MCPClientOAuthCallbackConfig): void {
+    this._oauthCallbackConfig = config;
+  }
+
+  /**
+   * Get the current OAuth callback configuration
+   * @returns The current OAuth callback configuration
+   */
+  getOAuthCallbackConfig(): MCPClientOAuthCallbackConfig | undefined {
+    return this._oauthCallbackConfig;
   }
 
   /**

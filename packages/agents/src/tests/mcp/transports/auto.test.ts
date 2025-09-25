@@ -57,7 +57,7 @@ describe("Auto Transport Mode", () => {
         "auto"
       );
 
-      await expect(connection.init()).rejects.toThrow();
+      await connection.init();
       expect(connection.connectionState).toBe("failed");
     });
 
@@ -67,7 +67,7 @@ describe("Auto Transport Mode", () => {
         "auto"
       );
 
-      await expect(connection.init()).rejects.toThrow();
+      await connection.init();
       expect(connection.connectionState).toBe("failed");
     });
 
@@ -77,7 +77,7 @@ describe("Auto Transport Mode", () => {
         "sse"
       );
 
-      await expect(connection.init()).rejects.toThrow();
+      await connection.init();
       expect(connection.connectionState).toBe("failed");
     });
   });
