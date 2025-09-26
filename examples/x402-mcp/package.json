@@ -9,6 +9,6 @@
   },
   "type": "module",
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.18.1"
+    "@modelcontextprotocol/sdk": "^1.18.2"
   }
 }
