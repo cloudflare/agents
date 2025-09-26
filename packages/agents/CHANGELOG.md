@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.6
+
+### Patch Changes
+
+- [`b388447`](https://github.com/cloudflare/agents/commit/b3884475a7c3a268fe27fae2eb55f30c73cef4ab) Thanks [@threepointone](https://github.com/threepointone)! - fix: getAITools shouldn't include hyphens in tool names
+
 ## 0.2.5
 
 ### Patch Changes
