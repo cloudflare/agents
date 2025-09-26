@@ -201,13 +201,13 @@ export class MCPClientManager {
       );
     }
     const code = url.searchParams.get("code");
-    const clientId = url.searchParams.get("state");
+    const state = url.searchParams.get("state");
     const urlParams = urlMatch.split("/");
     const serverId = urlParams[urlParams.length - 1];
     if (!code) {
       throw new Error("Unauthorized: no code provided");
     }
-    if (!clientId) {
+    if (!state) {
       throw new Error("Unauthorized: no state provided");
     }
 
@@ -227,6 +227,9 @@ export class MCPClientManager {
         "Trying to finalize authentication for a server connection without an authProvider"
       );
     }
+
+    // Get clientId from auth provider (stored during redirectToAuthorization) or fallback to state for backward compatibility
+    const clientId = conn.options.transport.authProvider.clientId || state;
 
     // Set the OAuth credentials
     conn.options.transport.authProvider.clientId = clientId;
