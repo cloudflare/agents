@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.5
+
+### Patch Changes
+
+- [`a90de5d`](https://github.com/cloudflare/agents/commit/a90de5d23d99246da8a1bef0bfa557316f75585f) Thanks [@threepointone](https://github.com/threepointone)! - codemode: remove stray logs, fix demo
+
 ## 0.2.4
 
 ### Patch Changes
