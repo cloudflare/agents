@@ -1,24 +1,16 @@
-import {
-  routeAgentRequest,
-  type Schedule,
-  Agent,
-  getAgentByName,
-  type AgentNamespace
-} from "agents";
+import { routeAgentRequest, Agent, callable, type Connection } from "agents";
 
 import { getSchedulePrompt } from "agents/schedule";
 
 import { codemode } from "agents/codemode/ai";
 import {
-  generateId,
   streamText,
   type UIMessage,
-  type StreamTextOnFinishCallback,
   stepCountIs,
-  createUIMessageStream,
   convertToModelMessages,
-  createUIMessageStreamResponse,
-  type ToolSet
+  type ToolSet,
+  readUIMessageStream,
+  generateId
 } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { tools } from "./tools";
@@ -62,30 +54,61 @@ export const globalOutbound = {
   }
 };
 
-export class Codemode extends Agent<
-  Env,
-  {
-    messages: UIMessage<typeof tools>[];
-  }
-> {
+type State = {
+  messages: UIMessage<typeof tools>[];
+  loading: boolean;
+};
+
+export class Codemode extends Agent<Env, State> {
   /**
    * Handles incoming chat messages and manages the response stream
    */
   tools: ToolSet = {};
 
+  observability = undefined;
+
+  lastMessageRepliedTo: string | undefined;
+
+  initialState: State = {
+    messages: [],
+    loading: false
+  };
+
   async onStart() {
-    console.log("Chat onStart");
-    void this.addMcpServer(
-      "cloudflare-agents",
-      "https://gitmcp.io/cloudflare/agents",
-      "http://localhost:5173"
-    )
+    this.lastMessageRepliedTo =
+      this.state.messages[this.state.messages.length - 1]?.id;
+    // console.log("Chat onStart");
+    // void this.addMcpServer(
+    //   "cloudflare-agents",
+    //   "https://gitmcp.io/cloudflare/agents",
+    //   "http://localhost:5173"
+    // )
+    //   .then(() => {
+    //     console.log("mcpServer added");
+    //   })
+    //   .catch((error) => {
+    //     console.error("mcpServer addition failed", error);
+    //   });
+  }
+
+  @callable({
+    description: "Add an MCP server to the agent"
+  })
+  addMcp({ name, url }: { name: string; url: string }) {
+    void this.addMcpServer(name, url, "http://localhost:5173")
       .then(() => {
-        console.log("mcpServer added");
+        console.log("mcpServer added", name, url);
       })
       .catch((error) => {
         console.error("mcpServer addition failed", error);
       });
+  }
+
+  @callable({
+    description: "Remove an MCP server from the agent"
+  })
+  removeMcp(id: string) {
+    void this.removeMcpServer(id);
   }
 
   callTool(functionName: string, args: unknown[]) {
@@ -96,15 +119,27 @@ export class Codemode extends Agent<
     });
   }
 
-  async onChatMessage(
-    onFinish: StreamTextOnFinishCallback<ToolSet>,
-    _options?: { abortSignal?: AbortSignal }
-  ) {
+  async onStateUpdate(state: State, source: Connection | "server") {
+    if (source === "server") {
+      return;
+    }
+    if (
+      state.messages.length > 0 &&
+      this.lastMessageRepliedTo !==
+        state.messages[state.messages.length - 1]?.id
+    ) {
+      await this.onChatMessage();
+      this.lastMessageRepliedTo = state.messages[state.messages.length - 1]?.id;
+    }
+  }
+
+  async onChatMessage() {
     // const mcpConnection = await this.mcp.connect(
     //   "https://path-to-mcp-server/sse"
     // );
 
     // Collect all tools, including MCP tools
+    this.setState({ messages: this.state.messages, loading: true });
     const allTools = {
       ...tools,
       ...this.mcp.getAITools()
@@ -131,49 +166,106 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
       })
     });
 
-    const stream = createUIMessageStream({
+    // const stream = createUIMessageStream({
+    //   onError: (error) => {
+    //     console.error("error", error);
+    //     return `Error: ${error}`;
+    //   },
+    //   execute: async ({ writer }) => {
+    //     // Clean up incomplete tool calls to prevent API errors
+    //     // const cleanedMessages = cleanupMessages(this.messages);
+
+    //     // // Process any pending tool calls from previous messages
+    //     // // This handles human-in-the-loop confirmations for tools
+    //     // const processedMessages = await processToolCalls({
+    //     //   messages: cleanedMessages,
+    //     //   dataStream: writer,
+    //     //   tools: wrappedTools,
+    //     //   executions
+    //     // });
+
+    //     const result = streamText({
+    //       system: prompt,
+
+    //       messages: convertToModelMessages(this.state.messages),
+    //       model,
+    //       // tools: allTools,
+    //       tools: wrappedTools,
+
+    //       onError: (error) => {
+    //         console.error("error", error);
+    //       },
+    //       onChunk: (chunk) => {
+    //         console.log("chunk", chunk);
+    //       },
+
+    //       stopWhen: stepCountIs(10)
+    //     });
+
+    //     writer.merge(result.toUIMessageStream());
+    //   }
+    // });
+
+    // return createUIMessageStreamResponse({ stream });
+
+    const result = streamText({
+      system: prompt,
+
+      messages: convertToModelMessages(this.state.messages),
+      model,
+      // tools: allTools,
+      tools: wrappedTools,
+
       onError: (error) => {
         console.error("error", error);
-        return `Error: ${error}`;
       },
-      execute: async ({ writer }) => {
-        // Clean up incomplete tool calls to prevent API errors
-        // const cleanedMessages = cleanupMessages(this.messages);
+      // onFinish: ({response}) => {
+      //   this.setState({ messages: this.state.messages, loading: false });
+      // },
 
-        // // Process any pending tool calls from previous messages
-        // // This handles human-in-the-loop confirmations for tools
-        // const processedMessages = await processToolCalls({
-        //   messages: cleanedMessages,
-        //   dataStream: writer,
-        //   tools: wrappedTools,
-        //   executions
-        // });
-
-        const result = streamText({
-          system: prompt,
-
-          messages: convertToModelMessages(this.state.messages),
-          model,
-          // tools: allTools,
-          tools: wrappedTools,
-          // Type boundary: streamText expects specific tool types, but base class uses ToolSet
-          // This is safe because our tools satisfy ToolSet interface (verified by 'satisfies' in tools.ts)
-          onFinish: onFinish as unknown as StreamTextOnFinishCallback<
-            typeof wrappedTools
-          >,
-          onError: (error) => {
-            console.error("error", error);
-          },
-
-          stopWhen: stepCountIs(10)
-        });
-
-        writer.merge(result.toUIMessageStream());
-      }
+      stopWhen: stepCountIs(10)
     });
 
-    return createUIMessageStreamResponse({ stream });
+    for await (const uiMessage of readUIMessageStream<UIMessage<typeof tools>>({
+      stream: result.toUIMessageStream({
+        generateMessageId: generateId
+      }),
+      onError: (error) => {
+        console.error("error", error);
+      }
+    })) {
+      // console.log("Current message state:", uiMessage);
+      this.setState({
+        messages: updateMessages(this.state.messages, uiMessage),
+        loading: this.state.loading
+      });
+    }
+    this.setState({
+      messages: this.state.messages,
+      loading: false
+    });
   }
+}
+
+function updateMessages(
+  messages: UIMessage<typeof tools>[],
+  newMessage: UIMessage<typeof tools>
+) {
+  const finalMessages = [];
+  let updated = false;
+  for (const message of messages) {
+    if (message.id === newMessage.id) {
+      finalMessages.push(newMessage);
+      updated = true;
+    } else {
+      finalMessages.push(message);
+    }
+  }
+  if (!updated) {
+    finalMessages.push(newMessage);
+  }
+
+  return finalMessages;
 }
 
 /**

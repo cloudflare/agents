@@ -44,7 +44,7 @@ describe("WebSocket ordering / races", () => {
       if (firstMessages.length < 4) firstMessages.push(data);
       else {
         resolvePromise(true);
-        t.close();
+        ws.close();
       }
     });
 

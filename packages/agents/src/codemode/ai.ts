@@ -8,7 +8,7 @@ import {
   createTypeAlias
 } from "zod-to-ts";
 import { getAgentByName } from "..";
-import { WorkerEntrypoint } from "cloudflare:workers";
+import { env, WorkerEntrypoint } from "cloudflare:workers";
 
 function toCamelCase(str: string) {
   return str
