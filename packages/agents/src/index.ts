@@ -477,6 +477,7 @@ export class Agent<
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
           if (this.mcp.isCallbackRequest(request)) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
             await this.mcp.handleCallbackRequest(request);
 
             // after the MCP connection handshake, we can send updated mcp state
@@ -659,17 +660,18 @@ export class Agent<
                   this.mcp.registerCallbackUrl(server.callback_url);
                 }
               });
-
               servers.forEach((server) => {
                 this._connectToMcpServerInternal(
                   server.name,
+                  server.id,
                   server.server_url,
                   server.callback_url,
                   server.server_options
                     ? JSON.parse(server.server_options)
                     : undefined,
                   {
-                    id: server.id,
+                    // reconnect
+                    id: server.id, // TODO no more use, to delete
                     oauthClientId: server.client_id ?? undefined
                   }
                 )
@@ -1444,25 +1446,27 @@ export class Agent<
       const requestUrl = new URL(request.url);
       resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
     }
-
-    const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    // IdServer Creation
+    const serverId = nanoid(8);
+    const callbackUrlWithServerId = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback/${serverId}`;
 
     const result = await this._connectToMcpServerInternal(
       serverName,
+      serverId,
       url,
-      callbackUrl,
+      callbackUrlWithServerId,
       options
     );
     this.sql`
         INSERT
         OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (
-        ${result.id},
+        ${serverId},
         ${serverName},
         ${url},
         ${result.clientId ?? null},
         ${result.authUrl ?? null},
-        ${callbackUrl},
+        ${callbackUrlWithServerId},
         ${options ? JSON.stringify(options) : null}
         );
     `;
@@ -1474,11 +1478,15 @@ export class Agent<
       })
     );
 
-    return result;
+    return {
+      id: serverId,
+      authUrl: result.authUrl
+    };
   }
 
   async _connectToMcpServerInternal(
     _serverName: string,
+    serverId: string,
     url: string,
     callbackUrl: string,
     // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
@@ -1501,10 +1509,10 @@ export class Agent<
       oauthClientId?: string;
     }
   ): Promise<{
-    id: string;
     authUrl: string | undefined;
     clientId: string | undefined;
   }> {
+    const baseRedirectUrl = callbackUrl.split("/").slice(0, -1).join("/");
     const authProvider = new DurableObjectOAuthClientProvider(
       this.ctx.storage,
       this.name,
@@ -1512,7 +1520,7 @@ export class Agent<
     );
 
     if (reconnect) {
-      authProvider.serverId = reconnect.id;
+      authProvider.serverId = reconnect.id; // No more used ?
       if (reconnect.oauthClientId) {
         authProvider.clientId = reconnect.oauthClientId;
       }
@@ -1539,7 +1547,7 @@ export class Agent<
     // Use the transport type specified in options, or default to "auto"
     const transportType = options?.transport?.type || "auto";
 
-    const { id, authUrl, clientId } = await this.mcp.connect(url, {
+    const { authUrl, clientId } = await this.mcp.connect(url, serverId, {
       client: options?.client,
       reconnect,
       transport: {
@@ -1551,8 +1559,7 @@ export class Agent<
 
     return {
       authUrl,
-      clientId,
-      id
+      clientId
     };
   }
 

@@ -45,6 +45,7 @@ export class MCPClientManager {
    */
   async connect(
     url: string,
+    serverId: string,
     options: {
       // Allows you to reconnect to a server (in the case of an auth reconnect)
       reconnect?: {
@@ -58,18 +59,17 @@ export class MCPClientManager {
       client?: ConstructorParameters<typeof Client>[1];
     } = {}
   ): Promise<{
-    id: string;
     authUrl?: string;
     clientId?: string;
   }> {
-    const id = options.reconnect?.id ?? nanoid(8);
+    //const id = options.reconnect?.id ?? nanoid(8);
 
     if (!options.transport?.authProvider) {
       console.warn(
         "No authProvider provided in the transport options. This client will only support unauthenticated remote MCP Servers"
       );
     } else {
-      options.transport.authProvider.serverId = id;
+      options.transport.authProvider.serverId = serverId;
       // reconnect with auth
       if (options.reconnect?.oauthClientId) {
         options.transport.authProvider.clientId =
@@ -78,8 +78,8 @@ export class MCPClientManager {
     }
 
     // During OAuth reconnect, reuse existing connection to preserve state
-    if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
-      this.mcpConnections[id] = new MCPClientConnection(
+    if (!options.reconnect?.oauthCode || !this.mcpConnections[serverId]) {
+      this.mcpConnections[serverId] = new MCPClientConnection(
         new URL(url),
         {
           name: this._name,
@@ -92,7 +92,7 @@ export class MCPClientManager {
       );
     }
 
-    await this.mcpConnections[id].init(options.reconnect?.oauthCode);
+    await this.mcpConnections[serverId].init(options.reconnect?.oauthCode);
 
     const authUrl = options.transport?.authProvider?.authUrl;
     if (authUrl && options.transport?.authProvider?.redirectUrl) {
@@ -101,14 +101,11 @@ export class MCPClientManager {
       );
       return {
         authUrl,
-        clientId: options.transport?.authProvider?.clientId,
-        id
+        clientId: options.transport?.authProvider?.clientId
       };
     }
 
-    return {
-      id
-    };
+    return {};
   }
 
   isCallbackRequest(req: Request): boolean {
@@ -163,7 +160,7 @@ export class MCPClientManager {
 
     // reconnect to server with authorization
     const serverUrl = conn.url.toString();
-    await this.connect(serverUrl, {
+    await this.connect(serverUrl, serverId, {
       reconnect: {
         id: serverId,
         oauthClientId: clientId,
@@ -189,6 +186,9 @@ export class MCPClientManager {
     }
   }
 
+  getCallbackUrl(): void {
+    const cb = this._callbackUrls;
+  }
   /**
    * Unregister a callback URL
    * @param serverId The server ID whose callback URL should be removed

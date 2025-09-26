@@ -45,7 +45,8 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   get redirectUrl() {
-    return `${this.baseRedirectUrl}/${this.serverId}`;
+    //return `${this.baseRedirectUrl}/${this.serverId}`;
+    return `${this.baseRedirectUrl}`;
   }
 
   get clientId() {
