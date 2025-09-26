@@ -1,6 +1,8 @@
-# Codemode
+# Codemode (Experimental)
 
-Codemode is a pattern of using LLMs to generate executable code that performs tool calls, inspired by [CodeAct](https://machinelearning.apple.com/research/codeact). Instead of directly calling predefined tools, the LLM generates Python/JavaScript code that orchestrates multiple tool calls and complex logic.
+Codemode is an experimental pattern of using LLMs to generate executable code that performs tool calls, inspired by [CodeAct](https://machinelearning.apple.com/research/codeact). Instead of directly calling predefined tools, the LLM generates Python/JavaScript code that orchestrates multiple tool calls and complex logic.
+
+> **⚠️ Experimental Feature**: Codemode is currently experimental and may have breaking changes in future releases. Use with caution in production environments.
 
 Rather than being limited to predefined tool schemas, agents can:
 
@@ -17,6 +19,21 @@ Our implementation brings this concept to AI SDK applications with a simple abst
 2. **Code Generation**: The system generates executable JavaScript code that uses your tools
 3. **Safe Execution**: Code runs in an isolated worker environment with controlled access to your tools
 4. **Result Return**: The executed code's result is returned to the user
+
+## Demo Application
+
+You can find a working demo of codemode in the `examples/codemode/` directory. The demo includes:
+
+- A complete implementation showing codemode in action
+- Interactive examples of tool composition
+- Real-time code generation and execution
+
+To run the demo:
+
+1. Navigate to `examples/codemode/`
+2. Create a `.env` file with your OpenAI API key (see `.env.example`)
+3. Run `npm install` to install dependencies
+4. Run `npm start` to start the development server
 
 ## Usage
 
@@ -189,6 +206,7 @@ async function executeTask() {
 
 ## Current Limitations
 
+- **Experimental**: This feature is experimental and subject to breaking changes
 - Requires Cloudflare Workers environment
 - Limited to JavaScript execution (Python support planned)
 - MCP server state updates need refinement
