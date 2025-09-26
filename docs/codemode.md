@@ -1,10 +1,8 @@
 # Codemode
 
-Codemode is a pattern of using LLMs to generate executable code that performs tool calls, inspired by [CodeAct research from Apple](https://machinelearning.apple.com/research/codeact). Instead of directly calling predefined tools, the LLM generates Python/JavaScript code that orchestrates multiple tool calls and complex logic.
+Codemode is a pattern of using LLMs to generate executable code that performs tool calls, inspired by [CodeAct](https://machinelearning.apple.com/research/codeact). Instead of directly calling predefined tools, the LLM generates Python/JavaScript code that orchestrates multiple tool calls and complex logic.
 
-## What is CodeAct?
-
-CodeAct is a research approach that uses executable code as a unified action space for LLM agents. Rather than being limited to predefined tool schemas, agents can:
+Rather than being limited to predefined tool schemas, agents can:
 
 - Generate dynamic code that combines multiple tools
 - Perform complex logic and control flow
@@ -55,7 +53,7 @@ const result = streamText({
 ### After (With Codemode)
 
 ```typescript
-import { codemode } from "agents/codemode/ai";
+import { experimental_codemode as codemode } from "agents/codemode/ai";
 
 // Define your tools as usual
 const tools = {
@@ -85,7 +83,7 @@ const { prompt, tools: wrappedTools } = await codemode({
   loader: env.LOADER,
   proxy: this.ctx.exports.CodeModeProxy({
     props: {
-      binding: "Codemode", // the name of your agent
+      binding: "Codemode", // the class name of your agent
       name: this.name,
       callback: "callTool"
     }

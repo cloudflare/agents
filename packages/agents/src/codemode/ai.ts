@@ -35,7 +35,7 @@ export class CodeModeProxy extends WorkerEntrypoint<
   }
 }
 
-export async function codemode(options: {
+export async function experimental_codemode(options: {
   tools: ToolSet;
   prompt: string;
   globalOutbound: Fetcher;

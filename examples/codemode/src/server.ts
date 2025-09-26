@@ -2,7 +2,7 @@ import { routeAgentRequest, Agent, callable, type Connection } from "agents";
 
 import { getSchedulePrompt } from "agents/schedule";
 
-import { codemode } from "agents/codemode/ai";
+import { experimental_codemode as codemode } from "agents/codemode/ai";
 import {
   streamText,
   type UIMessage,
