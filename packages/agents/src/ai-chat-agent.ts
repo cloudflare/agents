@@ -230,8 +230,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
-    this.sql`delete from cf_ai_chat_agent_messages`;
-    for (const message of messages) {
+    // only insert new messages that don't exist
+    const existingMessageIds = new Set(this.messages.map((m) => m.id));
+    const newMessages = messages.filter(
+      (message) => !existingMessageIds.has(message.id)
+    );
+
+    for (const message of newMessages) {
       this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
         message.id
       },${JSON.stringify(message)})`;

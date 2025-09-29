@@ -9,12 +9,15 @@ import {
   type Connection,
   type WSMessage
 } from "../index.ts";
+import { AIChatAgent } from "../ai-chat-agent.ts";
+import type { UIMessage as ChatMessage } from "ai";
 
 export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
   CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
+  TestChatAgent: DurableObjectNamespace<TestChatAgent>;
 };
 
 type State = unknown;
@@ -167,6 +170,25 @@ export class TestRaceAgent extends Agent<Env> {
     const tagged = !!conn.state?.tagged;
     // Echo a single JSON frame so the test can assert ordering
     conn.send(JSON.stringify({ type: "echo", tagged }));
+  }
+}
+
+export class TestChatAgent extends AIChatAgent<Env> {
+  async onChatMessage() {
+    // Simple echo response for testing
+    return new Response("Hello from chat agent!", {
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    const rawMessages = (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => {
+      return JSON.parse(row.message as string);
+    });
+    return rawMessages;
   }
 }
 
