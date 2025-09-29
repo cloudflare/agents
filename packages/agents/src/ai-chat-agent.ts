@@ -12,6 +12,7 @@ import {
   type ToolUIPart,
   type UIMessageChunk
 } from "ai";
+import { nanoid } from "nanoid";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import {
   MessageType,
@@ -851,6 +852,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         reader.releaseLock();
       }
 
+      // After streaming is complete, persist the complete assistant's response
       if (message.parts.length > 0) {
         await this.persistMessages([...this.messages, message]);
       }

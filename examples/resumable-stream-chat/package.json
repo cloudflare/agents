@@ -1,0 +1,13 @@
+{
+  "author": "",
+  "description": "Resumable Stream Chat Example",
+  "keywords": [],
+  "license": "ISC",
+  "private": true,
+  "scripts": {
+    "deploy": "vite build && wrangler deploy",
+    "start": "vite dev"
+  },
+  "type": "module",
+  "version": "0.0.0"
+}

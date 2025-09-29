@@ -9,12 +9,19 @@ import {
   type Connection,
   type WSMessage
 } from "../index.ts";
+import { AIHttpChatAgent } from "../ai-chat-agent-http.ts";
+import type {
+  UIMessage as ChatMessage,
+  StreamTextOnFinishCallback,
+  ToolSet
+} from "ai";
 
 export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
   CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
+  ResumableStreamAgent: DurableObjectNamespace<TestResumableStreamAgent>;
 };
 
 type State = unknown;
@@ -167,6 +174,132 @@ export class TestRaceAgent extends Agent<Env> {
     const tagged = !!conn.state?.tagged;
     // Echo a single JSON frame so the test can assert ordering
     conn.send(JSON.stringify({ type: "echo", tagged }));
+  }
+}
+
+// Test agent for resumable streaming functionality
+export class TestResumableStreamAgent extends AIHttpChatAgent<
+  Env,
+  unknown,
+  ChatMessage
+> {
+  // Mock AI response for testing
+  private mockResponses: Map<string, string> = new Map();
+
+  // Track requests for testing
+  requestHistory: Array<{ method: string; url: string; body?: unknown }> = [];
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    // Set up some mock responses
+    this.mockResponses.set("hello", "Hello! How can I help you today?");
+    this.mockResponses.set(
+      "test",
+      "This is a test response for resumable streaming."
+    );
+    this.mockResponses.set(
+      "long",
+      "This is a much longer response that will be streamed in multiple chunks. It contains enough text to demonstrate the chunking behavior of the resumable streaming system. The response continues with more content to ensure we have sufficient data for testing resumption scenarios."
+    );
+  }
+
+  async onChatMessage(
+    onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: { streamId?: string }
+  ): Promise<Response | undefined> {
+    // Track the request
+    this.requestHistory.push({
+      method: "chat",
+      url: options?.streamId || "unknown",
+      body: { messages: this.messages }
+    });
+
+    // Get the last user message
+    const lastMessage = this.messages.filter((m) => m.role === "user").pop();
+
+    if (!lastMessage || !lastMessage.parts) {
+      return new Response("No message content", { status: 400 });
+    }
+
+    const content = lastMessage.parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join(" ");
+
+    // Find mock response or use default
+    const responseText =
+      this.mockResponses.get(content.toLowerCase()) || `Echo: ${content}`;
+
+    // Create a streaming response
+    const stream = new ReadableStream({
+      async start(controller) {
+        const chunks = responseText.match(/.{1,10}/g) || [responseText];
+
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i];
+          const sseData = `data: ${JSON.stringify({
+            type: "text-delta",
+            delta: chunk
+          })}\n\n`;
+
+          controller.enqueue(new TextEncoder().encode(sseData));
+
+          // Small delay to simulate real streaming
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        // End the stream
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+        controller.close();
+
+        // Call onFinish with mock result for testing
+        await onFinish({
+          text: responseText,
+          toolCalls: [],
+          toolResults: [],
+          finishReason: "stop",
+          usage: {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0
+          },
+          rawResponse: {
+            headers: {}
+          },
+          warnings: []
+        } as unknown as Parameters<typeof onFinish>[0]);
+      }
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+      }
+    });
+  }
+
+  // Helper method to set mock response for testing
+  setMockResponse(input: string, response: string) {
+    this.mockResponses.set(input.toLowerCase(), response);
+  }
+
+  // Helper method to get request history for testing
+  getRequestHistory() {
+    return [...this.requestHistory];
+  }
+
+  // Helper method to clear history
+  clearHistory() {
+    this.requestHistory = [];
+    this.messages = [];
+  }
+
+  override onError(error: unknown): void {
+    // Don't console.error in tests to avoid queueMicrotask issues
+    throw error;
   }
 }
 

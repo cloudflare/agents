@@ -1,6 +1,10 @@
 {
-  "compatibility_date": "2025-04-17",
+  "compatibility_date": "2025-02-11",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "durable_objects": {
     "bindings": [
       {
@@ -19,7 +23,11 @@
         "class_name": "TestUserNotificationAgent",
         "name": "UserNotificationAgent"
       },
-      { "class_name": "TestRaceAgent", "name": "TAG_AGENT" }
+      { "class_name": "TestRaceAgent", "name": "TAG_AGENT" },
+      {
+        "class_name": "TestResumableStreamAgent",
+        "name": "ResumableStreamAgent"
+      }
     ]
   },
   "main": "worker.ts",
@@ -30,7 +38,8 @@
         "TestEmailAgent",
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",
-        "TestRaceAgent"
+        "TestRaceAgent",
+        "TestResumableStreamAgent"
       ],
       "tag": "v1"
     }
