@@ -46,11 +46,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     )`;
 
     // Load messages and automatically transform them to v5 format
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages` || []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
+    const rawMessages = this._loadMessagesFromDb();
 
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
     this.messages = autoTransformMessages(rawMessages);
@@ -60,6 +56,22 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
     this.broadcast(JSON.stringify(message), exclude);
+  }
+
+  private _loadMessagesFromDb(): ChatMessage[] {
+    const rows =
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      [];
+    return rows
+      .map((row) => {
+        try {
+          return JSON.parse(row.message as string);
+        } catch (error) {
+          console.error(`Failed to parse message ${row.id}:`, error);
+          return null;
+        }
+      })
+      .filter((msg): msg is ChatMessage => msg !== null);
   }
 
   override async onMessage(connection: Connection, message: WSMessage) {
@@ -182,11 +194,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     return this._tryCatchChat(() => {
       const url = new URL(request.url);
       if (url.pathname.endsWith("/get-messages")) {
-        const messages = (
-          this.sql`select * from cf_ai_chat_agent_messages` || []
-        ).map((row) => {
-          return JSON.parse(row.message as string);
-        });
+        const messages = this._loadMessagesFromDb();
         return Response.json(messages);
       }
       return super.onRequest(request);
@@ -237,11 +245,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }, ${JSON.stringify(message)})`;
     }
 
-    // refresh in-memory messagesm
-    const rows =
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      [];
-    const persisted = rows.map((row) => JSON.parse(row.message as string));
+    // refresh in-memory messages
+    const persisted = this._loadMessagesFromDb();
     this.messages = autoTransformMessages(persisted);
     this._broadcastChatMessage(
       {
