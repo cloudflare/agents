@@ -218,7 +218,6 @@ export function useAgentChat<
       const id = nanoid(8);
       const abortController = new AbortController();
       let controller: ReadableStreamDefaultController;
-      let isToolCallInProgress = false;
       const currentAgent = agentRef.current;
 
       signal?.addEventListener("abort", () => {
@@ -240,9 +239,7 @@ export function useAgentChat<
 
         abortController.abort();
         // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
-        if (!isToolCallInProgress) {
-          controller.close();
-        }
+        controller.close();
       });
 
       currentAgent.addEventListener(
@@ -264,14 +261,11 @@ export function useAgentChat<
               } else {
                 // Only enqueue non-empty data to prevent JSON parsing errors
                 if (data.body?.trim()) {
-                  if (data.body.includes('"tool_calls"')) {
-                    isToolCallInProgress = true;
-                  }
                   controller.enqueue(
                     new TextEncoder().encode(`data: ${data.body}\n\n`)
                   );
                 }
-                if (data.done && !isToolCallInProgress) {
+                if (data.done) {
                   controller.close();
                   abortController.abort();
                 }
