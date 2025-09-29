@@ -5,13 +5,13 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.2",
-    "ai": "5.0.54",
+    "ai": "5.0.57",
     "cron-schedule": "^5.0.4",
     "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.6",
-    "partyserver": "^0.0.74",
-    "partysocket": "1.1.5",
+    "partyserver": "^0.0.75",
+    "partysocket": "1.1.6",
     "x402": "^0.6.5",
     "zod": "^3.25.76",
     "zod-to-ts": "^1.2.0"
