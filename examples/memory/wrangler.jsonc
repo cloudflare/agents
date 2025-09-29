@@ -1,0 +1,28 @@
+{
+  "name": "memory-test",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "MemoryAgent",
+        "name": "AGENT"
+      }
+    ]
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["MemoryAgent"],
+      "tag": "v1"
+    }
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true
+    }
+  }
+}

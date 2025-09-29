@@ -1,0 +1,14 @@
+{
+  "name": "@cloudflare/agents-memory-example",
+  "type": "module",
+  "private": true,
+  "author": "",
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types --include-runtime false"
+  },
+  "dependencies": {
+    "hnsw": "^1.0.3"
+  },
+  "keywords": []
+}
