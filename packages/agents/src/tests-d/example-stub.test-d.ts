@@ -2,7 +2,6 @@
 import type { env } from "cloudflare:workers";
 import { Agent, callable, type StreamingResponse } from "..";
 import { useAgent } from "../react.tsx";
-import type { StreamOptions } from "../client.ts";
 
 class MyAgent extends Agent<typeof env, {}> {
   @callable()
@@ -57,7 +56,7 @@ class MyAgent extends Agent<typeof env, {}> {
   }
 }
 
-const { stub } = useAgent<MyAgent, {}>({ agent: "my-agent" });
+const { stub, streamingStub } = useAgent<MyAgent, {}>({ agent: "my-agent" });
 // return type is promisified
 stub.sayHello() satisfies Promise<string>;
 
@@ -76,21 +75,16 @@ await stub.nonRpc();
 // @ts-expect-error nonSerializable is not serializable
 await stub.nonSerializable("hello", new Date());
 
-const streamOptions: StreamOptions<number, boolean> = {};
-
-// biome-ignore lint: suspicious/noConfusingVoidType
-stub.performStream(streamOptions, "hello") satisfies void;
+const generator = streamingStub.performStream("hello") satisfies AsyncGenerator<
+  number,
+  boolean
+>;
+for await (const chunk of generator) {
+  chunk satisfies number;
+}
 
 // @ts-expect-error there's no 2nd argument
-stub.performStream(streamOptions, "hello", 1);
-
-const invalidStreamOptions: StreamOptions<string, boolean> = {};
-
-// @ts-expect-error streamOptions must be of type StreamOptions<number, boolean>
-stub.performStream(invalidStreamOptions, "hello");
-
-// @ts-expect-error first argument is not a streamOptions
-stub.performStreamFirstArgNotStreamOptions("hello", streamOptions);
+streamingStub.performStream("hello", 1);
 
 const { stub: stub2 } = useAgent<Omit<MyAgent, "nonRpc">, {}>({
   agent: "my-agent"
