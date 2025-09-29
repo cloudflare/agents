@@ -59,12 +59,6 @@ export class AIHttpChatAgent<
         return this._handlePostChat(request);
       }
 
-      // GET /stream/{streamId} - Resume interrupted stream
-      if (pathname.includes("/stream/") && request.method === "GET") {
-        const streamId = pathname.split("/stream/")[1];
-        return this._handleResumeStream(streamId);
-      }
-
       // POST /stream/{streamId}/cancel - Cancel active stream
       if (
         pathname.includes("/stream/") &&
@@ -83,6 +77,12 @@ export class AIHttpChatAgent<
       ) {
         const streamId = pathname.split("/stream/")[1].replace("/status", "");
         return this._handleStreamStatus(streamId);
+      }
+
+      // GET /stream/{streamId} - Resume interrupted stream
+      if (pathname.includes("/stream/") && request.method === "GET") {
+        const streamId = pathname.split("/stream/")[1];
+        return this._handleResumeStream(streamId);
       }
 
       // DELETE /messages - Clear message history

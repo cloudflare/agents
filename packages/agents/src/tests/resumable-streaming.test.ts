@@ -649,6 +649,76 @@ describe("Resumable Streaming - Data Integrity", () => {
   });
 });
 
+describe("Resumable Streaming - Cancellation", () => {
+  let agentId: string;
+
+  beforeEach(async () => {
+    agentId = `test-${nanoid()}`;
+  });
+
+  it("should cancel an active stream, mark it completed, and stop further output", async () => {
+    const customStreamId = `cancel-test-${nanoid()}`;
+
+    // Start a long stream
+    const response1 = await makeRequest(agentId, "POST", "/chat", {
+      messages: [
+        { id: "msg1", role: "user", parts: [{ type: "text", text: "long" }] }
+      ],
+      streamId: customStreamId
+    });
+
+    expect(response1.status).toBe(200);
+    expect(response1.headers.get("X-Stream-Id")).toBe(customStreamId);
+
+    // Read a few chunks to accumulate partial text
+    const { chunks: partialChunks, reader } = await readPartialStreamChunks(
+      response1,
+      2
+    );
+    const partialText = extractTextFromSSE(partialChunks);
+    expect(partialText.length).toBeGreaterThan(0);
+
+    // Cancel the stream
+    const cancelResp = await makeRequest(
+      agentId,
+      "POST",
+      `/stream/${customStreamId}/cancel`
+    );
+    expect(cancelResp.status).toBe(200);
+
+    // Ensure original reader is canceled/closed
+    try {
+      await reader.cancel();
+    } catch {}
+
+    // Status should show completed
+    const statusResp = await makeRequest(
+      agentId,
+      "GET",
+      `/stream/${customStreamId}/status`
+    );
+    expect(statusResp.status).toBe(200);
+    const status = (await statusResp.json()) as { completed: boolean };
+    expect(status.completed).toBe(true);
+
+    // Resuming should immediately complete and return only persisted partial deltas
+    const resumeResp = await makeRequest(
+      agentId,
+      "GET",
+      `/stream/${customStreamId}`
+    );
+    expect(resumeResp.status).toBe(200);
+    expect(resumeResp.headers.get("X-Stream-Complete")).toBe("true");
+
+    const resumedChunks = await readStreamChunks(resumeResp);
+    const resumedText = extractTextFromSSE(resumedChunks);
+    // After cancellation, no more output should be streamed; however,
+    // persisted deltas might slightly exceed what this client read before cancel.
+    // Ensure at least the previously seen partial text is included and no streaming continues beyond persisted data.
+    expect(resumedText.startsWith(partialText)).toBe(true);
+  });
+});
+
 describe("Resumable Streaming - Error Handling and Edge Cases", () => {
   let agentId: string;
 

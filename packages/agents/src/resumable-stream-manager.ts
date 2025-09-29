@@ -16,16 +16,16 @@ interface StreamStateRow {
   headers?: string;
 }
 
-interface ChunkRow {
+interface TextDeltaRow {
   stream_id: string;
   seq: number;
-  chunk: string;
+  text_delta: string;
   created_at?: string;
 }
 
 interface StreamStatusRow {
-  content: string;
-  position: number;
+  seq: number;
+  fetching: number;
   completed: number;
   created_at: string;
   updated_at: string;
@@ -41,6 +41,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       seq: number; // Current chunk sequence number
       fetching: boolean; // Is upstream still fetching?
       completed: boolean;
+      upstreamReader?: ReadableStreamDefaultReader<Uint8Array>; // Reader for upstream response
       timestamp: number;
       readers: Set<
         WritableStreamDefaultWriter | ReadableStreamDefaultController
@@ -80,11 +81,11 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
       updated_at datetime default current_timestamp
     )`;
 
-    // Initialize stream chunks table
-    this.sql`create table if not exists cf_ai_http_chat_chunks (
+    // Initialize stream text deltas table
+    this.sql`create table if not exists cf_ai_http_chat_text_deltas (
       stream_id text not null,
       seq integer not null,
-      chunk blob not null,
+      text_delta text not null,
       created_at datetime default current_timestamp,
       primary key (stream_id, seq)
     )`;
@@ -216,14 +217,14 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
    * Cancel an active stream
    */
   async cancelStream(streamId: string): Promise<Response> {
-    // Mark stream as completed to stop further processing
-    this.sql`
-      update cf_ai_http_chat_streams 
-      set completed = 1, updated_at = current_timestamp
-      where stream_id = ${streamId}
-    `;
+    const state = this._activeStreams.get(streamId);
+    if (state) {
+      try {
+        await state.upstreamReader?.cancel();
+      } catch {}
+    }
 
-    this._activeStreams.delete(streamId);
+    this._markStreamCompleted(streamId);
 
     return new Response(
       JSON.stringify({ success: true, message: "Stream cancelled" }),
@@ -236,7 +237,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
    */
   async getStreamStatus(streamId: string): Promise<Response> {
     const streamState = this.sql`
-      select * from cf_ai_http_chat_streams 
+      select seq, fetching, completed, created_at, updated_at from cf_ai_http_chat_streams 
       where stream_id = ${streamId}
     `[0] as unknown as StreamStatusRow | undefined;
 
@@ -250,8 +251,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     return new Response(
       JSON.stringify({
         streamId,
-        position: streamState.position,
-        contentLength: streamState.content.length,
+        position: streamState.seq,
         completed: Boolean(streamState.completed),
         createdAt: streamState.created_at,
         updatedAt: streamState.updated_at
@@ -261,11 +261,11 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
   }
 
   /**
-   * Clear all streams and chunks
+   * Clear all streams and text deltas
    */
   async clearStreams(): Promise<void> {
     this.sql`delete from cf_ai_http_chat_streams`;
-    this.sql`delete from cf_ai_http_chat_chunks`;
+    this.sql`delete from cf_ai_http_chat_text_deltas`;
     this._activeStreams.clear();
   }
 
@@ -279,7 +279,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
 
     // Drop all tables
     this.sql`DROP TABLE IF EXISTS cf_ai_http_chat_streams`;
-    this.sql`DROP TABLE IF EXISTS cf_ai_http_chat_chunks`;
+    this.sql`DROP TABLE IF EXISTS cf_ai_http_chat_text_deltas`;
   }
 
   /**
@@ -296,7 +296,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     `;
 
     this.sql`
-      delete from cf_ai_http_chat_chunks 
+      delete from cf_ai_http_chat_text_deltas 
       where stream_id in (
         select stream_id from cf_ai_http_chat_streams 
         where completed = 1 and updated_at < ${cutoffTime}
@@ -376,6 +376,8 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     const streamState = this._activeStreams.get(streamId);
     if (!streamState) return;
 
+    streamState.upstreamReader = reader;
+
     let assistantMessageText = "";
     const assistantMessageId = `assistant_${nanoid()}`;
     let buffer = "";
@@ -410,49 +412,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
           break;
         }
 
-        // Store raw chunk with sequence number atomically
-        const chunkBase64 = btoa(String.fromCharCode(...value));
-
-        try {
-          // Atomically get next sequence number and insert chunk
-          const seqResult = this.sql`
-            update cf_ai_http_chat_streams
-            set seq = seq + 1, updated_at = current_timestamp
-            where stream_id = ${streamId}
-            returning seq
-          `;
-
-          const seq = Number(seqResult[0]?.seq) || streamState.seq++;
-
-          this.sql`
-            insert into cf_ai_http_chat_chunks (stream_id, seq, chunk)
-            values (${streamId}, ${seq}, ${chunkBase64})
-          `;
-
-          // Update in-memory state to match database
-          streamState.seq = seq + 1;
-        } catch (sqlError) {
-          console.error(
-            `[ResumableStreamManager] SQL error for stream ${streamId}:`,
-            sqlError
-          );
-          // Fall back to in-memory sequence if SQL fails
-          const seq = streamState.seq++;
-          try {
-            this.sql`
-              insert into cf_ai_http_chat_chunks (stream_id, seq, chunk)
-              values (${streamId}, ${seq}, ${chunkBase64})
-            `;
-          } catch (fallbackError) {
-            console.error(
-              `[ResumableStreamManager] Fallback SQL error for stream ${streamId}:`,
-              fallbackError
-            );
-            // Continue processing even if storage fails
-          }
-        }
-
-        // Parse for assistant message content
+        // Parse SSE chunk for text content first
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
 
@@ -468,6 +428,30 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
               const data = JSON.parse(dataStr);
               if (data.type === "text-delta" && data.delta) {
                 assistantMessageText += data.delta;
+
+                // Store the parsed text delta
+                try {
+                  const seqResult = this.sql`
+                    update cf_ai_http_chat_streams
+                    set seq = seq + 1, updated_at = current_timestamp
+                    where stream_id = ${streamId}
+                    returning seq
+                  `;
+
+                  const seq = Number(seqResult[0]?.seq) || streamState.seq++;
+
+                  this.sql`
+                    insert into cf_ai_http_chat_text_deltas (stream_id, seq, text_delta)
+                    values (${streamId}, ${seq}, ${data.delta})
+                  `;
+
+                  streamState.seq = seq + 1;
+                } catch (sqlError) {
+                  console.error(
+                    `[ResumableStreamManager] SQL error storing text delta for ${streamId}:`,
+                    sqlError
+                  );
+                }
               }
             } catch {
               // Ignore parse errors
@@ -508,13 +492,17 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
         await persistMessages([...messages, assistantMessage]);
       }
     } finally {
+      // Clear the upstream reader reference
+      const currentState = this._activeStreams.get(streamId);
+      if (currentState) {
+        currentState.upstreamReader = undefined;
+      }
       // Only mark as completed if stream finished naturally, not if interrupted
       if (completedNaturally) {
         this._markStreamCompleted(streamId);
       } else {
         // Stream was interrupted - update fetching state but don't mark as completed
-        const currentState = this._activeStreams.get(streamId);
-        if (currentState) {
+        if (currentState && !currentState.completed) {
           currentState.fetching = false;
         }
         try {
@@ -554,7 +542,10 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
 
     if (!dbState) {
       console.log(`[ResumableStreamManager] No DB state found for ${streamId}`);
-      return new Response("Stream not found", { status: 404 });
+      return new Response(JSON.stringify({ error: "Stream not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
     }
 
     let streamState = this._activeStreams.get(streamId);
@@ -592,22 +583,22 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     // Replay stored chunks and setup live streaming
     (async () => {
       try {
-        // 1. Replay stored chunks with concurrency control
+        // 1. Replay stored text deltas
         await this.ctx.blockConcurrencyWhile(async () => {
-          const chunks = this.sql`
-            select seq, chunk from cf_ai_http_chat_chunks
+          const textDeltas = this.sql`
+            select seq, text_delta from cf_ai_http_chat_text_deltas
             where stream_id = ${streamId}
             order by seq asc
-          ` as unknown as Pick<ChunkRow, "seq" | "chunk">[];
+          ` as unknown as Pick<TextDeltaRow, "seq" | "text_delta">[];
 
-          for (const row of chunks) {
-            // Decode base64 back to Uint8Array
-            const chunkBase64 = row.chunk;
-            const binaryString = atob(chunkBase64);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-              bytes[i] = binaryString.charCodeAt(i);
-            }
+          for (const row of textDeltas) {
+            // Reconstruct SSE format from stored text delta
+            const sseData = {
+              type: "text-delta",
+              delta: row.text_delta
+            };
+            const sseChunk = `data: ${JSON.stringify(sseData)}\n\n`;
+            const bytes = new TextEncoder().encode(sseChunk);
             await writer.write(bytes);
             lastSeenSeq = row.seq;
           }
@@ -664,15 +655,12 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     // Add stream metadata headers
     headers["X-Stream-Id"] = streamId;
     headers["X-Resumable"] = "true";
+    headers["X-Stream-Complete"] = String(Boolean(dbState?.completed));
 
     // Include messages in header if requested
     if (includeMessages) {
       try {
-        // Use base64 encoding to avoid header encoding issues
         headers["X-Messages"] = encodeURIComponent(JSON.stringify(messages));
-
-        // Note: Assistant message content is delivered through the stream itself
-        // No need to duplicate it in headers since it's already available via persistMessages()
       } catch (e) {
         console.error("Failed to add messages to header:", e);
       }
@@ -682,7 +670,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
   }
 
   /**
-   * Backfill any chunks that were written while this writer was joining
+   * Backfill any text deltas that were written while this writer was joining
    */
   private async _backfillGaps(
     streamId: string,
@@ -695,19 +683,20 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
     let cursor = startSeq;
     while (cursor < streamState.seq) {
       const gaps = this.sql`
-        select seq, chunk from cf_ai_http_chat_chunks
+        select seq, text_delta from cf_ai_http_chat_text_deltas
         where stream_id = ${streamId} and seq >= ${cursor} and seq < ${streamState.seq}
         order by seq asc
-      ` as unknown as Pick<ChunkRow, "seq" | "chunk">[];
+      ` as unknown as Pick<TextDeltaRow, "seq" | "text_delta">[];
 
       for (const row of gaps) {
         try {
-          const chunkBase64 = row.chunk;
-          const binaryString = atob(chunkBase64);
-          const bytes = new Uint8Array(binaryString.length);
-          for (let i = 0; i < binaryString.length; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-          }
+          // Reconstruct SSE format from stored text delta
+          const sseData = {
+            type: "text-delta",
+            delta: row.text_delta
+          };
+          const sseChunk = `data: ${JSON.stringify(sseData)}\n\n`;
+          const bytes = new TextEncoder().encode(sseChunk);
           await writer.write(bytes);
           cursor = row.seq + 1;
         } catch {
@@ -716,7 +705,7 @@ export class ResumableStreamManager<Message extends ChatMessage = ChatMessage> {
         }
       }
 
-      // Check if more chunks arrived while we were backfilling
+      // Check if more text deltas arrived while we were backfilling
       if (cursor >= streamState.seq) break;
     }
   }

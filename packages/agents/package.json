@@ -41,6 +41,9 @@
   "devDependencies": {
     "@cloudflare/workers-oauth-provider": "^0.1.0",
     "@types/yargs": "^17.0.34",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/react-hooks": "^8.0.1",
+    "msw": "^2.11.3",
     "react": "*",
     "vitest-browser-react": "^1.0.1",
     "x402": "^0.7.1"
@@ -139,16 +142,6 @@
       "types": "./dist/use-agent-chat-http.d.ts",
       "import": "./dist/use-agent-chat-http.js",
       "require": "./dist/use-agent-chat-http.js"
-    },
-    "./ai-chat-agent-resumable-http": {
-      "types": "./dist/ai-chat-agent-resumable-http.d.ts",
-      "import": "./dist/ai-chat-agent-resumable-http.js",
-      "require": "./dist/ai-chat-agent-resumable-http.js"
-    },
-    "./use-agent-chat-resumable-http": {
-      "types": "./dist/use-agent-chat-resumable-http.d.ts",
-      "import": "./dist/use-agent-chat-resumable-http.js",
-      "require": "./dist/use-agent-chat-resumable-http.js"
     }
   },
   "publishConfig": {

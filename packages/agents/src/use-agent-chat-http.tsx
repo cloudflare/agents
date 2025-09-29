@@ -217,11 +217,7 @@ export function useAgentChatHttp<
         if (typeof window !== "undefined") {
           sessionStorage.setItem(storageKey, streamId);
         }
-
-        // Start polling for stream updates if needed
-        if (pollingInterval > 0) {
-          startPolling();
-        }
+        // Polling will start automatically via useEffect watching currentStreamId
       }
     }
 
@@ -302,9 +298,13 @@ export function useAgentChatHttp<
           const serverMessages = data.messages || [];
 
           // Update messages if they've changed
+          const currentMessages = useChatHelpers.messages;
           if (
-            JSON.stringify(serverMessages) !==
-            JSON.stringify(useChatHelpers.messages)
+            serverMessages.length !== currentMessages.length ||
+            (serverMessages.length > 0 &&
+              currentMessages.length > 0 &&
+              serverMessages[serverMessages.length - 1].id !==
+                currentMessages[currentMessages.length - 1].id)
           ) {
             useChatHelpers.setMessages(serverMessages);
           }
@@ -350,6 +350,25 @@ export function useAgentChatHttp<
     currentStreamId,
     stopPolling,
     useChatHelpers
+  ]);
+
+  /**
+   * Automatically start/stop polling based on active stream
+   */
+  useEffect(() => {
+    if (enableResumableStreams && currentStreamId && pollingInterval > 0) {
+      // Start polling when we have an active stream
+      startPolling();
+    } else {
+      // Stop polling when no active stream
+      stopPolling();
+    }
+  }, [
+    enableResumableStreams,
+    currentStreamId,
+    pollingInterval,
+    startPolling,
+    stopPolling
   ]);
 
   /**
@@ -514,7 +533,7 @@ export function useAgentChatHttp<
                 `Successfully reconnected to stream ${savedStreamId}`
               );
 
-              // Get messages from response header
+              // Optionally hydrate messages from header if present
               const messagesHeader = response.headers.get("X-Messages");
               let existingMessages: ChatMessage[] = [];
               if (messagesHeader) {
@@ -528,46 +547,14 @@ export function useAgentChatHttp<
                 }
               }
 
-              // Get assistant message if exists
-              const assistantContentHeader = response.headers.get(
-                "X-Assistant-Content"
-              );
-              const assistantIdHeader = response.headers.get("X-Assistant-Id");
-
+              // Initialize assistant message accumulation for resumed stream
               let assistantContent = "";
-              let assistantMessageId = `assistant_${Date.now()}`;
-
-              if (assistantContentHeader && assistantIdHeader) {
-                // We have the complete assistant message from server
-                assistantContent = decodeURIComponent(assistantContentHeader);
-                assistantMessageId = assistantIdHeader;
-                console.log(
-                  `Resuming with complete assistant message ${assistantMessageId}: "${assistantContent.substring(0, 50)}..."`
-                );
-
-                // Add or update the assistant message in messages
-                const hasAssistant = existingMessages.some(
-                  (m) => m.id === assistantMessageId
-                );
-                if (!hasAssistant && assistantContent) {
-                  const updatedMessages = [
-                    ...existingMessages,
-                    {
-                      id: assistantMessageId,
-                      role: "assistant",
-                      parts: [{ type: "text", text: assistantContent }]
-                    } as unknown as ChatMessage
-                  ];
-                  chatHelpersRef.current?.setMessages(updatedMessages);
-                  existingMessages = updatedMessages;
-                }
-              }
+              const assistantMessageId = `assistant_${Date.now()}`;
 
               // Process the resumed stream
               const reader = response.body.getReader();
               const decoder = new TextDecoder();
               let buffer = "";
-              let isReplay = !assistantContentHeader; // If we have content, we're already past replay
 
               const processStream = async () => {
                 try {
@@ -590,13 +577,6 @@ export function useAgentChatHttp<
 
                     for (const line of lines) {
                       if (line.trim() === "") continue;
-                      // Check for replay/live transition marker if needed
-                      if (line.includes("X-Replay-Complete")) {
-                        isReplay = false;
-                        console.log("Switching from replay to live streaming");
-                        continue;
-                      }
-
                       if (line.startsWith("data: ")) {
                         const dataStr = line.slice(6);
                         if (dataStr === "[DONE]") {
@@ -608,10 +588,6 @@ export function useAgentChatHttp<
                           const data = JSON.parse(dataStr);
                           if (data.type === "text-delta" && data.delta) {
                             assistantContent += data.delta;
-                            console.log(
-                              `${isReplay ? "Replay" : "Live"} delta:`,
-                              data.delta
-                            );
                             const updatedMessages = [...existingMessages];
                             const lastMessage =
                               updatedMessages[updatedMessages.length - 1];
