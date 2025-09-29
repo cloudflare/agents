@@ -123,13 +123,6 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
    * and require user interact to initiate the redirect flow
    */
   async redirectToAuthorization(authUrl: URL): Promise<void> {
-    const client_id = authUrl.searchParams.get("client_id");
-
-    // Store clientId internally for later use by clientInformation()
-    if (client_id) {
-      this._clientId_ = client_id;
-    }
-
     // Generate secure random token for state parameter
     const stateToken = nanoid();
     authUrl.searchParams.set("state", stateToken);
