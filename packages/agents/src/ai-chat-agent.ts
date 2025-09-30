@@ -224,6 +224,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
+    await this._tryCatchChat(async () => {
+      const response = await this.onChatMessage(() => {});
+      if (response) this._reply(crypto.randomUUID(), response);
+    });
   }
 
   async persistMessages(
