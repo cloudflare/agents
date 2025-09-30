@@ -13,6 +13,14 @@ import {
 import { AIChatAgent } from "../ai-chat-agent.ts";
 import type { UIMessage as ChatMessage } from "ai";
 
+interface ToolCallPart {
+  type: string;
+  toolCallId: string;
+  state: "input-available" | "output-available";
+  input: Record<string, unknown>;
+  output?: unknown;
+}
+
 export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
   EmailAgent: DurableObjectNamespace<TestEmailAgent>;
@@ -195,18 +203,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   @callable()
   async testPersistToolCall(messageId: string, toolName: string) {
+    const toolCallPart: ToolCallPart = {
+      type: `tool-${toolName}`,
+      toolCallId: `call_${messageId}`,
+      state: "input-available",
+      input: { location: "London" }
+    };
+
     const messageWithToolCall: ChatMessage = {
       id: messageId,
       role: "assistant",
-      parts: [
-        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
-        {
-          type: `tool-${toolName}`,
-          toolCallId: `call_${messageId}`,
-          state: "input-available",
-          input: { location: "London" }
-        } as any
-      ]
+      parts: [toolCallPart] as ChatMessage["parts"]
     };
     await this.persistMessages([messageWithToolCall]);
     return messageWithToolCall;
@@ -218,19 +225,18 @@ export class TestChatAgent extends AIChatAgent<Env> {
     toolName: string,
     output: string
   ) {
+    const toolResultPart: ToolCallPart = {
+      type: `tool-${toolName}`,
+      toolCallId: `call_${messageId}`,
+      state: "output-available",
+      input: { location: "London" },
+      output
+    };
+
     const messageWithToolOutput: ChatMessage = {
       id: messageId,
       role: "assistant",
-      parts: [
-        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
-        {
-          type: `tool-${toolName}`,
-          toolCallId: `call_${messageId}`,
-          state: "output-available",
-          input: { location: "London" },
-          output
-        } as any
-      ]
+      parts: [toolResultPart] as ChatMessage["parts"]
     };
     await this.persistMessages([messageWithToolOutput]);
     return messageWithToolOutput;

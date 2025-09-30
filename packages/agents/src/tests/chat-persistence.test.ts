@@ -4,6 +4,14 @@ import worker, { type Env } from "./worker";
 import { MessageType } from "../ai-types";
 import type { UIMessage as ChatMessage } from "ai";
 
+interface ToolCallPart {
+  type: string;
+  toolCallId: string;
+  state: "input-available" | "output-available";
+  input: Record<string, unknown>;
+  output?: unknown;
+}
+
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
@@ -274,18 +282,17 @@ describe("Chat Agent Persistence", () => {
       parts: [{ type: "text", text: "What time is it in London?" }]
     };
 
+    const toolCallPart: ToolCallPart = {
+      type: "tool-getLocalTime",
+      toolCallId: "call_456",
+      state: "input-available",
+      input: { location: "London" }
+    };
+
     const assistantToolCall: ChatMessage = {
       id: "assistant-1",
       role: "assistant",
-      parts: [
-        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
-        {
-          type: "tool-getLocalTime",
-          toolCallId: "call_456",
-          state: "input-available",
-          input: { location: "London" }
-        } as any
-      ]
+      parts: [toolCallPart] as ChatMessage["parts"]
     };
 
     await agentStub.persistMessages([userMessage, assistantToolCall]);
@@ -298,19 +305,18 @@ describe("Chat Agent Persistence", () => {
       messagesAfterToolCall.find((m) => m.id === "assistant-1")
     ).toBeDefined();
 
+    const toolResultPart: ToolCallPart = {
+      type: "tool-getLocalTime",
+      toolCallId: "call_456",
+      state: "output-available",
+      input: { location: "London" },
+      output: "3:00 PM"
+    };
+
     const assistantToolOutput: ChatMessage = {
       id: "assistant-1",
       role: "assistant",
-      parts: [
-        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
-        {
-          type: "tool-getLocalTime",
-          toolCallId: "call_456",
-          state: "output-available",
-          input: { location: "London" },
-          output: "3:00 PM"
-        } as any
-      ]
+      parts: [toolResultPart] as ChatMessage["parts"]
     };
 
     const assistantResponse: ChatMessage = {
