@@ -4,6 +4,7 @@ import { z } from "zod";
 import { McpAgent } from "../mcp/index.ts";
 import {
   Agent,
+  callable,
   routeAgentRequest,
   type AgentEmail,
   type Connection,
@@ -181,6 +182,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     });
   }
 
+  @callable()
   getPersistedMessages(): ChatMessage[] {
     const rawMessages = (
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
@@ -189,6 +191,49 @@ export class TestChatAgent extends AIChatAgent<Env> {
       return JSON.parse(row.message as string);
     });
     return rawMessages;
+  }
+
+  @callable()
+  async testPersistToolCall(messageId: string, toolName: string) {
+    const messageWithToolCall: ChatMessage = {
+      id: messageId,
+      role: "assistant",
+      parts: [
+        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
+        {
+          type: `tool-${toolName}`,
+          toolCallId: `call_${messageId}`,
+          state: "input-available",
+          input: { location: "London" }
+        } as any
+      ]
+    };
+    await this.persistMessages([messageWithToolCall]);
+    return messageWithToolCall;
+  }
+
+  @callable()
+  async testPersistToolResult(
+    messageId: string,
+    toolName: string,
+    output: string
+  ) {
+    const messageWithToolOutput: ChatMessage = {
+      id: messageId,
+      role: "assistant",
+      parts: [
+        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
+        {
+          type: `tool-${toolName}`,
+          toolCallId: `call_${messageId}`,
+          state: "output-available",
+          input: { location: "London" },
+          output
+        } as any
+      ]
+    };
+    await this.persistMessages([messageWithToolOutput]);
+    return messageWithToolOutput;
   }
 }
 

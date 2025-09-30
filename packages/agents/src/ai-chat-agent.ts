@@ -240,7 +240,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   ) {
     for (const message of messages) {
       this
-        .sql`insert or ignore into cf_ai_chat_agent_messages (id, message) values (${
+        .sql`insert or replace into cf_ai_chat_agent_messages (id, message) values (${
         message.id
       }, ${JSON.stringify(message)})`;
     }

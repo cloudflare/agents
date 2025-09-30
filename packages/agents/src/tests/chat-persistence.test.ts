@@ -190,4 +190,171 @@ describe("Chat Agent Persistence", () => {
     expect(messageIds).toContain("init2");
     expect(messageIds).toContain("new1");
   });
+
+  it("persists tool calls and updates them with tool outputs using real persistence methods", async () => {
+    const room = crypto.randomUUID();
+
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      {
+        headers: { Upgrade: "websocket" }
+      }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+
+    await agentStub.testPersistToolCall("msg-tool-1", "getLocalTime");
+
+    const messagesAfterCall =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(messagesAfterCall.length).toBe(1);
+    expect(messagesAfterCall[0].id).toBe("msg-tool-1");
+    const toolPart1 = messagesAfterCall[0].parts[0] as {
+      type: string;
+      state: string;
+      toolCallId: string;
+      input: unknown;
+    };
+    expect(toolPart1.type).toBe("tool-getLocalTime");
+    expect(toolPart1.state).toBe("input-available");
+    expect(toolPart1.input).toEqual({ location: "London" });
+
+    await agentStub.testPersistToolResult("msg-tool-1", "getLocalTime", "10am");
+
+    const messagesAfterOutput =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    // Should still be only 1 message
+    expect(messagesAfterOutput.length).toBe(1);
+    expect(messagesAfterOutput[0].id).toBe("msg-tool-1");
+
+    const toolPart2 = messagesAfterOutput[0].parts[0] as {
+      type: string;
+      state: string;
+      toolCallId: string;
+      input: unknown;
+      output: unknown;
+    };
+    expect(toolPart2.type).toBe("tool-getLocalTime");
+    expect(toolPart2.state).toBe("output-available");
+    expect(toolPart2.output).toBe("10am");
+    expect(toolPart2.input).toEqual({ location: "London" });
+
+    ws.close();
+  });
+
+  it("persists multiple messages with tool calls and outputs correctly using real persistence", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      {
+        headers: { Upgrade: "websocket" }
+      }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+
+    const userMessage: ChatMessage = {
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "What time is it in London?" }]
+    };
+
+    const assistantToolCall: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
+        {
+          type: "tool-getLocalTime",
+          toolCallId: "call_456",
+          state: "input-available",
+          input: { location: "London" }
+        } as any
+      ]
+    };
+
+    await agentStub.persistMessages([userMessage, assistantToolCall]);
+
+    const messagesAfterToolCall =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(messagesAfterToolCall.length).toBe(2);
+    expect(messagesAfterToolCall.find((m) => m.id === "user-1")).toBeDefined();
+    expect(
+      messagesAfterToolCall.find((m) => m.id === "assistant-1")
+    ).toBeDefined();
+
+    const assistantToolOutput: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        // biome-ignore lint/suspicious/noExplicitAny: test data for tool calls
+        {
+          type: "tool-getLocalTime",
+          toolCallId: "call_456",
+          state: "output-available",
+          input: { location: "London" },
+          output: "3:00 PM"
+        } as any
+      ]
+    };
+
+    const assistantResponse: ChatMessage = {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{ type: "text", text: "It is 3:00 PM in London." }]
+    };
+
+    await agentStub.persistMessages([
+      userMessage,
+      assistantToolOutput,
+      assistantResponse
+    ]);
+
+    const persistedMessages =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    // Should have 3 messages: user-1, assistant-1 (with tool output), assistant-2
+    expect(persistedMessages.length).toBe(3);
+
+    const userMsg = persistedMessages.find((m) => m.id === "user-1");
+    expect(userMsg).toBeDefined();
+    expect(userMsg?.role).toBe("user");
+
+    // Verify assistant message with tool output (should be updated, not duplicated)
+    const assistantWithTool = persistedMessages.find(
+      (m) => m.id === "assistant-1"
+    );
+    expect(assistantWithTool).toBeDefined();
+    const toolPart = assistantWithTool?.parts[0] as {
+      type: string;
+      state: string;
+      toolCallId: string;
+      input: unknown;
+      output: unknown;
+    };
+    expect(toolPart.type).toBe("tool-getLocalTime");
+    expect(toolPart.state).toBe("output-available");
+    expect(toolPart.output).toBe("3:00 PM");
+
+    const finalResponse = persistedMessages.find((m) => m.id === "assistant-2");
+    expect(finalResponse).toBeDefined();
+    expect(finalResponse?.parts[0].type).toBe("text");
+
+    ws.close();
+  });
 });

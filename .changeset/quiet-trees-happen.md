@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-add new messages instead of replacing them, add tests
+use INSERT OR REPLACE for message persistence to allow tool call updates
