@@ -119,9 +119,10 @@
     "check:test:react": "vitest -r src/react-tests --watch false",
     "check:test:workers": "vitest -r src/tests --watch false",
     "evals": "(cd evals; evalite)",
-    "test": "vitest -r src/tests",
+    "test": "npm run test:workers && npm run test:react",
     "test:react": "vitest -r src/react-tests",
-    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent"
+    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent",
+    "test:workers": "vitest -r src/tests"
   },
   "type": "module",
   "types": "dist/index.d.ts",

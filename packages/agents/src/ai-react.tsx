@@ -167,11 +167,14 @@ export function useAgentChat<
   function doGetInitialMessages(
     getInitialMessagesOptions: GetInitialMessagesOptions
   ) {
-    if (requestCache.has(agentUrlString)) {
-      return requestCache.get(agentUrlString)! as Promise<ChatMessage[]>;
+    // we need a unique cache key that includes both URL and agent identifiers, just URL wasn't enough
+    const cacheKey = `${agentUrlString}#${agent.agent}#${agent.name}`;
+
+    if (requestCache.has(cacheKey)) {
+      return requestCache.get(cacheKey)! as Promise<ChatMessage[]>;
     }
     const promise = getInitialMessagesFetch(getInitialMessagesOptions);
-    requestCache.set(agentUrlString, promise);
+    requestCache.set(cacheKey, promise);
     return promise;
   }
 
@@ -191,13 +194,14 @@ export function useAgentChat<
     if (!initialMessagesPromise) {
       return;
     }
-    requestCache.set(agentUrlString, initialMessagesPromise!);
+    const cacheKey = `${agentUrlString}#${agent.agent}#${agent.name}`;
+    requestCache.set(cacheKey, initialMessagesPromise!);
     return () => {
-      if (requestCache.get(agentUrlString) === initialMessagesPromise) {
-        requestCache.delete(agentUrlString);
+      if (requestCache.get(cacheKey) === initialMessagesPromise) {
+        requestCache.delete(cacheKey);
       }
     };
-  }, [agentUrlString, initialMessagesPromise]);
+  }, [agentUrlString, initialMessagesPromise, agent.agent, agent.name]);
 
   const aiFetch = useCallback(
     async (request: RequestInfo | URL, options: RequestInit = {}) => {
