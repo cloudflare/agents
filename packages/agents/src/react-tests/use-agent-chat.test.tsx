@@ -21,10 +21,6 @@ function createAgent({ name, url }: { name: string; url: string }) {
   return baseAgent as unknown as ReturnType<typeof useAgent>;
 }
 
-/**
- * These tests exercise the real useAgentChat hook (no module mocks).
- * They render the hook inside a component and assert on the DOM output.
- */
 describe("useAgentChat", () => {
   it("should cache initial message responses across re-renders", async () => {
     const agent = createAgent({
