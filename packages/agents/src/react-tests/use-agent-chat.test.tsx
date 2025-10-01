@@ -1,47 +1,32 @@
 import { StrictMode, Suspense, act } from "react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { useAgentChat } from "../ai-react";
 import type { useAgent } from "../react";
 
-// Store the mock implementation so we can reset it between tests
-let useChatMock = vi.fn();
+function createAgent({ name, url }: { name: string; url: string }) {
+  const target = new EventTarget();
+  const baseAgent = {
+    _pkurl: url,
+    _url: null as string | null,
+    addEventListener: target.addEventListener.bind(target),
+    agent: "Chat",
+    close: () => {},
+    id: "fake-agent",
+    name,
+    removeEventListener: target.removeEventListener.bind(target),
+    send: () => {},
+    dispatchEvent: target.dispatchEvent.bind(target)
+  };
+  return baseAgent as unknown as ReturnType<typeof useAgent>;
+}
 
-// mock the @ai-sdk/react package
-vi.mock("@ai-sdk/react", () => ({
-  useChat: (...args: unknown[]) => useChatMock(...args)
-}));
-
-beforeEach(() => {
-  useChatMock = vi.fn((args) => ({
-    messages: args.messages || [],
-    setMessages: vi.fn(),
-    append: vi.fn(),
-    reload: vi.fn(),
-    stop: vi.fn(),
-    isLoading: false,
-    error: undefined
-  }));
-});
-
-/**
- * Unit tests for the hook functionality which mock the network
- * layer and @ai-sdk dependencies.
- */
 describe("useAgentChat", () => {
   it("should cache initial message responses across re-renders", async () => {
-    // mocking the agent with a subset of fields used in useAgentChat
-    const mockAgent: ReturnType<typeof useAgent> = {
-      _pkurl: "ws://localhost:3000",
-      _url: "ws://localhost:3000",
-      addEventListener: vi.fn(),
-      agent: "Chat",
-      id: "fake-agent",
-      name: "fake-agent",
-      removeEventListener: vi.fn(),
-      send: vi.fn()
-      // biome-ignore lint/suspicious/noExplicitAny: tests
-    } as any;
+    const agent = createAgent({
+      name: "thread-alpha",
+      url: "ws://localhost:3000/agents/chat/thread-alpha?_pk=abc"
+    });
 
     const testMessages = [
       {
@@ -55,21 +40,21 @@ describe("useAgentChat", () => {
         parts: [{ type: "text" as const, text: "Hello" }]
       }
     ];
+
     const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
 
-    // We can observe how many times Suspense was triggered with this component.
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages
+      });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
     const suspenseRendered = vi.fn();
     const SuspenseObserver = () => {
       suspenseRendered();
       return "Suspended";
-    };
-
-    const TestComponent = () => {
-      const chat = useAgentChat({
-        agent: mockAgent,
-        getInitialMessages
-      });
-      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
     };
 
     const screen = await act(() =>
@@ -107,67 +92,17 @@ describe("useAgentChat", () => {
   });
 
   it("should refetch initial messages when the agent name changes", async () => {
-    // This test verifies the fix for issue #420
-    // https://github.com/cloudflare/agents/issues/420
+    const url = "ws://localhost:3000/agents/chat/thread-a?_pk=abc";
+    const agentA = createAgent({ name: "thread-a", url });
+    const agentB = createAgent({ name: "thread-b", url });
 
-    const mockAgent1: ReturnType<typeof useAgent> = {
-      _pkurl: "ws://localhost:3000",
-      _url: "ws://localhost:3000",
-      addEventListener: vi.fn(),
-      agent: "Chat",
-      id: "agent-1",
-      name: "thread-1",
-      removeEventListener: vi.fn(),
-      send: vi.fn()
-      // biome-ignore lint/suspicious/noExplicitAny: tests
-    } as any;
-
-    const mockAgent2: ReturnType<typeof useAgent> = {
-      _pkurl: "ws://localhost:3000",
-      _url: "ws://localhost:3000",
-      addEventListener: vi.fn(),
-      agent: "Chat",
-      id: "agent-2",
-      name: "thread-2",
-      removeEventListener: vi.fn(),
-      send: vi.fn()
-      // biome-ignore lint/suspicious/noExplicitAny: tests
-    } as any;
-
-    const messagesForAgent1 = [
+    const getInitialMessages = vi.fn(async ({ name }: { name: string }) => [
       {
         id: "1",
-        role: "user" as const,
-        parts: [{ type: "text" as const, text: "Hi from thread 1" }]
-      },
-      {
-        id: "2",
         role: "assistant" as const,
-        parts: [{ type: "text" as const, text: "Hello from thread 1" }]
+        parts: [{ type: "text" as const, text: `Hello from ${name}` }]
       }
-    ];
-
-    const messagesForAgent2 = [
-      {
-        id: "3",
-        role: "user" as const,
-        parts: [{ type: "text" as const, text: "Hi from thread 2" }]
-      },
-      {
-        id: "4",
-        role: "assistant" as const,
-        parts: [{ type: "text" as const, text: "Hello from thread 2" }]
-      }
-    ];
-
-    const getInitialMessages = vi.fn(
-      (options: { agent: string | undefined; name: string; url: string }) => {
-        if (options.name === "thread-1") {
-          return Promise.resolve(messagesForAgent1);
-        }
-        return Promise.resolve(messagesForAgent2);
-      }
-    );
+    ]);
 
     const TestComponent = ({
       agent
@@ -178,158 +113,47 @@ describe("useAgentChat", () => {
         agent,
         getInitialMessages
       });
-
-      // NOTE: this only works because of how @ai-sdk/react is mocked to use
-      // the initialMessages prop as the messages state in the mock return value.
       return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
     };
 
-    // wrapping in act is required to resolve the suspense boundary during
-    // initial render.
-    const screen = await act(() =>
-      render(<TestComponent agent={mockAgent1} />, {
-        wrapper: ({ children }) => (
-          <StrictMode>
-            <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
-          </StrictMode>
-        )
-      })
-    );
-
-    // Wait for initial messages from agent 1
-    await expect
-      .element(screen.getByTestId("messages"))
-      .toHaveTextContent(JSON.stringify(messagesForAgent1));
-
-    expect(getInitialMessages).toHaveBeenCalledTimes(1);
-    expect(getInitialMessages).toHaveBeenCalledWith({
-      agent: "Chat",
-      name: "thread-1",
-      url: expect.stringContaining("http://localhost:3000")
-    });
-
-    // Switch to agent 2
-    await act(() => screen.rerender(<TestComponent agent={mockAgent2} />));
-
-    // Messages should update to agent 2's messages
-    await expect
-      .element(screen.getByTestId("messages"))
-      .toHaveTextContent(JSON.stringify(messagesForAgent2));
-
-    // getInitialMessages should be called again for the new agent
-    expect(getInitialMessages).toHaveBeenCalledTimes(2);
-    expect(getInitialMessages).toHaveBeenCalledWith({
-      agent: "Chat",
-      name: "thread-2",
-      url: expect.stringContaining("http://localhost:3000")
-    });
-  });
-
-  it("should update messages when switching agents after messages have been appended", async () => {
-    // This test verifies the specific bug scenario from issue #420
-    // where messages don't update after the first agent receives new messages
-    // https://github.com/cloudflare/agents/issues/420
-
-    const mockAgent1: ReturnType<typeof useAgent> = {
-      _pkurl: "ws://localhost:3000",
-      _url: "ws://localhost:3000",
-      addEventListener: vi.fn(),
-      agent: "Chat",
-      id: "agent-1",
-      name: "thread-1",
-      removeEventListener: vi.fn(),
-      send: vi.fn()
-      // biome-ignore lint/suspicious/noExplicitAny: tests
-    } as any;
-
-    const mockAgent2: ReturnType<typeof useAgent> = {
-      _pkurl: "ws://localhost:3000",
-      _url: "ws://localhost:3000",
-      addEventListener: vi.fn(),
-      agent: "Chat",
-      id: "agent-2",
-      name: "thread-2",
-      removeEventListener: vi.fn(),
-      send: vi.fn()
-      // biome-ignore lint/suspicious/noExplicitAny: tests
-    } as any;
-
-    const initialMessagesForAgent1 = [
-      {
-        id: "1",
-        role: "user" as const,
-        parts: [{ type: "text" as const, text: "Initial message" }]
-      }
-    ];
-
-    const messagesForAgent2 = [
-      {
-        id: "3",
-        role: "user" as const,
-        parts: [{ type: "text" as const, text: "Thread 2 message" }]
-      }
-    ];
-
-    const getInitialMessages = vi.fn(
-      (options: { agent: string | undefined; name: string; url: string }) => {
-        if (options.name === "thread-1") {
-          return Promise.resolve(initialMessagesForAgent1);
-        }
-        return Promise.resolve(messagesForAgent2);
-      }
-    );
-
-    const TestComponent = ({
-      agent
-    }: {
-      agent: ReturnType<typeof useAgent>;
-    }) => {
-      const chat = useAgentChat({
-        agent,
-        getInitialMessages
-      });
-
-      return (
-        <div>
-          <div data-testid="messages">{JSON.stringify(chat.messages)}</div>
-          <div data-testid="agent-name">{agent.name}</div>
-        </div>
-      );
+    const suspenseRendered = vi.fn();
+    const SuspenseObserver = () => {
+      suspenseRendered();
+      return "Suspended";
     };
 
     const screen = await act(() =>
-      render(<TestComponent agent={mockAgent1} />, {
+      render(<TestComponent agent={agentA} />, {
         wrapper: ({ children }) => (
           <StrictMode>
-            <Suspense fallback={<div>Loading...</div>}>{children}</Suspense>
+            <Suspense fallback={<SuspenseObserver />}>{children}</Suspense>
           </StrictMode>
         )
       })
     );
 
-    // Wait for initial render with agent 1
     await expect
       .element(screen.getByTestId("messages"))
-      .toHaveTextContent(JSON.stringify(initialMessagesForAgent1));
+      .toHaveTextContent("Hello from thread-a");
 
     expect(getInitialMessages).toHaveBeenCalledTimes(1);
-    // Now switch to agent 2
-    await act(() => screen.rerender(<TestComponent agent={mockAgent2} />));
+    expect(getInitialMessages).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ name: "thread-a" })
+    );
 
-    await expect
-      .element(screen.getByTestId("agent-name"))
-      .toHaveTextContent("thread-2");
+    suspenseRendered.mockClear();
+
+    await act(() => screen.rerender(<TestComponent agent={agentB} />));
 
     await expect
       .element(screen.getByTestId("messages"))
-      .toHaveTextContent(JSON.stringify(messagesForAgent2));
+      .toHaveTextContent("Hello from thread-b");
 
-    // getInitialMessages should be called for both agents
     expect(getInitialMessages).toHaveBeenCalledTimes(2);
-    expect(getInitialMessages).toHaveBeenNthCalledWith(2, {
-      agent: "Chat",
-      name: "thread-2",
-      url: expect.stringContaining("http://localhost:3000")
-    });
+    expect(getInitialMessages).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ name: "thread-b" })
+    );
   });
 });
