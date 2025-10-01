@@ -21,6 +21,10 @@ function createAgent({ name, url }: { name: string; url: string }) {
   return baseAgent as unknown as ReturnType<typeof useAgent>;
 }
 
+/**
+ * These tests exercise the real useAgentChat hook (no module mocks).
+ * They render the hook inside a component and assert on the DOM output.
+ */
 describe("useAgentChat", () => {
   it("should cache initial message responses across re-renders", async () => {
     const agent = createAgent({
@@ -67,16 +71,13 @@ describe("useAgentChat", () => {
       })
     );
 
-    // wait for Suspense to resolve
     await expect
       .element(screen.getByTestId("messages"))
       .toHaveTextContent(JSON.stringify(testMessages));
 
-    // the component fetches the initial messages and suspends on first render
     expect(getInitialMessages).toHaveBeenCalledTimes(1);
     expect(suspenseRendered).toHaveBeenCalled();
 
-    // reset our Suspense observer
     suspenseRendered.mockClear();
 
     await screen.rerender(<TestComponent />);
@@ -85,8 +86,6 @@ describe("useAgentChat", () => {
       .element(screen.getByTestId("messages"))
       .toHaveTextContent(JSON.stringify(testMessages));
 
-    // since the initial messages are cached, the getInitialMessages function is not called again
-    // and the component does not suspend
     expect(getInitialMessages).toHaveBeenCalledTimes(1);
     expect(suspenseRendered).not.toHaveBeenCalled();
   });
