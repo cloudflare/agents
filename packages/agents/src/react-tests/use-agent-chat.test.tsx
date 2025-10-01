@@ -4,8 +4,10 @@ import { render } from "vitest-browser-react";
 import { useAgentChat } from "../ai-react";
 import type { useAgent } from "../react";
 
+// Store the mock implementation so we can reset it between tests
 let useChatMock = vi.fn();
 
+// mock the @ai-sdk/react package
 vi.mock("@ai-sdk/react", () => ({
   useChat: (...args: unknown[]) => useChatMock(...args)
 }));
@@ -22,8 +24,13 @@ beforeEach(() => {
   }));
 });
 
+/**
+ * Unit tests for the hook functionality which mock the network
+ * layer and @ai-sdk dependencies.
+ */
 describe("useAgentChat", () => {
   it("should cache initial message responses across re-renders", async () => {
+    // mocking the agent with a subset of fields used in useAgentChat
     const mockAgent: ReturnType<typeof useAgent> = {
       _pkurl: "ws://localhost:3000",
       _url: "ws://localhost:3000",
@@ -50,6 +57,7 @@ describe("useAgentChat", () => {
     ];
     const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
 
+    // We can observe how many times Suspense was triggered with this component.
     const suspenseRendered = vi.fn();
     const SuspenseObserver = () => {
       suspenseRendered();
@@ -83,6 +91,7 @@ describe("useAgentChat", () => {
     expect(getInitialMessages).toHaveBeenCalledTimes(1);
     expect(suspenseRendered).toHaveBeenCalled();
 
+    // reset our Suspense observer
     suspenseRendered.mockClear();
 
     await screen.rerender(<TestComponent />);
@@ -98,7 +107,7 @@ describe("useAgentChat", () => {
   });
 
   it("should refetch initial messages when the agent name changes", async () => {
-    // this is to test the fix for issue #420
+    // This test verifies the fix for issue #420
     // https://github.com/cloudflare/agents/issues/420
 
     const mockAgent1: ReturnType<typeof useAgent> = {
@@ -170,9 +179,13 @@ describe("useAgentChat", () => {
         getInitialMessages
       });
 
+      // NOTE: this only works because of how @ai-sdk/react is mocked to use
+      // the initialMessages prop as the messages state in the mock return value.
       return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
     };
 
+    // wrapping in act is required to resolve the suspense boundary during
+    // initial render.
     const screen = await act(() =>
       render(<TestComponent agent={mockAgent1} />, {
         wrapper: ({ children }) => (
@@ -213,7 +226,7 @@ describe("useAgentChat", () => {
   });
 
   it("should update messages when switching agents after messages have been appended", async () => {
-    // This verifies the specific scenario
+    // This test verifies the specific bug scenario from issue #420
     // where messages don't update after the first agent receives new messages
     // https://github.com/cloudflare/agents/issues/420
 
