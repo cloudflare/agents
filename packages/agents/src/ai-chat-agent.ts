@@ -239,10 +239,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     excludeBroadcastIds: string[] = []
   ) {
     for (const message of messages) {
-      this
-        .sql`insert or replace into cf_ai_chat_agent_messages (id, message) values (${
-        message.id
-      }, ${JSON.stringify(message)})`;
+      this.sql`
+        insert into cf_ai_chat_agent_messages (id, message)
+        values (${message.id}, ${JSON.stringify(message)})
+        on conflict(id) do update set message = excluded.message
+      `;
     }
 
     // refresh in-memory messages

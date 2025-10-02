@@ -199,7 +199,7 @@ describe("Chat Agent Persistence", () => {
     expect(messageIds).toContain("new1");
   });
 
-  it("persists tool calls and updates them with tool outputs using real persistence methods", async () => {
+  it("persists tool calls and updates them with tool outputs", async () => {
     const room = crypto.randomUUID();
 
     const ctx = createExecutionContext();
@@ -258,7 +258,7 @@ describe("Chat Agent Persistence", () => {
     ws.close();
   });
 
-  it("persists multiple messages with tool calls and outputs correctly using real persistence", async () => {
+  it("persists multiple messages with tool calls and outputs correctly", async () => {
     const room = crypto.randomUUID();
     const ctx = createExecutionContext();
     const req = new Request(
@@ -360,6 +360,83 @@ describe("Chat Agent Persistence", () => {
     const finalResponse = persistedMessages.find((m) => m.id === "assistant-2");
     expect(finalResponse).toBeDefined();
     expect(finalResponse?.parts[0].type).toBe("text");
+
+    ws.close();
+  });
+
+  it("maintains chronological order when tool outputs arrive after the final response", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      {
+        headers: { Upgrade: "websocket" }
+      }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+
+    const userMessage: ChatMessage = {
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "What time is it?" }]
+    };
+
+    const toolCallPart: ToolCallPart = {
+      type: "tool-getLocalTime",
+      toolCallId: "call_123",
+      state: "input-available",
+      input: { location: "London" }
+    };
+
+    const assistantToolCall: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [toolCallPart] as ChatMessage["parts"]
+    };
+
+    const assistantResponse: ChatMessage = {
+      id: "assistant-2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Let me check." }]
+    };
+
+    await agentStub.persistMessages([
+      userMessage,
+      assistantToolCall,
+      assistantResponse
+    ]);
+
+    const toolResultPart: ToolCallPart = {
+      type: "tool-getLocalTime",
+      toolCallId: "call_123",
+      state: "output-available",
+      input: { location: "London" },
+      output: "3:00 PM"
+    };
+
+    const assistantToolResult: ChatMessage = {
+      id: "assistant-1",
+      role: "assistant",
+      parts: [toolResultPart] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([assistantToolResult]);
+
+    const persistedMessages =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    expect(persistedMessages.map((m) => m.id)).toEqual([
+      "user-1",
+      "assistant-1",
+      "assistant-2"
+    ]);
 
     ws.close();
   });
