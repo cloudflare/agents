@@ -1,5 +1,17 @@
 # @cloudflare/agents
 
+## 0.2.8
+
+### Patch Changes
+
+- [#527](https://github.com/cloudflare/agents/pull/527) [`b060233`](https://github.com/cloudflare/agents/commit/b060233cf16c80b4f5b2718afa6358aea8db45ae) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - remove isToolCallInProgress
+
+- [#535](https://github.com/cloudflare/agents/pull/535) [`75865eb`](https://github.com/cloudflare/agents/commit/75865ebae6c1550aea3a130944df35de203a7ef9) Thanks [@threepointone](https://github.com/threepointone)! - move x402 to peerDependencies
+
+- [#525](https://github.com/cloudflare/agents/pull/525) [`789141e`](https://github.com/cloudflare/agents/commit/789141efa79be3d20ac1c098ff1452da488a9f2d) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - use INSERT OR REPLACE for message persistence to allow tool call updates
+
+- [#529](https://github.com/cloudflare/agents/pull/529) [`c41ebbc`](https://github.com/cloudflare/agents/commit/c41ebbcd148b5bab30883fea763401219e66bdcd) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - persist and stream reply in saveMessages
+
 ## 0.2.7
 
 ### Patch Changes
