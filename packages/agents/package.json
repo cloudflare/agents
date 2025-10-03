@@ -12,7 +12,6 @@
     "nanoid": "^5.1.6",
     "partyserver": "^0.0.75",
     "partysocket": "1.1.6",
-    "x402": "^0.6.5",
     "zod": "^3.25.76",
     "zod-to-ts": "^1.2.0"
   },
@@ -106,7 +105,13 @@
   "main": "src/index.ts",
   "name": "agents",
   "peerDependencies": {
-    "react": "*"
+    "react": "*",
+    "x402": "^0.6.5"
+  },
+  "peerDependenciesMeta": {
+    "x402": {
+      "optional": true
+    }
   },
   "repository": {
     "directory": "packages/agents",
