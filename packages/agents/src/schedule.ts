@@ -1,4 +1,5 @@
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 
 /**
  * Get the schedule prompt for a given event

@@ -1,6 +1,7 @@
 import { openai } from "@ai-sdk/openai";
 import { generateText, generateObject } from "ai";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 
 export default async function generateMarketingCopy(input: string) {
   const model = openai("gpt-4o");

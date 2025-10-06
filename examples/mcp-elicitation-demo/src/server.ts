@@ -8,7 +8,8 @@ import {
   type Connection,
   type WSMessage
 } from "agents";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 
 type Env = {
   MyAgent: AgentNamespace<MyAgent>;

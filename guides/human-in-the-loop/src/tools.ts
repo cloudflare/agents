@@ -1,5 +1,6 @@
 import { tool } from "ai";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 import type { AITool } from "agents/ai-react";
 
 // Server-side tool that requires confirmation

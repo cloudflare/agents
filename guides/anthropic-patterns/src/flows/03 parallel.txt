@@ -1,6 +1,7 @@
 import { openai } from '@ai-sdk/openai';
 import { generateText, generateObject } from 'ai';
-import { z } from 'zod';
+import * as zod from 'zod';
+const { z } = zod;
 
 // Example: Parallel code review with multiple specialized reviewers
 async function parallelCodeReview(code: string) {

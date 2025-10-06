@@ -9,7 +9,8 @@ Prototyping is very easy! If you want to quickly deploy an MCP, it only takes ~2
 ```typescript
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 
 // Our MCP server!
 export class TinyMcp extends McpAgent {
@@ -79,7 +80,8 @@ To get a feel of what a more realistic MCP might look like, let's deploy an MCP 
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 import { env } from "cloudflare:workers";
 
 export class StorageMcp extends McpAgent {

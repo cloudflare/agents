@@ -1,6 +1,7 @@
 import { Agent, type AgentInputItem, run, withTrace } from "@openai/agents";
 import { Agent as CFAgent, callable, routeAgentRequest } from "agents";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 
 type Env = {
   MyAgent: DurableObjectNamespace<MyAgent>;

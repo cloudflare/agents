@@ -9,7 +9,8 @@ import {
   routeAgentRequest
 } from "agents";
 import { generateObject, generateText } from "ai";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 
 type Env = {
   OPENAI_API_KEY: string;

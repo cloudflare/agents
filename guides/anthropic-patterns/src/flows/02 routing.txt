@@ -1,6 +1,7 @@
 import { openai } from '@ai-sdk/openai';
 import { generateObject, generateText } from 'ai';
-import { z } from 'zod';
+import * as zod from 'zod';
+const { z } = zod;
 
 async function handleCustomerQuery(query: string) {
   const model = openai('gpt-4o');

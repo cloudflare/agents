@@ -1,6 +1,7 @@
 import { McpAgent } from "../../mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+import * as zod from "zod";
+const { z } = zod;
 
 export type AuthProps = { email?: string };
 
