@@ -106,7 +106,7 @@ export const scheduleSchema = z.object({
 /**
  * The type for the schedule prompt
  */
-export type Schedule = z.infer<typeof scheduleSchema>;
+export type Schedule = zod.z.infer<typeof scheduleSchema>;
 
 /**
  * @deprecated this has been renamed to scheduleSchema, and unstable_scheduleSchema will be removed in the next major version
