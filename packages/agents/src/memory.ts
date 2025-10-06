@@ -3,7 +3,7 @@ import { HNSW } from "hnsw";
 // Types
 export type MemoryEntry = {
   content: string;
-  metadata?: Record<string, string>;
+  metadata?: Record<string, unknown>;
 };
 export type EmbeddingFn = (texts: string[]) => Promise<number[][]> | number[][];
 export type RerankFn = (
@@ -32,42 +32,76 @@ const autoHnsw = (size: number): HNSW => {
 };
 
 // Persistence backend for the IdentityDisk
-interface VectorSource {
+export interface IdentityDisk {
+  name: string;
+  size: number;
+  description?: string;
+
+  load(
+    entries?: MemoryEntry[],
+    opts?: { force?: boolean }
+  ): void | Promise<void>;
+
   // return every vector that should be in the index on start-up
-  dump(): Iterable<{
-    id: number;
-    vector: number[] | Float32Array;
-    entry: MemoryEntry;
-  }>;
-  // persist one new entry
-  persist(id: number, entry: MemoryEntry, vector: number[]): void;
+  dump():
+    | Iterable<{
+        id: number;
+        vector: number[] | Float32Array;
+        entry: MemoryEntry;
+      }>
+    | Promise<
+        Iterable<{
+          id: number;
+          vector: number[] | Float32Array;
+          entry: MemoryEntry;
+        }>
+      >;
+
+  // add a new entry
+  add(entry: MemoryEntry): void | Promise<void>;
 
   // destroy the source
-  destroy(): Promise<void>;
+  destroy(): void | Promise<void>;
+
+  // search the disk
+  search(query: string, k?: number): Promise<MemoryEntry[]>;
 }
 
 interface IdentityDiskOptions {
+  description?: string;
   embeddingFn: EmbeddingFn;
-  vectorSource?: VectorSource; // defaults to in-memory disk, no persistence
   rerankFn?: RerankFn; // defaults to no reranking, using the raw hits from the index
 }
 
-export class IdentityDisk {
+export class IdentityDiskMemory implements IdentityDisk {
+  name: string;
+  description?: string;
+
   private hnsw?: HNSW; // todo: move this too maybe?
   private memory: Record<number, MemoryEntry> = {}; // todo: move this
   private embeddingFn: EmbeddingFn;
   private rerank?: RerankFn;
-  private src: VectorSource;
+  size = 0;
 
-  constructor(opts: IdentityDiskOptions) {
+  constructor(name: string, opts: IdentityDiskOptions) {
+    this.name = name;
+    this.description = opts.description;
     this.embeddingFn = opts.embeddingFn;
     this.rerank = opts.rerankFn;
+  }
 
-    this.src = opts.vectorSource ?? new MemorySource(this.hnsw, this.memory);
+  *dump() {
+    if (!this.hnsw) throw new Error("IdentityDisk not initialized");
+
+    for (const [id, entry] of Object.entries(this.memory)) {
+      const node = this.hnsw.nodes.get(Number(id));
+      if (!node) continue; // should never happen
+      yield { id: Number(id), vector: node.vector as number[], entry };
+    }
   }
 
   async load(entries?: MemoryEntry[], opts?: { force?: boolean }) {
-    const dump = [...this.src.dump()];
+    const dump = [...this.dump()];
     if (dump.length && !opts?.force && entries?.length) {
       throw new Error("Storage not empty. Set `force: true` to overwrite.");
     }
@@ -80,7 +114,8 @@ export class IdentityDisk {
         const id = i; // or use natural key if you have one
         data.push({ id, vector: vectors[i] });
         this.memory[id] = entries[i];
-        this.src.persist(id, entries[i], vectors[i]);
+        // in-memory, so we don't really persist
+        // this.src.persist(id, entries[i], vectors[i]);
       }
     } else {
       // We re-initialize the index by reading from the source
@@ -90,10 +125,7 @@ export class IdentityDisk {
       }
     }
     this.hnsw = autoHnsw(data.length);
-    if (this.src instanceof MemorySource) {
-      // re-set the inmemory source to point to the new
-      this.src = new MemorySource(this.hnsw, this.memory);
-    }
+    this.size = data.length;
     await this.hnsw.buildIndex(data);
   }
 
@@ -104,7 +136,9 @@ export class IdentityDisk {
     const id = Math.max(-1, ...Object.keys(this.memory).map(Number)) + 1;
     this.memory[id] = entry;
     await this.hnsw.addPoint(id, vec);
-    this.src.persist(id, entry, vec);
+    // in-memory, so we don't really persist
+    // this.src.persist(id, entry, vec);
+    this.size += 1;
   }
 
   async search(query: string, k = 1) {
@@ -127,59 +161,38 @@ export class IdentityDisk {
   async destroy() {
     this.hnsw = undefined; // drop the index
     this.memory = {}; // drop the cache
-    await this.src.destroy(); // delegate to VectorSource
-  }
-
-  *export(): Iterable<MemoryEntry> {
-    for (const { entry } of this.src.dump()) {
-      yield entry;
-    }
+    this.size = 0;
   }
 }
 
-// Default in-memory backend
-class MemorySource implements VectorSource {
-  private hnsw?: HNSW;
-  private memory: Record<number, MemoryEntry>;
+export class IdentityDiskSqlite implements IdentityDisk {
+  name: string;
+  description?: string;
 
-  constructor(hnsw: HNSW | undefined, memory: Record<number, MemoryEntry>) {
-    this.hnsw = hnsw;
-    this.memory = memory;
-  }
+  private hnsw?: HNSW; // todo: move this too maybe?
+  private embeddingFn: EmbeddingFn;
+  private rerank?: RerankFn;
+  size = 0;
 
-  *dump() {
-    if (!this.hnsw) throw new Error("IdentityDisk not initialized");
-
-    for (const [id, entry] of Object.entries(this.memory)) {
-      const node = this.hnsw.nodes.get(Number(id));
-      if (!node) continue; // should never happen
-      yield { id: Number(id), vector: node.vector as number[], entry };
-    }
-  }
-
-  persist(_id: number, _entry: MemoryEntry, _vector: number[]) {} // no-op
-  async destroy() {} // no-op
-}
-
-interface SqliteSourceRow extends Record<string, SqlStorageValue> {
-  id: number;
-  content: string;
-  metadata: string;
-  embedding: ArrayBuffer;
-}
-
-// SQLite backend for DOs
-export class SqliteSource implements VectorSource {
   constructor(
+    name: string,
     private sql: SqlStorage,
-    private name: string
+    opts: IdentityDiskOptions
   ) {
-    sql.exec(`CREATE TABLE IF NOT EXISTS cf_agents_disk_${name}(
+    this.name = name;
+    this.sql = sql;
+
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS cf_agents_disk_${name}(
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                content TEXT NOT NULL,
                metadata TEXT,
                embedding BLOB)`);
+
+    this.description = opts.description;
+    this.embeddingFn = opts.embeddingFn;
+    this.rerank = opts.rerankFn;
   }
+
   *dump() {
     const rows = this.sql.exec<SqliteSourceRow>(
       `
@@ -196,7 +209,8 @@ export class SqliteSource implements VectorSource {
       };
     }
   }
-  persist(id: number, entry: MemoryEntry, vector: number[]) {
+
+  private persist(id: number, entry: MemoryEntry, vector: number[]) {
     this.sql.exec(
       `INSERT OR REPLACE INTO cf_agents_disk_${this.name}
        (id,content,metadata,embedding) VALUES (?,?,?,?)`,
@@ -207,7 +221,85 @@ export class SqliteSource implements VectorSource {
     );
   }
 
+  async load(entries?: MemoryEntry[], opts?: { force?: boolean }) {
+    const dump = [...this.dump()];
+    if (dump.length && !opts?.force && entries?.length) {
+      throw new Error("Storage not empty. Set `force: true` to overwrite.");
+    }
+
+    // We're importing entries + persisting them at once
+    const data: { id: number; vector: number[] }[] = [];
+    if (entries?.length) {
+      const vectors = await this.embeddingFn(entries.map((e) => e.content));
+      for (let i = 0; i < entries.length; i++) {
+        const id = i; // or use natural key if you have one
+        data.push({ id, vector: vectors[i] });
+        this.persist(id, entries[i], vectors[i]);
+      }
+    } else {
+      // We re-initialize the index by reading from the source
+      for (const { id, vector } of dump) {
+        data.push({ id, vector: Array.from(vector) });
+      }
+    }
+    this.hnsw = autoHnsw(data.length);
+    this.size = data.length;
+    await this.hnsw.buildIndex(data);
+  }
+
+  async add(entry: MemoryEntry) {
+    if (!this.hnsw) throw new Error("IdentityDisk not initialized");
+
+    const [vec] = await this.embeddingFn([entry.content]);
+    const id = Math.max(-1, this.size) + 1;
+    await this.hnsw.addPoint(id, vec);
+    // in-memory, so we don't really persist
+    this.persist(id, entry, vec);
+    this.size += 1;
+  }
+
+  private get(ids: number[]) {
+    return this.sql
+      .exec<{ content: string; metadata?: string }>(
+        `
+        SELECT content, metadata
+        FROM cf_agents_disk_${this.name} WHERE id IN (${ids.map(() => "?").join(",")})`,
+        ...ids
+      )
+      .toArray()
+      .map((r) => ({
+        content: r.content,
+        metadata: r.metadata ? JSON.parse(r.metadata) : undefined
+      }));
+  }
+
+  async search(query: string, k = 1) {
+    if (!this.hnsw) throw new Error("IdentityDisk not initialized");
+
+    const [vec] = await this.embeddingFn([query]);
+    const knn = this.hnsw.searchKNN(vec, this.rerank ? k * 2 : k);
+
+    const hits = this.get(knn.map((r) => r.id));
+    if (!this.rerank) return hits;
+
+    const reranked = await this.rerank(
+      query,
+      hits.map((h) => h.content)
+    );
+    reranked.sort((a, b) => b.score - a.score);
+    return reranked.slice(0, k).map((r) => hits[r.id]);
+  }
+
   async destroy() {
+    this.hnsw = undefined; // drop the index
+    this.size = 0;
     this.sql.exec(`DROP TABLE IF EXISTS cf_agents_disk_${this.name}`);
   }
+}
+
+interface SqliteSourceRow extends Record<string, SqlStorageValue> {
+  id: number;
+  content: string;
+  metadata: string;
+  embedding: ArrayBuffer;
 }
