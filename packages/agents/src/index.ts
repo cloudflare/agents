@@ -1784,7 +1784,6 @@ export class Agent<
       throw this.onError(e);
     }
   }
-
   /**
    * Automatically wrap custom methods with agent context
    * This ensures getCurrentAgent() works in all custom methods without decorators
