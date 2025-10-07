@@ -1,0 +1,13 @@
+{
+  "name": "realtime-agents",
+  "private": true,
+  "type": "module",
+  "author": "Ramyak Mehra <ramyakmehra@cloudflare.com>",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "test": "vitest",
+    "cf-typegen": "wrangler types"
+  }
+}
