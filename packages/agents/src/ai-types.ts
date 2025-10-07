@@ -9,7 +9,7 @@ export enum MessageType {
   CF_AGENT_USE_CHAT_RESPONSE = "cf_agent_use_chat_response",
   CF_AGENT_CHAT_CLEAR = "cf_agent_chat_clear",
   CF_AGENT_CHAT_REQUEST_CANCEL = "cf_agent_chat_request_cancel",
-
+  CF_AGENT_DISKS = "cf_agent_disks",
   CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
   CF_MCP_AGENT_EVENT = "cf_mcp_agent_event",
   CF_AGENT_STATE = "cf_agent_state",

@@ -29,6 +29,13 @@ import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import {
+  type IdentityDisk,
+  IdentityDiskSqlite,
+  type EmbeddingFn,
+  type MemoryEntry,
+  type RerankFn
+} from "./memory";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -243,6 +250,12 @@ type MCPServerRow = {
   server_options: string;
 };
 
+type AgentStaticOptions = {
+  hibernate: boolean;
+  embeddingFn?: EmbeddingFn;
+  rerankFn?: RerankFn;
+};
+
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
@@ -319,6 +332,7 @@ export class Agent<
 > extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
+  disks = new Map<string, IdentityDisk>();
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -334,6 +348,58 @@ export class Agent<
    */
   initialState: State = DEFAULT_STATE as State;
 
+  async mountDisk(
+    name: string,
+    entries: MemoryEntry[],
+    opts: { description?: string }
+  ) {
+    if (!this._ParentClass.options.embeddingFn)
+      throw new Error("Set embeddingFn to use Identity Disk");
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_disks (name, description)
+      VALUES (${name}, ${opts.description ?? null});
+    `;
+
+    const disk = new IdentityDiskSqlite(name, this.ctx.storage.sql, {
+      embeddingFn: this._ParentClass.options.embeddingFn,
+      rerankFn: this._ParentClass.options.rerankFn
+    });
+    await disk.load(entries);
+    this.disks.set(name, disk);
+    this.broadcastDisks();
+  }
+
+  async unmountDisk(name: string) {
+    const disk = this.disks.get(name);
+    if (!disk) return;
+
+    this.sql`
+      DELETE FROM cf_agents_disks WHERE name = ${name};
+    `;
+    await disk.destroy();
+    this.disks.delete(name);
+    this.broadcastDisks();
+  }
+
+  broadcastDisks() {
+    this.broadcast(
+      JSON.stringify({
+        disks: this.mountedDisks.map((disk) => ({
+          name: disk.name,
+          description: disk.description,
+          size: this.disks.get(disk.name)?.size
+        })),
+        type: MessageType.CF_AGENT_DISKS
+      })
+    );
+  }
+
+  get mountedDisks() {
+    return this.sql<{ name: string; description?: string }>`
+      SELECT name, description FROM cf_agents_disks;
+    `;
+  }
   /**
    * Current state of the Agent
    */
@@ -380,7 +446,7 @@ export class Agent<
   /**
    * Agent configuration options
    */
-  static options = {
+  static options: AgentStaticOptions = {
     /** Whether the Agent should hibernate when inactive */
     hibernate: true // default to hibernate
   };
@@ -487,6 +553,36 @@ export class Agent<
         server_options TEXT
       )
     `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_disks (
+        name TEXT PRIMARY KEY NOT NULL,
+        description TEXT
+      )`;
+
+    if (this._ParentClass.options.embeddingFn) {
+      // We read all tables and find all tables that start with 'cf_agents_disk_'
+      const disks = this.sql<{ name: string; description?: string }>`
+      SELECT name FROM cf_agents_disks;
+    `;
+
+      const promises: Promise<void>[] = [];
+      for (const disk of disks) {
+        const idz = new IdentityDiskSqlite(disk.name, this.ctx.storage.sql, {
+          description: disk.description,
+          embeddingFn: this._ParentClass.options.embeddingFn,
+          rerankFn: this._ParentClass.options.rerankFn
+        });
+        this.disks.set(disk.name, idz);
+        promises.push(idz.load());
+      }
+
+      void this.ctx.blockConcurrencyWhile(async () => {
+        return this._tryCatch(async () => {
+          await Promise.all(promises);
+        });
+      });
+    }
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
@@ -621,6 +717,20 @@ export class Agent<
               JSON.stringify({
                 state: this.state,
                 type: MessageType.CF_AGENT_STATE
+              })
+            );
+          }
+
+          // We can't use identity disks without an embedding function
+          if (this._ParentClass.options.embeddingFn) {
+            connection.send(
+              JSON.stringify({
+                disks: this.mountedDisks.map((disk) => ({
+                  name: disk.name,
+                  description: disk.description,
+                  size: this.disks.get(disk.name)?.size
+                })),
+                type: MessageType.CF_AGENT_DISKS
               })
             );
           }
