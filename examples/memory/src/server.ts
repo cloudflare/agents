@@ -352,12 +352,10 @@ export class MemoryAgent extends Agent<Env> {
         );
       }
 
-      const sanitizedName = name.replace(/[^a-zA-Z0-9_]/g, "_");
-
-      await this.mountDisk(sanitizedName, entries, { description });
+      await this.mountDisk(name, entries, { description });
 
       return Response.json({
-        result: `Disk "${sanitizedName}" imported successfully with ${entries.length} entries`
+        result: `Disk "${name}" imported successfully with ${entries.length} entries`
       });
     } else if (request.method === "POST" && request.url.includes("delete")) {
       const { name } = await request.json<{ name: string }>();

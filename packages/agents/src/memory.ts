@@ -182,7 +182,8 @@ export class IdentityDiskSqlite implements IdentityDisk {
     this.name = name;
     this.sql = sql;
 
-    this.sql.exec(`CREATE TABLE IF NOT EXISTS cf_agents_disk_${name}(
+    this.sql
+      .exec(`CREATE TABLE IF NOT EXISTS cf_agents_disk_${this.sanitizedName}(
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                content TEXT NOT NULL,
                metadata TEXT,
@@ -193,11 +194,16 @@ export class IdentityDiskSqlite implements IdentityDisk {
     this.rerank = opts.rerankFn;
   }
 
+  // Sanitize name to ensure it's a valid SQL table name identifier
+  private get sanitizedName() {
+    return this.name.replace(/[^a-zA-Z0-9_]/g, "_");
+  }
+
   *dump() {
     const rows = this.sql.exec<SqliteSourceRow>(
       `
         SELECT id, content, metadata, embedding
-        FROM cf_agents_disk_${this.name} ORDER BY id ASC`
+        FROM cf_agents_disk_${this.sanitizedName} ORDER BY id ASC`
     );
 
     for (const r of rows) {
@@ -212,7 +218,7 @@ export class IdentityDiskSqlite implements IdentityDisk {
 
   private persist(id: number, entry: MemoryEntry, vector: number[]) {
     this.sql.exec(
-      `INSERT OR REPLACE INTO cf_agents_disk_${this.name}
+      `INSERT OR REPLACE INTO cf_agents_disk_${this.sanitizedName}
        (id,content,metadata,embedding) VALUES (?,?,?,?)`,
       id,
       entry.content,
@@ -263,7 +269,7 @@ export class IdentityDiskSqlite implements IdentityDisk {
       .exec<{ content: string; metadata?: string }>(
         `
         SELECT content, metadata
-        FROM cf_agents_disk_${this.name} WHERE id IN (${ids.map(() => "?").join(",")})`,
+        FROM cf_agents_disk_${this.sanitizedName} WHERE id IN (${ids.map(() => "?").join(",")})`,
         ...ids
       )
       .toArray()
@@ -293,7 +299,7 @@ export class IdentityDiskSqlite implements IdentityDisk {
   async destroy() {
     this.hnsw = undefined; // drop the index
     this.size = 0;
-    this.sql.exec(`DROP TABLE IF EXISTS cf_agents_disk_${this.name}`);
+    this.sql.exec(`DROP TABLE IF EXISTS cf_agents_disk_${this.sanitizedName}`);
   }
 }
 
