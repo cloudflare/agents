@@ -19,7 +19,7 @@ import type {
   CallToolResult,
   ToolAnnotations
 } from "@modelcontextprotocol/sdk/types.js";
-import type { ZodRawShape } from "zod";
+import type { ZodRawShape } from "zod/v3";
 import { base, baseSepolia, type Chain } from "viem/chains";
 
 import { processPriceToAtomicAmount } from "x402/shared";
@@ -54,6 +54,7 @@ export interface X402AugmentedServer {
     priceUSD: number,
     paramsSchema: Args,
     annotations: ToolAnnotations,
+    // @ts-expect-error drift between ai and mcp types
     cb: ToolCallback<Args>
   ): RegisteredTool;
 }

@@ -524,7 +524,7 @@ Agents can seamlessly integrate with the Model Context Protocol, allowing them t
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
-import { z } from "zod";
+import { z } from "zod/v3";
 
 type Env = {
   MyMCP: DurableObjectNamespace<MyMCP>;

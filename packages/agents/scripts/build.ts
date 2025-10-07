@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { build } from "tsup";
+import { build } from "tsdown";
 
 async function main() {
   await build({
@@ -26,8 +26,7 @@ async function main() {
       "x402"
     ],
     format: "esm",
-    sourcemap: true,
-    splitting: true
+    sourcemap: true
   });
 
   // then run prettier on the generated .d.ts files

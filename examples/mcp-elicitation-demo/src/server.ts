@@ -83,6 +83,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
 
   async init() {
     // Counter tool with user confirmation via elicitation
+    // @ts-expect-error drift between ai and mcp types
     this.server.tool(
       "increment-counter",
       "Increment the counter with user confirmation",
@@ -151,6 +152,7 @@ export class McpServerAgent extends McpAgent<Env, { counter: number }, {}> {
     );
 
     // User creation tool with form-based elicitation
+    // @ts-expect-error drift between ai and mcp types
     this.server.tool(
       "create-user",
       "Create a new user with form input",

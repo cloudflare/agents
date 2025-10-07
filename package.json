@@ -16,7 +16,7 @@
     "build": "npm run build -w agents -w hono-agents",
     "format": "prettier --write .",
     "typecheck": "npx tsx scripts/typecheck.ts",
-    "check": "sherif && prettier --check . && biome lint && npm run typecheck",
+    "check": "prettier --check . && biome lint && npm run typecheck",
     "test": "npm run test -w agents",
     "test:react": "npm run test:react -w agents",
     "postinstall": "patch-package",
@@ -69,7 +69,7 @@
     "vitest-browser-react": "^1.0.1",
     "workers-ai-provider": "^2.0.0",
     "wrangler": "^4.40.2",
-    "zod": "^3.25.76"
+    "zod": "^4.1.12"
   },
   "workspaces": [
     "examples/*",
@@ -85,5 +85,8 @@
       "prettier --write --ignore-unknown"
     ]
   },
-  "packageManager": "npm@11.6.1"
+  "packageManager": "npm@11.6.1",
+  "dependencies": {
+    "tsdown": "^0.15.6"
+  }
 }

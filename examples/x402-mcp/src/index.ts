@@ -105,6 +105,7 @@ export class PayMCP extends McpAgent<Env> {
 
   async init() {
     // Paid tool
+    // @ts-expect-error drift between ai and mcp types
     this.server.paidTool(
       "square",
       "Squares a number",

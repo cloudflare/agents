@@ -4,7 +4,7 @@ import type {
   ServerCapabilities
 } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import type { MCPObservabilityEvent } from "../../observability/mcp";
 

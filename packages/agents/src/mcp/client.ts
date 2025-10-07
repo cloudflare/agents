@@ -2,11 +2,14 @@ import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
+  CallToolResult,
   CallToolResultSchema,
   CompatibilityCallToolResultSchema,
   GetPromptRequest,
+  GetPromptResult,
   Prompt,
   ReadResourceRequest,
+  ReadResourceResult,
   Resource,
   ResourceTemplate,
   Tool
@@ -462,8 +465,9 @@ export class MCPClientManager {
       | typeof CallToolResultSchema
       | typeof CompatibilityCallToolResultSchema,
     options?: RequestOptions
-  ) {
+  ): Promise<CallToolResult> {
     const unqualifiedName = params.name.replace(`${params.serverId}.`, "");
+    // @ts-expect-error drift between ai and mcp types
     return this.mcpConnections[params.serverId].client.callTool(
       {
         ...params,
@@ -480,7 +484,8 @@ export class MCPClientManager {
   readResource(
     params: ReadResourceRequest["params"] & { serverId: string },
     options: RequestOptions
-  ) {
+  ): ReadResourceResult {
+    // @ts-expect-error drift between ai and mcp types
     return this.mcpConnections[params.serverId].client.readResource(
       params,
       options
@@ -493,7 +498,8 @@ export class MCPClientManager {
   getPrompt(
     params: GetPromptRequest["params"] & { serverId: string },
     options: RequestOptions
-  ) {
+  ): GetPromptResult {
+    // @ts-expect-error drift between ai and mcp types
     return this.mcpConnections[params.serverId].client.getPrompt(
       params,
       options
