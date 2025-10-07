@@ -46,7 +46,7 @@ export default function App() {
     if (agentName) {
       agent.reconnect();
     }
-  }, [agentName]);
+  }, [agentName, agent.reconnect]);
 
   const handleConnect = useCallback(
     (agentName: string) => {

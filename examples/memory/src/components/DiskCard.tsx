@@ -22,6 +22,7 @@ export function DiskCard({ disk, onDelete, onExport }: DiskCardProps) {
   return (
     <div className="disk-card" box-="square" shear-="top">
       <div className="delete-disk">
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: dont care */}
         <span
           style={{
             background: "var(--background0)",
@@ -33,6 +34,7 @@ export function DiskCard({ disk, onDelete, onExport }: DiskCardProps) {
         >
           ↓
         </span>
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: dont care */}
         <span
           style={{
             background: "var(--background0)",

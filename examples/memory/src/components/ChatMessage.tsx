@@ -8,7 +8,7 @@ function tryPrettyJSON(maybeJSON: string): string {
   if (typeof maybeJSON !== "string") {
     try {
       return JSON.stringify(maybeJSON, null, 2);
-    } catch (e) {
+    } catch {
       return String(maybeJSON == null ? "" : maybeJSON);
     }
   }

@@ -19,9 +19,10 @@ export interface ImportData {
   entries: MemoryEntry[];
 }
 
-export interface MemoryEntry {
-  [key: string]: any;
-}
+export type MemoryEntry = {
+  content: string;
+  metadata?: Record<string, unknown>;
+};
 
 export interface DiskSearchNotification {
   diskName: string;

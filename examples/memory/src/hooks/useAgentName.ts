@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 export function useAgentName(): [string, (name: string) => void] {
   const [agentName, setAgentNameState] = useState<string>(

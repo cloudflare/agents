@@ -1,4 +1,3 @@
-import React from "react";
 import { useState, useRef } from "react";
 import { DiskCard } from "./DiskCard";
 import type { Disk, MemoryEntry } from "../types";
@@ -52,7 +51,7 @@ export function DisksSection({ agentBase, disks }: DisksSectionProps) {
 
     try {
       const text = await pendingFile.text();
-      let parsed: any;
+      let parsed: { entries: MemoryEntry[] } | MemoryEntry[];
 
       try {
         parsed = JSON.parse(text);
@@ -92,8 +91,6 @@ export function DisksSection({ agentBase, disks }: DisksSectionProps) {
         throw new Error(errorData.error || `HTTP ${res.status}`);
       }
 
-      const json = (await res.json()) as { result?: string };
-
       // Clear the file input and state
       setPendingFile(null);
       setDiskName("");
@@ -101,8 +98,7 @@ export function DisksSection({ agentBase, disks }: DisksSectionProps) {
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
-    } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
+    } catch {
       // Clear the file input on error too
       setPendingFile(null);
       setDiskName("");
@@ -144,10 +140,6 @@ export function DisksSection({ agentBase, disks }: DisksSectionProps) {
         const errorData = (await res.json()) as { error?: string };
         throw new Error(errorData.error || `HTTP ${res.status}`);
       }
-
-      const json = (await res.json()) as { result?: string };
-    } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
     } finally {
       setDiskToDelete(null);
     }
@@ -233,7 +225,7 @@ export function DisksSection({ agentBase, disks }: DisksSectionProps) {
       </div>
 
       {disks.length > 0 && (
-        <div id="disk-cards" className="disk-cards">
+        <div className="disk-cards">
           {disks.map((disk, index) => (
             <DiskCard
               key={`${disk.name}-${index}`}
@@ -274,10 +266,10 @@ export function DisksSection({ agentBase, disks }: DisksSectionProps) {
             />
           </label>
           <div className="dialog-buttons">
-            <button box-="round" onClick={handleCancelImport}>
+            <button box-="round" onClick={handleCancelImport} type="button">
               Cancel
             </button>
-            <button box-="round" onClick={handleConfirmImport}>
+            <button box-="round" onClick={handleConfirmImport} type="button">
               Import
             </button>
           </div>
@@ -295,10 +287,10 @@ export function DisksSection({ agentBase, disks }: DisksSectionProps) {
         <div box-="round" className="dialog-content">
           <p>Are you sure you want to delete disk "{diskToDelete}"?</p>
           <div className="dialog-buttons">
-            <button box-="round" onClick={handleCancelDelete} autoFocus>
+            <button box-="round" onClick={handleCancelDelete} type="button">
               Cancel
             </button>
-            <button box-="round" onClick={handleConfirmDelete}>
+            <button box-="round" onClick={handleConfirmDelete} type="button">
               Delete
             </button>
           </div>

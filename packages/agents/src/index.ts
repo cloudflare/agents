@@ -250,6 +250,12 @@ type MCPServerRow = {
   server_options: string;
 };
 
+type AgentStaticOptions = {
+  hibernate: boolean;
+  embeddingFn?: EmbeddingFn;
+  rerankFn?: RerankFn;
+};
+
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
@@ -361,16 +367,7 @@ export class Agent<
     });
     await disk.load(entries);
     this.disks.set(name, disk);
-    this.broadcast(
-      JSON.stringify({
-        disks: this.mountedDisks.map((disk) => ({
-          name: disk.name,
-          description: disk.description,
-          size: this.disks.get(disk.name)?.size
-        })),
-        type: MessageType.CF_AGENT_DISKS
-      })
-    );
+    this.broadcastDisks();
   }
 
   async unmountDisk(name: string) {
@@ -382,6 +379,10 @@ export class Agent<
     `;
     await disk.destroy();
     this.disks.delete(name);
+    this.broadcastDisks();
+  }
+
+  broadcastDisks() {
     this.broadcast(
       JSON.stringify({
         disks: this.mountedDisks.map((disk) => ({
@@ -445,11 +446,9 @@ export class Agent<
   /**
    * Agent configuration options
    */
-  static options = {
+  static options: AgentStaticOptions = {
     /** Whether the Agent should hibernate when inactive */
-    hibernate: true, // default to hibernate
-    embeddingFn: undefined as EmbeddingFn | undefined,
-    rerankFn: undefined as RerankFn | undefined
+    hibernate: true // default to hibernate
   };
 
   /**

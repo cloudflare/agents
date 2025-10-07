@@ -16,7 +16,6 @@ const embed: EmbeddingFn = async (memories: string[]) => {
       text: memories.slice(i, i + 100)
     })) as { data: number[][] };
     embeddings = embeddings.concat(res.data);
-    console.log("Finished embedding batch", res.data.length);
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return embeddings;
@@ -56,7 +55,7 @@ export class MemoryAgent extends Agent<Env> {
     hibernate: true
   };
 
-  async chat(messages: any[]) {
+  async chat(messages: unknown[]) {
     const disks = this.mountedDisks
       .map(({ name, description }) => {
         const size = this.disks.get(name)?.size ?? 0;
@@ -131,12 +130,50 @@ export class MemoryAgent extends Agent<Env> {
           },
           required: ["name", "content"]
         }
+      },
+      {
+        type: "function",
+        name: "create_identity_disk",
+        description:
+          "Mounts and initializes a new identity disk. Requires at least 2 memory entries to create the disk.",
+        parameters: {
+          type: "object",
+          properties: {
+            name: {
+              type: "string",
+              description: "The name of the identity disk to create."
+            },
+            description: {
+              type: "string",
+              description: "The description of the identity disk to create."
+            },
+            entries: {
+              type: "array",
+              items: {
+                type: "object",
+                description:
+                  "The memory entries to initialize the disk with. 2 required.",
+                properties: {
+                  content: {
+                    type: "string",
+                    description: "The content of the memory entry to create."
+                  },
+                  metadata: {
+                    type: "object",
+                    description: "Optional metadata for the memory entry."
+                  }
+                },
+                required: ["content"]
+              }
+            }
+          },
+          required: ["name", "entries"]
+        }
       }
     ];
 
     let answer = "";
     while (true) {
-      console.log(input);
       // biome-ignore lint/suspicious/noExplicitAny: workers AI has wrong types
       const response: any = await env.AI.run("@cf/openai/gpt-oss-120b", {
         tools,
@@ -168,6 +205,15 @@ export class MemoryAgent extends Agent<Env> {
         const args = JSON.parse(msg.arguments);
         const name = msg.name;
         if (name === "search_identity_disk") {
+          if (!args.query) {
+            input.push({
+              type: "function_call_output",
+              call_id: msg.call_id,
+              output: "Query is required."
+            });
+            continue;
+          }
+
           const disk = this.disks.get(args.name);
           if (!disk) {
             input.push({
@@ -234,10 +280,22 @@ export class MemoryAgent extends Agent<Env> {
             })
           );
 
+          this.broadcastDisks();
+
           input.push({
             type: "function_call_output",
             call_id: msg.call_id,
             output: `Successfully added entry to Identity Disk "${args.name}".`
+          });
+        } else if (name === "create_identity_disk") {
+          await this.mountDisk(args.name, args.entries, {
+            description: args.description
+          });
+
+          input.push({
+            type: "function_call_output",
+            call_id: msg.call_id,
+            output: `Successfully created Identity Disk "${args.name}".`
           });
         }
       } else if (msg.type === "message") {
@@ -248,7 +306,6 @@ export class MemoryAgent extends Agent<Env> {
     return answer;
   }
 
-  // TODO: make identity stores dynamic, so we can import more than one
   async onRequest(request: Request) {
     if (request.method === "POST" && request.url.includes("export")) {
       const { name } = await request.json<{ name: string }>();

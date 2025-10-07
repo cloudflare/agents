@@ -64,7 +64,7 @@ export function useChat(agentName: string): UseChatReturn {
         let assistantText = "";
 
         // Handle streaming response
-        if (res.body && res.body.getReader) {
+        if (res.body?.getReader) {
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
 
@@ -90,7 +90,7 @@ export function useChat(agentName: string): UseChatReturn {
           // Fallback for non-streaming
           const ct = res.headers.get("content-type") || "";
           if (ct.includes("application/json")) {
-            const json = await res.json();
+            const json = await res.json<{ text?: string; message?: string }>();
             assistantText =
               json.text || json.message || JSON.stringify(json, null, 2);
           } else {

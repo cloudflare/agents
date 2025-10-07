@@ -18,6 +18,7 @@ export function ChatSection({
   const [messageInput, setMessageInput] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: dont care
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -40,7 +41,6 @@ export function ChatSection({
   return (
     <>
       <div
-        id="chat"
         style={{
           display: "flex",
           flexDirection: "column",
@@ -52,7 +52,7 @@ export function ChatSection({
         }}
       >
         {messages.map((msg, index) => (
-          <ChatMessage key={index} message={msg} />
+          <ChatMessage key={String(index)} message={msg} />
         ))}
         {isLoading && (
           <div
@@ -63,16 +63,16 @@ export function ChatSection({
               color: "var(--foreground)"
             }}
           >
-            <span is-="spinner" variant-="dots"></span>
+            <span is-="spinner" variant-="dots" />
             <span>Thinking...</span>
           </div>
         )}
         <div ref={chatEndRef} />
       </div>
 
-      <div style={{ width: "100%", marginTop: "-0.5lh" }} is-="separator"></div>
+      <div style={{ width: "100%", marginTop: "-0.5lh" }} is-="separator" />
 
-      <div id="chat-row" className="content">
+      <div className="content">
         <div
           className="buttons"
           style={{ alignItems: "flex-start", width: "100%" }}
@@ -84,7 +84,6 @@ export function ChatSection({
               </span>
             </div>
             <input
-              id="message"
               placeholder="Ask about your memories…"
               value={messageInput}
               onChange={(e) => setMessageInput(e.target.value)}
@@ -92,10 +91,15 @@ export function ChatSection({
               disabled={isLoading}
             />
           </label>
-          <button box-="round" onClick={handleSend} disabled={isLoading}>
+          <button
+            box-="round"
+            onClick={handleSend}
+            disabled={isLoading}
+            type="button"
+          >
             {isLoading ? "Sending..." : "Send"}
           </button>
-          <button onClick={onNewChat} disabled={isLoading}>
+          <button onClick={onNewChat} disabled={isLoading} type="button">
             New chat
           </button>
         </div>

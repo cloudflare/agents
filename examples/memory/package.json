@@ -1,5 +1,5 @@
 {
-  "name": "idz-reader",
+  "name": "memory-test",
   "type": "module",
   "private": true,
   "author": "",
@@ -7,24 +7,24 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "vite build && wrangler deploy",
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "@vitejs/plugin-react": "^5.0.4",
+    "@vitejs/plugin-react": "^5.0.3",
     "@webtui/css": "^0.1.5",
     "agents": "*",
     "hnsw": "^1.0.3",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
   },
   "keywords": [],
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.13.7",
-    "@types/node": "^24.6.0",
+    "@cloudflare/vite-plugin": "^1.13.6",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
     "vite": "^7.1.7",
-    "wrangler": "^4.40.2"
+    "wrangler": "^4.40.1"
   }
 }

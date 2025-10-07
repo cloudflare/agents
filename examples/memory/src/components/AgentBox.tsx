@@ -22,22 +22,19 @@ export function AgentBox({
   isLoading
 }: AgentBoxProps) {
   return (
-    <div id="agent-box" box-="square" shear-="top">
+    <div box-="square" shear-="top">
       <div className="header">
         <span is-="badge" variant-="background0">
           Agent
         </span>
-        <span id="agent-name-badge" is-="badge" variant-="background0">
+        <span is-="badge" variant-="background0">
           {agentName}
         </span>
       </div>
 
       <DisksSection agentBase={agentBase} disks={disks} />
 
-      <div
-        style={{ width: "100%", marginBottom: "-0.5lh" }}
-        is-="separator"
-      ></div>
+      <div style={{ width: "100%", marginBottom: "-0.5lh" }} is-="separator" />
       <ChatSection
         messages={messages}
         onSendMessage={onSendMessage}

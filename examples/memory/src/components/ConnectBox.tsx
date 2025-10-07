@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import { useState } from "react";
 
 interface ConnectBoxProps {
   onConnect: (agentName: string) => void;
@@ -27,7 +27,7 @@ export function ConnectBox({
   };
 
   return (
-    <div id="connect-box">
+    <div style={{ paddingTop: "3ch", marginBottom: "3ch" }}>
       <div box-="square" shear-="both">
         <div className="header">
           <span is-="badge" variant-="background0">
@@ -44,20 +44,19 @@ export function ConnectBox({
                 </span>
               </div>
               <input
-                id="agent"
                 placeholder="my-cool-agent"
                 value={agentName}
                 onChange={(e) => setAgentName(e.target.value)}
                 onKeyDown={handleKeyDown}
               />
             </label>
-            <button id="connect-button" onClick={handleConnect}>
+            <button onClick={handleConnect} type="button">
               Connect
             </button>
           </div>
         </div>
-        <div id="header">
-          <span id="status" is-="badge" variant-="background0">
+        <div>
+          <span is-="badge" variant-="background0">
             {status}
           </span>
         </div>

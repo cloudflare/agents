@@ -53,15 +53,6 @@ input[type="file"] {
   opacity: 0;
 }
 
-#connect-box {
-  padding-top: 5ch;
-  margin-bottom: 5ch;
-}
-
-#agent-box {
-  min-height: 95ch;
-}
-
 .hidden {
   display: none !important;
 }
