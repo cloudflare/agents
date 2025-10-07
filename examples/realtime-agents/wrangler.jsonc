@@ -1,0 +1,27 @@
+{
+  "name": "realtime-agents",
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "RealtimeVoiceAgent",
+        "name": "REALTIME_VOICE_AGENT"
+      }
+    ]
+  },
+  "main": "src/index.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["RealtimeVoiceAgent"],
+      "tag": "v1"
+    }
+  ],
+  "vars": {
+    "ACCOUNT_ID": "",
+    "API_TOKEN": ""
+  }
+}
