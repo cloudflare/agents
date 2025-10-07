@@ -11,7 +11,7 @@
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^5.0.3",
+    "@vitejs/plugin-react": "^5.0.4",
     "@webtui/css": "^0.1.5",
     "agents": "*",
     "hnsw": "^1.0.3",
@@ -20,11 +20,11 @@
   },
   "keywords": [],
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.13.6",
+    "@cloudflare/vite-plugin": "^1.13.7",
     "@types/node": "^24.5.2",
-    "@types/react": "^19.1.13",
+    "@types/react": "^19.1.15",
     "@types/react-dom": "^19.1.9",
     "vite": "^7.1.7",
-    "wrangler": "^4.40.1"
+    "wrangler": "^4.40.2"
   }
 }
