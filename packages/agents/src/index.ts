@@ -721,16 +721,19 @@ export class Agent<
             );
           }
 
-          connection.send(
-            JSON.stringify({
-              disks: this.mountedDisks.map((disk) => ({
-                name: disk.name,
-                description: disk.description,
-                size: this.disks.get(disk.name)?.size
-              })),
-              type: MessageType.CF_AGENT_DISKS
-            })
-          );
+          // We can't use identity disks without an embedding function
+          if (this._ParentClass.options.embeddingFn) {
+            connection.send(
+              JSON.stringify({
+                disks: this.mountedDisks.map((disk) => ({
+                  name: disk.name,
+                  description: disk.description,
+                  size: this.disks.get(disk.name)?.size
+                })),
+                type: MessageType.CF_AGENT_DISKS
+              })
+            );
+          }
 
           connection.send(
             JSON.stringify({
