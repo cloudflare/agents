@@ -1,0 +1,20 @@
+{
+  "name": "pizzaz-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-08-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "PizzazMcp"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PizzazMcp"]
+    }
+  ]
+}
