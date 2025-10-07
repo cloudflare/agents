@@ -1,16 +1,13 @@
-import {
-  getToolName,
-  isToolUIPart,
-  parsePartialJson,
-  type UIMessage as ChatMessage,
-  type DynamicToolUIPart,
-  type ProviderMetadata,
-  type ReasoningUIPart,
-  type StreamTextOnFinishCallback,
-  type TextUIPart,
-  type ToolSet,
-  type ToolUIPart,
-  type UIMessageChunk
+import type {
+  UIMessage as ChatMessage,
+  DynamicToolUIPart,
+  ProviderMetadata,
+  ReasoningUIPart,
+  StreamTextOnFinishCallback,
+  TextUIPart,
+  ToolSet,
+  ToolUIPart,
+  UIMessageChunk
 } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import {
@@ -21,6 +18,37 @@ import {
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 const decoder = new TextDecoder();
+
+/**
+ * Lazy-load heavy runtime functions from AI SDK to avoid CPU startup limits
+ *
+ * Background: Cloudflare Workers have a strict 400ms CPU time limit during startup.
+ * The AI SDK includes large Zod schemas and initialization code that can exceed this limit,
+ * causing Workers to fail startup with "CPU time limit exceeded" errors.
+ *
+ * Import only types at module level (which are erased at runtime), and dynamically
+ * import runtime functions only when first needed (when processing the first chat message).
+ * This keeps Worker startup fast (<400ms) while accepting a small penalty on the first request.
+ *
+ * See: https://github.com/cloudflare/workers-sdk/issues/10723
+ */
+let aiUtils: {
+  getToolName: typeof import("ai").getToolName;
+  isToolUIPart: typeof import("ai").isToolUIPart;
+  parsePartialJson: typeof import("ai").parsePartialJson;
+} | null = null;
+
+async function getAiUtils() {
+  if (!aiUtils) {
+    const ai = await import("ai");
+    aiUtils = {
+      getToolName: ai.getToolName,
+      isToolUIPart: ai.isToolUIPart,
+      parsePartialJson: ai.parsePartialJson
+    };
+  }
+  return aiUtils;
+}
 
 /**
  * Extension of Agent with built-in chat capabilities
@@ -264,6 +292,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   private async _reply(id: string, response: Response) {
     return this._tryCatchChat(async () => {
+      // Lazy-load AI SDK utilities when first chat message is processed
+      const { getToolName, isToolUIPart, parsePartialJson } =
+        await getAiUtils();
+
       if (!response.body) {
         // Send empty response if no body
         this._broadcastChatMessage({
