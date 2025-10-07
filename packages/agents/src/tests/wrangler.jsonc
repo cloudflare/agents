@@ -19,7 +19,11 @@
         "class_name": "TestUserNotificationAgent",
         "name": "UserNotificationAgent"
       },
-      { "class_name": "TestRaceAgent", "name": "TAG_AGENT" }
+      { "class_name": "TestRaceAgent", "name": "TAG_AGENT" },
+      {
+        "class_name": "TestChatAgent",
+        "name": "TestChatAgent"
+      }
     ]
   },
   "main": "worker.ts",
@@ -30,7 +34,8 @@
         "TestEmailAgent",
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",
-        "TestRaceAgent"
+        "TestRaceAgent",
+        "TestChatAgent"
       ],
       "tag": "v1"
     }

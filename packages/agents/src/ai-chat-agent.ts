@@ -46,11 +46,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     )`;
 
     // Load messages and automatically transform them to v5 format
-    const rawMessages = (
-      this.sql`select * from cf_ai_chat_agent_messages` || []
-    ).map((row) => {
-      return JSON.parse(row.message as string);
-    });
+    const rawMessages = this._loadMessagesFromDb();
 
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
     this.messages = autoTransformMessages(rawMessages);
@@ -60,6 +56,22 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
     this.broadcast(JSON.stringify(message), exclude);
+  }
+
+  private _loadMessagesFromDb(): ChatMessage[] {
+    const rows =
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      [];
+    return rows
+      .map((row) => {
+        try {
+          return JSON.parse(row.message as string);
+        } catch (error) {
+          console.error(`Failed to parse message ${row.id}:`, error);
+          return null;
+        }
+      })
+      .filter((msg): msg is ChatMessage => msg !== null);
   }
 
   override async onMessage(connection: Connection, message: WSMessage) {
@@ -182,11 +194,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     return this._tryCatchChat(() => {
       const url = new URL(request.url);
       if (url.pathname.endsWith("/get-messages")) {
-        const messages = (
-          this.sql`select * from cf_ai_chat_agent_messages` || []
-        ).map((row) => {
-          return JSON.parse(row.message as string);
-        });
+        const messages = this._loadMessagesFromDb();
         return Response.json(messages);
       }
       return super.onRequest(request);
@@ -224,19 +232,27 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
+    await this._tryCatchChat(async () => {
+      const response = await this.onChatMessage(() => {});
+      if (response) this._reply(crypto.randomUUID(), response);
+    });
   }
 
   async persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
-    this.sql`delete from cf_ai_chat_agent_messages`;
     for (const message of messages) {
-      this.sql`insert into cf_ai_chat_agent_messages (id, message) values (${
-        message.id
-      },${JSON.stringify(message)})`;
+      this.sql`
+        insert into cf_ai_chat_agent_messages (id, message)
+        values (${message.id}, ${JSON.stringify(message)})
+        on conflict(id) do update set message = excluded.message
+      `;
     }
-    this.messages = messages;
+
+    // refresh in-memory messages
+    const persisted = this._loadMessagesFromDb();
+    this.messages = autoTransformMessages(persisted);
     this._broadcastChatMessage(
       {
         messages: messages,
