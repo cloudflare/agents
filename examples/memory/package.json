@@ -1,14 +1,30 @@
 {
-  "name": "@cloudflare/agents-memory-example",
+  "name": "idz-reader",
   "type": "module",
   "private": true,
   "author": "",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "wrangler dev",
+    "deploy": "wrangler deploy",
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
-    "hnsw": "^1.0.3"
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "@webtui/css": "^0.1.5",
+    "agents": "*",
+    "hnsw": "^1.0.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
-  "keywords": []
+  "keywords": [],
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.13.7",
+    "@types/node": "^24.6.0",
+    "vite": "^7.1.7",
+    "wrangler": "^4.40.2"
+  }
 }

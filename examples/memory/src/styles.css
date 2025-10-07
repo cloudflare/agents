@@ -1,0 +1,151 @@
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.content {
+  padding: 0lh 1ch;
+  padding-top: 1lh;
+  display: flex;
+}
+
+.buttons {
+  display: flex;
+  justify-content: space-between;
+  gap: 1ch;
+  align-items: center;
+}
+
+input {
+  width: 50ch;
+  background-color: var(--background0);
+}
+
+.message {
+  border-radius: 1lh;
+  max-width: 80ch;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.message-content {
+  padding: 1lh 1lh 1ch 1lh;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.message.user {
+  align-self: flex-end;
+  background: var(--background0);
+}
+
+.message.assistant {
+  align-self: flex-start;
+}
+
+input[type="password"] {
+  width: 33ch;
+}
+
+input[type="file"] {
+  opacity: 0;
+}
+
+#connect-box {
+  padding-top: 5ch;
+  margin-bottom: 5ch;
+}
+
+#agent-box {
+  min-height: 95ch;
+}
+
+.hidden {
+  display: none !important;
+}
+
+pre {
+  white-space: pre-wrap;
+  overflow: auto;
+}
+
+.disk-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1ch;
+}
+
+.disk-card {
+  min-width: 20ch;
+}
+
+.delete-disk {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0;
+}
+
+.disk-name {
+  font-weight: bold;
+  margin-bottom: 0.5lh;
+}
+
+.disk-size {
+  font-size: 0.9em;
+  color: var(--foreground1);
+}
+
+.disk-description {
+  font-size: 0.85em;
+  color: var(--foreground1);
+  margin-top: 0.5lh;
+  font-style: italic;
+}
+
+dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+dialog[open] {
+  border: none;
+  padding: 0;
+  background: transparent;
+}
+
+.dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1lh;
+  padding: 2lh 2ch 1lh 2ch;
+  background-color: var(--background1);
+}
+
+.dialog-buttons {
+  display: flex;
+  gap: 1ch;
+  justify-content: flex-end;
+}
+
+.dialog-content input,
+.dialog-content textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.5lh 1ch;
+  background-color: var(--background0);
+  border: 1px solid var(--foreground1);
+  color: var(--foreground0);
+}
+
+.dialog-content textarea {
+  min-height: 3lh;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.dialog-content label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5lh;
+}
