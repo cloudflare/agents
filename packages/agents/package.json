@@ -7,6 +7,7 @@
     "@ai-sdk/openai": "2.0.48",
     "@modelcontextprotocol/sdk": "^1.20.0",
     "ai": "5.0.68",
+    "@cloudflare/realtimekit": "1.1.7-agent.1",
     "cron-schedule": "^5.0.4",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
@@ -31,6 +32,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.js"
+    },
+    "./realtime": {
+      "types": "./dist/realtime-agent.d.ts",
+      "import": "./dist/realtime-agent.js",
+      "require": "./dist/realtime-agent.js"
     },
     "./ai-chat-agent": {
       "types": "./dist/ai-chat-agent.d.ts",

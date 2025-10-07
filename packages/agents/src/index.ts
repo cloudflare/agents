@@ -29,6 +29,16 @@ import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import {
+  CLOUDFLARE_BASE,
+  DataKind,
+  isRealtimeInternalWebsocket,
+  processNDJSONStream,
+  REALTIME_AGENTS_SERVICE,
+  RealtimeKitTransport,
+  type RealtimePipelineComponent
+} from "./realtime-agent";
+import { randomUUID } from "node:crypto";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -313,12 +323,19 @@ function withAgentContext<T extends (...args: any[]) => any>(
  * @template State State type to store within the Agent
  */
 export class Agent<
-  Env = typeof env,
-  State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
-> extends Server<Env, Props> {
+    Env = typeof env,
+    State = unknown,
+    Props extends Record<string, unknown> = Record<string, unknown>
+  >
+  extends Server<Env, Props>
+  implements RealtimePipelineComponent
+{
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
+  private _rtk_components: RealtimePipelineComponent[] = [];
+  private _rtk_flowId = "";
+  private _rtk_authToken = "";
+  private _rtk_ws?: WebSocket;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -327,6 +344,24 @@ export class Agent<
     this._ParentClass.name,
     "0.0.1"
   );
+
+  realtimePipelineComponents?: () => RealtimePipelineComponent[];
+  realtimePipelineRunning = false;
+
+  input_kind() {
+    return DataKind.Text;
+  }
+
+  output_kind() {
+    return DataKind.Text;
+  }
+
+  schema() {
+    return {
+      name: this._ParentClass.name,
+      type: "agent"
+    };
+  }
 
   /**
    * Initial state for the Agent
@@ -500,6 +535,39 @@ export class Agent<
             return callbackResult;
           }
 
+          const url = new URL(request.url);
+          const split = url.pathname.split("realtime");
+          if (split.length > 2 && this.realtimePipelineComponents) {
+            const path = split[split.length - 1];
+            switch (path) {
+              case "/rtk/produce":
+                const payload = await request.json<{
+                  producingTransportId: string;
+                  producerId: string;
+                  kind: string;
+                }>();
+                const meeting = this._rtk_components.filter(
+                  (c) => c instanceof RealtimeKitTransport
+                )[0].meeting!;
+                if (meeting.self.roomJoined) {
+                  console.log("bot joined the meeting");
+                  await meeting.self.produce(payload);
+                } else {
+                  console.log("bot not joined the meeting");
+                  meeting.self.on("roomJoined", () =>
+                    meeting.self.produce(payload)
+                  );
+                }
+                return new Response(null, { status: 200 });
+              case "/start":
+                await this.startRealtimePipeline();
+                return new Response(null, { status: 200 });
+              case "/stop":
+                await this.stopRealtimePipeline();
+                return new Response(null, { status: 200 });
+            }
+          }
+
           return this._tryCatch(() => _onRequest(request));
         }
       );
@@ -510,6 +578,54 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
+          console.log(
+            "incoming connection message",
+            message,
+            "connection",
+            connection,
+            "conn url:",
+            connection.url
+          );
+          // need to figure out if it's coming from realtime or not
+          // if (isRealtimeInternalWebsocket(connection) || true) {
+          if (typeof message === "string") {
+            const ws_message: {
+              type: string;
+              version: number;
+              identifier: string;
+              payload: {
+                content_type: string;
+                context_id: string;
+                data: string;
+              };
+            } = JSON.parse(message);
+            const textProcessor = this._rtk_components.filter(
+              (c) => c instanceof Agent
+            );
+            if (textProcessor.length > 0) {
+              textProcessor[0].onRealtimeTranscript(
+                ws_message.payload.data,
+                async (text) => {
+                  if (typeof text === "string") {
+                    textProcessor[0].speak(text, ws_message.payload.context_id);
+                    return;
+                  }
+
+                  for await (const chunk of processNDJSONStream(
+                    text.getReader()
+                  )) {
+                    if (!chunk.response) continue;
+                    textProcessor[0].speak(
+                      chunk.response,
+                      ws_message.payload.context_id
+                    );
+                  }
+                }
+              );
+            }
+          }
+          // return;
+          // }
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
           }
@@ -645,7 +761,7 @@ export class Agent<
           email: undefined
         },
         async () => {
-          await this._tryCatch(() => {
+          await this._tryCatch(async () => {
             const servers = this.sql<MCPServerRow>`
             SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
           `;
@@ -1779,6 +1895,197 @@ export class Agent<
     const baseUrl = new URL(request.url).origin;
     return Response.redirect(baseUrl);
   }
+
+  private async initRealtimePipeline(components: RealtimePipelineComponent[]) {
+    const { CF_ACCOUNT_ID, CF_API_TOKEN } = this.env as any;
+    if (!CF_ACCOUNT_ID) throw new Error("CF_ACCOUNT_ID is required");
+    if (!CF_API_TOKEN) throw new Error("CF_API_TOKEN is required");
+
+    var last_component = undefined;
+    for (const component of components) {
+      if (
+        last_component &&
+        last_component.output_kind() !== component.input_kind()
+      ) {
+        throw new Error(
+          `cannot link up component of output kind ${last_component.output_kind()} with one of input kind ${component.input_kind()}`
+        );
+      }
+      last_component = component;
+    }
+
+    const { request } = getCurrentAgent();
+    if (!request) throw new Error("request is required");
+
+    console.log("initializing realtime pipeline");
+    const requestUrl = new URL(request.url);
+    const agentId = this.name;
+    const agentName = camelCaseToKebabCase(this._ParentClass.name);
+    const agentURL = `${requestUrl.host}/agents/${agentName}/${agentId}/realtime`;
+
+    const elements: { name: string; [K: string]: any }[] = [
+      {
+        name: "ws_out",
+        type: "websocket_out",
+        internal_sdk: true,
+        url: `wss://${agentURL}/ws`
+      },
+      {
+        name: "ws_in_text",
+        internal_sdk: true,
+        type: "websocket_in"
+      }
+    ];
+
+    const layers: { id: number; name: string; elements: string[] }[] = [
+      {
+        id: 1,
+        name: "default",
+        elements: []
+      }
+    ];
+
+    for (const component of components) {
+      if (component instanceof Agent) {
+        layers[layers.length - 1].elements.push("ws_out");
+        layers.push({
+          id: layers.length + 1,
+          name: `default-${layers.length + 1}`,
+          elements: ["ws_in_text"]
+        });
+      } else {
+        if (elements.filter((e) => e.name === component.name).length === 0) {
+          if (component instanceof RealtimeKitTransport)
+            elements.push({
+              ...component.schema(),
+              worker_url: `https://${agentURL}`
+            });
+          else elements.push(component.schema());
+        }
+        layers[layers.length - 1].elements.push(component.name);
+      }
+    }
+
+    const response = await fetch(
+      `${CLOUDFLARE_BASE}/client/v4/accounts/${CF_ACCOUNT_ID}/realtime/agents/pipeline`,
+      {
+        // const response = await fetch(`${REALTIME_AGENTS_SERVICE}/pipeline`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CF_API_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          event: "pipeline.provision",
+          id: randomUUID(),
+          elements,
+          layers
+        })
+      }
+    );
+    const { id, token } = await response.json<{ id: string; token: string }>();
+    if (!id || !token) throw new Error("invalid response from streamline");
+    console.log("pipeline provisioned", id, token);
+    // TODO: need to store these values in storage
+    this._rtk_flowId = id;
+    this._rtk_authToken = token;
+    this._rtk_components = components;
+    await this._rtk_components
+      .filter((c) => c instanceof RealtimeKitTransport)[0]
+      .init(token);
+
+    const meetingTranport = this._rtk_components.filter(
+      (c) => c instanceof RealtimeKitTransport
+    );
+    if (meetingTranport.length > 0) {
+      meetingTranport[0].meeting.self.on("roomLeft", () =>
+        this.stopRealtimePipeline()
+      );
+    }
+    this.schedule(Date.now() + 10000, "wakeup");
+  }
+
+  wakeup() {}
+
+  /**
+   * Start the agent
+   */
+  async startRealtimePipeline() {
+    // check if instance is already started
+    if (this.realtimePipelineRunning)
+      throw new Error("agent is already running");
+    const components = this.realtimePipelineComponents!();
+    await this.initRealtimePipeline(components);
+
+    const startResponse = await fetch(
+      `${REALTIME_AGENTS_SERVICE}/pipeline?authToken=${this._rtk_authToken}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "start"
+        })
+      }
+    );
+    const { success } = await startResponse.json<{ success: boolean }>();
+    if (!success) throw new Error("failed to start pipeline");
+    this.realtimePipelineRunning = true;
+    this._rtk_ws = new WebSocket(
+      `${REALTIME_AGENTS_SERVICE.replace("http", "ws")}/pipeline/media/ws?authToken=${this._rtk_authToken}&kind=text&elementName=ws_in_text`
+    );
+  }
+
+  /**
+   * Stop the agent
+   */
+  async stopRealtimePipeline() {
+    if (!this.realtimePipelineRunning) throw new Error("agent not running");
+    const meetingTransports = this._rtk_components.filter(
+      (c) => c instanceof RealtimeKitTransport
+    );
+    if (meetingTransports.length > 0) {
+      if (meetingTransports[0].meeting.self.roomJoined)
+        meetingTransports[0].meeting.leave();
+    }
+    const response = await fetch(
+      `${REALTIME_AGENTS_SERVICE}/pipeline?authToken=${this._rtk_authToken}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "stop"
+        })
+      }
+    );
+    const { success } = await response.json<{ success: boolean }>();
+    if (!success) throw new Error("failed to stop agent");
+    this.realtimePipelineRunning = false;
+  }
+
+  async speak(text: string, contextId?: string) {
+    console.log("sending response:", text);
+    this._rtk_ws?.send(
+      JSON.stringify({
+        type: "media",
+        version: 1,
+        identifier: randomUUID(),
+        payload: {
+          content_type: "text",
+          context_id: contextId,
+          data: text
+        }
+      })
+    );
+  }
+
+  onRealtimeTranscript(
+    text: string,
+    reply: (text: string | ReadableStream<Uint8Array>) => void
+  ) {}
 }
 
 // A set of classes that have been wrapped with agent context
