@@ -7,8 +7,5 @@
     "dev": "wrangler dev",
     "types": "wrangler types --include-runtime false"
   },
-  "type": "module",
-  "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.18.2"
-  }
+  "type": "module"
 }

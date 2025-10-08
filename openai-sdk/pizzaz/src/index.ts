@@ -2,18 +2,19 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+// Adapted from https://developers.openai.com/apps-sdk/build/examples
 export class PizzazMcp extends McpAgent {
   server = new McpServer({ name: "Pizzaz", version: "v1.0.0" });
 
   async init() {
     this.server.registerResource(
-      "pizza-map",
-      "ui://widget/pizza-map.html",
+      "pizzaz-map",
+      "ui://widget/pizzaz-map.html",
       {},
       async () => ({
         contents: [
           {
-            uri: "ui://widget/pizza-map.html",
+            uri: "ui://widget/pizzaz-map.html",
             mimeType: "text/html+skybridge",
             text: `
       <div id="pizzaz-root"></div>
@@ -26,11 +27,11 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerTool(
-      "pizza-map",
+      "pizzaz-map",
       {
         title: "Show Pizza Map",
         _meta: {
-          "openai/outputTemplate": "ui://widget/pizza-map.html",
+          "openai/outputTemplate": "ui://widget/pizzaz-map.html",
           "openai/toolInvocation/invoking": "Hand-tossing a map",
           "openai/toolInvocation/invoked": "Served a fresh map"
         },
@@ -45,8 +46,8 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerResource(
-      "pizza-carousel",
-      "ui://widget/pizza-carousel.html",
+      "pizzaz-carousel",
+      "ui://widget/pizzaz-carousel.html",
       {},
       async () => ({
         contents: [
@@ -64,11 +65,11 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerTool(
-      "pizza-carousel",
+      "pizzaz-carousel",
       {
         title: "Show Pizza Carousel",
         _meta: {
-          "openai/outputTemplate": "ui://widget/pizza-carousel.html",
+          "openai/outputTemplate": "ui://widget/pizzaz-carousel.html",
           "openai/toolInvocation/invoking": "Carousel some spots",
           "openai/toolInvocation/invoked": "Served a fresh carousel"
         },
@@ -83,8 +84,8 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerResource(
-      "pizza-albums",
-      "ui://widget/pizza-albums.html",
+      "pizzaz-albums",
+      "ui://widget/pizzaz-albums.html",
       {},
       async () => ({
         contents: [
@@ -102,11 +103,11 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerTool(
-      "pizza-albums",
+      "pizzaz-albums",
       {
         title: "Show Pizza Album",
         _meta: {
-          "openai/outputTemplate": "ui://widget/pizza-albums.html",
+          "openai/outputTemplate": "ui://widget/pizzaz-albums.html",
           "openai/toolInvocation/invoking": "Hand-tossing an album",
           "openai/toolInvocation/invoked": "Served a fresh album"
         },
@@ -121,8 +122,8 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerResource(
-      "pizza-list",
-      "ui://widget/pizza-list.html",
+      "pizzaz-list",
+      "ui://widget/pizzaz-list.html",
       {},
       async () => ({
         contents: [
@@ -140,11 +141,11 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerTool(
-      "pizza-list",
+      "pizzaz-list",
       {
         title: "Show Pizza List",
         _meta: {
-          "openai/outputTemplate": "ui://widget/pizza-list.html",
+          "openai/outputTemplate": "ui://widget/pizzaz-list.html",
           "openai/toolInvocation/invoking": "Hand-tossing a list",
           "openai/toolInvocation/invoked": "Served a fresh list"
         },
@@ -159,8 +160,8 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerResource(
-      "pizza-video",
-      "ui://widget/pizza-video.html",
+      "pizzaz-video",
+      "ui://widget/pizzaz-video.html",
       {},
       async () => ({
         contents: [
@@ -178,11 +179,11 @@ export class PizzazMcp extends McpAgent {
     );
 
     this.server.registerTool(
-      "pizza-video",
+      "pizzaz-video",
       {
         title: "Show Pizza Video",
         _meta: {
-          "openai/outputTemplate": "ui://widget/pizza-video.html",
+          "openai/outputTemplate": "ui://widget/pizzaz-video.html",
           "openai/toolInvocation/invoking": "Hand-tossing a video",
           "openai/toolInvocation/invoked": "Served a fresh video"
         },

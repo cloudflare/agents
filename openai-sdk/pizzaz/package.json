@@ -7,11 +7,6 @@
     "dev": "wrangler dev"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.0.6",
-    "@modelcontextprotocol/sdk": "^1.18.2",
     "agents": "*"
-  },
-  "devDependencies": {
-    "@types/node": "^24.3.0"
   }
 }

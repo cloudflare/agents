@@ -17,7 +17,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
     icons: [
       {
         src: icon,
-        sizes: "any",
+        sizes: ["any"],
         mimeType: "image/svg+xml"
       }
     ],
