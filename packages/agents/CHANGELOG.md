@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.9
+
+### Patch Changes
+
+- [#545](https://github.com/cloudflare/agents/pull/545) [`70499f1`](https://github.com/cloudflare/agents/commit/70499f1cb30d71af621ec6e16e5d43786559f75d) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Update mcp sdk
+
 ## 0.2.8
 
 ### Patch Changes
