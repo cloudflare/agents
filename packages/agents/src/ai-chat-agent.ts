@@ -19,8 +19,13 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 const decoder = new TextDecoder();
 
-// Lazy-load AI SDK utilities to avoid loading at startup
-let aiUtils: any;
+// Lazy-load AI SDK utilities
+type AIUtils = {
+  getToolName: (part: unknown) => string | undefined;
+  isToolUIPart: (part: unknown) => part is ToolUIPart;
+  parsePartialJson: (json: string) => Record<string, unknown>;
+};
+let aiUtils: AIUtils | undefined;
 function getAIUtils() {
   if (!aiUtils) {
     const ai = require("ai");
@@ -30,7 +35,7 @@ function getAIUtils() {
       parsePartialJson: ai.parsePartialJson
     };
   }
-  return aiUtils;
+  return aiUtils!;
 }
 
 /**
@@ -626,9 +631,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                       partialToolCall.text += data.inputTextDelta;
 
                       const { parsePartialJson } = getAIUtils();
-                      const { value: partialArgs } = await parsePartialJson(
+                      const partialArgsResult = await parsePartialJson(
                         partialToolCall.text
                       );
+                      const partialArgs = (
+                        partialArgsResult as { value: Record<string, unknown> }
+                      ).value;
 
                       if (partialToolCall.dynamic) {
                         updateDynamicToolPart({
@@ -747,7 +755,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
                         updateToolPart({
                           toolCallId: data.toolCallId,
-                          toolName: getToolName(toolInvocation),
+                          toolName: getToolName(toolInvocation) || "",
                           state: "output-available",
                           input: toolInvocation.input,
                           output: data.output,
@@ -795,7 +803,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           throw new Error("Tool invocation not found");
                         updateToolPart({
                           toolCallId: data.toolCallId,
-                          toolName: getToolName(toolInvocation),
+                          toolName: getToolName(toolInvocation) || "",
                           state: "output-error",
                           input: toolInvocation.input,
                           rawInput:

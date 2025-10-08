@@ -1,9 +1,12 @@
-/**
- * Lazy loading utilities that work in both bundled and test environments
- */
+import type { MCPClientManager } from "./mcp/client";
+import type { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 
-let mcpClientModule: any;
-let oauthProviderModule: any;
+let mcpClientModule: { MCPClientManager: typeof MCPClientManager } | undefined;
+let oauthProviderModule:
+  | {
+      DurableObjectOAuthClientProvider: typeof DurableObjectOAuthClientProvider;
+    }
+  | undefined;
 
 export function getMCPClientManager() {
   if (!mcpClientModule) {
@@ -15,12 +18,12 @@ export function getMCPClientManager() {
         mcpClientModule = require("./mcp/client.js");
       } catch {
         // Last resort: try absolute path (for tests)
-        const path = __dirname + "/mcp/client";
+        const path = `${__dirname}/mcp/client`;
         mcpClientModule = require(path);
       }
     }
   }
-  return mcpClientModule.MCPClientManager;
+  return mcpClientModule!.MCPClientManager;
 }
 
 export function getDurableObjectOAuthClientProvider() {
@@ -31,10 +34,10 @@ export function getDurableObjectOAuthClientProvider() {
       try {
         oauthProviderModule = require("./mcp/do-oauth-client-provider.js");
       } catch {
-        const path = __dirname + "/mcp/do-oauth-client-provider";
+        const path = `${__dirname}/mcp/do-oauth-client-provider`;
         oauthProviderModule = require(path);
       }
     }
   }
-  return oauthProviderModule.DurableObjectOAuthClientProvider;
+  return oauthProviderModule!.DurableObjectOAuthClientProvider;
 }
