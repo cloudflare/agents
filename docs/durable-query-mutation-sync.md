@@ -22,13 +22,14 @@ However, there's no built-in pattern for:
 
 ## Goals
 
-1. **Client-Side Hooks**: Provide `useDurableQuery` and `useDurableMutation` React hooks
+1. **Client-Side Hooks**: Provide `useDurableQuery`, `useDurableMutation`, and `useDurableInfiniteQuery` React hooks built on **TanStack Query**
 2. **Server-Side Query Registry**: Define queries and mutations inside the Agent/Durable Object
 3. **Automatic Synchronization**: Broadcast query results when data changes
 4. **Hibernation-Aware**: Handle WebSocket reconnection and query re-subscription after hibernation
 5. **Type Safety**: Full TypeScript support for queries and mutations
 6. **Efficient Broadcasting**: Only broadcast to clients subscribed to affected queries
-7. **Optimistic Updates**: Support optimistic UI updates before server confirmation
+7. **TanStack Query Integration**: Leverage battle-tested caching, deduplication, and state management
+8. **Optimistic Updates**: Built-in support via TanStack Query's optimistic update system
 
 ## Current Architecture Analysis
 
@@ -380,194 +381,175 @@ Add to `onClose` handler:
 this.subscriptionManager.cleanupConnection(connection.id);
 ```
 
-#### 5. Client-Side Hooks
+#### 5. Client-Side Hooks (Built on TanStack Query)
 
-##### `useDurableQuery`
+> **📘 Full Implementation**: See [durable-query-mutation-sync-tanstack.md](./durable-query-mutation-sync-tanstack.md) for complete TanStack Query integration details.
+
+The client hooks are built on **TanStack Query (React Query)** to leverage its proven caching, deduplication, and state management capabilities while adding real-time WebSocket synchronization.
+
+**Key Benefits:**
+
+- Battle-tested caching and request deduplication
+- Automatic background refetching
+- Built-in optimistic updates support
+- Rich DevTools for debugging
+- Framework-agnostic core (can extend to Vue, Solid, etc.)
+
+**Dependencies:**
+
+```json
+{
+  "dependencies": {
+    "@tanstack/react-query": "^5.0.0",
+    "agents": "latest"
+  }
+}
+```
+
+**Setup:**
 
 ```typescript
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 1000,
+      refetchOnWindowFocus: true,
+    },
+  },
+});
+
+function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <YourApp />
+    </QueryClientProvider>
+  );
+}
+```
+
+##### `useDurableQuery` (Simplified Overview)
+
+```typescript
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+
 export function useDurableQuery<TArgs, TResult>(
   agent: ReturnType<typeof useAgent>,
   queryName: string,
   args: TArgs,
-  options?: {
-    enabled?: boolean;
-    refetchOnWindowFocus?: boolean;
-    staleTime?: number;
-  }
-): {
-  data: TResult[] | undefined;
-  isLoading: boolean;
-  error: Error | undefined;
-  refetch: () => void;
-} {
-  const [data, setData] = useState<TResult[] | undefined>(undefined);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<Error | undefined>(undefined);
-  const subscriptionIdRef = useRef<string>();
+  options?: Omit<UseQueryOptions<TResult[], Error>, "queryKey" | "queryFn">
+) {
+  const queryClient = useQueryClient();
 
-  const enabled = options?.enabled ?? true;
+  // Create stable query key for TanStack Query
+  const queryKey = ["durable", agent.agent, agent.name, queryName, args];
 
+  // Use TanStack Query with WebSocket-based query function
+  const query = useQuery({
+    queryKey,
+    queryFn: async () => {
+      // Subscribe and wait for initial data via WebSocket
+      return fetchViaSubscription(agent, queryName, args);
+    },
+    ...options // All TanStack Query options available
+  });
+
+  // Set up real-time WebSocket listener to update cache
   useEffect(() => {
-    if (!enabled) return;
-
-    const subscriptionId = nanoid();
-    subscriptionIdRef.current = subscriptionId;
-    setIsLoading(true);
-
-    // Subscribe to query
-    agent.send(
-      JSON.stringify({
-        type: MessageType.CF_AGENT_QUERY_SUBSCRIBE,
-        queryName,
-        args,
-        subscriptionId
-      })
-    );
-
-    // Listen for query data updates
     const handleMessage = (event: MessageEvent) => {
-      if (typeof event.data !== "string") return;
-
-      try {
-        const message = JSON.parse(event.data);
-
-        if (
-          message.type === MessageType.CF_AGENT_QUERY_DATA &&
-          message.queryName === queryName &&
-          JSON.stringify(message.args) === JSON.stringify(args)
-        ) {
-          setData(message.data);
-          setIsLoading(false);
-          setError(undefined);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err : new Error(String(err)));
-        setIsLoading(false);
+      const message = JSON.parse(event.data);
+      if (message.type === MessageType.CF_AGENT_QUERY_DATA) {
+        // Update TanStack Query cache when real-time updates arrive
+        queryClient.setQueryData(queryKey, message.data);
       }
     };
 
     agent.addEventListener("message", handleMessage);
-
     return () => {
       agent.removeEventListener("message", handleMessage);
-
-      // Unsubscribe
-      agent.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_QUERY_UNSUBSCRIBE,
-          queryName,
-          args
-        })
-      );
+      // Unsubscribe from Agent
     };
-  }, [agent, queryName, JSON.stringify(args), enabled]);
+  }, [agent, queryKey]);
 
-  const refetch = useCallback(() => {
-    // Re-subscribe to trigger fresh data
-    if (subscriptionIdRef.current && enabled) {
-      agent.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_QUERY_SUBSCRIBE,
-          queryName,
-          args,
-          subscriptionId: subscriptionIdRef.current
-        })
-      );
-    }
-  }, [agent, queryName, args, enabled]);
-
-  return { data, isLoading, error, refetch };
+  return query; // Returns TanStack Query result with all features
 }
 ```
 
-##### `useDurableMutation`
+**Full implementation available in [durable-query-mutation-sync-tanstack.md](./durable-query-mutation-sync-tanstack.md)**
+
+**Usage:**
 
 ```typescript
+const { data, isLoading, error, refetch, isFetching } = useDurableQuery(
+  agent,
+  "getTodos",
+  { completed: false },
+  {
+    staleTime: 5000,
+    refetchOnWindowFocus: true
+    // All TanStack Query options work!
+  }
+);
+```
+
+##### `useDurableMutation` (Simplified Overview)
+
+```typescript
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+
 export function useDurableMutation<TArgs, TResult>(
   agent: ReturnType<typeof useAgent>,
   mutationName: string,
-  options?: {
-    onSuccess?: (result: TResult) => void;
-    onError?: (error: Error) => void;
-  }
-): {
-  mutate: (args: TArgs) => Promise<TResult>;
-  isLoading: boolean;
-  error: Error | undefined;
-  data: TResult | undefined;
-} {
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<Error | undefined>(undefined);
-  const [data, setData] = useState<TResult | undefined>(undefined);
-  const pendingMutationsRef = useRef(
-    new Map<
-      string,
-      {
-        resolve: (value: TResult) => void;
-        reject: (error: Error) => void;
-      }
-    >()
-  );
+  options?: Omit<UseMutationOptions<TResult, Error, TArgs>, "mutationFn">
+) {
+  const queryClient = useQueryClient();
 
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (typeof event.data !== "string") return;
-
-      try {
-        const message = JSON.parse(event.data);
-
-        if (message.type === MessageType.CF_AGENT_MUTATION_RESULT) {
-          const pending = pendingMutationsRef.current.get(message.mutationId);
-          if (!pending) return;
-
-          if (message.success) {
-            setData(message.result);
-            setError(undefined);
-            pending.resolve(message.result);
-            options?.onSuccess?.(message.result);
-          } else {
-            const err = new Error(message.error);
-            setError(err);
-            pending.reject(err);
-            options?.onError?.(err);
-          }
-
-          pendingMutationsRef.current.delete(message.mutationId);
-          setIsLoading(false);
-        }
-      } catch (err) {
-        console.error("Error handling mutation result:", err);
-      }
-    };
-
-    agent.addEventListener("message", handleMessage);
-    return () => agent.removeEventListener("message", handleMessage);
-  }, [agent, options]);
-
-  const mutate = useCallback(
-    async (args: TArgs): Promise<TResult> => {
-      return new Promise((resolve, reject) => {
-        const mutationId = nanoid();
-        pendingMutationsRef.current.set(mutationId, { resolve, reject });
-
-        setIsLoading(true);
-        setError(undefined);
-
-        agent.send(
-          JSON.stringify({
-            type: MessageType.CF_AGENT_MUTATION,
-            mutationName,
-            args,
-            mutationId
-          })
-        );
-      });
+  const mutation = useMutation({
+    mutationFn: async (args: TArgs) => {
+      // Send mutation via WebSocket and wait for result
+      return executeMutationViaWebSocket(agent, mutationName, args);
     },
-    [agent, mutationName]
-  );
+    ...options,
+    onSuccess: (data, variables, context) => {
+      // Server broadcasts query updates automatically
+      // TanStack Query handles cache updates via WebSocket listeners
+      options?.onSuccess?.(data, variables, context);
+    }
+  });
 
-  return { mutate, isLoading, error, data };
+  return mutation;
 }
+```
+
+**Full implementation available in [durable-query-mutation-sync-tanstack.md](./durable-query-mutation-sync-tanstack.md)**
+
+**Usage:**
+
+```typescript
+const { mutate, mutateAsync, isPending, error } = useDurableMutation(
+  agent,
+  'addTodo',
+  {
+    onSuccess: (result) => {
+      console.log('Todo added:', result);
+      // No manual invalidation needed - server broadcasts updates
+    },
+    // Optimistic updates supported
+    onMutate: async (newTodo) => {
+      await queryClient.cancelQueries({ queryKey: ['durable', ...] });
+      queryClient.setQueryData(['durable', ...], (old) => [...old, newTodo]);
+      return { previousValue };
+    },
+    onError: (err, variables, context) => {
+      // Rollback on error
+      queryClient.setQueryData(['durable', ...], context.previousValue);
+    }
+  }
+);
+
+// Use mutation
+mutate({ text: 'New todo' });
 ```
 
 ## Implementation Plan
