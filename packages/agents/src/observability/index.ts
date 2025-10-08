@@ -1,4 +1,3 @@
-import { getCurrentAgent } from "../index";
 import type { AgentObservabilityEvent } from "./agent";
 import type { MCPObservabilityEvent } from "./mcp";
 
@@ -33,18 +32,24 @@ export const genericObservability: Observability = {
   }
 };
 
-let localMode = false;
+let localMode: boolean | null = null;
 
 function isLocalMode() {
-  if (localMode) {
-    return true;
+  if (localMode !== null) {
+    return localMode;
   }
-  const { request } = getCurrentAgent();
-  if (!request) {
-    return false;
-  }
+  try {
+    const indexModule = require("../index");
+    if (indexModule && typeof indexModule.getCurrentAgent === "function") {
+      const { request } = indexModule.getCurrentAgent();
+      if (request) {
+        const url = new URL(request.url);
+        localMode = url.hostname === "localhost";
+        return localMode;
+      }
+    }
+  } catch (e) {}
 
-  const url = new URL(request.url);
-  localMode = url.hostname === "localhost";
+  localMode = false;
   return localMode;
 }
