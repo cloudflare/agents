@@ -1,5 +1,5 @@
 {
-  "name": "pizzaz-app",
+  "name": "@cloudflare/pizzaz-app",
   "private": true,
   "type": "module",
   "scripts": {
