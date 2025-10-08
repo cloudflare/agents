@@ -11,7 +11,7 @@ import type {
   ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import { type ToolSet, jsonSchema } from "ai";
+import type { ToolSet } from "ai";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
@@ -339,6 +339,17 @@ export class MCPClientManager {
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
+    // Lazy-load jsonSchema from ai package to avoid pulling in the entire package at module load time
+    // This is loaded synchronously here (when getAITools is called), not at module import time
+    let jsonSchemaFn: ((schema: any) => any) | undefined;
+    const getJsonSchema = () => {
+      if (!jsonSchemaFn) {
+        // This will only execute when getAITools() is actually called
+        jsonSchemaFn = require("ai").jsonSchema;
+      }
+      return jsonSchemaFn;
+    };
+
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
@@ -358,11 +369,11 @@ export class MCPClientManager {
               return result;
             },
             // @ts-expect-error drift between ai and mcp types
-            inputSchema: jsonSchema(tool.inputSchema),
+            inputSchema: getJsonSchema()(tool.inputSchema),
 
             outputSchema: tool.outputSchema
               ? // @ts-expect-error drift between ai and mcp types
-                jsonSchema(tool.outputSchema)
+                getJsonSchema()(tool.outputSchema)
               : undefined
           }
         ];

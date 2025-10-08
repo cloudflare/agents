@@ -2,6 +2,8 @@ import type { env } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import { MCPClientManager } from "./mcp/client";
+import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 
 import type {
   Prompt,
@@ -22,9 +24,8 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
-import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import type { MCPClientOAuthResult } from "./mcp/client";
 import type { MCPConnectionState } from "./mcp/client-connection";
-import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
@@ -323,10 +324,14 @@ export class Agent<
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  readonly mcp: MCPClientManager = new MCPClientManager(
-    this._ParentClass.name,
-    "0.0.1"
-  );
+  private _mcp?: MCPClientManager;
+
+  get mcp(): MCPClientManager {
+    if (!this._mcp) {
+      this._mcp = new MCPClientManager(this._ParentClass.name, "0.0.1");
+    }
+    return this._mcp!; // Non-null assertion: we just initialized it above
+  }
 
   /**
    * Initial state for the Agent
