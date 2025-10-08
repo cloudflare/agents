@@ -807,6 +807,237 @@ function TodoApp() {
 
 ## Key Considerations
 
+### Pagination Support
+
+**Challenge**: Large result sets need to be paginated for performance and usability.
+
+**Solution**: Support both cursor-based and offset-based pagination patterns.
+
+#### Cursor-Based Pagination (Recommended)
+
+Cursor-based pagination is more efficient and provides stable results when data changes:
+
+```typescript
+// Server-side query with cursor support
+this.registerQuery<
+  { cursor?: string; limit?: number; completed?: boolean },
+  Todo
+>(
+  "getTodos",
+  (args) => {
+    const limit = args.limit || 20;
+    const cursorCondition = args.cursor
+      ? this.sql`AND created_at < ${args.cursor}`
+      : this.sql``;
+
+    return this.sql<Todo>`
+      SELECT * FROM todos 
+      WHERE ${args.completed !== undefined ? this.sql`completed = ${args.completed ? 1 : 0}` : this.sql`1=1`}
+      ${cursorCondition}
+      ORDER BY created_at DESC 
+      LIMIT ${limit + 1}
+    `;
+  },
+  { dependencies: ["todos"] }
+);
+
+// Client-side hook with infinite scroll
+const {
+  data, // All pages flattened into single array
+  hasNextPage, // Boolean indicating more data available
+  fetchNextPage, // Function to load next page
+  isFetchingNextPage,
+  refetch // Re-fetch all pages
+} = useDurableInfiniteQuery(
+  agent,
+  "getTodos",
+  { limit: 20, completed: false },
+  {
+    getNextPageParam: (lastPage) => {
+      // Return undefined when no more pages
+      if (lastPage.length <= 20) return undefined;
+      // Use last item's timestamp as cursor
+      return lastPage[lastPage.length - 1].created_at;
+    }
+  }
+);
+```
+
+#### Offset-Based Pagination
+
+For traditional page-based navigation:
+
+```typescript
+// Server-side query with offset and total count
+this.registerQuery<
+  { page: number; pageSize: number },
+  { todos: Todo[]; total: number; pages: number }
+>(
+  "getTodosPaginated",
+  (args) => {
+    const offset = args.page * args.pageSize;
+    const todos = this.sql<Todo>`
+      SELECT * FROM todos 
+      ORDER BY created_at DESC 
+      LIMIT ${args.pageSize} OFFSET ${offset}
+    `;
+    const [{ count }] = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM todos
+    `;
+
+    return [
+      {
+        todos,
+        total: count,
+        pages: Math.ceil(count / args.pageSize)
+      }
+    ];
+  },
+  { dependencies: ["todos"] }
+);
+
+// Client-side with manual page control
+const [page, setPage] = useState(0);
+const { data, isLoading } = useDurableQuery(agent, "getTodosPaginated", {
+  page,
+  pageSize: 20
+});
+
+// Access: data[0].todos, data[0].total, data[0].pages
+```
+
+#### Infinite Query Hook Implementation
+
+```typescript
+export function useDurableInfiniteQuery<TArgs, TResult>(
+  agent: ReturnType<typeof useAgent>,
+  queryName: string,
+  baseArgs: TArgs,
+  options: {
+    getNextPageParam: (lastPage: TResult[]) => string | undefined;
+    enabled?: boolean;
+  }
+): {
+  data: TResult[];
+  hasNextPage: boolean;
+  fetchNextPage: () => void;
+  isFetchingNextPage: boolean;
+  refetch: () => void;
+} {
+  const [pages, setPages] = useState<TResult[][]>([]);
+  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
+  const [isFetchingNextPage, setIsFetchingNextPage] = useState(false);
+
+  const currentCursor = cursors[cursors.length - 1];
+  const queryArgs = { ...baseArgs, cursor: currentCursor };
+
+  // Subscribe to query with current cursor
+  const { data: currentPageData, isLoading } = useDurableQuery(
+    agent,
+    queryName,
+    queryArgs,
+    { enabled: options.enabled }
+  );
+
+  useEffect(() => {
+    if (currentPageData && !isLoading) {
+      setPages((prev) => {
+        const newPages = [...prev];
+        newPages[cursors.length - 1] = currentPageData;
+        return newPages;
+      });
+      setIsFetchingNextPage(false);
+    }
+  }, [currentPageData, isLoading]);
+
+  const hasNextPage = currentPageData
+    ? options.getNextPageParam(currentPageData) !== undefined
+    : false;
+
+  const fetchNextPage = useCallback(() => {
+    if (!currentPageData || !hasNextPage) return;
+
+    const nextCursor = options.getNextPageParam(currentPageData);
+    setCursors((prev) => [...prev, nextCursor]);
+    setIsFetchingNextPage(true);
+  }, [currentPageData, hasNextPage, options]);
+
+  const refetch = useCallback(() => {
+    setCursors([undefined]);
+    setPages([]);
+  }, []);
+
+  const flatData = pages.flat();
+
+  return {
+    data: flatData,
+    hasNextPage,
+    fetchNextPage,
+    isFetchingNextPage,
+    refetch
+  };
+}
+```
+
+#### Pagination with Real-time Updates
+
+When new data arrives via mutations, pagination behavior:
+
+**Cursor-based (Recommended)**:
+
+- New items appear naturally at the beginning of the list
+- Existing pages remain stable (no shifting)
+- Users can continue scrolling without disruption
+
+**Offset-based**:
+
+- May cause items to shift between pages
+- Consider re-fetching current page after mutations
+- Show "new items available" notification instead of auto-updating
+
+```typescript
+// Mutation with smart invalidation
+this.registerMutation<{ text: string }, { id: string }>(
+  "addTodo",
+  (args) => {
+    const id = nanoid();
+    this.sql`
+      INSERT INTO todos (id, text, created_at)
+      VALUES (${id}, ${args.text}, ${Date.now()})
+    `;
+    return { id };
+  },
+  {
+    // Invalidates all getTodos queries regardless of pagination params
+    invalidates: ["getTodos", "getTodosPaginated"]
+  }
+);
+
+// Client can choose to handle updates differently for paginated views
+const { mutate: addTodo } = useDurableMutation(agent, "addTodo", {
+  onSuccess: (result) => {
+    // For infinite scroll: prepend optimistically or refetch first page
+    // For pagination: show "new items" banner, don't auto-update
+  }
+});
+```
+
+#### Subscription Persistence for Paginated Queries
+
+Each page subscription is stored separately:
+
+```sql
+-- Subscriptions table tracks cursor/page for each subscription
+CREATE TABLE cf_agents_query_subscriptions (
+  connection_id TEXT,
+  query_name TEXT,
+  query_args TEXT,  -- JSON: { "cursor": "1234567890", "limit": 20 }
+  subscribed_at INTEGER
+);
+```
+
+When a client has multiple pages loaded (e.g., scrolled down), each page maintains its own subscription. On reconnection after hibernation, all subscriptions are restored.
+
 ### Hibernation Strategy
 
 **Challenge**: When a Durable Object hibernates, the Agent instance is destroyed but WebSocket connections persist. On wake-up, we need to restore query subscriptions.
@@ -912,7 +1143,7 @@ The implementation is backwards-compatible and can be added incrementally withou
 ## Questions for Discussion
 
 1. Should we support optimistic updates at the framework level?
-2. How should we handle query pagination?
+2. ~~How should we handle query pagination?~~ ✅ **Resolved**: Support both cursor-based (recommended) and offset-based pagination with `useDurableInfiniteQuery` hook
 3. Should mutations support rollback on error?
 4. What's the right balance between caching and freshness?
 5. Should we expose raw SQL subscriptions or stick to named queries?
