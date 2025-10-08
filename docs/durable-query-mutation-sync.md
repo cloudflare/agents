@@ -1031,12 +1031,232 @@ When a client has multiple pages loaded (e.g., scrolled down), each page maintai
 3. Immediately send current query results for all subscriptions
 4. Clean up subscriptions only when the connection is permanently closed
 
+### Storage Backend Selection with Drizzle ORM
+
+**Challenge**: Durable Object SQLite storage is limited to 10GB per instance. For larger datasets or multi-tenant scenarios, we need to support external databases like D1.
+
+**Solution**: Use **Drizzle ORM** to abstract the database layer, supporting both:
+
+- **Local SQLite** (default): Isolated per Durable Object, no filtering needed
+- **D1 or other databases**: Shared database with automatic user filtering
+
+#### Drizzle Schema Definition
+
+```typescript
+import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+
+// Define schema with optional userId for multi-tenancy
+export const todos = sqliteTable("todos", {
+  id: text("id").primaryKey(),
+  userId: text("user_id"), // Only used with D1/shared databases
+  text: text("text").notNull(),
+  completed: integer("completed", { mode: "boolean" }).default(false),
+  created_at: integer("created_at", { mode: "timestamp" }).notNull()
+});
+
+export type Todo = typeof todos.$inferSelect;
+export type NewTodo = typeof todos.$inferInsert;
+```
+
+#### Agent Configuration
+
+```typescript
+import { drizzle } from "drizzle-orm/d1";
+import { drizzle as drizzleSqlite } from "drizzle-orm/durable-objects";
+import { eq, and, desc } from "drizzle-orm";
+import * as schema from "./schema";
+
+type DatabaseConfig =
+  | { type: "local-sqlite" }
+  | { type: "d1"; binding: D1Database };
+
+export class TodoAgent extends Agent<Env, {}> {
+  private db: ReturnType<typeof drizzle>;
+  private dbConfig: DatabaseConfig;
+  private userIdFilter?: string; // Populated for shared databases
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+
+    // Determine database configuration
+    this.dbConfig = env.USE_D1
+      ? { type: "d1", binding: env.DB }
+      : { type: "local-sqlite" };
+
+    // Initialize Drizzle with appropriate adapter
+    if (this.dbConfig.type === "d1") {
+      this.db = drizzle(this.dbConfig.binding, { schema });
+      this.userIdFilter = this.name; // Use DO name as userId for filtering
+    } else {
+      this.db = drizzleSqlite(this.ctx.storage, { schema });
+      this.userIdFilter = undefined; // No filtering needed for local SQLite
+    }
+
+    // Register queries with automatic filtering
+    this.registerQuery<{ completed?: boolean }, Todo>(
+      "getTodos",
+      async (args) => {
+        let query = this.db
+          .select()
+          .from(schema.todos)
+          .orderBy(desc(schema.todos.created_at));
+
+        // Build filters array
+        const filters = [];
+
+        // CRITICAL: Add userId filter for shared databases
+        if (this.userIdFilter) {
+          filters.push(eq(schema.todos.userId, this.userIdFilter));
+        }
+
+        // Add user-specified filters
+        if (args.completed !== undefined) {
+          filters.push(eq(schema.todos.completed, args.completed));
+        }
+
+        if (filters.length > 0) {
+          query = query.where(and(...filters));
+        }
+
+        return await query;
+      },
+      { dependencies: ["todos"] }
+    );
+
+    // Register mutations with automatic userId injection
+    this.registerMutation<{ text: string }, { id: string }>(
+      "addTodo",
+      async (args) => {
+        const id = nanoid();
+        const newTodo: NewTodo = {
+          id,
+          text: args.text,
+          userId: this.userIdFilter, // Include userId for D1, undefined for local SQLite
+          completed: false,
+          created_at: new Date()
+        };
+
+        await this.db.insert(schema.todos).values(newTodo);
+        return { id };
+      },
+      { invalidates: ["getTodos"] }
+    );
+  }
+}
+```
+
+#### Automatic Query Filtering
+
+The system automatically adds `userId` filtering when using shared databases:
+
+**Local SQLite (default):**
+
+```sql
+-- No userId filter needed - already isolated per DO
+SELECT * FROM todos WHERE completed = 0 ORDER BY created_at DESC
+```
+
+**D1 (shared database):**
+
+```sql
+-- Automatic userId filter added (userId = this.name)
+SELECT * FROM todos
+WHERE user_id = 'user-123' AND completed = 0
+ORDER BY created_at DESC
+```
+
+#### Database Configuration
+
+```jsonc
+// wrangler.jsonc
+
+// Option 1: Use local SQLite (default)
+{
+  "name": "todo-agent",
+  "durable_objects": {
+    "bindings": [
+      { "name": "TodoAgent", "class_name": "TodoAgent" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TodoAgent"]  // Enable SQLite storage
+    }
+  ],
+  "vars": {
+    "USE_D1": "false"
+  }
+}
+
+// Option 2: Use D1 (shared database)
+{
+  "name": "todo-agent",
+  "durable_objects": {
+    "bindings": [
+      { "name": "TodoAgent", "class_name": "TodoAgent" }
+    ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "todos-db",
+      "database_id": "xxxx"
+    }
+  ],
+  "vars": {
+    "USE_D1": "true"
+  }
+}
+```
+
+#### Benefits of This Approach
+
+1. **Flexible Storage**: Choose between local SQLite (fast, isolated) or D1 (unlimited, shared)
+2. **Type Safety**: Drizzle provides full TypeScript types for all queries
+3. **Automatic Filtering**: No manual userId filtering needed - framework handles it
+4. **Same API**: Queries work identically regardless of storage backend
+5. **Migration Path**: Start with SQLite, migrate to D1 when you hit 10GB limit
+6. **Multi-tenancy**: D1 mode enables true multi-tenant architecture with shared database
+
+#### Storage Limits & Recommendations
+
+| Backend          | Limit              | Isolation             | Best For                                |
+| ---------------- | ------------------ | --------------------- | --------------------------------------- |
+| **Local SQLite** | 10GB per DO        | Per-user              | Small to medium datasets, fast access   |
+| **D1**           | No practical limit | Shared with filtering | Large datasets, analytics, multi-tenant |
+| **Hybrid**       | Mix both           | Configurable          | Hot data in SQLite, cold data in D1     |
+
+**Recommendation**: Start with local SQLite for simplicity and performance. Migrate to D1 when:
+
+- Approaching 10GB limit per user
+- Need cross-user analytics
+- Want to reduce per-DO storage costs
+- Building multi-tenant SaaS
+
+**Dependencies:**
+
+```json
+{
+  "dependencies": {
+    "drizzle-orm": "^0.30.0",
+    "@tanstack/react-query": "^5.0.0",
+    "agents": "latest"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.20.0"
+  }
+}
+```
+
 ### Performance Optimization
 
 1. **Query Result Caching**: Cache query results with a short TTL to avoid re-executing identical queries
 2. **Batched Broadcasting**: When multiple mutations occur in quick succession, batch the query updates
 3. **Selective Broadcasting**: Only send updates to connections subscribed to affected queries
 4. **Connection Pooling**: Reuse SQL prepared statements where possible
+5. **Database Selection**: Use local SQLite for fast access, D1 for unlimited storage
+6. **Pagination Efficiency**: Only re-fetch affected pages, not entire datasets
 
 ### Type Safety
 
