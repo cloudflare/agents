@@ -4,11 +4,11 @@
 
 ## Requirements
 
-You'll need a ChatGPT developer account to be able to use ChatGPT apps (connectors). To do so, from ChatGPT go to **Settings -> Apps & Connectors -> Advanced Settings -> Develper mode ON**.
+You'll need a ChatGPT developer account to be able to use ChatGPT apps (connectors). To do so, from ChatGPT go to **Settings -> Apps & Connectors -> Advanced Settings -> Developer mode ON**.
 
 ## Usage
 
-We'll be deploying a PizzaMCP that allows us to render and a few different pizza-related components.
+We'll be deploying a PizzaMCP that allows us to render a few different pizza-related components.
 All ChatGPT App MCPs are ready-to-ship with `agents`.
 
 Run `npm run deploy` and make a note of the URL your worker is hosted at. It should be something like `https://pizzaz-mcp.<your-account>.workers.dev`.
