@@ -131,8 +131,11 @@ export enum MessageType {
   CF_AGENT_QUERY_SUBSCRIBE = "cf_agent_query_subscribe",
   CF_AGENT_QUERY_UNSUBSCRIBE = "cf_agent_query_unsubscribe",
   CF_AGENT_QUERY_DATA = "cf_agent_query_data",
+  CF_AGENT_QUERY_ERROR = "cf_agent_query_error",
   CF_AGENT_MUTATION = "cf_agent_mutation",
-  CF_AGENT_MUTATION_RESULT = "cf_agent_mutation_result"
+  CF_AGENT_MUTATION_RESULT = "cf_agent_mutation_result",
+  CF_AGENT_HEARTBEAT = "cf_agent_heartbeat",
+  CF_AGENT_VERSION_MISMATCH = "cf_agent_version_mismatch"
 }
 ```
 
@@ -143,15 +146,21 @@ export enum MessageType {
 Store query definitions in the Agent class:
 
 ```typescript
+export type PaginationStrategy = "cursor" | "offset" | "stable-cursor";
+
 export type QueryDefinition<TArgs = unknown, TResult = unknown> = {
   name: string;
   execute: (args: TArgs, agent: Agent) => TResult[] | Promise<TResult[]>;
   dependencies?: string[]; // Table names that affect this query
+  pagination?: {
+    strategy: PaginationStrategy;
+    keyField: string; // Field to use for cursor (e.g., "created_at", "id")
+  };
 };
 
 export type MutationDefinition<TArgs = unknown, TResult = unknown> = {
   name: string;
-  execute: (args: TArgs, agent: Agent) => TResult | Promise<TResult>;
+  execute: (args: TArgs & { mutationId: string }, agent: Agent) => TResult | Promise<TResult>;
   invalidates?: string[]; // Query names to invalidate after mutation
 };
 
@@ -179,73 +188,147 @@ protected registerMutation<TArgs, TResult>(
 
 #### 2. Subscription Manager (Server-Side)
 
-Track which connections are subscribed to which queries:
+Track which connections are subscribed to which queries with connection deduplication and heartbeat support:
 
 ```typescript
 // Store in SQL for persistence across hibernation
 // cf_agents_query_subscriptions table schema:
-// - connection_id: TEXT
+// - dedupe_key: TEXT (PRIMARY KEY) - userId:queryName:queryArgs hash for deduplication
+// - user_id: TEXT
 // - query_name: TEXT
 // - query_args: TEXT (JSON serialized)
+// - connection_ids: TEXT (JSON array of connection IDs)
 // - subscribed_at: INTEGER
 
 export class QuerySubscriptionManager {
-  constructor(private agent: Agent) {}
+  private heartbeatInterval = 45000; // 45s to beat corporate proxies
+  private connectionGroups = new Map<string, Set<string>>();
+  private readonly MAX_SUBSCRIPTIONS_PER_USER = 100;
 
-  subscribe(connectionId: string, queryName: string, args: unknown) {
-    // Store subscription in SQL
+  constructor(private agent: Agent) {
+    this.setupHeartbeat();
+  }
+
+  private setupHeartbeat() {
+    setInterval(() => {
+      this.agent.broadcast(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_HEARTBEAT,
+          timestamp: Date.now()
+        })
+      );
+    }, this.heartbeatInterval);
+  }
+
+  subscribe(
+    connectionId: string,
+    userId: string,
+    queryName: string,
+    args: unknown
+  ) {
+    // Check subscription limits
+    const userSubs = this.agent.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_query_subscriptions 
+      WHERE user_id = ${userId}
+    `[0];
+
+    if (userSubs.count >= this.MAX_SUBSCRIPTIONS_PER_USER) {
+      throw new Error("Subscription limit exceeded");
+    }
+
+    // Group connections by userId to deduplicate subscriptions
+    if (!this.connectionGroups.has(userId)) {
+      this.connectionGroups.set(userId, new Set());
+    }
+    this.connectionGroups.get(userId)!.add(connectionId);
+
+    // Only store one subscription per userId+query combination
+    const dedupeKey = `${userId}:${queryName}:${JSON.stringify(args)}`;
     this.agent.sql`
       INSERT OR REPLACE INTO cf_agents_query_subscriptions 
-      (connection_id, query_name, query_args, subscribed_at)
-      VALUES (${connectionId}, ${queryName}, ${JSON.stringify(args)}, ${Date.now()})
+      (dedupe_key, user_id, query_name, query_args, connection_ids, subscribed_at)
+      VALUES (${dedupeKey}, ${userId}, ${queryName}, ${JSON.stringify(args)}, 
+              ${JSON.stringify([...this.connectionGroups.get(userId)!])}, ${Date.now()})
     `;
   }
 
-  unsubscribe(connectionId: string, queryName: string, args: unknown) {
-    const argsJson = JSON.stringify(args);
-    this.agent.sql`
-      DELETE FROM cf_agents_query_subscriptions 
-      WHERE connection_id = ${connectionId} 
-      AND query_name = ${queryName}
-      AND query_args = ${argsJson}
-    `;
+  unsubscribe(
+    connectionId: string,
+    userId: string,
+    queryName: string,
+    args: unknown
+  ) {
+    const dedupeKey = `${userId}:${queryName}:${JSON.stringify(args)}`;
+    this.connectionGroups.get(userId)?.delete(connectionId);
+
+    if (this.connectionGroups.get(userId)?.size === 0) {
+      // Remove subscription if no connections left
+      this.agent.sql`
+        DELETE FROM cf_agents_query_subscriptions 
+        WHERE dedupe_key = ${dedupeKey}
+      `;
+    } else {
+      // Update connection list
+      this.agent.sql`
+        UPDATE cf_agents_query_subscriptions 
+        SET connection_ids = ${JSON.stringify([...this.connectionGroups.get(userId)!])}
+        WHERE dedupe_key = ${dedupeKey}
+      `;
+    }
   }
 
-  getSubscriptions(connectionId: string) {
+  getSubscriptions(userId: string) {
     return this.agent.sql<{
       query_name: string;
       query_args: string;
     }>`
       SELECT query_name, query_args 
       FROM cf_agents_query_subscriptions 
-      WHERE connection_id = ${connectionId}
+      WHERE user_id = ${userId}
     `;
   }
 
   getSubscribersForQuery(queryName: string) {
     return this.agent.sql<{
-      connection_id: string;
+      user_id: string;
+      connection_ids: string;
       query_args: string;
     }>`
-      SELECT connection_id, query_args 
+      SELECT user_id, connection_ids, query_args 
       FROM cf_agents_query_subscriptions 
       WHERE query_name = ${queryName}
     `;
   }
 
-  cleanupConnection(connectionId: string) {
-    this.agent.sql`
-      DELETE FROM cf_agents_query_subscriptions 
-      WHERE connection_id = ${connectionId}
-    `;
+  cleanupConnection(connectionId: string, userId: string) {
+    this.connectionGroups.get(userId)?.delete(connectionId);
+
+    // Update all subscriptions to remove this connection
+    const activeConnections = this.connectionGroups.get(userId);
+    if (activeConnections && activeConnections.size > 0) {
+      this.agent.sql`
+        UPDATE cf_agents_query_subscriptions 
+        SET connection_ids = ${JSON.stringify([...activeConnections])}
+        WHERE user_id = ${userId}
+      `;
+    } else {
+      // Remove all subscriptions for this user if no connections left
+      this.agent.sql`
+        DELETE FROM cf_agents_query_subscriptions 
+        WHERE user_id = ${userId}
+      `;
+      this.connectionGroups.delete(userId);
+    }
   }
 }
 ```
 
-#### 3. Query Execution & Broadcasting
+#### 3. Query Execution & Broadcasting with Versioning
 
 ```typescript
 // In Agent class
+private globalVersion = 0;
+
 private async executeQuery(queryName: string, args: unknown) {
   const queryDef = this.queries.get(queryName);
   if (!queryDef) {
@@ -254,28 +337,55 @@ private async executeQuery(queryName: string, args: unknown) {
   return await queryDef.execute(args, this);
 }
 
-private async broadcastQueryUpdate(queryName: string) {
+private async broadcastQueryUpdate(queryName: string, version: number) {
   const subscribers = this.subscriptionManager.getSubscribersForQuery(queryName);
 
   for (const sub of subscribers) {
     const args = JSON.parse(sub.query_args);
     const data = await this.executeQuery(queryName, args);
 
-    const connection = this.getConnections().find(c => c.id === sub.connection_id);
-    if (connection) {
-      connection.send(JSON.stringify({
-        type: MessageType.CF_AGENT_QUERY_DATA,
-        queryName,
-        args,
-        data,
-        timestamp: Date.now()
-      }));
+    // Store update for hibernation recovery
+    this.sql`
+      INSERT INTO cf_agents_query_updates (query_name, query_args, version, created_at)
+      VALUES (${queryName}, ${sub.query_args}, ${version}, ${Date.now()})
+    `;
+
+    // Send updated data to all user's connections
+    const connectionIds = JSON.parse(sub.connection_ids);
+    for (const connectionId of connectionIds) {
+      const connection = this.connections.get(connectionId);
+      if (connection) {
+        try {
+          connection.send(JSON.stringify({
+            type: MessageType.CF_AGENT_QUERY_DATA,
+            queryName,
+            args,
+            data,
+            version,
+            timestamp: Date.now()
+          }));
+        } catch (error) {
+          // Handle WebSocket errors gracefully
+          console.warn(`Failed to send to connection ${connectionId}:`, error);
+          this.connections.delete(connectionId);
+        }
+      }
     }
   }
 }
 
-// Trigger broadcasts after mutations
-private async executeMutation(mutationName: string, args: unknown) {
+// Trigger broadcasts after mutations with idempotency
+private async executeMutation(mutationName: string, args: unknown & { mutationId: string }) {
+  // Check for duplicate mutation (idempotency)
+  const existing = this.sql<{ result: string }>`
+    SELECT result FROM cf_agents_mutations
+    WHERE mutation_id = ${args.mutationId}
+  `[0];
+
+  if (existing) {
+    return JSON.parse(existing.result); // Return cached result
+  }
+
   const mutationDef = this.mutations.get(mutationName);
   if (!mutationDef) {
     throw new Error(`Mutation ${mutationName} not found`);
@@ -283,10 +393,23 @@ private async executeMutation(mutationName: string, args: unknown) {
 
   const result = await mutationDef.execute(args, this);
 
+  // Store result for idempotency
+  this.sql`
+    INSERT INTO cf_agents_mutations (mutation_id, mutation_name, args, result, created_at)
+    VALUES (${args.mutationId}, ${mutationName}, ${JSON.stringify(args)}, ${JSON.stringify(result)}, ${Date.now()})
+  `;
+
+  // Increment global version for ordering
+  this.globalVersion++;
+  this.sql`
+    INSERT OR REPLACE INTO cf_agents_metadata (key, value)
+    VALUES ('global_version', ${this.globalVersion})
+  `;
+
   // Invalidate and re-broadcast affected queries
   if (mutationDef.invalidates) {
     for (const queryName of mutationDef.invalidates) {
-      await this.broadcastQueryUpdate(queryName);
+      await this.broadcastQueryUpdate(queryName, this.globalVersion);
     }
   }
 
@@ -1020,16 +1143,354 @@ CREATE TABLE cf_agents_query_subscriptions (
 
 When a client has multiple pages loaded (e.g., scrolled down), each page maintains its own subscription. On reconnection after hibernation, all subscriptions are restored.
 
-### Hibernation Strategy
+### Hibernation Strategy with Missed Update Recovery
 
-**Challenge**: When a Durable Object hibernates, the Agent instance is destroyed but WebSocket connections persist. On wake-up, we need to restore query subscriptions.
+**Challenge**: When a Durable Object hibernates, the Agent instance is destroyed but WebSocket connections persist. On wake-up, we need to restore query subscriptions and replay missed updates.
 
 **Solution**:
 
 1. Store all subscriptions in the SQL database (`cf_agents_query_subscriptions` table)
-2. On `onConnect`, check if this is a reconnection by looking up existing subscriptions
-3. Immediately send current query results for all subscriptions
+2. Store query updates with versions in `cf_agents_query_updates` table
+3. On `onConnect`, check if this is a reconnection and replay missed updates
 4. Clean up subscriptions only when the connection is permanently closed
+
+````typescript
+export class Agent extends Server {
+  private lastWakeTime = Date.now();
+
+  async onConnect(connection: Connection) {
+    const connectionId = connection.id;
+    const userId = await this.extractUserId(connection);
+
+    if (!userId) {
+      connection.close(1008, "Authentication required");
+      return;
+    }
+
+    // Check for existing subscriptions (reconnection after hibernation)
+    const existingSubscriptions = this.subscriptionManager.getSubscriptions(userId);
+
+    if (existingSubscriptions.length > 0) {
+      // This is a reconnection - replay missed updates
+      for (const sub of existingSubscriptions) {
+        const queryName = sub.query_name;
+        const args = JSON.parse(sub.query_args);
+
+        // Check for missed updates since last wake
+        const missedUpdates = this.sql<{ version: number; data: string }>`
+          SELECT version, data FROM cf_agents_query_updates
+          WHERE query_name = ${queryName}
+          AND query_args = ${sub.query_args}
+          AND created_at > ${this.lastWakeTime}
+          ORDER BY version ASC
+        `;
+
+        if (missedUpdates.length > 0) {
+          // Send the latest update
+          const latestUpdate = missedUpdates[missedUpdates.length - 1];
+          connection.send(JSON.stringify({
+            type: MessageType.CF_AGENT_QUERY_DATA,
+            queryName,
+            args,
+            data: JSON.parse(latestUpdate.data),
+            version: latestUpdate.version,
+            timestamp: Date.now()
+          }));
+        } else {
+          // No missed updates, send current data
+          const currentData = await this.executeQuery(queryName, args);
+          connection.send(JSON.stringify({
+            type: MessageType.CF_AGENT_QUERY_DATA,
+            queryName,
+            args,
+            data: currentData,
+            version: this.globalVersion,
+            timestamp: Date.now()
+          }));
+        }
+      }
+
+      // Update connection mapping
+      this.subscriptionManager.addConnectionToUser(connectionId, userId);
+    }
+
+    this.lastWakeTime = Date.now();
+  }
+
+  async onClose(connection: Connection) {
+    const userId = await this.extractUserId(connection);
+    if (userId) {
+      this.subscriptionManager.cleanupConnection(connection.id, userId);
+    }
+  }
+}
+
+### Security & Resource Management
+
+**Critical security considerations and resource limits:**
+
+```typescript
+export class Agent extends Server {
+  private readonly MAX_MESSAGE_SIZE = 64 * 1024; // 64KB
+  private readonly MAX_SUBSCRIPTIONS_PER_USER = 100;
+  private readonly MAX_BROADCAST_QUEUE = 100;
+  private readonly HEARTBEAT_INTERVAL = 45000; // 45s to beat corporate proxies
+
+  async onMessage(connection: Connection, message: string | ArrayBuffer) {
+    if (typeof message !== "string") {
+      connection.close(1003, "Binary messages not supported");
+      return;
+    }
+
+    // Message size limit
+    if (message.length > this.MAX_MESSAGE_SIZE) {
+      connection.close(1009, "Message too large");
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(message);
+
+      // Version compatibility check
+      if (parsed.version && parsed.version !== CURRENT_PROTOCOL_VERSION) {
+        connection.send(JSON.stringify({
+          type: MessageType.CF_AGENT_VERSION_MISMATCH,
+          supportedVersion: CURRENT_PROTOCOL_VERSION,
+          clientVersion: parsed.version
+        }));
+        return;
+      }
+
+      // Extract and verify user authorization
+      const userId = await this.extractUserId(connection);
+      if (!userId) {
+        connection.close(1008, "Authentication required");
+        return;
+      }
+
+      // Rate limiting per user
+      if (await this.isRateLimited(userId)) {
+        connection.send(JSON.stringify({
+          type: MessageType.CF_AGENT_QUERY_ERROR,
+          error: "Rate limit exceeded"
+        }));
+        return;
+      }
+
+      // Subscription limits
+      if (parsed.type === MessageType.CF_AGENT_QUERY_SUBSCRIBE) {
+        const userSubs = this.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_query_subscriptions
+          WHERE user_id = ${userId}
+        `[0];
+
+        if (userSubs.count >= this.MAX_SUBSCRIPTIONS_PER_USER) {
+          connection.send(JSON.stringify({
+            type: MessageType.CF_AGENT_QUERY_ERROR,
+            error: "Subscription limit exceeded"
+          }));
+          return;
+        }
+      }
+
+      // Cross-tenant isolation check
+      if (parsed.type === MessageType.CF_AGENT_QUERY_SUBSCRIBE ||
+          parsed.type === MessageType.CF_AGENT_MUTATION) {
+        if (!await this.verifyUserAccess(userId, parsed)) {
+          connection.close(1008, "Unauthorized access");
+          return;
+        }
+      }
+
+      // Process message with user context
+      await this.handleMessage(connection, parsed, userId);
+
+    } catch (error) {
+      console.warn("Invalid message:", error);
+      connection.close(1002, "Invalid JSON");
+    }
+  }
+
+  // Safe broadcast with resource limits
+  broadcast(message: string, excludeConnectionIds?: string[]) {
+    const connections = [...this.connections.values()]
+      .filter(conn => !excludeConnectionIds?.includes(conn.id))
+      .slice(0, this.MAX_BROADCAST_QUEUE); // Limit broadcast size
+
+    let successCount = 0;
+    let errorCount = 0;
+
+    connections.forEach(conn => {
+      try {
+        conn.send(message);
+        successCount++;
+      } catch (error) {
+        errorCount++;
+        console.warn(`Failed to send to connection ${conn.id}:`, error);
+        this.connections.delete(conn.id);
+      }
+    });
+
+    // Log metrics for monitoring
+    if (errorCount > 0) {
+      console.log(`Broadcast: ${successCount} sent, ${errorCount} failed`);
+    }
+  }
+
+  private async extractUserId(connection: Connection): Promise<string | null> {
+    // Extract from JWT in headers or URL params
+    const token = connection.request?.headers?.authorization?.replace('Bearer ', '') ||
+                  connection.request?.url?.searchParams?.get('token');
+
+    if (!token) return null;
+
+    try {
+      const payload = await this.verifyJWT(token);
+      return payload.sub || payload.userId;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private async verifyUserAccess(userId: string, message: any): Promise<boolean> {
+    // Implement tenant isolation logic
+    // Ensure user can only access their own data
+
+    if (message.type === MessageType.CF_AGENT_QUERY_SUBSCRIBE) {
+      // Check if user can subscribe to this query with these args
+      return await this.canUserAccessQuery(userId, message.queryName, message.args);
+    }
+
+    if (message.type === MessageType.CF_AGENT_MUTATION) {
+      // Check if user can execute this mutation
+      return await this.canUserExecuteMutation(userId, message.mutationName, message.args);
+    }
+
+    return false;
+  }
+
+  private async isRateLimited(userId: string): Promise<boolean> {
+    const window = 60 * 1000; // 1 minute
+    const maxRequests = 100; // 100 requests per minute
+
+    const key = `rate_limit:${userId}`;
+    const count = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_rate_limits
+      WHERE user_id = ${userId} AND created_at > ${Date.now() - window}
+    `[0]?.count || 0;
+
+    if (count >= maxRequests) {
+      return true;
+    }
+
+    // Record this request
+    this.sql`
+      INSERT INTO cf_agents_rate_limits (user_id, created_at)
+      VALUES (${userId}, ${Date.now()})
+    `;
+
+    // Cleanup old entries
+    this.sql`
+      DELETE FROM cf_agents_rate_limits
+      WHERE created_at < ${Date.now() - window}
+    `;
+
+    return false;
+  }
+}
+````
+
+### Database Schema for Edge Case Handling
+
+**Required tables for robust operation:**
+
+```sql
+-- Query subscriptions with deduplication
+CREATE TABLE cf_agents_query_subscriptions (
+  dedupe_key TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  query_name TEXT NOT NULL,
+  query_args TEXT NOT NULL,
+  connection_ids TEXT NOT NULL, -- JSON array
+  subscribed_at INTEGER NOT NULL
+);
+
+-- Mutation idempotency tracking
+CREATE TABLE cf_agents_mutations (
+  mutation_id TEXT PRIMARY KEY,
+  mutation_name TEXT NOT NULL,
+  args TEXT NOT NULL,
+  result TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- Query update history for hibernation recovery
+CREATE TABLE cf_agents_query_updates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  query_name TEXT NOT NULL,
+  query_args TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- Global metadata
+CREATE TABLE cf_agents_metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- Rate limiting
+CREATE TABLE cf_agents_rate_limits (
+  user_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- Indexes for performance
+CREATE INDEX idx_subscriptions_user ON cf_agents_query_subscriptions(user_id);
+CREATE INDEX idx_subscriptions_query ON cf_agents_query_subscriptions(query_name);
+CREATE INDEX idx_updates_query ON cf_agents_query_updates(query_name, query_args);
+CREATE INDEX idx_updates_version ON cf_agents_query_updates(version);
+CREATE INDEX idx_rate_limits_user ON cf_agents_rate_limits(user_id, created_at);
+```
+
+### Critical Edge Cases & Mitigations
+
+**1. Connection Management:**
+
+- ✅ **Multiple tabs**: Deduplicate subscriptions by userId+query
+- ✅ **Corporate proxies**: 45s heartbeat interval
+- ✅ **WebSocket errors**: Graceful error handling with connection cleanup
+- ✅ **Back-pressure**: Limit broadcast queue to prevent memory exhaustion
+
+**2. Data Consistency:**
+
+- ✅ **Mutation idempotency**: Server-side mutation ID tracking
+- ✅ **Out-of-order updates**: Version numbering for proper ordering
+- ✅ **Hibernation gaps**: Store and replay missed updates
+- ✅ **Pagination drift**: Strategy selection (cursor vs offset)
+
+**3. Security & Resource Limits:**
+
+- ✅ **Cross-tenant access**: User isolation with JWT verification
+- ✅ **Message size limits**: 64KB max message size
+- ✅ **Subscription limits**: 100 subscriptions per user
+- ✅ **Rate limiting**: 100 requests per minute per user
+- ✅ **Version compatibility**: Protocol version checking
+
+**4. React Integration:**
+
+- ✅ **StrictMode**: Prevent duplicate subscriptions
+- ✅ **SSR hydration**: Proper initialization order
+- ✅ **Background tabs**: Resource cleanup and optimization
+- ✅ **Optimistic updates**: TanStack Query integration
+
+**5. Performance & Monitoring:**
+
+- ✅ **Broadcast metrics**: Success/failure tracking
+- ✅ **Query performance**: Proper indexing
+- ✅ **Memory management**: Subscription cleanup
+- ✅ **Debug logging**: Comprehensive error reporting
 
 ### Storage Backend Selection with Drizzle ORM
 
