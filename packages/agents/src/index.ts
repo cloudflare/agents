@@ -36,6 +36,7 @@ import {
   processNDJSONStream,
   REALTIME_AGENTS_SERVICE,
   RealtimeKitTransport,
+  TextProcessor,
   type RealtimePipelineComponent
 } from "./realtime-agent";
 import { randomUUID } from "node:crypto";
@@ -356,10 +357,11 @@ export class Agent<
     return DataKind.Text;
   }
 
-  schema() {
+  schema(): { name: string; type: string; [K: string]: any } {
     return {
       name: this._ParentClass.name,
-      type: "agent"
+      type: "agent",
+      internal_sdk: true
     };
   }
 
@@ -1917,25 +1919,17 @@ export class Agent<
     const { request } = getCurrentAgent();
     if (!request) throw new Error("request is required");
 
-    console.log("initializing realtime pipeline");
     const requestUrl = new URL(request.url);
     const agentId = this.name;
     const agentName = camelCaseToKebabCase(this._ParentClass.name);
     const agentURL = `${requestUrl.host}/agents/${agentName}/${agentId}/realtime`;
 
-    const elements: { name: string; [K: string]: any }[] = [
-      {
-        name: "ws_out",
-        type: "websocket_out",
-        internal_sdk: true,
-        url: `wss://${agentURL}/ws`
-      },
-      {
-        name: "ws_in_text",
-        internal_sdk: true,
-        type: "websocket_in"
-      }
-    ];
+    // We need to check if the components array have any instance of
+    // Agent or TextProcessor, in that case we need to split the components
+    // into two layers, where the first layers end at that component
+    // and the second layer starts from that component. The Agent/TextProcessor
+    // are websocket element, we will be using bidirectional websocket so only
+    // one websocket element will be acting as input and output both.
 
     const layers: { id: number; name: string; elements: string[] }[] = [
       {
@@ -1944,32 +1938,41 @@ export class Agent<
         elements: []
       }
     ];
+    let elements: { name: string; [K: string]: any }[] = [];
 
     for (const component of components) {
-      if (component instanceof Agent) {
-        layers[layers.length - 1].elements.push("ws_out");
+      let schema = component.schema();
+      if (component instanceof Agent || component instanceof TextProcessor) {
+        if (component instanceof Agent) {
+          schema.type = "websocket";
+          schema.url = `wss://${agentURL}`;
+        }
+        layers[layers.length - 1].elements.push(schema.name);
+
         layers.push({
           id: layers.length + 1,
           name: `default-${layers.length + 1}`,
-          elements: ["ws_in_text"]
+          elements: []
         });
-      } else {
-        if (elements.filter((e) => e.name === component.name).length === 0) {
-          if (component instanceof RealtimeKitTransport)
-            elements.push({
-              ...component.schema(),
-              worker_url: `https://${agentURL}`
-            });
-          else elements.push(component.schema());
-        }
-        layers[layers.length - 1].elements.push(component.name);
       }
+
+      if (component instanceof RealtimeKitTransport) {
+        schema.worker_url = `https://${agentURL}`;
+      }
+      elements.push(schema);
+      layers[layers.length - 1].elements.push(schema.name);
     }
+
+    elements = elements.filter(
+      (v, idx, arr) => idx === arr.findIndex((v1) => v1.name === v.name)
+    );
+
+    console.log("layers", layers, "elements", elements);
 
     const response = await fetch(
       `${CLOUDFLARE_BASE}/client/v4/accounts/${CF_ACCOUNT_ID}/realtime/agents/pipeline`,
+      // `${REALTIME_AGENTS_SERVICE}/pipeline`,
       {
-        // const response = await fetch(`${REALTIME_AGENTS_SERVICE}/pipeline`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${CF_API_TOKEN}`,
@@ -2014,8 +2017,7 @@ export class Agent<
     // check if instance is already started
     if (this.realtimePipelineRunning)
       throw new Error("agent is already running");
-    const components = this.realtimePipelineComponents!();
-    await this.initRealtimePipeline(components);
+    await this.initRealtimePipeline(this.realtimePipelineComponents!());
 
     const startResponse = await fetch(
       `${REALTIME_AGENTS_SERVICE}/pipeline?authToken=${this._rtk_authToken}`,
