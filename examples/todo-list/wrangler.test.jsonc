@@ -1,0 +1,22 @@
+{
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TodoAgent",
+        "name": "TodoAgent"
+      }
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["TodoAgent"],
+      "tag": "v1"
+    }
+  ]
+}
