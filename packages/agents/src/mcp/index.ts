@@ -17,7 +17,9 @@ import {
   handleCORS,
   isDurableObjectNamespace,
   MCP_HTTP_METHOD_HEADER,
-  MCP_MESSAGE_HEADER
+  MCP_MESSAGE_ENCODING_HEADER,
+  MCP_MESSAGE_HEADER,
+  MAXIMUM_MESSAGE_SIZE_BYTES
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 
@@ -153,7 +155,43 @@ export abstract class McpAgent<
             case "POST": {
               // This returns the repsonse directly to the client
               const payloadHeader = req.headers.get(MCP_MESSAGE_HEADER);
-              const parsedBody = await JSON.parse(payloadHeader ?? "{}");
+              const encodingHeader = req.headers.get(
+                MCP_MESSAGE_ENCODING_HEADER
+              );
+              let rawPayload: string;
+
+              // fallback to empty object if no payload header
+              if (!payloadHeader) {
+                rawPayload = "{}";
+              } else if (!encodingHeader) {
+                // if no encoding header, use the payload header as is
+                rawPayload = payloadHeader; // backward compatibility
+              } else if (encodingHeader === "base64") {
+                try {
+                  rawPayload = Buffer.from(payloadHeader, "base64").toString(
+                    "utf-8"
+                  );
+                } catch (_error) {
+                  throw new Error(
+                    "Internal Server Error: Failed to decode MCP message header"
+                  );
+                }
+              } else {
+                throw new Error(
+                  `Internal Server Error: Unsupported MCP message encoding: ${encodingHeader}`
+                );
+              }
+
+              if (
+                Buffer.byteLength(rawPayload, "utf-8") >
+                MAXIMUM_MESSAGE_SIZE_BYTES
+              ) {
+                throw new Error(
+                  "Internal Server Error: MCP message exceeds maximum supported size"
+                );
+              }
+
+              const parsedBody = JSON.parse(rawPayload);
               this._transport?.handlePostRequest(req, parsedBody);
               break;
             }
