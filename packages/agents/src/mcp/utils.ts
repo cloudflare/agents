@@ -232,6 +232,8 @@ export const createStreamingHttpHandler = (
           existingHeaders[key] = value;
         });
 
+        // Remove MCP-specific headers to prevent stale/corrupted data from
+        // propagating (e.g., from retries, proxies, or cached requests)
         delete existingHeaders[MCP_MESSAGE_HEADER];
         delete existingHeaders[MCP_MESSAGE_ENCODING_HEADER];
 
