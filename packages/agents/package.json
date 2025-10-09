@@ -126,7 +126,8 @@
     "evals": "(cd evals; evalite)",
     "test": "vitest -r src/tests",
     "test:react": "vitest -r src/react-tests",
-    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent"
+    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent",
+    "test:v2": "vitest -r src/v2/tests --run --sequence.concurrent"
   },
   "type": "module",
   "types": "dist/index.d.ts",
