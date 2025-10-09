@@ -225,10 +225,6 @@ export const createStreamingHttpHandler = (
           existingHeaders[key] = value;
         });
 
-        // Remove MCP message header to prevent stale/corrupted data from
-        // propagating (e.g., from retries, proxies, or cached requests)
-        delete existingHeaders[MCP_MESSAGE_HEADER];
-
         const req = new Request(request.url, {
           headers: {
             ...existingHeaders,
