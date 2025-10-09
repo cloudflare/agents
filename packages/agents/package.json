@@ -130,6 +130,11 @@
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",
       "require": "./dist/mcp/x402.js"
+    },
+    "./v2": {
+      "types": "./dist/v2/index.d.ts",
+      "import": "./dist/v2/index.js",
+      "require": "./dist/v2/index.js"
     }
   },
   "publishConfig": {

@@ -1,5 +1,6 @@
 import { env } from "cloudflare:test";
 import type { Env } from "./worker";
+import type { Persisted } from "../types";
 
 /**
  * Helper to wait for async operations in Durable Objects
@@ -43,7 +44,7 @@ export async function fetchThreadState(
     method: "GET"
   });
   const res = await worker.fetch(req, env, ctx);
-  return res.json();
+  return res.json<Persisted>();
 }
 
 /**

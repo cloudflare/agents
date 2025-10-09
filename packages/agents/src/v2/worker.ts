@@ -5,10 +5,9 @@ import type {
   ToolHandler,
   ApproveBody,
   Persisted,
-  RunState,
   ToolCall
 } from "./types";
-import { Agent, type Connection } from "agents";
+import { Agent } from "../";
 import { vfs, hitl } from "./middleware";
 import { step } from "./runner";
 import { type AgentEvent, AgentEventType } from "./events";
@@ -37,7 +36,7 @@ export const createAgentThread = (options: {
   provider: Provider;
   middleware?: AgentMiddleware[];
   initialState?: AgentState;
-}) => {
+}): typeof Agent<unknown> => {
   return class extends Agent {
     provider = options.provider;
     middleware: AgentMiddleware[] = options.middleware ?? [
@@ -274,10 +273,10 @@ export const createAgentThread = (options: {
             tool_name: call.name,
             output: out
           });
-        } catch (e: any) {
+        } catch (e: unknown) {
           this.emit(persist, AgentEventType.TOOL_ERROR, {
             tool_name: call.name,
-            error: String(e?.message ?? e)
+            error: String(e instanceof Error ? e.message : e)
           });
           // keep going; model can recover
         }
@@ -290,8 +289,42 @@ export const createAgentThread = (options: {
         return;
       }
 
+      // we wrap provider to emit events
+      const observedProvider: Provider = {
+        invoke: async (req, opts) => {
+          this.emit(persist, AgentEventType.MODEL_STARTED, {
+            model: req.model
+          });
+          const out = await this.provider.invoke(req, opts);
+          this.emit(persist, AgentEventType.MODEL_COMPLETED, {
+            usage: {
+              input_tokens: out.usage?.promptTokens ?? 0,
+              output_tokens: out.usage?.completionTokens ?? 0
+            }
+          });
+          return out;
+        },
+        stream: async (req, onDelta) => {
+          this.emit(persist, AgentEventType.MODEL_STARTED, {
+            model: req.model
+          });
+          const out = await this.provider.stream(req, (d) => {
+            this.emit(persist, AgentEventType.MODEL_DELTA, { delta: d });
+            onDelta(d);
+          });
+          this.emit(persist, AgentEventType.MODEL_COMPLETED, {
+            usage: undefined
+          });
+          return out;
+        }
+      };
+
       // Now do one model step
-      const verdict = await step(this.provider, this.middleware, persist.state);
+      const verdict = await step(
+        observedProvider,
+        this.middleware,
+        persist.state
+      );
       persist.state = verdict.state;
 
       if (verdict.kind === "paused") {
@@ -328,7 +361,6 @@ export const createAgentThread = (options: {
         return;
       }
 
-      // continue: assistant proposed tool calls; move them into pending and reschedule
       const last = persist.state.messages[persist.state.messages.length - 1];
       const calls =
         last?.role === "assistant" &&

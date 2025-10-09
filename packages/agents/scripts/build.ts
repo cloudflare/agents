@@ -13,7 +13,8 @@ async function main() {
       "src/mcp/do-oauth-client-provider.ts",
       "src/mcp/x402.ts",
       "src/observability/index.ts",
-      "src/codemode/ai.ts"
+      "src/codemode/ai.ts",
+      "src/v2/index.ts"
     ],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],
