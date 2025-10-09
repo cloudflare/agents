@@ -1,3 +1,5 @@
+import { getAgentByName, type Agent } from "../index";
+
 // The hope is that you only have to write the following
 `
 import { createAgentThread } from "./worker";
@@ -11,11 +13,11 @@ export AgentThread;
 export default createHandler(); // this is the entrypoint to the worker
 `;
 
-export const createHandler = (_opts: { baseUrl?: string }) => {
+export const createHandler = (_opts: { baseUrl?: string } = {}) => {
   return {
     async fetch(
       req: Request,
-      env: { AGENT_THREAD: DurableObjectNamespace },
+      env: { AGENT_THREAD: DurableObjectNamespace<Agent> },
       _ctx: ExecutionContext
     ) {
       const url = new URL(req.url);
@@ -25,8 +27,6 @@ export const createHandler = (_opts: { baseUrl?: string }) => {
       }
 
       if (req.method === "GET" && url.pathname === "/dashboard") {
-        // TODO: We must expose a nice dashboard here to use all of this.
-        // We want this library to be usable out of the box.
         return new Response("Not implemented", {
           status: 200,
           headers: { "content-type": "text/html" }
@@ -36,16 +36,36 @@ export const createHandler = (_opts: { baseUrl?: string }) => {
       const match = url.pathname.match(/^\/threads\/([^/]+)(?:\/(.*))?$/);
       if (!match) return new Response("not found", { status: 404 });
       const [_, threadId, tail] = match;
+      const stub = await getAgentByName(env.AGENT_THREAD, threadId);
 
-      const stub = env.AGENT_THREAD.get(env.AGENT_THREAD.idFromName(threadId));
+      // Create a new request with the path that the DO expects
+      const doUrl = new URL(req.url);
+      doUrl.pathname = `/${tail || ""}`;
 
-      // We rather do everything through WS, so we don't need to handle SSE here
-      if (tail === "invoke") return stub.fetch(req);
-      if (tail === "approve") return stub.fetch(req);
-      if (tail === "state") return stub.fetch(req);
+      // For invoke requests, inject thread_id into the body
+      let doReq: Request;
+      if (tail === "invoke" && req.method === "POST") {
+        const body = (await req.json().catch(() => ({}))) as Record<
+          string,
+          unknown
+        >;
+        body.thread_id = threadId;
+        doReq = new Request(doUrl, {
+          method: req.method,
+          headers: req.headers,
+          body: JSON.stringify(body)
+        });
+      } else {
+        doReq = new Request(doUrl, req);
+      }
+
+      if (tail === "invoke" && req.method === "POST") return stub.fetch(doReq);
+      if (tail === "approve" && req.method === "POST") return stub.fetch(doReq);
+      if (tail === "cancel" && req.method === "POST") return stub.fetch(doReq);
+      if (tail === "state" && req.method === "GET") return stub.fetch(doReq);
+      if (tail === "events" && req.method === "GET") return stub.fetch(doReq);
       if (tail === "ws" && req.headers.get("upgrade") === "websocket")
-        return stub.fetch(req); // DO handles WS accept
-
+        return stub.fetch(doReq);
       return new Response("not found", { status: 404 });
     }
   };

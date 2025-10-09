@@ -67,6 +67,7 @@ export interface AgentState {
 export type Persisted = {
   state: AgentState;
   run: RunState | null;
+  thread_id?: string; // human-readable thread identifier
   // ring buffer of recent events for dashboard
   events: AgentEvent[];
   events_seq: number; // monotonically increasing sequence

@@ -66,7 +66,7 @@ export const createAgentThread = (options: {
       const evt = {
         type,
         data,
-        thread_id: this.ctx.id.toString(),
+        thread_id: persist.thread_id || this.ctx.id.toString(),
         ts: new Date().toISOString(),
         seq: ++persist.events_seq
       } as AgentEvent;
@@ -80,56 +80,82 @@ export const createAgentThread = (options: {
     }
 
     // callback exposed by Agent class
-    onRequest(req: Request) {
+    async onRequest(req: Request) {
       const url = new URL(req.url);
-      if (url.pathname === "/invoke") return this.invoke(req);
-      if (url.pathname === "/approve") return this.approve(req);
-      if (url.pathname === "/cancel") return this.cancel(req);
-      if (url.pathname === "/state") return this.getState(req);
-      if (url.pathname === "/events") return this.getEvents(req);
-      return new Response("not found", { status: 404 });
+      switch (url.pathname) {
+        case "/invoke":
+          return this.invoke(req);
+        case "/approve":
+          return this.approve(req);
+        case "/cancel":
+          return this.cancel(req);
+        case "/state":
+          return this.getState(req);
+        case "/events":
+          return this.getEvents(req);
+        default:
+          return new Response("not found", { status: 404 });
+      }
     }
 
     async invoke(req: Request) {
-      const body = (await req.json().catch(() => ({}))) as {
-        messages?: AgentState["messages"];
-        files?: Record<string, string>;
-        idempotencyKey?: string;
-      };
-      const persist = this.load();
-
-      // Merge input into state
-      if (body.messages?.length) persist.state.messages.push(...body.messages);
-      if (body.files)
-        persist.state.files = { ...(persist.state.files ?? {}), ...body.files };
-
-      // Start or continue run
-      if (
-        !persist.run ||
-        ["completed", "canceled", "error"].includes(persist.run.status)
-      ) {
-        persist.run = {
-          run_id: persist.run?.run_id ?? crypto.randomUUID(),
-          status: "running",
-          step: 0,
-          next_alarm_at: null
+      try {
+        const body = (await req.json().catch(() => ({}))) as {
+          messages?: AgentState["messages"];
+          files?: Record<string, string>;
+          idempotencyKey?: string;
+          thread_id?: string;
         };
-        this.emit(persist, AgentEventType.RUN_STARTED, {
-          run_id: persist.run.run_id
-        });
-      } else if (persist.run.status === "paused") {
-        // remains paused; client may be trying to push more messages—fine.
-      }
+        const persist = this.load();
 
-      this.save(persist);
-      await this.ensureScheduled(persist);
-      return new Response(
-        JSON.stringify({
-          run_id: persist.run?.run_id,
-          status: persist.run?.status
-        }),
-        { status: 202 }
-      );
+        // Store thread_id on first invoke if provided
+        if (body.thread_id && !persist.thread_id) {
+          persist.thread_id = body.thread_id;
+        }
+
+        // Merge input into state
+        if (body.messages?.length)
+          persist.state.messages.push(...body.messages);
+        if (body.files)
+          persist.state.files = {
+            ...(persist.state.files ?? {}),
+            ...body.files
+          };
+
+        // Start or continue run
+        if (
+          !persist.run ||
+          ["completed", "canceled", "error"].includes(persist.run.status)
+        ) {
+          persist.run = {
+            run_id: persist.run?.run_id ?? crypto.randomUUID(),
+            status: "running",
+            step: 0,
+            next_alarm_at: null
+          };
+          this.emit(persist, AgentEventType.RUN_STARTED, {
+            run_id: persist.run.run_id
+          });
+        } else if (persist.run.status === "paused") {
+          // remains paused; client may be trying to push more messages—fine.
+        }
+
+        this.save(persist);
+        await this.ensureScheduled(persist);
+        return new Response(
+          JSON.stringify({
+            run_id: persist.run?.run_id,
+            status: persist.run?.status
+          }),
+          { status: 202 }
+        );
+      } catch (error: unknown) {
+        const err = error as Error;
+        return new Response(
+          JSON.stringify({ error: err.message, stack: err.stack }),
+          { status: 500, headers: { "content-type": "application/json" } }
+        );
+      }
     }
 
     async approve(req: Request) {
@@ -199,8 +225,8 @@ export const createAgentThread = (options: {
       if (!persist.run || persist.run.status !== "running") return;
       const schedules = this.getSchedules();
       if (!schedules.length) {
-        const now = Date.now();
-        persist.run.next_alarm_at = now;
+        const now = new Date();
+        persist.run.next_alarm_at = now.getTime();
         this.save(persist);
         await this.schedule(now, "run");
       }
@@ -276,7 +302,7 @@ export const createAgentThread = (options: {
           reason: verdict.reason
         });
         await this.checkpoint(persist);
-        await this.save(persist);
+        this.save(persist);
         return;
       }
 
@@ -303,11 +329,11 @@ export const createAgentThread = (options: {
       }
 
       // continue: assistant proposed tool calls; move them into pending and reschedule
-      const last = persist.state.messages[
-        persist.state.messages.length - 1
-      ] as any;
+      const last = persist.state.messages[persist.state.messages.length - 1];
       const calls =
-        last?.role === "assistant" && Array.isArray(last.tool_calls)
+        last?.role === "assistant" &&
+        "tool_calls" in last &&
+        Array.isArray(last.tool_calls)
           ? last.tool_calls
           : [];
       if (calls.length) {
@@ -347,8 +373,8 @@ export const createAgentThread = (options: {
 
     async reschedule(persist: Persisted) {
       // Yield to respect per-event subrequest limits; schedule next tick immediately
-      const now = Date.now();
-      persist.run!.next_alarm_at = Date.now();
+      const now = new Date();
+      persist.run!.next_alarm_at = now.getTime();
       this.save(persist);
       await this.schedule(now, "run");
     }
