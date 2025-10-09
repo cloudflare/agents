@@ -1,9 +1,4 @@
-import {
-  Agent,
-  type AgentNamespace,
-  callable,
-  routeAgentRequest
-} from "agents";
+import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
 
 type Env = {
   TodoAgent: AgentNamespace<TodoAgent>;
@@ -16,91 +11,113 @@ export type Todo = {
   createdAt: number;
 };
 
-export type TodoState = {
-  todos: Todo[];
-  filter: "all" | "active" | "completed";
-};
+export class TodoAgent extends Agent<Env, {}> {
+  constructor(ctx: any, env: Env) {
+    super(ctx, env);
 
-export class TodoAgent extends Agent<Env, TodoState> {
-  initialState: TodoState = {
-    todos: [],
-    filter: "all"
-  };
-
-  @callable()
-  async addTodo(text: string) {
-    const newTodo: Todo = {
-      id: crypto.randomUUID(),
-      text,
-      completed: false,
-      createdAt: Date.now()
-    };
-
-    this.setState({
-      ...this.state,
-      todos: [...this.state.todos, newTodo]
-    });
-  }
-
-  @callable()
-  async toggleTodo(id: string) {
-    this.setState({
-      ...this.state,
-      todos: this.state.todos.map((todo) =>
-        todo.id === id ? { ...todo, completed: !todo.completed } : todo
+    this.sql`
+      CREATE TABLE IF NOT EXISTS todos (
+        id TEXT PRIMARY KEY,
+        text TEXT NOT NULL,
+        completed INTEGER DEFAULT 0,
+        created_at INTEGER DEFAULT (unixepoch())
       )
-    });
-  }
+    `;
 
-  @callable()
-  async deleteTodo(id: string) {
-    this.setState({
-      ...this.state,
-      todos: this.state.todos.filter((todo) => todo.id !== id)
-    });
-  }
+    this.registerQuery<{ completed?: boolean }, Todo>(
+      "getTodos",
+      (args) => {
+        if (args.completed !== undefined) {
+          return this.sql<Todo>`
+            SELECT * FROM todos 
+            WHERE completed = ${args.completed ? 1 : 0}
+            ORDER BY created_at DESC
+          `;
+        }
+        return this.sql<Todo>`
+          SELECT * FROM todos ORDER BY created_at DESC
+        `;
+      },
+      { dependencies: ["todos"] }
+    );
 
-  @callable()
-  async updateTodoText(id: string, text: string) {
-    this.setState({
-      ...this.state,
-      todos: this.state.todos.map((todo) =>
-        todo.id === id ? { ...todo, text } : todo
-      )
-    });
-  }
+    this.registerQuery<{ id: string }, Todo>(
+      "getTodo",
+      (args) => {
+        return this.sql<Todo>`
+          SELECT * FROM todos WHERE id = ${args.id}
+        `;
+      },
+      { dependencies: ["todos"] }
+    );
 
-  @callable()
-  async clearCompleted() {
-    this.setState({
-      ...this.state,
-      todos: this.state.todos.filter((todo) => !todo.completed)
-    });
-  }
+    this.registerMutation<{ text: string }, { id: string }>(
+      "addTodo",
+      (args) => {
+        const id = crypto.randomUUID();
+        this.sql`
+          INSERT INTO todos (id, text, completed, created_at)
+          VALUES (${id}, ${args.text}, 0, ${Date.now()})
+        `;
+        return { id };
+      },
+      { invalidates: ["getTodos"] }
+    );
 
-  @callable()
-  async setFilter(filter: "all" | "active" | "completed") {
-    this.setState({
-      ...this.state,
-      filter
-    });
-  }
+    this.registerMutation<{ id: string; completed: boolean }, void>(
+      "toggleTodo",
+      (args) => {
+        this.sql`
+          UPDATE todos 
+          SET completed = ${args.completed ? 1 : 0}
+          WHERE id = ${args.id}
+        `;
+      },
+      { invalidates: ["getTodos", "getTodo"] }
+    );
 
-  @callable()
-  async toggleAll() {
-    const allCompleted = this.state.todos.every((todo) => todo.completed);
-    this.setState({
-      ...this.state,
-      todos: this.state.todos.map((todo) => ({
-        ...todo,
-        completed: !allCompleted
-      }))
-    });
-  }
+    this.registerMutation<{ id: string }, void>(
+      "deleteTodo",
+      (args) => {
+        this.sql`DELETE FROM todos WHERE id = ${args.id}`;
+      },
+      { invalidates: ["getTodos"] }
+    );
 
-  @callable()
-  getState(): TodoState {
-    return this.state;
+    this.registerMutation<{ id: string; text: string }, void>(
+      "updateTodoText",
+      (args) => {
+        this.sql`
+          UPDATE todos 
+          SET text = ${args.text}
+          WHERE id = ${args.id}
+        `;
+      },
+      { invalidates: ["getTodos", "getTodo"] }
+    );
+
+    this.registerMutation<{}, void>(
+      "clearCompleted",
+      () => {
+        this.sql`DELETE FROM todos WHERE completed = 1`;
+      },
+      { invalidates: ["getTodos"] }
+    );
+
+    this.registerMutation<{}, void>(
+      "toggleAll",
+      () => {
+        const todos = this.sql<{ completed: number }>`
+          SELECT completed FROM todos
+        `;
+        const allCompleted = todos.every((todo) => todo.completed === 1);
+        this.sql`
+          UPDATE todos 
+          SET completed = ${allCompleted ? 0 : 1}
+        `;
+      },
+      { invalidates: ["getTodos"] }
+    );
   }
 }
 

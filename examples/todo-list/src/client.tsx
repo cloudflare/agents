@@ -1,39 +1,73 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { TodoState, Todo } from "./server";
+import type { Todo } from "./server";
+import {
+  useDurableQuery,
+  useDurableMutation
+} from "agents/durable-query-react";
 import "./styles.css";
 
 function App() {
-  const [state, setState] = useState<TodoState>({
-    todos: [],
-    filter: "all"
-  });
+  const [filter, setFilter] = useState<"all" | "active" | "completed">("all");
   const [inputValue, setInputValue] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
 
-  const agent = useAgent<TodoState>({
-    agent: "todo-agent",
-    onStateUpdate: (newState) => {
-      setState(newState);
-    }
+  const agent = useAgent({
+    agent: "todo-agent"
   });
+
+  const completedFilter = filter === "all" ? undefined : filter === "completed";
+  const { data: todos = [], isLoading } = useDurableQuery<
+    { completed?: boolean },
+    Todo
+  >(agent, "getTodos", { completed: completedFilter });
+
+  const { mutate: addTodo } = useDurableMutation<
+    { text: string },
+    { id: string }
+  >(agent, "addTodo");
+
+  const { mutate: toggleTodo } = useDurableMutation<
+    { id: string; completed: boolean },
+    void
+  >(agent, "toggleTodo");
+
+  const { mutate: deleteTodo } = useDurableMutation<{ id: string }, void>(
+    agent,
+    "deleteTodo"
+  );
+
+  const { mutate: updateTodoText } = useDurableMutation<
+    { id: string; text: string },
+    void
+  >(agent, "updateTodoText");
+
+  const { mutate: clearCompleted } = useDurableMutation<{}, void>(
+    agent,
+    "clearCompleted"
+  );
+
+  const { mutate: toggleAll } = useDurableMutation<{}, void>(
+    agent,
+    "toggleAll"
+  );
 
   const handleAddTodo = async (e: React.FormEvent) => {
     e.preventDefault();
     if (inputValue.trim()) {
-      await agent.call("addTodo", [inputValue.trim()]);
+      addTodo({ text: inputValue.trim() });
       setInputValue("");
     }
   };
 
-  const handleToggleTodo = async (id: string) => {
-    await agent.call("toggleTodo", [id]);
+  const handleToggleTodo = (id: string, completed: boolean) => {
+    toggleTodo({ id, completed: !completed });
   };
 
-  const handleDeleteTodo = async (id: string) => {
-    await agent.call("deleteTodo", [id]);
+  const handleDeleteTodo = (id: string) => {
+    deleteTodo({ id });
   };
 
   const handleStartEdit = (todo: Todo) => {
@@ -41,9 +75,9 @@ function App() {
     setEditText(todo.text);
   };
 
-  const handleSaveEdit = async (id: string) => {
+  const handleSaveEdit = (id: string) => {
     if (editText.trim()) {
-      await agent.call("updateTodoText", [id, editText.trim()]);
+      updateTodoText({ id, text: editText.trim() });
     }
     setEditingId(null);
     setEditText("");
@@ -54,27 +88,25 @@ function App() {
     setEditText("");
   };
 
-  const handleClearCompleted = async () => {
-    await agent.call("clearCompleted");
+  const handleClearCompleted = () => {
+    clearCompleted({});
   };
 
-  const handleSetFilter = async (filter: "all" | "active" | "completed") => {
-    await agent.call("setFilter", [filter]);
+  const handleSetFilter = (newFilter: "all" | "active" | "completed") => {
+    setFilter(newFilter);
   };
 
-  const handleToggleAll = async () => {
-    await agent.call("toggleAll");
+  const handleToggleAll = () => {
+    toggleAll({});
   };
 
-  const filteredTodos = state.todos.filter((todo) => {
-    if (state.filter === "active") return !todo.completed;
-    if (state.filter === "completed") return todo.completed;
-    return true;
-  });
+  const activeCount = todos.filter((todo) => !todo.completed).length;
+  const completedCount = todos.filter((todo) => todo.completed).length;
+  const allCompleted = todos.length > 0 && activeCount === 0;
 
-  const activeCount = state.todos.filter((todo) => !todo.completed).length;
-  const completedCount = state.todos.filter((todo) => todo.completed).length;
-  const allCompleted = state.todos.length > 0 && activeCount === 0;
+  if (isLoading) {
+    return <div className="todo-app">Loading...</div>;
+  }
 
   return (
     <div className="todo-app">
@@ -92,7 +124,7 @@ function App() {
         </form>
       </header>
 
-      {state.todos.length > 0 && (
+      {todos.length > 0 && (
         <section className="main">
           <input
             id="toggle-all"
@@ -104,7 +136,7 @@ function App() {
           <label htmlFor="toggle-all">Mark all as complete</label>
 
           <ul className="todo-list">
-            {filteredTodos.map((todo) => (
+            {todos.map((todo) => (
               <li
                 key={todo.id}
                 className={`${todo.completed ? "completed" : ""} ${
@@ -116,7 +148,7 @@ function App() {
                     className="toggle"
                     type="checkbox"
                     checked={todo.completed}
-                    onChange={() => handleToggleTodo(todo.id)}
+                    onChange={() => handleToggleTodo(todo.id, todo.completed)}
                   />
                   <label onDoubleClick={() => handleStartEdit(todo)}>
                     {todo.text}
@@ -150,7 +182,7 @@ function App() {
         </section>
       )}
 
-      {state.todos.length > 0 && (
+      {todos.length > 0 && (
         <footer className="footer">
           <span className="todo-count">
             <strong>{activeCount}</strong>{" "}
@@ -160,7 +192,7 @@ function App() {
             <li>
               <button
                 type="button"
-                className={state.filter === "all" ? "selected" : ""}
+                className={filter === "all" ? "selected" : ""}
                 onClick={() => handleSetFilter("all")}
               >
                 All
@@ -169,7 +201,7 @@ function App() {
             <li>
               <button
                 type="button"
-                className={state.filter === "active" ? "selected" : ""}
+                className={filter === "active" ? "selected" : ""}
                 onClick={() => handleSetFilter("active")}
               >
                 Active
@@ -178,7 +210,7 @@ function App() {
             <li>
               <button
                 type="button"
-                className={state.filter === "completed" ? "selected" : ""}
+                className={filter === "completed" ? "selected" : ""}
                 onClick={() => handleSetFilter("completed")}
               >
                 Completed
