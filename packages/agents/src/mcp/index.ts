@@ -17,8 +17,7 @@ import {
   handleCORS,
   isDurableObjectNamespace,
   MCP_HTTP_METHOD_HEADER,
-  MCP_MESSAGE_HEADER,
-  MAXIMUM_MESSAGE_SIZE_BYTES
+  MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 
@@ -168,15 +167,6 @@ export abstract class McpAgent<
                     "Internal Server Error: Failed to decode MCP message header"
                   );
                 }
-              }
-
-              if (
-                Buffer.byteLength(rawPayload, "utf-8") >
-                MAXIMUM_MESSAGE_SIZE_BYTES
-              ) {
-                throw new Error(
-                  "Internal Server Error: MCP message exceeds maximum supported size"
-                );
               }
 
               const parsedBody = JSON.parse(rawPayload);

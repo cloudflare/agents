@@ -25,7 +25,7 @@ export const MCP_HTTP_METHOD_HEADER = "cf-mcp-method";
  */
 export const MCP_MESSAGE_HEADER = "cf-mcp-message";
 
-export const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
+const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
 export const createStreamingHttpHandler = (
   basePath: string,
