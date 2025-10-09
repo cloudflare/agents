@@ -24,9 +24,7 @@ interface Env {
 }
 
 export class RealtimeVoiceAgent extends Agent<Env> {
-  realtimePipelineComponents = this.createRealtimePipeline;
-
-  createRealtimePipeline() {
+  realtimePipelineComponents = () => {
     // RealtimeKit transport for audio I/O
     const rtk = new RealtimeKitTransport(
       this.env.RTK_MEETING_ID || "default-meeting",
@@ -47,7 +45,7 @@ export class RealtimeVoiceAgent extends Agent<Env> {
     const tts = new ElevenLabsTTS(this.env.ELEVENLABS_API_KEY);
 
     return [rtk, stt, this, tts, rtk];
-  }
+  };
 
   /**
    * Handle incoming transcribed text and generate intelligent responses

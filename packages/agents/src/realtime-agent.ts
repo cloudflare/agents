@@ -2,7 +2,7 @@ import { type Connection } from "./";
 import RealtimeKitClient from "@cloudflare/realtimekit";
 
 export const REALTIME_AGENTS_SERVICE = "https://agents.realtime.cloudflare.com";
-// export const REALTIME_AGENTS_SERVICE = "https://spotty-plums-start.loca.lt";
+// export const REALTIME_AGENTS_SERVICE = "https://curly-radios-eat.loca.lt";
 export const CLOUDFLARE_BASE = "https://api.cloudflare.com";
 
 export enum DataKind {
@@ -98,6 +98,7 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
       name: this.name,
       type: "rtk",
       meeting_id: this.meetingId,
+      auth_token: this.authToken,
       filters: this.filters
     };
   }
@@ -188,6 +189,8 @@ export class ElevenLabsTTS implements RealtimePipelineComponent {
 export abstract class TextProcessor implements RealtimePipelineComponent {
   constructor() {}
 
+  abstract get url(): string;
+
   abstract onRealtimeTranscript(
     text: string,
     reply: (response: string) => void
@@ -208,7 +211,8 @@ export abstract class TextProcessor implements RealtimePipelineComponent {
   schema() {
     return {
       name: this.name,
-      type: "text_processor"
+      type: "text_processor",
+      url: this.url
     };
   }
 }
