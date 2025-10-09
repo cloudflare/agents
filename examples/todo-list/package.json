@@ -12,7 +12,8 @@
   "name": "@cloudflare/agents-todo-list",
   "private": true,
   "scripts": {
-    "start": "vite dev"
+    "start": "vite dev",
+    "test": "vitest run"
   },
   "type": "module",
   "version": "0.0.0"

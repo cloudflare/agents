@@ -97,6 +97,11 @@ export class TodoAgent extends Agent<Env, TodoState> {
       }))
     });
   }
+
+  @callable()
+  getState(): TodoState {
+    return this.state;
+  }
 }
 
 export default {
