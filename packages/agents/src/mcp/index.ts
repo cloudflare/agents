@@ -151,7 +151,7 @@ export abstract class McpAgent<
         if (this._transport instanceof StreamableHTTPServerTransport) {
           switch (req.headers.get(MCP_HTTP_METHOD_HEADER)) {
             case "POST": {
-              // This returns the repsonse directly to the client
+              // This returns the response directly to the client
               const payloadHeader = req.headers.get(MCP_MESSAGE_HEADER);
               let rawPayload: string;
 
