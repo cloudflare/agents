@@ -13,11 +13,7 @@ import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { getCurrentAgent, type Connection } from "..";
 import type { McpAgent } from ".";
 import { MessageType } from "../ai-types";
-import {
-  MCP_HTTP_METHOD_HEADER,
-  MCP_MESSAGE_ENCODING_HEADER,
-  MCP_MESSAGE_HEADER
-} from "./utils";
+import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
 export class McpSSETransport implements Transport {
   sessionId?: string;
@@ -234,7 +230,6 @@ export class StreamableHTTPServerTransport implements Transport {
     // Remove headers that are not part of the original request
     delete requestInfo.headers[MCP_HTTP_METHOD_HEADER];
     delete requestInfo.headers[MCP_MESSAGE_HEADER];
-    delete requestInfo.headers[MCP_MESSAGE_ENCODING_HEADER];
     delete requestInfo.headers.upgrade;
 
     const rawMessage = parsedBody;

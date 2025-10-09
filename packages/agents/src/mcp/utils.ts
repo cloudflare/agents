@@ -25,13 +25,6 @@ export const MCP_HTTP_METHOD_HEADER = "cf-mcp-method";
  */
 export const MCP_MESSAGE_HEADER = "cf-mcp-message";
 
-/**
- * Indicates how the MCP message was encoded before being stuffed into a header.
- */
-export const MCP_MESSAGE_ENCODING_HEADER = "cf-mcp-message-encoding";
-
-const MCP_MESSAGE_ENCODING = "base64" as const;
-
 export const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 
 export const createStreamingHttpHandler = (
@@ -232,22 +225,17 @@ export const createStreamingHttpHandler = (
           existingHeaders[key] = value;
         });
 
-        // Remove MCP-specific headers to prevent stale/corrupted data from
+        // Remove MCP message header to prevent stale/corrupted data from
         // propagating (e.g., from retries, proxies, or cached requests)
         delete existingHeaders[MCP_MESSAGE_HEADER];
-        delete existingHeaders[MCP_MESSAGE_ENCODING_HEADER];
-
-        const encodedMessage = Buffer.from(
-          JSON.stringify(messages),
-          "utf-8"
-        ).toString(MCP_MESSAGE_ENCODING);
 
         const req = new Request(request.url, {
           headers: {
             ...existingHeaders,
             [MCP_HTTP_METHOD_HEADER]: "POST",
-            [MCP_MESSAGE_HEADER]: encodedMessage,
-            [MCP_MESSAGE_ENCODING_HEADER]: MCP_MESSAGE_ENCODING,
+            [MCP_MESSAGE_HEADER]: Buffer.from(
+              JSON.stringify(messages)
+            ).toString("base64"),
             Upgrade: "websocket"
           }
         });
