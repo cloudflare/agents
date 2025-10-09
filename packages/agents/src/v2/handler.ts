@@ -1,6 +1,7 @@
-import { getAgentByName, type Agent } from "../index";
+import { getAgentByName, type Agent } from "..";
+import { html } from "./client";
 
-// The hope is that you only have to write the following
+// The idea is that you only have to write the following
 `
 import { createAgentThread } from "./worker";
 import { createHandler } from "./handler";
@@ -27,7 +28,7 @@ export const createHandler = (_opts: { baseUrl?: string } = {}) => {
       }
 
       if (req.method === "GET" && url.pathname === "/dashboard") {
-        return new Response("Not implemented", {
+        return new Response(html, {
           status: 200,
           headers: { "content-type": "text/html" }
         });

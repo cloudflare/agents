@@ -1,3 +1,4 @@
+// @ts-expect-error TODO: fix this
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker, { type Env } from "./worker";
@@ -9,6 +10,7 @@ import {
   fetchThreadEvents
 } from "./test-utils";
 
+// @ts-expect-error TODO: fix this
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
