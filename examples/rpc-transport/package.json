@@ -1,0 +1,10 @@
+{
+  "author": "Matt Carey <mcarey@cloudflare.com>",
+  "keywords": [],
+  "name": "@cloudflare/agents-rpc-transport-demo",
+  "private": true,
+  "scripts": {
+    "start": "vite dev"
+  },
+  "type": "module"
+}

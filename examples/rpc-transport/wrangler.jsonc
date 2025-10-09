@@ -1,0 +1,24 @@
+{
+  "compatibility_date": "2025-09-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "MyMCP",
+        "name": "MyMCP"
+      },
+      {
+        "class_name": "Chat",
+        "name": "Chat"
+      }
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["MyMCP", "Chat"],
+      "tag": "v1"
+    }
+  ],
+  "name": "rpc-transport-demo"
+}
