@@ -48,7 +48,7 @@ function isLocalMode() {
         return localMode;
       }
     }
-  } catch (e) {}
+  } catch (_e) {}
 
   localMode = false;
   return localMode;
