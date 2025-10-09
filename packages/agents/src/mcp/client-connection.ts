@@ -33,6 +33,10 @@ import {
 } from "./errors";
 import { SSEEdgeClientTransport } from "./sse-edge";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+import {
+  RPCClientTransport,
+  type RPCClientTransportOptions
+} from "./rpc-transport";
 import type { BaseTransportType, TransportType } from "./types";
 
 /**
@@ -48,6 +52,7 @@ export type MCPConnectionState =
 export type MCPTransportOptions = (
   | SSEClientTransportOptions
   | StreamableHTTPClientTransportOptions
+  | RPCClientTransportOptions
 ) & {
   authProvider?: AgentsOAuthProvider;
   type?: TransportType;
@@ -143,9 +148,21 @@ export class MCPClientConnection {
     }
 
     const finishAuth = async (base: BaseTransportType) => {
+      if (base === "rpc") {
+        throw new Error("RPC transport does not support authentication");
+      }
       const transport = this.getTransport(base);
-      await transport.finishAuth(code);
+      if (
+        "finishAuth" in transport &&
+        typeof transport.finishAuth === "function"
+      ) {
+        await transport.finishAuth(code);
+      }
     };
+
+    if (configuredType === "rpc") {
+      throw new Error("RPC transport does not support authentication");
+    }
 
     if (configuredType === "sse" || configuredType === "streamable-http") {
       await finishAuth(configuredType);
@@ -433,6 +450,10 @@ export class MCPClientConnection {
         return new SSEEdgeClientTransport(
           this.url,
           this.options.transport as SSEClientTransportOptions
+        );
+      case "rpc":
+        return new RPCClientTransport(
+          this.options.transport as RPCClientTransportOptions
         );
       default:
         throw new Error(`Unsupported transport type: ${transportType}`);

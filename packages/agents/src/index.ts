@@ -1432,6 +1432,40 @@ export class Agent<
     serverName: string,
     url: string,
     callbackHost?: string,
+    agentsPrefix?: string,
+    options?: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport?: {
+        headers?: HeadersInit;
+        type?: TransportType;
+      };
+    }
+  ): Promise<{ id: string; authUrl: string | undefined }>;
+
+  /**
+   * Connect to an MCP Server via RPC binding
+   *
+   * @param config RPC configuration with binding name
+   * @returns id of the connection
+   */
+  async addMcpServer(config: {
+    type: "rpc";
+    binding: string;
+    functionName?: string;
+    serverName?: string;
+  }): Promise<{ id: string; authUrl: string | undefined }>;
+
+  async addMcpServer(
+    serverNameOrConfig:
+      | string
+      | {
+          type: "rpc";
+          binding: string;
+          functionName?: string;
+          serverName?: string;
+        },
+    url?: string,
+    callbackHost?: string,
     agentsPrefix = "agents",
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
@@ -1441,6 +1475,19 @@ export class Agent<
       };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
+    // Handle RPC config
+    if (
+      typeof serverNameOrConfig === "object" &&
+      serverNameOrConfig.type === "rpc"
+    ) {
+      return this._connectToRpcMcpServer(serverNameOrConfig);
+    }
+
+    // Handle URL-based config
+    const serverName = serverNameOrConfig as string;
+    if (!url) {
+      throw new Error("URL is required for non-RPC connections");
+    }
     // If callbackHost is not provided, derive it from the current request
     let resolvedCallbackHost = callbackHost;
     if (!resolvedCallbackHost) {
@@ -1561,6 +1608,86 @@ export class Agent<
       clientId,
       id
     };
+  }
+
+  private async _connectToRpcMcpServer(config: {
+    type: "rpc";
+    binding: string;
+    functionName?: string;
+    serverName?: string;
+  }): Promise<{ id: string; authUrl: string | undefined }> {
+    const {
+      binding: bindingName,
+      functionName = "handle",
+      serverName = "default"
+    } = config;
+
+    // Get the binding from env
+    const binding = this.env[bindingName as keyof Env];
+    if (!binding) {
+      throw new Error(`Binding '${bindingName}' not found in environment`);
+    }
+
+    // Generate a unique ID for this connection
+    const id = nanoid(8);
+
+    // Create an RPCBinding wrapper that calls the DO
+    // For RPC transport, we use the naming convention "rpc:sessionId"
+    type RPCBinding = {
+      handle(
+        message: import("@modelcontextprotocol/sdk/types.js").JSONRPCMessage
+      ): Promise<
+        | import("@modelcontextprotocol/sdk/types.js").JSONRPCMessage
+        | import("@modelcontextprotocol/sdk/types.js").JSONRPCMessage[]
+        | undefined
+      >;
+    };
+    const rpcBinding: RPCBinding = {
+      handle: async (message) => {
+        // Get a stub to the MCP server DO using RPC naming convention
+        const namespace = binding as unknown as DurableObjectNamespace;
+
+        const doId = namespace.idFromString(`rpc:${serverName}`);
+        const stub = namespace.get(doId) as unknown as {
+          [key: string]: (message: unknown) => Promise<unknown>;
+        };
+        await stub.setName(doId.toString());
+
+        // Call the handle method directly on the stub
+        const result = await stub[functionName](message);
+        return result as
+          | import("@modelcontextprotocol/sdk/types.js").JSONRPCMessage
+          | import("@modelcontextprotocol/sdk/types.js").JSONRPCMessage[]
+          | undefined;
+      }
+    };
+
+    // Connect using RPC transport
+    await this.mcp.connect("rpc://local", {
+      transport: {
+        type: "rpc",
+        binding: rpcBinding,
+        functionName
+      }
+    });
+
+    // Store in database for persistence (callback_url is required by schema but not used for RPC)
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${id},
+        ${serverName},
+        ${`rpc://${bindingName}`},
+        ${null},
+        ${null},
+        ${"rpc://internal"},
+        ${JSON.stringify({ type: "rpc", binding: bindingName, functionName })}
+      );
+    `;
+
+    this.broadcastMcpServers();
+
+    return { id, authUrl: undefined };
   }
 
   async removeMcpServer(id: string) {
