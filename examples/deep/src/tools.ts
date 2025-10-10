@@ -1,4 +1,4 @@
-import { defineTool } from "agents/v2";
+import { defineTool } from "agents/deep";
 
 export const internet_search = defineTool(
   {
