@@ -756,7 +756,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
                         updateToolPart({
                           toolCallId: data.toolCallId,
-                          toolName: getToolName(toolInvocation) || "",
+                          toolName: getToolName(toolInvocation),
                           state: "output-available",
                           input: toolInvocation.input,
                           output: data.output,
