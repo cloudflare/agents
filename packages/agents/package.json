@@ -4,6 +4,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
+    "@cloudflare/realtimekit": "1.1.7-agent.1",
     "@modelcontextprotocol/sdk": "^1.19.1",
     "ai": "5.0.57",
     "cron-schedule": "^5.0.4",
@@ -84,6 +85,11 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
       "require": "./dist/react.js"
+    },
+    "./realtime": {
+      "types": "./dist/realtime-agent.d.ts",
+      "import": "./dist/realtime-agent.js",
+      "require": "./dist/realtime-agent.js"
     },
     "./schedule": {
       "types": "./dist/schedule.d.ts",

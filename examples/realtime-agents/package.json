@@ -1,0 +1,11 @@
+{
+  "name": "@cloudflare/realtime-agents-example",
+  "author": "Manish",
+  "keywords": [],
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types"
+  },
+  "type": "module"
+}
