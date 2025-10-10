@@ -1,7 +1,6 @@
 {
   "name": "@cloudflare/realtime-agents-example",
   "author": "Manish",
-  "dependencies": {},
   "keywords": [],
   "private": true,
   "scripts": {

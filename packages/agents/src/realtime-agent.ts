@@ -1,4 +1,4 @@
-import { type Connection } from "./";
+import type { Connection } from "./";
 import RealtimeKitClient from "@cloudflare/realtimekit";
 
 export const REALTIME_AGENTS_SERVICE = "https://agents.realtime.cloudflare.com";
@@ -18,7 +18,7 @@ export interface RealtimePipelineComponent {
   output_kind(): DataKind;
 
   // schema to be passed to streamline pipeline
-  schema(): { name: string; type: string; [K: string]: any };
+  schema(): { name: string; type: string; [K: string]: unknown };
 }
 
 export type RealtimeKitMediaFilter =
@@ -187,8 +187,6 @@ export class ElevenLabsTTS implements RealtimePipelineComponent {
 }
 
 export abstract class TextProcessor implements RealtimePipelineComponent {
-  constructor() {}
-
   abstract get url(): string;
 
   abstract onRealtimeTranscript(
@@ -218,8 +216,6 @@ export abstract class TextProcessor implements RealtimePipelineComponent {
 }
 
 export abstract class MediaProcessor implements RealtimePipelineComponent {
-  constructor() {}
-
   abstract onRealtimeMediaFrame(
     frame: Uint8Array,
     reply: (response: Uint8Array) => void
