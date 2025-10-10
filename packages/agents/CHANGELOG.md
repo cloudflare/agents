@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.12
+
+### Patch Changes
+
+- [#559](https://github.com/cloudflare/agents/pull/559) [`3667584`](https://github.com/cloudflare/agents/commit/3667584792aba94aa47760160ef573af4a33a9a9) Thanks [@threepointone](https://github.com/threepointone)! - use lazy imports for ai sdk
+
 ## 0.2.11
 
 ### Patch Changes
