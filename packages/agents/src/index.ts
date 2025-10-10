@@ -29,8 +29,17 @@ import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import {
+  QuerySubscriptionManager,
+  type QueryDefinition,
+  type MutationDefinition,
+  isQuerySubscribeMessage,
+  isQueryUnsubscribeMessage,
+  isMutationMessage
+} from "./durable-query";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
+export type { QueryDefinition, MutationDefinition } from "./durable-query";
 
 /**
  * RPC request message from client
@@ -328,6 +337,11 @@ export class Agent<
     "0.0.1"
   );
 
+  protected queries = new Map<string, QueryDefinition>();
+  protected mutations = new Map<string, MutationDefinition>();
+  protected subscriptionManager?: QuerySubscriptionManager;
+  private globalVersion = 0;
+
   /**
    * Initial state for the Agent
    * Override to provide default state values
@@ -488,6 +502,51 @@ export class Agent<
       )
     `;
 
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_query_subscriptions (
+        dedupe_key TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        query_name TEXT NOT NULL,
+        query_args TEXT NOT NULL,
+        connection_ids TEXT NOT NULL,
+        subscribed_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_query_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_name TEXT NOT NULL,
+        query_args TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mutations (
+        mutation_id TEXT PRIMARY KEY NOT NULL,
+        mutation_name TEXT NOT NULL,
+        args TEXT NOT NULL,
+        result TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_metadata (
+        key TEXT PRIMARY KEY NOT NULL,
+        value INTEGER
+      )
+    `;
+
+    const versionRow = this.sql<{ value: number }>`
+      SELECT value FROM cf_agents_metadata WHERE key = 'global_version'
+    `[0];
+    this.globalVersion = versionRow?.value ?? 0;
+
+    this.subscriptionManager = new QuerySubscriptionManager(this);
+
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
       return agentContext.run(
@@ -600,6 +659,84 @@ export class Agent<
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
+            }
+            return;
+          }
+
+          if (isQuerySubscribeMessage(parsed)) {
+            try {
+              const { queryName, args, subscriptionId } = parsed;
+              const userId = this.name;
+
+              this.subscriptionManager?.subscribe(
+                connection.id,
+                userId,
+                queryName,
+                args
+              );
+
+              const data = await this.executeQuery(queryName, args);
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_QUERY_DATA,
+                  queryName,
+                  args,
+                  subscriptionId,
+                  data,
+                  version: this.globalVersion,
+                  timestamp: Date.now()
+                })
+              );
+            } catch (error) {
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_QUERY_ERROR,
+                  queryName: parsed.queryName,
+                  error: error instanceof Error ? error.message : String(error)
+                })
+              );
+            }
+            return;
+          }
+
+          if (isQueryUnsubscribeMessage(parsed)) {
+            const { queryName, args } = parsed;
+            const userId = this.name;
+            this.subscriptionManager?.unsubscribe(
+              connection.id,
+              userId,
+              queryName,
+              args
+            );
+            return;
+          }
+
+          if (isMutationMessage(parsed)) {
+            try {
+              const { mutationName, args, mutationId } = parsed;
+              const result = await this.executeMutation(mutationName, {
+                ...(args as object),
+                mutationId
+              });
+
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_MUTATION_RESULT,
+                  mutationId,
+                  success: true,
+                  result,
+                  timestamp: Date.now()
+                })
+              );
+            } catch (error) {
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_MUTATION_RESULT,
+                  mutationId: parsed.mutationId,
+                  success: false,
+                  error: error instanceof Error ? error.message : String(error)
+                })
+              );
             }
             return;
           }
@@ -1609,6 +1746,137 @@ export class Agent<
         type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );
+  }
+
+  protected registerQuery<TArgs = unknown, TResult = unknown>(
+    name: string,
+    execute: (args: TArgs) => TResult[] | Promise<TResult[]>,
+    options?: {
+      dependencies?: string[];
+      pagination?: {
+        strategy: "cursor" | "offset" | "stable-cursor";
+        keyField: string;
+      };
+    }
+  ) {
+    this.queries.set(name, {
+      name,
+      execute: execute as (
+        args: unknown,
+        agent: Agent<unknown>
+      ) => unknown[] | Promise<unknown[]>,
+      dependencies: options?.dependencies,
+      pagination: options?.pagination
+    });
+  }
+
+  protected registerMutation<TArgs = unknown, TResult = unknown>(
+    name: string,
+    execute: (
+      args: TArgs & { mutationId: string }
+    ) => TResult | Promise<TResult>,
+    options?: { invalidates?: string[] }
+  ) {
+    this.mutations.set(name, {
+      name,
+      execute: execute as unknown as (
+        args: unknown & { mutationId: string },
+        agent: Agent<unknown>
+      ) => unknown | Promise<unknown>,
+      invalidates: options?.invalidates
+    });
+  }
+
+  private async executeQuery(queryName: string, args: unknown) {
+    const queryDef = this.queries.get(queryName);
+    if (!queryDef) {
+      throw new Error(`Query ${queryName} not found`);
+    }
+    return await queryDef.execute(args, this);
+  }
+
+  private async broadcastQueryUpdate(queryName: string, version: number) {
+    if (!this.subscriptionManager) return;
+
+    const subscribers =
+      this.subscriptionManager.getSubscribersForQuery(queryName);
+
+    for (const sub of subscribers) {
+      const args = JSON.parse(sub.query_args);
+      const data = await this.executeQuery(queryName, args);
+
+      this.sql`
+        INSERT INTO cf_agents_query_updates (query_name, query_args, version, created_at)
+        VALUES (${queryName}, ${sub.query_args}, ${version}, ${Date.now()})
+      `;
+
+      const connectionIds = JSON.parse(sub.connection_ids);
+      const connections = Array.from(this.getConnections());
+      for (const connectionId of connectionIds) {
+        const connection = connections.find(
+          (c: Connection) => c.id === connectionId
+        );
+        if (connection) {
+          try {
+            connection.send(
+              JSON.stringify({
+                type: MessageType.CF_AGENT_QUERY_DATA,
+                queryName,
+                args,
+                data,
+                version,
+                timestamp: Date.now()
+              })
+            );
+          } catch (error) {
+            console.warn(
+              `Failed to send to connection ${connectionId}:`,
+              error
+            );
+          }
+        }
+      }
+    }
+  }
+
+  private async executeMutation(
+    mutationName: string,
+    args: unknown & { mutationId: string }
+  ) {
+    const existing = this.sql<{ result: string }>`
+      SELECT result FROM cf_agents_mutations
+      WHERE mutation_id = ${args.mutationId}
+    `[0];
+
+    if (existing) {
+      return JSON.parse(existing.result);
+    }
+
+    const mutationDef = this.mutations.get(mutationName);
+    if (!mutationDef) {
+      throw new Error(`Mutation ${mutationName} not found`);
+    }
+
+    const result = await mutationDef.execute(args, this);
+
+    this.sql`
+      INSERT INTO cf_agents_mutations (mutation_id, mutation_name, args, result, created_at)
+      VALUES (${args.mutationId}, ${mutationName}, ${JSON.stringify(args)}, ${JSON.stringify(result)}, ${Date.now()})
+    `;
+
+    this.globalVersion++;
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_metadata (key, value)
+      VALUES ('global_version', ${this.globalVersion})
+    `;
+
+    if (mutationDef.invalidates) {
+      for (const queryName of mutationDef.invalidates) {
+        await this.broadcastQueryUpdate(queryName, this.globalVersion);
+      }
+    }
+
+    return result;
   }
 
   /**
