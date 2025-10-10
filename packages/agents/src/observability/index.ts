@@ -1,5 +1,6 @@
 import type { AgentObservabilityEvent } from "./agent";
 import type { MCPObservabilityEvent } from "./mcp";
+import { getCurrentAgent } from "../index";
 
 /**
  * Union of all observability event types from different domains
@@ -38,17 +39,13 @@ function isLocalMode() {
   if (localMode !== null) {
     return localMode;
   }
-  try {
-    const indexModule = require("../index");
-    if (indexModule && typeof indexModule.getCurrentAgent === "function") {
-      const { request } = indexModule.getCurrentAgent();
-      if (request) {
-        const url = new URL(request.url);
-        localMode = url.hostname === "localhost";
-        return localMode;
-      }
-    }
-  } catch (_e) {}
+
+  const { request } = getCurrentAgent();
+  if (request) {
+    const url = new URL(request.url);
+    localMode = url.hostname === "localhost";
+    return localMode;
+  }
 
   localMode = false;
   return localMode;

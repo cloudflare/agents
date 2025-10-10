@@ -21,9 +21,9 @@ const decoder = new TextDecoder();
 
 // Lazy-load AI SDK utilities
 type AISDK = {
-  getToolName: (part: unknown) => string | undefined;
-  isToolUIPart: (part: unknown) => part is ToolUIPart;
-  parsePartialJson: (json: string) => Record<string, unknown>;
+  getToolName: typeof import("ai").getToolName;
+  isToolUIPart: typeof import("ai").isToolUIPart;
+  parsePartialJson: typeof import("ai").parsePartialJson;
 };
 let aiSDK: AISDK | undefined;
 function getAISDK() {

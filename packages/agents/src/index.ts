@@ -324,14 +324,10 @@ export class Agent<
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  private _mcp?: MCPClientManager;
-
-  get mcp(): MCPClientManager {
-    if (!this._mcp) {
-      this._mcp = new MCPClientManager(this._ParentClass.name, "0.0.1");
-    }
-    return this._mcp!; // Non-null assertion: we just initialized it above
-  }
+  readonly mcp: MCPClientManager = new MCPClientManager(
+    this._ParentClass.name,
+    "0.0.1"
+  );
 
   /**
    * Initial state for the Agent
