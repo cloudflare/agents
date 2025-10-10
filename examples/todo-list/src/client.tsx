@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Todo } from "./server";
 import {
@@ -13,9 +13,11 @@ function App() {
   const [inputValue, setInputValue] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const username = useMemo(() => (Math.random() < 0.5 ? "adam" : "eve"), []);
 
   const agent = useAgent({
-    agent: "todo-agent"
+    agent: "todo-agent",
+    name: username
   });
 
   const completedFilter = filter === "all" ? undefined : filter === "completed";
@@ -110,6 +112,7 @@ function App() {
 
   return (
     <div className="todo-app">
+      current user: {username}
       <header className="header">
         <h1>todos</h1>
         <form onSubmit={handleAddTodo} className="todo-form">
@@ -123,7 +126,6 @@ function App() {
           />
         </form>
       </header>
-
       {todos.length > 0 && (
         <section className="main">
           <input
@@ -181,7 +183,6 @@ function App() {
           </ul>
         </section>
       )}
-
       {todos.length > 0 && (
         <footer className="footer">
           <span className="todo-count">
@@ -228,7 +229,6 @@ function App() {
           )}
         </footer>
       )}
-
       <footer className="info">
         <p>Double-click to edit a todo</p>
         <p>Open multiple windows to see state sync in real-time</p>
