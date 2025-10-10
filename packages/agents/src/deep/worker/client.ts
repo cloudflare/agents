@@ -367,6 +367,83 @@ export const html = `<!doctype html>
       padding: 16px;
     }
   }
+
+  .zoom-controls {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--border-color);
+    padding: 6px 8px;
+    border-radius: 8px;
+    backdrop-filter: blur(6px);
+  }
+  .zoom-controls button {
+    padding: 4px 8px;
+  }
+  .zoom-controls .zoom-pct {
+    min-width: 48px;
+    text-align: center;
+    font-weight: 600;
+    color: var(--muted);
+  }
+
+  .todos-summary {
+      display:flex; gap:12px; flex-wrap:wrap; margin: 8px 0 12px;
+      color: var(--muted); font-size: 13px;
+    }
+    .todo-pill {
+      display:inline-flex; align-items:center; gap:6px;
+      padding:4px 8px; border-radius:999px; border:1px solid var(--border-color);
+      background: rgba(255,255,255,0.04); font-weight: 600;
+    }
+    .todo-pill.pending { color:#9ca3af; }
+    .todo-pill.in_progress { color: var(--info); }
+    .todo-pill.completed { color: var(--ok); }
+
+    .todo-list { list-style:none; padding:0; margin:0; }
+    .todo-item {
+      display:flex; align-items:flex-start; gap:10px;
+      padding:8px 10px; border:1px solid var(--border-color);
+      border-radius:10px; margin-bottom:8px; background: var(--card-bg);
+    }
+    .todo-status {
+      min-width: 10px; min-height:10px; border-radius:999px; margin-top:6px;
+    }
+    .todo-status.pending { background:#9ca3af; }
+    .todo-status.in_progress { background: var(--info); }
+    .todo-status.completed { background: var(--ok); }
+    .todo-content { white-space:pre-wrap; word-break:break-word; }
+
+    .files-grid {
+      display:grid; grid-template-columns: 260px 1fr; gap:12px;
+    }
+    .files-list {
+      border:1px solid var(--border-color); border-radius:10px;
+      background: var(--card-bg); overflow:auto; max-height:420px;
+    }
+    .file-row {
+      display:flex; align-items:center; justify-content:space-between;
+      padding:8px 10px; cursor:pointer; border-bottom:1px solid var(--border-color);
+    }
+    .file-row:last-child { border-bottom: none; }
+    .file-row:hover { background: rgba(255,255,255,0.06); }
+    .file-name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width: 180px;
+    }
+    .file-meta { font-size:12px; color: var(--muted); }
+    .file-preview {
+      background:#050a15; padding:12px; border:1px solid var(--border-color);
+      border-radius:10px; max-height:420px; overflow:auto;
+    }
+
+    /* line numbers in preview */
+    .ln { color:#64748b; user-select:none; margin-right:10px; display:inline-block; width:56px; text-align:right; }
+    .code { white-space:pre; }
 </style>
 <body>
   <div class="container">
@@ -424,6 +501,26 @@ export const html = `<!doctype html>
           <span class="badge" style="margin-left:auto;">💡 Click and drag to pan</span>
         </div>
         <svg id="graph"></svg>
+        <div class="zoom-controls">
+          <button id="zoomOut">-</button>
+          <span class="zoom-pct" id="zoomPct">100%</span>
+          <button id="zoomIn">+</button>
+          <button id="zoomReset">Reset</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Todos</h3>
+      <div class="todos-summary" id="todosSummary"></div>
+      <ul class="todo-list" id="todosList"></ul>
+    </div>
+
+    <div class="card">
+      <h3>Files</h3>
+      <div class="files-grid">
+        <div class="files-list" id="filesList"></div>
+        <pre class="file-preview"><code id="filePreview" class="code"></code></pre>
       </div>
     </div>
 
@@ -468,6 +565,7 @@ const firstNodeInLane = new Map(); // threadId -> first nodeKey
 const lastNodeInLane = new Map(); // threadId -> last nodeKey
 const margin = {left:100, top:40, xStep:140, yStep:110};
 const arrowId = "arrowHead";
+const pendingEdges = new Map();
 
 // Pan/drag state
 let panState = {
@@ -478,6 +576,8 @@ let panState = {
   offsetY: 0
 };
 let graphGroup; // Main group element that gets transformed
+let zoom = 1;
+const minZoom = 0.5, maxZoom = 4;
 
 function initSVG() {
   G.innerHTML = "";
@@ -488,6 +588,7 @@ function initSVG() {
   marker.setAttribute("refX","10"); marker.setAttribute("refY","5");
   marker.setAttribute("markerWidth","6"); marker.setAttribute("markerHeight","6");
   marker.setAttribute("orient","auto-start-reverse");
+  marker.setAttribute("markerUnits","userSpaceOnUse"); // keep size stable on zoom
   const path = document.createElementNS("http://www.w3.org/2000/svg","path");
   path.setAttribute("d","M 0 0 L 10 5 L 0 10 z"); path.setAttribute("fill","#64748b");
   marker.appendChild(path); defs.appendChild(marker); G.appendChild(defs);
@@ -499,6 +600,7 @@ function initSVG() {
   
   // Reset pan state
   panState = { isPanning: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 };
+  applyTransform();
 }
 initSVG();
 
@@ -512,9 +614,9 @@ G.addEventListener("mousedown", (e) => {
 
 G.addEventListener("mousemove", (e) => {
   if (!panState.isPanning) return;
-  panState.offsetX = e.clientX - panState.startX;
-  panState.offsetY = e.clientY - panState.startY;
-  graphGroup.setAttribute("transform", \`translate(\${panState.offsetX}, \${panState.offsetY})\`);
+  panState.offsetX = (e.clientX - panState.startX);
+  panState.offsetY = (e.clientY - panState.startY);
+  applyTransform();
 });
 
 G.addEventListener("mouseup", () => {
@@ -527,8 +629,31 @@ G.addEventListener("mouseleave", () => {
   G.style.cursor = "grab";
 });
 
+G.addEventListener("wheel", (e) => {
+  // Use pinch-zoom gesture (Ctrl/Cmd on most platforms).
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+
+  const factor = Math.pow(1.0015, -e.deltaY);  // smooth
+  const newZoom = Math.max(minZoom, Math.min(maxZoom, zoom * factor));
+  if (newZoom === zoom) return;
+
+  zoom = newZoom;
+  applyTransform();
+}, { passive: false });
+
+$("zoomIn").onclick   = () => { zoom = Math.min(maxZoom, zoom * 1.2); applyTransform(); };
+$("zoomOut").onclick  = () => { zoom = Math.max(minZoom, zoom / 1.2); applyTransform(); };
+$("zoomReset").onclick= () => { zoom = 1; panState.offsetX = 0; panState.offsetY = 0; applyTransform(); };
+
 // Set initial cursor
 G.style.cursor = "grab";
+
+function applyTransform() {
+  // translate, then scale (standard pattern used by D3)
+  graphGroup.setAttribute("transform", \`translate(\${panState.offsetX}, \${panState.offsetY}) scale(\${zoom})\`);
+  const zp = $("zoomPct"); if (zp) zp.textContent = Math.round(zoom * 100) + "%";
+}
 
 function laneFor(threadId) {
   if (lanes.has(threadId)) return lanes.get(threadId).lane;
@@ -561,8 +686,8 @@ function laneFor(threadId) {
 }
 
 function resizeSVG() {
-  const width = Math.max(900, margin.left + (globalMaxIndex()+2)*margin.xStep);
-  const height = Math.max(300, margin.top + Math.max(1, lanes.size)*margin.yStep);
+  const width  = Math.max(900, G.clientWidth || 900); // keep viewport stable
+  const height = Math.max(300, margin.top + Math.max(1, lanes.size) * margin.yStep);
   G.setAttribute("viewBox", \`0 0 \${width} \${height}\`);
   G.setAttribute("preserveAspectRatio", "xMinYMin meet");
 }
@@ -611,6 +736,7 @@ function addNode(threadId, type, label, payload) {
   c.setAttribute("fill", fill); c.setAttribute("stroke", "#1e293b"); c.setAttribute("stroke-width", "1");
   c.setAttribute("opacity","0");
   c.setAttribute("class", "node-circle");
+  c.setAttribute("vector-effect", "non-scaling-stroke");
 
   // Make node clickable
   c.style.cursor = "pointer";
@@ -636,6 +762,11 @@ function addNode(threadId, type, label, payload) {
   laneObj.nodes.push(nodeKey);
   if (!firstNodeInLane.has(threadId)) firstNodeInLane.set(threadId, nodeKey);
   lastNodeInLane.set(threadId, nodeKey);
+  const pend = pendingEdges.get(threadId);
+  if (pend && pend.length) {
+    for (const parentKey of pend) connectLanes(nodeKey, parentKey);
+    pendingEdges.delete(threadId);
+  }
 
   // Animate in
   setTimeout(() => {
@@ -665,6 +796,7 @@ function drawEdge(x1,y1,x2,y2,dashed) {
   line.setAttribute("x2", x2); line.setAttribute("y2", y2);
   line.setAttribute("stroke", "#64748b");
   line.setAttribute("stroke-width", "1.5");
+  line.setAttribute("vector-effect", "non-scaling-stroke");
   if (dashed) line.setAttribute("stroke-dasharray","5,4");
   line.setAttribute("marker-end", \`url(#\${arrowId})\`);
   // insert edges behind nodes
@@ -756,7 +888,13 @@ function handleEvent(threadId, ev) {
       const doneKey = addNode(threadId, "tool", \`child \${short(child)} ✓\`, ev);
       // connect dashed from child's last to this node (if we have it)
       const childLast = lastNodeInLane.get(child);
-      if (childLast) connectLanes(childLast, doneKey);
+      if (childLast) {
+        connectLanes(childLast, doneKey);
+      } else {
+        const arr = pendingEdges.get(child) || [];
+        arr.push(doneKey);
+        pendingEdges.set(child, arr);
+      }
       break;
     }
     default:
@@ -834,9 +972,10 @@ async function connect() {
   
   try {
     mainThreadId = id;
-    await primeEvents(id);
+    await primeEventsDeep(id);
     connectThreadWS(id);
     showNotification("Connected to thread", "success");
+    await refreshState();
   } catch (error) {
     console.error("Connection error:", error);
     showNotification("Failed to connect: " + error.message, "error");
@@ -847,10 +986,40 @@ async function primeEvents(threadId) {
   try {
     const r = await fetch(\`/threads/\${threadId}/events\`);
     const j = await r.json();
-    (j.events||[]).forEach(ev => handleEvent(threadId, ev));
+    const foundChildren = new Set();
+    (j.events||[]).forEach(ev => {
+      handleEvent(threadId, ev)
+      if (ev?.type === "subagent.spawned" || ev?.type === "subagent.completed") {
+        const cid = ev?.data?.child_thread_id;
+        if (cid) foundChildren.add(cid);
+      }
+    });
+    return [...foundChildren];
   } catch (e) { 
     console.error("Failed to prime events:", e);
     showNotification("Failed to load thread events", "error");
+    return [];
+  }
+}
+
+async function primeEventsDeep(rootId) {
+  const visited = new Set();
+  const q = [rootId];
+  while (q.length) {
+    const id = q.shift();
+    if (visited.has(id)) continue;
+    visited.add(id);
+
+    // Prime this thread's past events first
+    const children = await primeEvents(id);
+
+    // Ensure we get live updates going forward
+    connectThreadWS(id);
+
+    // Prime each child, and let their own histories reveal grandchildren, etc.
+    for (const c of children) {
+      if (!visited.has(c)) q.push(c);
+    }
   }
 }
 
@@ -947,6 +1116,8 @@ async function refreshState() {
     const r = await fetch("/threads/" + id + "/state");
     const j = await r.json();
     S.textContent = JSON.stringify(j, null, 2);
+    renderTodos(j.state);
+    renderFiles(j.state);
   } catch (err) {
     console.error("Failed to refresh state:", err);
     showNotification("Failed to refresh state: " + err.message, "error");
@@ -981,6 +1152,107 @@ document.addEventListener("keydown", (e) => {
 
 // Initialize with a new thread
 newThread();
+
+function renderTodos(state) {
+  const todos = state?.todos || [];
+  const wrap = document.getElementById("todosList");
+  const summary = document.getElementById("todosSummary");
+  wrap.innerHTML = "";
+  summary.innerHTML = "";
+
+  if (!todos.length) {
+    summary.innerHTML = \`<span class="todo-pill">No todos yet</span>\`;
+    return;
+  }
+
+  const counts = { pending:0, in_progress:0, completed:0 };
+  todos.forEach(t => { counts[t.status] = (counts[t.status]||0)+1; });
+
+  summary.innerHTML = \`
+    <span class="todo-pill pending">Pending: \${counts.pending||0}</span>
+    <span class="todo-pill in_progress">In progress: \${counts.in_progress||0}</span>
+    <span class="todo-pill completed">Completed: \${counts.completed||0}</span>
+    <span class="todo-pill">Total: \${todos.length}</span>
+  \`;
+
+  for (const t of todos) {
+    const li = document.createElement("li");
+    li.className = "todo-item";
+    li.innerHTML = \`
+      <span class="todo-status \${t.status}"></span>
+      <div class="todo-content">
+        <div>\${escapeHtml(t.content||"")}</div>
+        <div style="margin-top:6px; font-size:12px; color:var(--muted);">Status: \${t.status}</div>
+      </div>
+    \`;
+    wrap.appendChild(li);
+  }
+}
+
+// ---- Files ----
+let _selectedFile = null;
+
+function renderFiles(state) {
+  const files = state?.files || {};
+  const list = document.getElementById("filesList");
+  const preview = document.getElementById("filePreview");
+  list.innerHTML = "";
+  preview.textContent = "";
+
+  const paths = Object.keys(files).sort();
+  if (!paths.length) {
+    list.innerHTML = \`<div class="file-row"><span class="file-name">(no files)</span></div>\`;
+    return;
+  }
+
+  for (const p of paths) {
+    const content = files[p] ?? "";
+    const size = new TextEncoder().encode(content).length; // bytes
+    const lines = content ? content.split(/\\r?\\n/).length : 0;
+
+    const row = document.createElement("div");
+    row.className = "file-row";
+    row.onclick = () => selectFile(p, content);
+    row.innerHTML = \`
+      <span class="file-name" title="\${escapeHtml(p)}">\${escapeHtml(p)}</span>
+      <span class="file-meta">\${lines} lines • \${size} B</span>
+    \`;
+    list.appendChild(row);
+  }
+
+  // keep previous selection if still present
+  if (_selectedFile && files[_selectedFile] !== undefined) {
+    selectFile(_selectedFile, files[_selectedFile]);
+  } else {
+    // auto-select first
+    const first = paths[0];
+    selectFile(first, files[first]);
+  }
+}
+
+function selectFile(path, content) {
+  _selectedFile = path;
+  const code = document.getElementById("filePreview");
+  code.innerHTML = renderWithLineNumbers(content || "");
+}
+
+// helpers
+function renderWithLineNumbers(text) {
+  const lines = (text ?? "").split(/\\r?\\n/);
+  return lines.map((line, i) => {
+    const ln = String(i+1).padStart(4, " ");
+    return \`<span class="ln">\${ln}</span>\${escapeHtml(line)}\n\`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll("\\"","&quot;")
+    .replaceAll("'","&#039;");
+}
 </script>
 </body>
 </html>`;
