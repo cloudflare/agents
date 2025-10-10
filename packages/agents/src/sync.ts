@@ -1,14 +1,5 @@
 import type { env } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-
-import type {
-  Prompt,
-  Resource,
-  ServerCapabilities,
-  Tool
-} from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
@@ -22,15 +13,17 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
-import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
-import type { MCPConnectionState } from "./mcp/client-connection";
-import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
-import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
-
-export type { Connection, ConnectionContext, WSMessage } from "partyserver";
+import {
+  QuerySubscriptionManager,
+  type QueryDefinition,
+  type MutationDefinition,
+  isQuerySubscribeMessage,
+  isQueryUnsubscribeMessage,
+  isMutationMessage
+} from "./durable-query";
 
 /**
  * RPC request message from client
@@ -154,12 +147,12 @@ export const unstable_callable = (metadata: CallableMetadata = {}) => {
 export type QueueItem<T = string> = {
   id: string;
   payload: T;
-  callback: keyof Agent<unknown>;
+  callback: keyof SyncAgent<unknown>;
   created_at: number;
 };
 
 /**
- * Represents a scheduled task within an Agent
+ * Represents a scheduled task within an SyncAgent
  * @template T Type of the payload data
  */
 export type Schedule<T = string> = {
@@ -199,64 +192,20 @@ function getNextCronTime(cron: string) {
   return interval.getNextDate();
 }
 
-export type { TransportType } from "./mcp/types";
-
-/**
- * MCP Server state update message from server -> Client
- */
-export type MCPServerMessage = {
-  type: MessageType.CF_AGENT_MCP_SERVERS;
-  mcp: MCPServersState;
-};
-
-export type MCPServersState = {
-  servers: {
-    [id: string]: MCPServer;
-  };
-  tools: Tool[];
-  prompts: Prompt[];
-  resources: Resource[];
-};
-
-export type MCPServer = {
-  name: string;
-  server_url: string;
-  auth_url: string | null;
-  // This state is specifically about the temporary process of getting a token (if needed).
-  // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
-  // to communicate a change to a non-ready state.
-  state: MCPConnectionState;
-  instructions: string | null;
-  capabilities: ServerCapabilities | null;
-};
-
-/**
- * MCP Server data stored in DO SQL for resuming MCP Server connections
- */
-type MCPServerRow = {
-  id: string;
-  name: string;
-  server_url: string;
-  client_id: string | null;
-  auth_url: string | null;
-  callback_url: string;
-  server_options: string;
-};
-
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
 const agentContext = new AsyncLocalStorage<{
-  agent: Agent<unknown, unknown>;
+  agent: SyncAgent<unknown, unknown>;
   connection: Connection | undefined;
   request: Request | undefined;
   email: AgentEmail | undefined;
 }>();
 
 export function getCurrentAgent<
-  T extends Agent<unknown, unknown> = Agent<unknown, unknown>
+  T extends SyncAgent<unknown, unknown> = SyncAgent<unknown, unknown>
 >(): {
   agent: T | undefined;
   connection: Connection | undefined;
@@ -292,7 +241,10 @@ export function getCurrentAgent<
 // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
 function withAgentContext<T extends (...args: any[]) => any>(
   method: T
-): (this: Agent<unknown, unknown>, ...args: Parameters<T>) => ReturnType<T> {
+): (
+  this: SyncAgent<unknown, unknown>,
+  ...args: Parameters<T>
+) => ReturnType<T> {
   return function (...args: Parameters<T>): ReturnType<T> {
     const { connection, request, email, agent } = getCurrentAgent();
 
@@ -308,11 +260,11 @@ function withAgentContext<T extends (...args: any[]) => any>(
 }
 
 /**
- * Base class for creating Agent implementations
+ * Base class for creating SyncAgent implementations
  * @template Env Environment type containing bindings
- * @template State State type to store within the Agent
+ * @template State State type to store within the SyncAgent
  */
-export class Agent<
+export class SyncAgent<
   Env = typeof env,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
@@ -320,22 +272,22 @@ export class Agent<
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
 
-  private _ParentClass: typeof Agent<Env, State> =
+  private _ParentClass: typeof SyncAgent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  readonly mcp: MCPClientManager = new MCPClientManager(
-    this._ParentClass.name,
-    "0.0.1"
-  );
+  protected queries = new Map<string, QueryDefinition>();
+  protected mutations = new Map<string, MutationDefinition>();
+  protected subscriptionManager?: QuerySubscriptionManager;
+  private globalVersion = 0;
 
   /**
-   * Initial state for the Agent
+   * Initial state for the SyncAgent
    * Override to provide default state values
    */
   initialState: State = DEFAULT_STATE as State;
 
   /**
-   * Current state of the Agent
+   * Current state of the SyncAgent
    */
   get state(): State {
     if (this._state !== DEFAULT_STATE) {
@@ -378,20 +330,20 @@ export class Agent<
   }
 
   /**
-   * Agent configuration options
+   * SyncAgent configuration options
    */
   static options = {
-    /** Whether the Agent should hibernate when inactive */
+    /** Whether the SyncAgent should hibernate when inactive */
     hibernate: true // default to hibernate
   };
 
   /**
-   * The observability implementation to use for the Agent
+   * The observability implementation to use for the SyncAgent
    */
   observability?: Observability = genericObservability;
 
   /**
-   * Execute SQL queries against the Agent's database
+   * Execute SQL queries against the SyncAgent's database
    * @template T Type of the returned rows
    * @param strings SQL query template strings
    * @param values Values to be inserted into the query
@@ -424,20 +376,6 @@ export class Agent<
       this._autoWrapCustomMethods();
       wrappedClasses.add(this.constructor);
     }
-
-    // Broadcast server state after background connects (for OAuth servers)
-    this._disposables.add(
-      this.mcp.onConnected(async () => {
-        this.broadcastMcpServers();
-      })
-    );
-
-    // Emit MCP observability events
-    this._disposables.add(
-      this.mcp.onObservabilityEvent((event) => {
-        this.observability?.emit(event);
-      })
-    );
 
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
@@ -477,43 +415,55 @@ export class Agent<
     });
 
     this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        server_url TEXT NOT NULL,
-        callback_url TEXT NOT NULL,
-        client_id TEXT,
-        auth_url TEXT,
-        server_options TEXT
+      CREATE TABLE IF NOT EXISTS cf_agents_query_subscriptions (
+        dedupe_key TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        query_name TEXT NOT NULL,
+        query_args TEXT NOT NULL,
+        connection_ids TEXT NOT NULL,
+        subscribed_at INTEGER DEFAULT (unixepoch())
       )
     `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_query_updates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query_name TEXT NOT NULL,
+        query_args TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mutations (
+        mutation_id TEXT PRIMARY KEY NOT NULL,
+        mutation_name TEXT NOT NULL,
+        args TEXT NOT NULL,
+        result TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_metadata (
+        key TEXT PRIMARY KEY NOT NULL,
+        value INTEGER
+      )
+    `;
+
+    const versionRow = this.sql<{ value: number }>`
+      SELECT value FROM cf_agents_metadata WHERE key = 'global_version'
+    `[0];
+    this.globalVersion = versionRow?.value ?? 0;
+
+    this.subscriptionManager = new QuerySubscriptionManager(this);
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          if (this.mcp.isCallbackRequest(request)) {
-            const result = await this.mcp.handleCallbackRequest(request);
-            this.broadcastMcpServers();
-
-            if (result.authSuccess) {
-              // Start background connection if auth was successful
-              this.mcp
-                .establishConnection(result.serverId)
-                .catch((error) => {
-                  console.error("Background connection failed:", error);
-                })
-                .finally(() => {
-                  // Broadcast after background connection resolves (success/failure)
-                  this.broadcastMcpServers();
-                });
-            }
-
-            // Handle OAuth callback response using MCPClientManager configuration
-            return this.handleOAuthCallbackResponse(result, request);
-          }
-
           return this._tryCatch(() => _onRequest(request));
         }
       );
@@ -604,6 +554,84 @@ export class Agent<
             return;
           }
 
+          if (isQuerySubscribeMessage(parsed)) {
+            try {
+              const { queryName, args, subscriptionId } = parsed;
+              const userId = this.name;
+
+              this.subscriptionManager?.subscribe(
+                connection.id,
+                userId,
+                queryName,
+                args
+              );
+
+              const data = await this.executeQuery(queryName, args);
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_QUERY_DATA,
+                  queryName,
+                  args,
+                  subscriptionId,
+                  data,
+                  version: this.globalVersion,
+                  timestamp: Date.now()
+                })
+              );
+            } catch (error) {
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_QUERY_ERROR,
+                  queryName: parsed.queryName,
+                  error: error instanceof Error ? error.message : String(error)
+                })
+              );
+            }
+            return;
+          }
+
+          if (isQueryUnsubscribeMessage(parsed)) {
+            const { queryName, args } = parsed;
+            const userId = this.name;
+            this.subscriptionManager?.unsubscribe(
+              connection.id,
+              userId,
+              queryName,
+              args
+            );
+            return;
+          }
+
+          if (isMutationMessage(parsed)) {
+            try {
+              const { mutationName, args, mutationId } = parsed;
+              const result = await this.executeMutation(mutationName, {
+                ...(args as object),
+                mutationId
+              });
+
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_MUTATION_RESULT,
+                  mutationId,
+                  success: true,
+                  result,
+                  timestamp: Date.now()
+                })
+              );
+            } catch (error) {
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_MUTATION_RESULT,
+                  mutationId: parsed.mutationId,
+                  success: false,
+                  error: error instanceof Error ? error.message : String(error)
+                })
+              );
+            }
+            return;
+          }
+
           return this._tryCatch(() => _onMessage(connection, message));
         }
       );
@@ -624,13 +652,6 @@ export class Agent<
               })
             );
           }
-
-          connection.send(
-            JSON.stringify({
-              mcp: this.getMcpServers(),
-              type: MessageType.CF_AGENT_MCP_SERVERS
-            })
-          );
 
           this.observability?.emit(
             {
@@ -660,51 +681,6 @@ export class Agent<
         },
         async () => {
           await this._tryCatch(() => {
-            const servers = this.sql<MCPServerRow>`
-            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-          `;
-
-            this.broadcastMcpServers();
-
-            // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-            if (servers && Array.isArray(servers) && servers.length > 0) {
-              // Restore callback URLs for OAuth-enabled servers
-              servers.forEach((server) => {
-                if (server.callback_url) {
-                  // Register the full redirect URL including serverId to avoid ambiguous matches
-                  this.mcp.registerCallbackUrl(
-                    `${server.callback_url}/${server.id}`
-                  );
-                }
-              });
-
-              servers.forEach((server) => {
-                this._connectToMcpServerInternal(
-                  server.name,
-                  server.server_url,
-                  server.callback_url,
-                  server.server_options
-                    ? JSON.parse(server.server_options)
-                    : undefined,
-                  {
-                    id: server.id,
-                    oauthClientId: server.client_id ?? undefined
-                  }
-                )
-                  .then(() => {
-                    // Broadcast updated MCP servers state after each server connects
-                    this.broadcastMcpServers();
-                  })
-                  .catch((error) => {
-                    console.error(
-                      `Error connecting to MCP server: ${server.name} (${server.server_url})`,
-                      error
-                    );
-                    // Still broadcast even if connection fails, so clients know about the failure
-                    this.broadcastMcpServers();
-                  });
-              });
-            }
             return _onStart(props);
           });
         }
@@ -754,7 +730,7 @@ export class Agent<
   }
 
   /**
-   * Update the Agent's state
+   * Update the SyncAgent's state
    * @param state New state to set
    */
   setState(state: State) {
@@ -762,7 +738,7 @@ export class Agent<
   }
 
   /**
-   * Called when the Agent's state is updated
+   * Called when the SyncAgent's state is updated
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
@@ -772,7 +748,7 @@ export class Agent<
   }
 
   /**
-   * Called when the Agent receives an email via routeAgentEmail()
+   * Called when the SyncAgent receives an email via routeAgentEmail()
    * Override this method to handle incoming emails
    * @param email Email message to process
    */
@@ -833,8 +809,8 @@ export class Agent<
       const messageId = `<${agentId}@${domain}>`;
       msg.setHeader("In-Reply-To", email.headers.get("Message-ID")!);
       msg.setHeader("Message-ID", messageId);
-      msg.setHeader("X-Agent-Name", agentName);
-      msg.setHeader("X-Agent-ID", agentId);
+      msg.setHeader("X-SyncAgent-Name", agentName);
+      msg.setHeader("X-SyncAgent-ID", agentId);
 
       if (options.headers) {
         for (const [key, value] of Object.entries(options.headers)) {
@@ -862,8 +838,8 @@ export class Agent<
    * This ensures getCurrentAgent() works in all custom methods without decorators
    */
   private _autoWrapCustomMethods() {
-    // Collect all methods from base prototypes (Agent and Server)
-    const basePrototypes = [Agent.prototype, Server.prototype];
+    // Collect all methods from base prototypes (SyncAgent and Server)
+    const basePrototypes = [SyncAgent.prototype, Server.prototype];
     const baseMethods = new Set<string>();
     for (const baseProto of basePrototypes) {
       let proto = baseProto;
@@ -999,7 +975,7 @@ export class Agent<
       }
 
       for (const row of result || []) {
-        const callback = this[row.callback as keyof Agent<Env>];
+        const callback = this[row.callback as keyof SyncAgent<Env>];
         if (!callback) {
           console.error(`callback ${row.callback} not found`);
           continue;
@@ -1321,7 +1297,7 @@ export class Agent<
 
     if (result && Array.isArray(result)) {
       for (const row of result) {
-        const callback = this[row.callback as keyof Agent<Env>];
+        const callback = this[row.callback as keyof SyncAgent<Env>];
         if (!callback) {
           console.error(`callback ${row.callback} not found`);
           continue;
@@ -1382,25 +1358,27 @@ export class Agent<
   };
 
   /**
-   * Destroy the Agent, removing all state and scheduled tasks
+   * Destroy the SyncAgent, removing all state and scheduled tasks
    */
   async destroy() {
     // drop all tables
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_query_subscriptions`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_query_updates`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_mutations`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_metadata`;
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     this._disposables.dispose();
-    await this.mcp.dispose?.();
     this.ctx.abort("destroyed"); // enforce that the agent is evicted
 
     this.observability?.emit(
       {
-        displayMessage: "Agent destroyed",
+        displayMessage: "SyncAgent destroyed",
         id: nanoid(),
         payload: {},
         timestamp: Date.now(),
@@ -1411,271 +1389,176 @@ export class Agent<
   }
 
   /**
-   * Get all methods marked as callable on this Agent
+   * Get all methods marked as callable on this SyncAgent
    * @returns A map of method names to their metadata
    */
   private _isCallable(method: string): boolean {
     return callableMetadata.has(this[method as keyof this] as Function);
   }
 
-  /**
-   * Connect to a new MCP Server
-   *
-   * @param serverName Name of the MCP server
-   * @param url MCP Server SSE URL
-   * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request.
-   * @param agentsPrefix agents routing prefix if not using `agents`
-   * @param options MCP client and transport options
-   * @returns authUrl
-   */
-  async addMcpServer(
-    serverName: string,
-    url: string,
-    callbackHost?: string,
-    agentsPrefix = "agents",
+  protected registerQuery<TArgs = unknown, TResult = unknown>(
+    name: string,
+    execute: (args: TArgs) => TResult[] | Promise<TResult[]>,
     options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
+      dependencies?: string[];
+      pagination?: {
+        strategy: "cursor" | "offset" | "stable-cursor";
+        keyField: string;
       };
     }
-  ): Promise<{ id: string; authUrl: string | undefined }> {
-    // If callbackHost is not provided, derive it from the current request
-    let resolvedCallbackHost = callbackHost;
-    if (!resolvedCallbackHost) {
-      const { request } = getCurrentAgent();
-      if (!request) {
-        throw new Error(
-          "callbackHost is required when not called within a request context"
-        );
-      }
+  ) {
+    this.queries.set(name, {
+      name,
+      execute: execute as (
+        args: unknown,
+        agent: SyncAgent<unknown>
+      ) => unknown[] | Promise<unknown[]>,
+      dependencies: options?.dependencies,
+      pagination: options?.pagination
+    });
+  }
 
-      // Extract the origin from the request
-      const requestUrl = new URL(request.url);
-      resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
+  protected registerMutation<TArgs = unknown, TResult = unknown>(
+    name: string,
+    execute: (
+      args: TArgs & { mutationId: string }
+    ) => TResult | Promise<TResult>,
+    options?: { invalidates?: string[] }
+  ) {
+    this.mutations.set(name, {
+      name,
+      execute: execute as unknown as (
+        args: unknown & { mutationId: string },
+        agent: SyncAgent<unknown>
+      ) => unknown | Promise<unknown>,
+      invalidates: options?.invalidates
+    });
+  }
+
+  private async executeQuery(queryName: string, args: unknown) {
+    const queryDef = this.queries.get(queryName);
+    if (!queryDef) {
+      throw new Error(`Query ${queryName} not found`);
+    }
+    return await queryDef.execute(args, this);
+  }
+
+  private async broadcastQueryUpdate(queryName: string, version: number) {
+    if (!this.subscriptionManager) return;
+
+    const subscribers =
+      this.subscriptionManager.getSubscribersForQuery(queryName);
+
+    for (const sub of subscribers) {
+      const args = JSON.parse(sub.query_args);
+      const data = await this.executeQuery(queryName, args);
+
+      this.sql`
+        INSERT INTO cf_agents_query_updates (query_name, query_args, version, created_at)
+        VALUES (${queryName}, ${sub.query_args}, ${version}, ${Date.now()})
+      `;
+
+      const connectionIds = JSON.parse(sub.connection_ids);
+      const connections = Array.from(this.getConnections());
+      for (const connectionId of connectionIds) {
+        const connection = connections.find(
+          (c: Connection) => c.id === connectionId
+        );
+        if (connection) {
+          try {
+            connection.send(
+              JSON.stringify({
+                type: MessageType.CF_AGENT_QUERY_DATA,
+                queryName,
+                args,
+                data,
+                version,
+                timestamp: Date.now()
+              })
+            );
+          } catch (error) {
+            console.warn(
+              `Failed to send to connection ${connectionId}:`,
+              error
+            );
+          }
+        }
+      }
+    }
+  }
+
+  private async executeMutation(
+    mutationName: string,
+    args: unknown & { mutationId: string }
+  ) {
+    const existing = this.sql<{ result: string }>`
+      SELECT result FROM cf_agents_mutations
+      WHERE mutation_id = ${args.mutationId}
+    `[0];
+
+    if (existing) {
+      return JSON.parse(existing.result);
     }
 
-    const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    const mutationDef = this.mutations.get(mutationName);
+    if (!mutationDef) {
+      throw new Error(`Mutation ${mutationName} not found`);
+    }
 
-    const result = await this._connectToMcpServerInternal(
-      serverName,
-      url,
-      callbackUrl,
-      options
-    );
+    const result = await mutationDef.execute(args, this);
 
     this.sql`
-        INSERT
-        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${result.id},
-        ${serverName},
-        ${url},
-        ${result.clientId ?? null},
-        ${result.authUrl ?? null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-        );
+      INSERT INTO cf_agents_mutations (mutation_id, mutation_name, args, result, created_at)
+      VALUES (${args.mutationId}, ${mutationName}, ${JSON.stringify(args)}, ${JSON.stringify(result)}, ${Date.now()})
     `;
 
-    this.broadcastMcpServers();
+    this.globalVersion++;
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_metadata (key, value)
+      VALUES ('global_version', ${this.globalVersion})
+    `;
+
+    if (mutationDef.invalidates) {
+      for (const queryName of mutationDef.invalidates) {
+        await this.broadcastQueryUpdate(queryName, this.globalVersion);
+      }
+    }
 
     return result;
-  }
-
-  private async _connectToMcpServerInternal(
-    _serverName: string,
-    url: string,
-    callbackUrl: string,
-    // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      /**
-       * We don't expose the normal set of transport options because:
-       * 1) we can't serialize things like the auth provider or a fetch function into the DB for reconnection purposes
-       * 2) We probably want these options to be agnostic to the transport type (SSE vs Streamable)
-       *
-       * This has the limitation that you can't override fetch, but I think headers should handle nearly all cases needed (i.e. non-standard bearer auth).
-       */
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
-      };
-    },
-    reconnect?: {
-      id: string;
-      oauthClientId?: string;
-    }
-  ): Promise<{
-    id: string;
-    authUrl: string | undefined;
-    clientId: string | undefined;
-  }> {
-    const authProvider = new DurableObjectOAuthClientProvider(
-      this.ctx.storage,
-      this.name,
-      callbackUrl
-    );
-
-    if (reconnect) {
-      authProvider.serverId = reconnect.id;
-      if (reconnect.oauthClientId) {
-        authProvider.clientId = reconnect.oauthClientId;
-      }
-    }
-
-    // Use the transport type specified in options, or default to "auto"
-    const transportType: TransportType = options?.transport?.type ?? "auto";
-
-    // allows passing through transport headers if necessary
-    // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
-    let headerTransportOpts: SSEClientTransportOptions = {};
-    if (options?.transport?.headers) {
-      headerTransportOpts = {
-        eventSourceInit: {
-          fetch: (url, init) =>
-            fetch(url, {
-              ...init,
-              headers: options?.transport?.headers
-            })
-        },
-        requestInit: {
-          headers: options?.transport?.headers
-        }
-      };
-    }
-
-    const { id, authUrl, clientId } = await this.mcp.connect(url, {
-      client: options?.client,
-      reconnect,
-      transport: {
-        ...headerTransportOpts,
-        authProvider,
-        type: transportType
-      }
-    });
-
-    return {
-      authUrl,
-      clientId,
-      id
-    };
-  }
-
-  async removeMcpServer(id: string) {
-    this.mcp.closeConnection(id);
-    this.mcp.unregisterCallbackUrl(id);
-    this.sql`
-      DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
-    `;
-    this.broadcastMcpServers();
-  }
-
-  getMcpServers(): MCPServersState {
-    const mcpState: MCPServersState = {
-      prompts: this.mcp.listPrompts(),
-      resources: this.mcp.listResources(),
-      servers: {},
-      tools: this.mcp.listTools()
-    };
-
-    const servers = this.sql<MCPServerRow>`
-      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-    `;
-
-    if (servers && Array.isArray(servers) && servers.length > 0) {
-      for (const server of servers) {
-        const serverConn = this.mcp.mcpConnections[server.id];
-        mcpState.servers[server.id] = {
-          auth_url: server.auth_url,
-          capabilities: serverConn?.serverCapabilities ?? null,
-          instructions: serverConn?.instructions ?? null,
-          name: server.name,
-          server_url: server.server_url,
-          // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
-          state: serverConn?.connectionState ?? "authenticating"
-        };
-      }
-    }
-
-    return mcpState;
-  }
-
-  private broadcastMcpServers() {
-    this.broadcast(
-      JSON.stringify({
-        mcp: this.getMcpServers(),
-        type: MessageType.CF_AGENT_MCP_SERVERS
-      })
-    );
-  }
-
-  /**
-   * Handle OAuth callback response using MCPClientManager configuration
-   * @param result OAuth callback result
-   * @param request The original request (needed for base URL)
-   * @returns Response for the OAuth callback
-   */
-  private handleOAuthCallbackResponse(
-    result: MCPClientOAuthResult,
-    request: Request
-  ): Response {
-    const config = this.mcp.getOAuthCallbackConfig();
-
-    // Use custom handler if configured
-    if (config?.customHandler) {
-      return config.customHandler(result);
-    }
-
-    // Use redirect URLs if configured
-    if (config?.successRedirect && result.authSuccess) {
-      return Response.redirect(config.successRedirect);
-    }
-
-    if (config?.errorRedirect && !result.authSuccess) {
-      return Response.redirect(
-        `${config.errorRedirect}?error=${encodeURIComponent(result.authError || "Unknown error")}`
-      );
-    }
-
-    // Default behavior - redirect to base URL
-    const baseUrl = new URL(request.url).origin;
-    return Response.redirect(baseUrl);
   }
 }
 
 // A set of classes that have been wrapped with agent context
-const wrappedClasses = new Set<typeof Agent.prototype.constructor>();
+const wrappedClasses = new Set<typeof SyncAgent.prototype.constructor>();
 
 /**
- * Namespace for creating Agent instances
- * @template Agentic Type of the Agent class
+ * Namespace for creating SyncAgent instances
+ * @template Agentic Type of the SyncAgent class
  */
-export type AgentNamespace<Agentic extends Agent<unknown>> =
+export type AgentNamespace<Agentic extends SyncAgent<unknown>> =
   DurableObjectNamespace<Agentic>;
 
 /**
- * Agent's durable context
+ * SyncAgent's durable context
  */
 export type AgentContext = DurableObjectState;
 
 /**
- * Configuration options for Agent routing
+ * Configuration options for SyncAgent routing
  */
 export type AgentOptions<Env> = PartyServerOptions<Env> & {
   /**
-   * Whether to enable CORS for the Agent
+   * Whether to enable CORS for the SyncAgent
    */
   cors?: boolean | HeadersInit | undefined;
 };
 
 /**
- * Route a request to the appropriate Agent
+ * Route a request to the appropriate SyncAgent
  * @param request Request to route
- * @param env Environment containing Agent bindings
+ * @param env Environment containing SyncAgent bindings
  * @param options Routing options
- * @returns Response from the Agent or undefined if no route matched
+ * @returns Response from the SyncAgent or undefined if no route matched
  */
 export async function routeAgentRequest<Env>(
   request: Request,
@@ -1832,9 +1715,9 @@ const agentMapCache = new WeakMap<
 >();
 
 /**
- * Route an email to the appropriate Agent
+ * Route an email to the appropriate SyncAgent
  * @param email The email to route
- * @param env The environment containing the Agent bindings
+ * @param env The environment containing the SyncAgent bindings
  * @param options The options for routing the email
  * @returns A promise that resolves when the email has been routed
  */
@@ -1877,12 +1760,12 @@ export async function routeAgentEmail<Env>(
       .filter((key) => !key.includes("-")) // Show only original names, not kebab-case duplicates
       .join(", ");
     throw new Error(
-      `Agent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
+      `SyncAgent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
     );
   }
 
   const agent = await getAgentByName(
-    namespace as unknown as AgentNamespace<Agent<Env>>,
+    namespace as unknown as AgentNamespace<SyncAgent<Env>>,
     routingInfo.agentId
   );
 
@@ -1955,17 +1838,17 @@ export type EmailSendOptions = {
 };
 
 /**
- * Get or create an Agent by name
+ * Get or create an SyncAgent by name
  * @template Env Environment type containing bindings
- * @template T Type of the Agent class
- * @param namespace Agent namespace
- * @param name Name of the Agent instance
- * @param options Options for Agent creation
- * @returns Promise resolving to an Agent instance stub
+ * @template T Type of the SyncAgent class
+ * @param namespace SyncAgent namespace
+ * @param name Name of the SyncAgent instance
+ * @param options Options for SyncAgent creation
+ * @returns Promise resolving to an SyncAgent instance stub
  */
 export async function getAgentByName<
   Env,
-  T extends Agent<Env>,
+  T extends SyncAgent<Env>,
   Props extends Record<string, unknown> = Record<string, unknown>
 >(
   namespace: AgentNamespace<T>,

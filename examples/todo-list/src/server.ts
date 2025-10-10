@@ -1,5 +1,5 @@
 import { type AgentNamespace, routeAgentRequest } from "agents";
-import { Agent } from "../../../packages/agents/src";
+import { SyncAgent } from "../../../packages/agents/src/sync";
 
 type Env = {
   TodoAgent: AgentNamespace<TodoAgent>;
@@ -12,7 +12,7 @@ export type Todo = {
   createdAt: number;
 };
 
-export class TodoAgent extends Agent<Env, {}> {
+export class TodoAgent extends SyncAgent<Env, {}> {
   constructor(ctx: any, env: Env) {
     super(ctx, env);
 

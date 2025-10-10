@@ -1,4 +1,4 @@
-import type { Agent } from "./index";
+import type { SyncAgent } from "./sync";
 import { MessageType } from "./ai-types";
 
 /**
@@ -13,7 +13,7 @@ export type QueryDefinition<TArgs = unknown, TResult = unknown> = {
   name: string;
   execute: (
     args: TArgs,
-    agent: Agent<unknown>
+    agent: SyncAgent<unknown>
   ) => TResult[] | Promise<TResult[]>;
   dependencies?: string[];
   pagination?: {
@@ -29,7 +29,7 @@ export type MutationDefinition<TArgs = unknown, TResult = unknown> = {
   name: string;
   execute: (
     args: TArgs & { mutationId: string },
-    agent: Agent<unknown>
+    agent: SyncAgent<unknown>
   ) => TResult | Promise<TResult>;
   invalidates?: string[];
 };
@@ -43,7 +43,7 @@ export class QuerySubscriptionManager {
   private readonly MAX_SUBSCRIPTIONS_PER_USER = 100;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
 
-  constructor(private agent: Agent<unknown>) {
+  constructor(private agent: SyncAgent<unknown>) {
     this.setupHeartbeat();
   }
 
