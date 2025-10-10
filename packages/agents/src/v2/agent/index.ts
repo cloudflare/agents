@@ -1,4 +1,4 @@
-import type { Provider } from "./providers";
+import type { Provider } from "../providers";
 import type {
   AgentMiddleware,
   AgentState,
@@ -9,17 +9,11 @@ import type {
   InvokeBody,
   ToolMeta,
   SubagentDescriptor
-} from "./types";
-import { Agent, getAgentByName } from "../";
-import {
-  subagents,
-  hitl,
-  planning,
-  filesystem,
-  getToolMeta
-} from "./middleware";
-import { step } from "./runner";
-import { type AgentEvent, AgentEventType } from "./events";
+} from "../types";
+import { Agent, getAgentByName } from "../..";
+import { subagents, planning, filesystem, getToolMeta } from "../middleware";
+import { type AgentEvent, AgentEventType } from "../events";
+import { step } from "./step";
 
 const INITIAL_STATE: AgentState = { messages: [], files: {} };
 const EVENTS_RING_MAX = 500;
@@ -108,8 +102,15 @@ export const createAgentThread = (options: {
       const persist = this.load();
       const subagentType = persist.state.meta?.subagent_type;
 
+      console.log("subagentType", subagentType);
+      console.log("subagentToolsMap", this.subagentToolsMap);
+
       if (subagentType && this.subagentToolsMap.has(subagentType)) {
-        return this.subagentToolsMap.get(subagentType)!;
+        const tools = this.subagentToolsMap.get(subagentType)!;
+        console.log(
+          `I'm a subagent of type ${subagentType} and have tools ${Object.keys(tools).join(", ")}`
+        );
+        return tools;
       }
 
       return this.extraTools;
@@ -386,6 +387,7 @@ export const createAgentThread = (options: {
           tool_call_id: string;
         }[] = persist.state.meta?.waitingSubagents ?? [];
 
+        // TODO: it'd be nice to move this to the task tool itself
         // Spawn all subagents in parallel
         await Promise.all(
           spawnRequests.map(async ({ call, out }) => {
