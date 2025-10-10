@@ -374,7 +374,7 @@ export class MCPClientManager {
           }
         ];
       })
-    ) as ToolSet;
+    );
   }
 
   /**

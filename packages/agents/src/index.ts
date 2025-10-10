@@ -2,8 +2,6 @@ import type { env } from "cloudflare:workers";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-import { MCPClientManager } from "./mcp/client";
-import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 
 import type {
   Prompt,
@@ -24,8 +22,9 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
-import type { MCPClientOAuthResult } from "./mcp/client";
+import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type { MCPConnectionState } from "./mcp/client-connection";
+import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
