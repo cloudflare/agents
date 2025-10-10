@@ -1,4 +1,5 @@
-import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
+import { type AgentNamespace, routeAgentRequest } from "agents";
+import { Agent } from "../../../packages/agents/src";
 
 type Env = {
   TodoAgent: AgentNamespace<TodoAgent>;
@@ -29,7 +30,7 @@ export class TodoAgent extends Agent<Env, {}> {
       (args) => {
         if (args.completed !== undefined) {
           return this.sql<Todo>`
-            SELECT * FROM todos 
+            SELECT * FROM todos
             WHERE completed = ${args.completed ? 1 : 0}
             ORDER BY created_at DESC
           `;
@@ -68,7 +69,7 @@ export class TodoAgent extends Agent<Env, {}> {
       "toggleTodo",
       (args) => {
         this.sql`
-          UPDATE todos 
+          UPDATE todos
           SET completed = ${args.completed ? 1 : 0}
           WHERE id = ${args.id}
         `;
@@ -88,7 +89,7 @@ export class TodoAgent extends Agent<Env, {}> {
       "updateTodoText",
       (args) => {
         this.sql`
-          UPDATE todos 
+          UPDATE todos
           SET text = ${args.text}
           WHERE id = ${args.id}
         `;
@@ -112,7 +113,7 @@ export class TodoAgent extends Agent<Env, {}> {
         `;
         const allCompleted = todos.every((todo) => todo.completed === 1);
         this.sql`
-          UPDATE todos 
+          UPDATE todos
           SET completed = ${allCompleted ? 0 : 1}
         `;
       },

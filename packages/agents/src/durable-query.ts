@@ -1,6 +1,5 @@
 import type { Agent } from "./index";
 import { MessageType } from "./ai-types";
-import type { Connection } from "partyserver";
 
 /**
  * Pagination strategy for queries
@@ -70,7 +69,7 @@ export class QuerySubscriptionManager {
     args: unknown
   ) {
     const userSubs = this.agent.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_query_subscriptions 
+      SELECT COUNT(*) as count FROM cf_agents_query_subscriptions
       WHERE user_id = ${userId}
     `[0];
 
@@ -85,9 +84,9 @@ export class QuerySubscriptionManager {
 
     const dedupeKey = `${userId}:${queryName}:${JSON.stringify(args)}`;
     this.agent.sql`
-      INSERT OR REPLACE INTO cf_agents_query_subscriptions 
+      INSERT OR REPLACE INTO cf_agents_query_subscriptions
       (dedupe_key, user_id, query_name, query_args, connection_ids, subscribed_at)
-      VALUES (${dedupeKey}, ${userId}, ${queryName}, ${JSON.stringify(args)}, 
+      VALUES (${dedupeKey}, ${userId}, ${queryName}, ${JSON.stringify(args)},
               ${JSON.stringify([...this.connectionGroups.get(userId)!])}, ${Date.now()})
     `;
   }
@@ -103,13 +102,13 @@ export class QuerySubscriptionManager {
 
     if (this.connectionGroups.get(userId)?.size === 0) {
       this.agent.sql`
-        DELETE FROM cf_agents_query_subscriptions 
+        DELETE FROM cf_agents_query_subscriptions
         WHERE dedupe_key = ${dedupeKey}
       `;
       this.connectionGroups.delete(userId);
     } else {
       this.agent.sql`
-        UPDATE cf_agents_query_subscriptions 
+        UPDATE cf_agents_query_subscriptions
         SET connection_ids = ${JSON.stringify([...this.connectionGroups.get(userId)!])}
         WHERE dedupe_key = ${dedupeKey}
       `;
@@ -121,8 +120,8 @@ export class QuerySubscriptionManager {
       query_name: string;
       query_args: string;
     }>`
-      SELECT query_name, query_args 
-      FROM cf_agents_query_subscriptions 
+      SELECT query_name, query_args
+      FROM cf_agents_query_subscriptions
       WHERE user_id = ${userId}
     `;
   }
@@ -133,8 +132,8 @@ export class QuerySubscriptionManager {
       connection_ids: string;
       query_args: string;
     }>`
-      SELECT user_id, connection_ids, query_args 
-      FROM cf_agents_query_subscriptions 
+      SELECT user_id, connection_ids, query_args
+      FROM cf_agents_query_subscriptions
       WHERE query_name = ${queryName}
     `;
   }
@@ -145,13 +144,13 @@ export class QuerySubscriptionManager {
     const activeConnections = this.connectionGroups.get(userId);
     if (activeConnections && activeConnections.size > 0) {
       this.agent.sql`
-        UPDATE cf_agents_query_subscriptions 
+        UPDATE cf_agents_query_subscriptions
         SET connection_ids = ${JSON.stringify([...activeConnections])}
         WHERE user_id = ${userId}
       `;
     } else {
       this.agent.sql`
-        DELETE FROM cf_agents_query_subscriptions 
+        DELETE FROM cf_agents_query_subscriptions
         WHERE user_id = ${userId}
       `;
       this.connectionGroups.delete(userId);

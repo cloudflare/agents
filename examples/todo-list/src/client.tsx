@@ -5,7 +5,7 @@ import type { Todo } from "./server";
 import {
   useDurableQuery,
   useDurableMutation
-} from "agents/durable-query-react";
+} from "../../../packages/agents/src/durable-query-react";
 import "./styles.css";
 
 function App() {
