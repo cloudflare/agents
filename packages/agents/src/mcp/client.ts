@@ -22,6 +22,14 @@ import {
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
 
+let jsonSchemaFn: typeof import("ai").jsonSchema | undefined;
+function getJsonSchema() {
+  if (!jsonSchemaFn) {
+    jsonSchemaFn = require("ai").jsonSchema;
+  }
+  return jsonSchemaFn;
+}
+
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
   errorRedirect?: string;
@@ -339,18 +347,6 @@ export class MCPClientManager {
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
-    // Lazy-load jsonSchema from ai package to avoid pulling in the entire package at module load time
-    // This is loaded synchronously here (when getAITools is called), not at module import time
-    type JsonSchemaFn = typeof import("ai").jsonSchema;
-    let jsonSchemaFn: JsonSchemaFn | undefined;
-    const getJsonSchema = () => {
-      if (!jsonSchemaFn) {
-        // This will only execute when getAITools() is actually called
-        jsonSchemaFn = require("ai").jsonSchema as JsonSchemaFn;
-      }
-      return jsonSchemaFn!;
-    };
-
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
