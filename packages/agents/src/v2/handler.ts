@@ -67,6 +67,9 @@ export const createHandler = (_opts: { baseUrl?: string } = {}) => {
       if (tail === "events" && req.method === "GET") return stub.fetch(doReq);
       if (tail === "ws" && req.headers.get("upgrade") === "websocket")
         return stub.fetch(doReq);
+      if (tail === "child_result" && req.method === "POST")
+        return stub.fetch(doReq);
+
       return new Response("not found", { status: 404 });
     }
   };
