@@ -804,7 +804,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           throw new Error("Tool invocation not found");
                         updateToolPart({
                           toolCallId: data.toolCallId,
-                          toolName: getToolName(toolInvocation) || "",
+                          toolName: getToolName(toolInvocation),
                           state: "output-error",
                           input: toolInvocation.input,
                           rawInput:
