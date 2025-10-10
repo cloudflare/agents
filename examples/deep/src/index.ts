@@ -1,4 +1,4 @@
-import { createAgentThread, createHandler, makeOpenAI } from "agents/v2";
+import { createAgentThread, createHandler, makeOpenAI } from "agents/deep";
 import { internet_search, read_website } from "./tools";
 import { research_agent_prompt, competitive_analysis_prompt } from "./prompts";
 import { env } from "cloudflare:workers"; // yes this is a worker :)

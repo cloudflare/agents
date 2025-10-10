@@ -1,3 +1,5 @@
+// This amazing prompts came from the LangChain folks
+// https://github.com/langchain-ai/deepagents/blob/master/src/deepagents/prompts.py
 export const WRITE_TODOS_TOOL_DESCRIPTION = `Use this tool to create and manage a structured task list for your current work session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
 It also helps the user understand the progress of the task and overall progress of their requests.
 Only use this tool if you think it will be helpful in staying organized. If the user's request is trivial and takes less than 3 steps, it is better to NOT use this tool and just do the taks directly.
