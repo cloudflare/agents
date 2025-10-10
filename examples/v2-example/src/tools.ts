@@ -12,18 +12,34 @@ export const internet_search = defineTool(
     }
   },
   async (p: { query: string }, ctx) => {
-    const response = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${ctx.env.TAVILY_API_KEY}`
-      },
-      body: JSON.stringify({ query: p.query })
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to search the internet: ${response.statusText}`);
+    const retries = 3;
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch("https://api.tavily.com/search", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ctx.env.TAVILY_API_KEY}`
+          },
+          body: JSON.stringify({ query: p.query })
+        });
+        if (response.status === 429) {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          continue;
+        }
+        if (!response.ok) {
+          throw new Error(
+            `Failed to search the internet: ${response.statusText}`
+          );
+        }
+        return response.text();
+      } catch (error) {
+        if (i >= retries - 1) {
+          throw error;
+        }
+      }
     }
-    return response.text();
+    return "Error: Failed to search the internet";
   }
 );
 
@@ -43,17 +59,33 @@ export const read_website = defineTool(
     }
   },
   async (p: { urls: string[] }, ctx) => {
-    const response = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${ctx.env.TAVILY_API_KEY}`
-      },
-      body: JSON.stringify({ urls: p.urls })
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to read the website: ${response.statusText}`);
+    const retries = 3;
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch("https://api.tavily.com/extract", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${ctx.env.TAVILY_API_KEY}`
+          },
+          body: JSON.stringify({ urls: p.urls })
+        });
+        if (response.status === 429) {
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          continue;
+        }
+        if (!response.ok) {
+          throw new Error(
+            `Failed to search the internet: ${response.statusText}`
+          );
+        }
+        return response.text();
+      } catch (error) {
+        if (i >= retries - 1) {
+          throw error;
+        }
+      }
     }
-    return response.text();
+    return "Error: Failed to read the website(s)";
   }
 );

@@ -59,18 +59,10 @@ export const createAgentThread = (options: {
   subagents?: SubagentDescriptor[];
 }): typeof Agent<unknown> => {
   // Build configuration maps from subagent descriptors
-  const subagentMiddlewareMap = new Map<string, AgentMiddleware[]>();
-  const subagentToolsMap = new Map<string, Record<string, ToolHandler>>();
   const subagentDescriptorMap = new Map<string, SubagentDescriptor>();
 
   for (const desc of options.subagents ?? []) {
     subagentDescriptorMap.set(desc.name, desc);
-    if (desc.middleware) {
-      subagentMiddlewareMap.set(desc.name, desc.middleware);
-    }
-    if (desc.tools) {
-      subagentToolsMap.set(desc.name, desc.tools);
-    }
   }
 
   return class extends Agent {
@@ -80,8 +72,6 @@ export const createAgentThread = (options: {
       filesystem(),
       subagents({ subagents: options.subagents })
     ];
-    subagentMiddlewareMap = subagentMiddlewareMap;
-    subagentToolsMap = subagentToolsMap;
     subagentDescriptorMap = subagentDescriptorMap;
     extraTools = options.tools ?? {};
 
@@ -90,8 +80,8 @@ export const createAgentThread = (options: {
       const persist = this.load();
       const subagentType = persist.state.meta?.subagent_type;
 
-      if (subagentType && this.subagentMiddlewareMap.has(subagentType)) {
-        return this.subagentMiddlewareMap.get(subagentType)!;
+      if (subagentType && this.subagentDescriptorMap.has(subagentType)) {
+        return this.subagentDescriptorMap.get(subagentType)?.middleware ?? [];
       }
 
       return this.defaultMiddleware;
@@ -102,15 +92,8 @@ export const createAgentThread = (options: {
       const persist = this.load();
       const subagentType = persist.state.meta?.subagent_type;
 
-      console.log("subagentType", subagentType);
-      console.log("subagentToolsMap", this.subagentToolsMap);
-
-      if (subagentType && this.subagentToolsMap.has(subagentType)) {
-        const tools = this.subagentToolsMap.get(subagentType)!;
-        console.log(
-          `I'm a subagent of type ${subagentType} and have tools ${Object.keys(tools).join(", ")}`
-        );
-        return tools;
+      if (subagentType && this.subagentDescriptorMap.has(subagentType)) {
+        return this.subagentDescriptorMap.get(subagentType)?.tools ?? {};
       }
 
       return this.extraTools;
@@ -458,13 +441,18 @@ export const createAgentThread = (options: {
 
       // Append tool messages for regular (non-spawn) results
       for (const { call, out, error } of regularResults) {
-        if (!error) {
-          persist.state.messages.push({
-            role: "tool",
-            content: typeof out === "string" ? out : JSON.stringify(out),
-            tool_call_id: call.id
-          });
-        }
+        // Always add a tool message, even for errors (OpenAI requires one for each tool_call_id)
+        const content = error
+          ? `Error: ${error instanceof Error ? error.message : String(error)}`
+          : typeof out === "string"
+            ? out
+            : JSON.stringify(out);
+
+        persist.state.messages.push({
+          role: "tool",
+          content,
+          tool_call_id: call.id
+        });
       }
 
       // If we consumed some but still have pending tool calls, pause to yield and reschedule
