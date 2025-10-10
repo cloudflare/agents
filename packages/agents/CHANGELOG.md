@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.2.10
+
+### Patch Changes
+
+- [#550](https://github.com/cloudflare/agents/pull/550) [`336602f`](https://github.com/cloudflare/agents/commit/336602fe3b2eeb9933822b690c8626024da669dd) Thanks [@ainergiz](https://github.com/ainergiz)! - encode MCP message headers with Base64
+
+- [#544](https://github.com/cloudflare/agents/pull/544) [`afd9efd`](https://github.com/cloudflare/agents/commit/afd9efd6da74a9e8f961aa55e87328c9b18fab12) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Startup time optimisations
+
 ## 0.2.9
 
 ### Patch Changes
