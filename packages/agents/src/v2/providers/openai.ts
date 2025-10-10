@@ -18,58 +18,7 @@ type OAChatMsg =
       }>;
     };
 
-function normalizeToolLinks(messages: ChatMessage[]): ChatMessage[] {
-  const out: ChatMessage[] = [];
-  let pendingIds: string[] = [];
-  let callBlockIndex = 0; // increments per assistant message that proposes tool_calls
-
-  for (const m of messages) {
-    // Assistant proposing tool calls
-    if (
-      m.role === "assistant" &&
-      "tool_calls" in m &&
-      Array.isArray(m.tool_calls) &&
-      m.tool_calls.length
-    ) {
-      const withIds = m.tool_calls.map((tc, j) => ({
-        ...tc,
-        id: tc.id ?? `call_${callBlockIndex}_${j}`
-      }));
-      pendingIds = withIds.map((tc) => tc.id!);
-      out.push({ role: "assistant", tool_calls: withIds });
-      callBlockIndex += 1;
-      continue;
-    }
-
-    // Tool result without tool_call_id → attach next pending id
-    if (m.role === "tool") {
-      const id = (m as any).tool_call_id ?? pendingIds[0];
-      if (id) {
-        // consume one id (assumes one tool result per call; matches our sequential executor)
-        pendingIds.shift();
-        out.push({
-          role: "tool",
-          content: (m as any).content ?? "",
-          tool_call_id: id
-        } as any);
-      } else {
-        // No context to infer — pass through (OpenAI may error, but we can't guess)
-        out.push(m as any);
-      }
-      continue;
-    }
-
-    // Any other message resets pending matching context
-    if (m.role !== "assistant") pendingIds = [];
-    out.push(m);
-  }
-  return out;
-}
-
 function toOA(req: ModelRequest) {
-  // 🔧 NEW: normalize first
-  //   const norm = normalizeToolLinks(req.messages);
-
   const msgs: OAChatMsg[] = [];
   if (req.systemPrompt)
     msgs.push({ role: "system", content: req.systemPrompt });
@@ -103,34 +52,6 @@ function toOA(req: ModelRequest) {
       msgs.push({ role: m.role, content: m.content ?? "" });
     }
   }
-
-  //   for (const m of norm) {
-  //     if (m.role === "assistant" && "tool_calls" in m && m.tool_calls?.length) {
-  //       msgs.push({
-  //         role: "assistant",
-  //         content: "",
-  //         tool_calls: m.tool_calls.map((tc) => ({
-  //           id: tc.id!, // now guaranteed by normalize
-  //           type: "function",
-  //           function: {
-  //             name: tc.name,
-  //             arguments:
-  //               typeof tc.args === "string"
-  //                 ? tc.args
-  //                 : JSON.stringify(tc.args ?? {})
-  //           }
-  //         }))
-  //       });
-  //     } else if (m.role === "tool") {
-  //       msgs.push({
-  //         role: "tool",
-  //         content: m.content ?? "",
-  //         tool_call_id: m.tool_call_id // present after normalize
-  //       });
-  //     } else {
-  //       msgs.push({ role: m.role, content: m.content ?? "" });
-  //     }
-  //   }
 
   const tools = (req.toolDefs ?? []).map((t) => ({
     type: "function",

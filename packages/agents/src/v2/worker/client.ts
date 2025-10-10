@@ -185,13 +185,18 @@ export const html = `<!doctype html>
     border-radius:10px; 
     padding:16px; 
     background: var(--card-bg);
-    overflow:auto; 
-    max-height:650px; 
+    overflow:hidden; 
+    height:650px;
+    position: relative;
   }
   #graph { 
     display:block; 
+    width: 100%;
+    height: calc(100% - 32px);
     background:linear-gradient(180deg, #0a0e1a, #151929); 
-    border-radius:8px; 
+    border-radius:8px;
+    user-select: none;
+    -webkit-user-select: none;
   }
   .legend { 
     display:flex; 
@@ -354,18 +359,12 @@ export const html = `<!doctype html>
     }
     
     .graph-wrap {
-      max-height: 400px;
+      height: 400px;
     }
     
     .modal-content {
       max-width: 90%;
       padding: 16px;
-    }
-    
-    .margin {
-      left: 50px;
-      xStep: 100;
-      yStep: 80;
     }
   }
 </style>
@@ -422,6 +421,7 @@ export const html = `<!doctype html>
           <span class="badge"><span class="dot" style="background:var(--err)"></span>Error</span>
           <span class="badge"><span class="dot" style="background:var(--info)"></span>Run Tick</span>
           <span class="badge">Dashed link = Subagent relation</span>
+          <span class="badge" style="margin-left:auto;">💡 Click and drag to pan</span>
         </div>
         <svg id="graph"></svg>
       </div>
@@ -469,6 +469,16 @@ const lastNodeInLane = new Map(); // threadId -> last nodeKey
 const margin = {left:100, top:40, xStep:140, yStep:110};
 const arrowId = "arrowHead";
 
+// Pan/drag state
+let panState = {
+  isPanning: false,
+  startX: 0,
+  startY: 0,
+  offsetX: 0,
+  offsetY: 0
+};
+let graphGroup; // Main group element that gets transformed
+
 function initSVG() {
   G.innerHTML = "";
   const defs = document.createElementNS("http://www.w3.org/2000/svg","defs");
@@ -481,8 +491,44 @@ function initSVG() {
   const path = document.createElementNS("http://www.w3.org/2000/svg","path");
   path.setAttribute("d","M 0 0 L 10 5 L 0 10 z"); path.setAttribute("fill","#64748b");
   marker.appendChild(path); defs.appendChild(marker); G.appendChild(defs);
+  
+  // Create main group for all graph elements
+  graphGroup = document.createElementNS("http://www.w3.org/2000/svg","g");
+  graphGroup.setAttribute("id", "graphGroup");
+  G.appendChild(graphGroup);
+  
+  // Reset pan state
+  panState = { isPanning: false, startX: 0, startY: 0, offsetX: 0, offsetY: 0 };
 }
 initSVG();
+
+// Pan/drag handlers
+G.addEventListener("mousedown", (e) => {
+  panState.isPanning = true;
+  panState.startX = e.clientX - panState.offsetX;
+  panState.startY = e.clientY - panState.offsetY;
+  G.style.cursor = "grabbing";
+});
+
+G.addEventListener("mousemove", (e) => {
+  if (!panState.isPanning) return;
+  panState.offsetX = e.clientX - panState.startX;
+  panState.offsetY = e.clientY - panState.startY;
+  graphGroup.setAttribute("transform", \`translate(\${panState.offsetX}, \${panState.offsetY})\`);
+});
+
+G.addEventListener("mouseup", () => {
+  panState.isPanning = false;
+  G.style.cursor = "grab";
+});
+
+G.addEventListener("mouseleave", () => {
+  panState.isPanning = false;
+  G.style.cursor = "grab";
+});
+
+// Set initial cursor
+G.style.cursor = "grab";
 
 function laneFor(threadId) {
   if (lanes.has(threadId)) return lanes.get(threadId).lane;
@@ -501,14 +547,14 @@ function laneFor(threadId) {
   rect.setAttribute("height", 16);
   rect.setAttribute("fill", "rgba(255, 255, 255, 0.05)");
   rect.setAttribute("rx", 4);
-  G.appendChild(rect);
+  graphGroup.appendChild(rect);
   
   const label = document.createElementNS("http://www.w3.org/2000/svg","text");
   label.setAttribute("x", 10);
   label.setAttribute("y", y-28);
   label.setAttribute("class", "laneLabel");
   label.textContent = lane === 0 ? \`Root Thread\` : \`Subagent #\${lane}\`;
-  G.appendChild(label);
+  graphGroup.appendChild(label);
 
   resizeSVG();
   return lane;
@@ -517,8 +563,8 @@ function laneFor(threadId) {
 function resizeSVG() {
   const width = Math.max(900, margin.left + (globalMaxIndex()+2)*margin.xStep);
   const height = Math.max(300, margin.top + Math.max(1, lanes.size)*margin.yStep);
-  G.setAttribute("width", width);
-  G.setAttribute("height", height);
+  G.setAttribute("viewBox", \`0 0 \${width} \${height}\`);
+  G.setAttribute("preserveAspectRatio", "xMinYMin meet");
 }
 
 function globalMaxIndex() {
@@ -582,7 +628,7 @@ function addNode(threadId, type, label, payload) {
   c.appendChild(title);
 
   group.appendChild(c); group.appendChild(t);
-  G.appendChild(group);
+  graphGroup.appendChild(group);
 
   const nodeKey = \`\${threadId}-\${payload.seq ?? Date.now()}-\${idx}\`;
   nodeMap.set(nodeKey, { x, y, type, elCircle:c, elText:t, threadId });
@@ -622,7 +668,7 @@ function drawEdge(x1,y1,x2,y2,dashed) {
   if (dashed) line.setAttribute("stroke-dasharray","5,4");
   line.setAttribute("marker-end", \`url(#\${arrowId})\`);
   // insert edges behind nodes
-  G.insertBefore(line, G.firstChild.nextSibling); // after defs
+  graphGroup.insertBefore(line, graphGroup.firstChild || null);
 }
 
 function connectLanes(fromNodeKey, toNodeKey) {
@@ -668,6 +714,11 @@ function handleEvent(threadId, ev) {
     case "tool.started": {
       const name = ev.data?.tool_name ?? "tool";
       addNode(threadId, "tool", name, ev);
+      break;
+    }
+    case "tool.output": {
+      const name = ev.data?.tool_name ?? "tool";
+      addNode(threadId, "tool", \`\${name} ✓\`, ev);
       break;
     }
     case "tool.error": {
@@ -721,7 +772,7 @@ function handleEvent(threadId, ev) {
           dot.setAttribute("cy", prev.y - 14);
           dot.setAttribute("r", 3);
           dot.setAttribute("fill", "#64748b");
-          G.appendChild(dot);
+          graphGroup.appendChild(dot);
         }
       }
   }
