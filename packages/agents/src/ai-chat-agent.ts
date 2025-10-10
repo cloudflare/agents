@@ -19,26 +19,6 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 const decoder = new TextDecoder();
 
-// Lazy-load AI SDK utilities
-type AISDK = {
-  getToolName: typeof import("ai").getToolName;
-  isToolUIPart: typeof import("ai").isToolUIPart;
-  parsePartialJson: typeof import("ai").parsePartialJson;
-};
-let aiSDK: AISDK | undefined;
-function getAISDK() {
-  if (!aiSDK) {
-    // Use destructuring to help with tree-shaking
-    const { getToolName, isToolUIPart, parsePartialJson } = require("ai");
-    aiSDK = {
-      getToolName,
-      isToolUIPart,
-      parsePartialJson
-    };
-  }
-  return aiSDK!;
-}
-
 /**
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
@@ -292,6 +272,16 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         return;
       }
 
+      /* Lazy loading ai sdk, because putting it in module scope is
+       * causing issues with startup time.
+       * The only place it's used is in _reply, which only matters after
+       * a chat message is received.
+       * So it's safe to delay loading it until a chat message is received.
+       */
+      const { getToolName, isToolUIPart, parsePartialJson } = await import(
+        "ai"
+      );
+
       const reader = response.body.getReader();
 
       // Parsing state adapted from:
@@ -413,7 +403,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             }
         )
       ) {
-        const { isToolUIPart } = getAISDK();
         const part = message.parts.find(
           (part) =>
             isToolUIPart(part) &&
@@ -595,7 +584,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                     }
 
                     case "tool-input-start": {
-                      const { isToolUIPart } = getAISDK();
                       const toolInvocations =
                         message.parts.filter(isToolUIPart);
 
@@ -631,7 +619,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
                       partialToolCall.text += data.inputTextDelta;
 
-                      const { parsePartialJson } = getAISDK();
                       const partialArgsResult = await parsePartialJson(
                         partialToolCall.text
                       );
@@ -741,7 +728,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           preliminary: data.preliminary
                         });
                       } else {
-                        const { isToolUIPart, getToolName } = getAISDK();
                         const toolInvocations = message.parts.filter(
                           isToolUIPart
                         ) as ToolUIPart[];
@@ -790,7 +776,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           errorText: data.errorText
                         });
                       } else {
-                        const { isToolUIPart, getToolName } = getAISDK();
                         const toolInvocations = message.parts.filter(
                           isToolUIPart
                         ) as ToolUIPart[];

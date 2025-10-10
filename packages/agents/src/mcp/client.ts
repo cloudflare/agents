@@ -23,15 +23,6 @@ import {
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
 
-let jsonSchemaFn: typeof import("ai").jsonSchema | undefined;
-function getJsonSchema() {
-  if (!jsonSchemaFn) {
-    const { jsonSchema } = require("ai");
-    jsonSchemaFn = jsonSchema;
-  }
-  return jsonSchemaFn;
-}
-
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
   errorRedirect?: string;
@@ -71,6 +62,8 @@ export class MCPClientManager {
     private _version: string
   ) {}
 
+  jsonSchema: typeof import("ai").jsonSchema | undefined;
+
   /**
    * Connect to and register an MCP server
    *
@@ -97,6 +90,19 @@ export class MCPClientManager {
     authUrl?: string;
     clientId?: string;
   }> {
+    /* Late initialization of jsonSchemaFn */
+    /**
+     * We need to delay loading ai sdk, because putting it in module scope is
+     * causing issues with startup time.
+     * The only place it's used is in getAITools, which only matters after
+     * .connect() is called on at least one server.
+     * So it's safe to delay loading it until .connect() is called.
+     */
+    if (!this.jsonSchema) {
+      const { jsonSchema } = await import("ai");
+      this.jsonSchema = jsonSchema;
+    }
+
     const id = options.reconnect?.id ?? nanoid(8);
 
     if (options.transport?.authProvider) {
@@ -367,9 +373,9 @@ export class MCPClientManager {
               }
               return result;
             },
-            inputSchema: getJsonSchema()!(tool.inputSchema as JSONSchema7),
+            inputSchema: this.jsonSchema!(tool.inputSchema as JSONSchema7),
             outputSchema: tool.outputSchema
-              ? getJsonSchema()!(tool.outputSchema as JSONSchema7)
+              ? this.jsonSchema!(tool.outputSchema as JSONSchema7)
               : undefined
           }
         ];
