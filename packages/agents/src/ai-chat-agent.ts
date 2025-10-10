@@ -28,11 +28,12 @@ type AISDK = {
 let aiSDK: AISDK | undefined;
 function getAISDK() {
   if (!aiSDK) {
-    const ai = require("ai");
+    // Use destructuring to help with tree-shaking
+    const { getToolName, isToolUIPart, parsePartialJson } = require("ai");
     aiSDK = {
-      getToolName: ai.getToolName,
-      isToolUIPart: ai.isToolUIPart,
-      parsePartialJson: ai.parsePartialJson
+      getToolName,
+      isToolUIPart,
+      parsePartialJson
     };
   }
   return aiSDK!;

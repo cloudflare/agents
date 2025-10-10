@@ -12,6 +12,7 @@ import type {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolSet } from "ai";
+import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
@@ -25,7 +26,8 @@ import type { TransportType } from "./types";
 let jsonSchemaFn: typeof import("ai").jsonSchema | undefined;
 function getJsonSchema() {
   if (!jsonSchemaFn) {
-    jsonSchemaFn = require("ai").jsonSchema;
+    const { jsonSchema } = require("ai");
+    jsonSchemaFn = jsonSchema;
   }
   return jsonSchemaFn;
 }
@@ -365,9 +367,9 @@ export class MCPClientManager {
               }
               return result;
             },
-            inputSchema: getJsonSchema()(tool.inputSchema),
+            inputSchema: getJsonSchema()!(tool.inputSchema as JSONSchema7),
             outputSchema: tool.outputSchema
-              ? getJsonSchema()(tool.outputSchema)
+              ? getJsonSchema()!(tool.outputSchema as JSONSchema7)
               : undefined
           }
         ];
