@@ -10,6 +10,7 @@ const subagent = {
   name: "research-agent",
   description: research_sub_agent_description,
   prompt: research_agent_prompt,
+  model: "gpt-5-2025-08-07",
   tools: { internet_search, read_website }
 };
 
@@ -19,7 +20,10 @@ const AgentThread = createAgentThread({
   subagents: [subagent],
   initialState: {
     messages: [],
-    meta: { systemPrompt: competitive_analysis_prompt }
+    meta: {
+      systemPrompt: competitive_analysis_prompt,
+      model: "gpt-5-2025-08-07"
+    }
   }
 });
 

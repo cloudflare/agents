@@ -1,19 +1,21 @@
-import { getAgentByName, type Agent } from "..";
+import { getAgentByName, type Agent } from "../..";
 import { html } from "./client";
 
-// The idea is that you only have to write the following
-`
-import { createAgentThread } from "./worker";
-import { createHandler } from "./handler";
-
-const AgentThread = createAgentThread({
-  provider: makeOpenAI(env.OPENAI_API_KEY, env.OPENAI_BASE_URL),
-});
-
-export AgentThread;
-export default createHandler(); // this is the entrypoint to the worker
-`;
-
+/**
+ * Creates a Worker entrypoint handler. Example usage:
+ *
+ * ```typescript
+ * import { createAgentThread } from "./worker";
+ * import { createHandler } from "./handler";
+ *
+ * const AgentThread = createAgentThread({
+ *   provider: makeOpenAI(env.OPENAI_API_KEY, env.OPENAI_BASE_URL),
+ * });
+ *
+ * export AgentThread;
+ * export default createHandler(); // this is the entrypoint to the worker
+ * ```
+ */
 export const createHandler = (_opts: { baseUrl?: string } = {}) => {
   return {
     async fetch(
@@ -22,16 +24,18 @@ export const createHandler = (_opts: { baseUrl?: string } = {}) => {
       _ctx: ExecutionContext
     ) {
       const url = new URL(req.url);
-      if (req.method === "POST" && url.pathname === "/threads") {
-        const id = crypto.randomUUID();
-        return new Response(JSON.stringify({ id }), { status: 201 });
-      }
 
-      if (req.method === "GET" && url.pathname === "/dashboard") {
+      // Serve dashboard client
+      if (req.method === "GET" && url.pathname === "/") {
         return new Response(html, {
           status: 200,
           headers: { "content-type": "text/html" }
         });
+      }
+
+      if (req.method === "POST" && url.pathname === "/threads") {
+        const id = crypto.randomUUID();
+        return new Response(JSON.stringify({ id }), { status: 201 });
       }
 
       const match = url.pathname.match(/^\/threads\/([^/]+)(?:\/(.*))?$/);

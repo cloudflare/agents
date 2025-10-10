@@ -1,21 +1,5 @@
-import type { ModelRequest, ChatMessage } from "./types";
-
-// llm/providers.ts
-export interface Provider {
-  invoke(
-    req: ModelRequest,
-    opts: { signal?: AbortSignal }
-  ): Promise<ModelResult>;
-  stream(
-    req: ModelRequest,
-    onDelta: (chunk: string) => void
-  ): Promise<ModelResult>;
-}
-
-export type ModelResult = {
-  message: ChatMessage; // assistant message (may include tool_calls)
-  usage?: { promptTokens: number; completionTokens: number; costUsd?: number };
-};
+import type { ChatMessage, ModelRequest } from "../types";
+import { type Provider, parseModel } from ".";
 
 type OAChatMsg =
   | {
@@ -33,12 +17,6 @@ type OAChatMsg =
         function: { name: string; arguments: string };
       }>;
     };
-
-function parseModel(m: string): string {
-  // Accept "openai:gpt-4o-mini" style or raw "gpt-4o-mini"
-  const idx = m.indexOf(":");
-  return idx >= 0 ? m.slice(idx + 1) : m;
-}
 
 function normalizeToolLinks(messages: ChatMessage[]): ChatMessage[] {
   const out: ChatMessage[] = [];
@@ -90,39 +68,69 @@ function normalizeToolLinks(messages: ChatMessage[]): ChatMessage[] {
 
 function toOA(req: ModelRequest) {
   // 🔧 NEW: normalize first
-  const norm = normalizeToolLinks(req.messages);
+  //   const norm = normalizeToolLinks(req.messages);
 
-  const msgs = [];
+  const msgs: OAChatMsg[] = [];
   if (req.systemPrompt)
     msgs.push({ role: "system", content: req.systemPrompt });
 
-  for (const m of norm) {
-    if (m.role === "assistant" && "tool_calls" in m && m.tool_calls?.length) {
+  for (const m of req.messages) {
+    if (m.role === "tool") {
+      msgs.push({
+        role: "tool",
+        content: m.content ?? "",
+        tool_call_id: m.tool_call_id
+      });
+    } else if (
+      m.role === "assistant" &&
+      "tool_calls" in m &&
+      m.tool_calls?.length
+    ) {
       msgs.push({
         role: "assistant",
-        content: "",
-        tool_calls: m.tool_calls.map((tc, i) => ({
-          id: tc.id!, // now guaranteed by normalize
+        content: "", // TODO: check whether we can skip this when we have tool_calls
+        tool_calls: m.tool_calls.map(({ id, name, args }) => ({
+          id,
           type: "function",
           function: {
-            name: tc.name,
+            name,
             arguments:
-              typeof tc.args === "string"
-                ? tc.args
-                : JSON.stringify(tc.args ?? {})
+              typeof args === "string" ? args : JSON.stringify(args ?? {})
           }
         }))
       });
-    } else if (m.role === "tool") {
-      msgs.push({
-        role: "tool",
-        content: (m as any).content ?? "",
-        tool_call_id: (m as any).tool_call_id // present after normalize
-      });
-    } else {
-      msgs.push({ role: (m as any).role, content: (m as any).content ?? "" });
+    } else if ("content" in m) {
+      msgs.push({ role: m.role, content: m.content ?? "" });
     }
   }
+
+  //   for (const m of norm) {
+  //     if (m.role === "assistant" && "tool_calls" in m && m.tool_calls?.length) {
+  //       msgs.push({
+  //         role: "assistant",
+  //         content: "",
+  //         tool_calls: m.tool_calls.map((tc) => ({
+  //           id: tc.id!, // now guaranteed by normalize
+  //           type: "function",
+  //           function: {
+  //             name: tc.name,
+  //             arguments:
+  //               typeof tc.args === "string"
+  //                 ? tc.args
+  //                 : JSON.stringify(tc.args ?? {})
+  //           }
+  //         }))
+  //       });
+  //     } else if (m.role === "tool") {
+  //       msgs.push({
+  //         role: "tool",
+  //         content: m.content ?? "",
+  //         tool_call_id: m.tool_call_id // present after normalize
+  //       });
+  //     } else {
+  //       msgs.push({ role: m.role, content: m.content ?? "" });
+  //     }
+  //   }
 
   const tools = (req.toolDefs ?? []).map((t) => ({
     type: "function",
@@ -207,30 +215,9 @@ export function makeOpenAI(
       return { message, usage };
     },
 
-    async stream(req, onDelta) {
-      return { message: { role: "assistant", content: "Hello, world!" } };
-    }
-  };
-}
-export function makeAnthropic(_baseUrl: string, _apiKey: string): Provider {
-  /* SSE parse */
-  return {
-    invoke: async (_req, _opts) => {
-      return { message: { role: "assistant", content: "Hello, world!" } };
-    },
-    stream: async (_req, _onDelta) => {
-      return { message: { role: "assistant", content: "Hello, world!" } };
-    }
-  };
-}
-export function makeWorkersAI(_ai: unknown): Provider {
-  /* @cloudflare/ai or fetch */
-  return {
-    invoke: async (_req, _opts) => {
-      return { message: { role: "assistant", content: "Hello, world!" } };
-    },
-    stream: async (_req, _onDelta) => {
-      return { message: { role: "assistant", content: "Hello, world!" } };
+    // don't care about streaming for now
+    async stream(_req, _onDelta) {
+      throw new Error("Streaming not implemented");
     }
   };
 }
