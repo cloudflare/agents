@@ -3,11 +3,13 @@ import type { AgentMiddleware, AgentState, ModelRequest } from "./types";
 
 export type StepVerdict =
   | { kind: "continue"; state: AgentState }
-  | { kind: "paused"; state: AgentState; reason: "hitl" | "exhausted" }
+  | {
+      kind: "paused";
+      state: AgentState;
+      reason: "hitl" | "exhausted" | "subagent";
+    }
   | { kind: "done"; state: AgentState }
   | { kind: "error"; state: AgentState; error: Error };
-
-const DEFAULT_MODEL = "openai:gpt-4.1";
 
 export async function step(
   provider: Provider,
@@ -28,12 +30,15 @@ export async function step(
       model: state.meta?.model ?? "openai:gpt-4.1",
       systemPrompt: state.meta?.systemPrompt,
       messages: state.messages.filter((m) => m.role !== "system"),
-      tools: [] // tools collected by scheduler; this function is provider-agnostic
+      toolDefs: state.meta?.toolDefs ?? []
     };
+
     for (const m of middleware)
       req = await (m.modifyModelRequest?.(req, state) ?? req);
 
+    console.log("req", JSON.stringify(req.messages, null, 2));
     const res = await provider.invoke(req, {});
+    console.log("res", JSON.stringify(res.message, null, 2));
     state = { ...state, messages: [...state.messages, res.message] };
 
     // 4) afterModel (HITL / guardrails may pause)

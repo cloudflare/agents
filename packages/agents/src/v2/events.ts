@@ -50,7 +50,10 @@ export type AgentEventData =
   | { type: AgentEventType.RUN_TICK; data: { run_id: string; step: number } }
   | {
       type: AgentEventType.RUN_PAUSED;
-      data: { run_id: string; reason: "hitl" | "error" | "exhausted" };
+      data: {
+        run_id: string;
+        reason: "hitl" | "error" | "exhausted" | "subagent";
+      };
     }
   | { type: AgentEventType.RUN_RESUMED; data: { run_id: string } }
   | { type: AgentEventType.RUN_CANCELED; data: { run_id: string } }

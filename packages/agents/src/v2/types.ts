@@ -22,20 +22,36 @@ export interface ApproveBody {
   modified_tool_calls?: Array<{ tool_name: string; args: unknown }>;
 }
 
+export type Todo = {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+};
+
 export type ToolCall = {
   name: string;
   args: unknown;
-  id?: string;
+  id: string;
+};
+
+export type ToolJsonSchema = Record<string, unknown>;
+
+export type ToolMeta = {
+  name: string;
+  description?: string; // this is where *_TOOL_DESCRIPTION goes
+  parameters?: ToolJsonSchema; // JSON Schema for the args (OpenAI/Anthropic)
 };
 
 export type ChatMessage =
-  | { role: "system" | "user" | "assistant" | "tool"; content: string }
-  | { role: "assistant"; tool_calls?: ToolCall[] };
+  | { role: "system" | "user" | "assistant"; content: string }
+  | { role: "assistant"; tool_calls?: ToolCall[] }
+  | { role: "tool"; content: string; tool_call_id: string };
 
 export interface InvokeBody {
+  thread_id?: string;
   messages?: ChatMessage[]; // optional new user messages
   files?: Record<string, string>; // optional files to merge into VFS
   idempotencyKey?: string; // dedupe protection
+  meta?: Partial<AgentState["meta"]>;
 }
 
 export interface ModelRequest {
@@ -43,6 +59,7 @@ export interface ModelRequest {
   systemPrompt?: string; // big system prompt (may be dynamic)
   messages: ChatMessage[]; // excludes systemPrompt
   tools?: string[]; // exposed tool names
+  toolDefs?: ToolMeta[];
   toolChoice?: "auto" | { type: "function"; function: { name: string } };
   responseFormat?: "text" | "json" | { schema: unknown };
   temperature?: number;
@@ -60,7 +77,17 @@ export interface AgentState {
     usdSpent?: number;
     pendingToolCalls?: ToolCall[];
     runStatus?: RunStatus;
+    lastReadPaths?: string[];
+    parent?: { thread_id: string; token: string };
+    subagent_type?: string;
+    waitingSubagents?: Array<{
+      token: string;
+      child_thread_id: string;
+      tool_call_id: string;
+    }>;
+    toolDefs?: ToolMeta[];
   };
+  todos?: Todo[];
   jumpTo?: "model" | "tools" | "end";
 }
 
@@ -71,6 +98,15 @@ export type Persisted = {
   // ring buffer of recent events for dashboard
   events: AgentEvent[];
   events_seq: number; // monotonically increasing sequence
+};
+
+export type SubagentDescriptor = {
+  name: string;
+  description: string;
+  prompt: string;
+  tools?: Record<string, ToolHandler>;
+  model?: string;
+  middleware?: AgentMiddleware[];
 };
 
 // Middleware lifecycle
@@ -86,10 +122,10 @@ export interface AgentMiddleware {
   tools?: Record<string, ToolHandler>;
 }
 
-export type ToolHandler = (
+export type ToolHandler = ((
   input: any, // TODO: type this
   ctx: ToolContext
-) => Promise<string | object>;
+) => Promise<string | object>) & { __tool?: ToolMeta };
 
 export type ToolContext = {
   state: AgentState;
