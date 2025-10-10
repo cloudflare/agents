@@ -32,7 +32,6 @@ import { MessageType } from "./ai-types";
 import {
   CLOUDFLARE_BASE,
   DataKind,
-  isRealtimeInternalWebsocket,
   processNDJSONStream,
   REALTIME_AGENTS_SERVICE,
   RealtimeKitTransport,
@@ -357,7 +356,7 @@ export class Agent<
     return DataKind.Text;
   }
 
-  schema(): { name: string; type: string; [K: string]: any } {
+  schema(): { name: string; type: string; [K: string]: unknown } {
     return {
       name: this._ParentClass.name,
       type: "agent",
@@ -542,7 +541,7 @@ export class Agent<
           if (split.length > 2 && this.realtimePipelineComponents) {
             const path = split[split.length - 1];
             switch (path) {
-              case "/rtk/produce":
+              case "/rtk/produce": {
                 const payload = await request.json<{
                   producingTransportId: string;
                   producerId: string;
@@ -561,12 +560,15 @@ export class Agent<
                   );
                 }
                 return new Response(null, { status: 200 });
-              case "/start":
+              }
+              case "/start": {
                 await this.startRealtimePipeline();
                 return new Response(null, { status: 200 });
-              case "/stop":
+              }
+              case "/stop": {
                 await this.stopRealtimePipeline();
                 return new Response(null, { status: 200 });
+              }
             }
           }
 
@@ -1899,11 +1901,14 @@ export class Agent<
   }
 
   private async initRealtimePipeline(components: RealtimePipelineComponent[]) {
-    const { CF_ACCOUNT_ID, CF_API_TOKEN } = this.env as any;
+    const { CF_ACCOUNT_ID, CF_API_TOKEN } = this.env as {
+      CF_ACCOUNT_ID: string;
+      CF_API_TOKEN: string;
+    };
     if (!CF_ACCOUNT_ID) throw new Error("CF_ACCOUNT_ID is required");
     if (!CF_API_TOKEN) throw new Error("CF_API_TOKEN is required");
 
-    var last_component = undefined;
+    let last_component: RealtimePipelineComponent | undefined;
     for (const component of components) {
       if (
         last_component &&
@@ -1938,10 +1943,10 @@ export class Agent<
         elements: []
       }
     ];
-    let elements: { name: string; [K: string]: any }[] = [];
+    let elements: { name: string; [K: string]: unknown }[] = [];
 
     for (const component of components) {
-      let schema = component.schema();
+      const schema = component.schema();
       if (component instanceof Agent || component instanceof TextProcessor) {
         if (component instanceof Agent) {
           schema.type = "websocket";
@@ -2085,8 +2090,8 @@ export class Agent<
   }
 
   onRealtimeTranscript(
-    text: string,
-    reply: (text: string | ReadableStream<Uint8Array>) => void
+    _text: string,
+    _reply: (text: string | ReadableStream<Uint8Array>) => void
   ) {}
 }
 

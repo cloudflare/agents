@@ -33,11 +33,6 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js"
     },
-    "./realtime": {
-      "types": "./dist/realtime-agent.d.ts",
-      "import": "./dist/realtime-agent.js",
-      "require": "./dist/realtime-agent.js"
-    },
     "./ai-chat-agent": {
       "types": "./dist/ai-chat-agent.d.ts",
       "import": "./dist/ai-chat-agent.js",
@@ -92,6 +87,11 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
       "require": "./dist/react.js"
+    },
+    "./realtime": {
+      "types": "./dist/realtime-agent.d.ts",
+      "import": "./dist/realtime-agent.js",
+      "require": "./dist/realtime-agent.js"
     },
     "./schedule": {
       "types": "./dist/schedule.d.ts",
