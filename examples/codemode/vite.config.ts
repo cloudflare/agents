@@ -9,5 +9,8 @@ export default defineConfig({
   },
   build: {
     minify: true
+  },
+  optimizeDeps: {
+    exclude: ["ai"]
   }
 });

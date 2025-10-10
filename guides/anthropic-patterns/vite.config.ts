@@ -19,5 +19,8 @@ export default defineConfig({
       },
       name: "requestLogger"
     }
-  ]
+  ],
+  optimizeDeps: {
+    exclude: ["ai"]
+  }
 });
