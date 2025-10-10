@@ -1,8 +1,8 @@
 {
   "author": "",
   "dependencies": {
-    "hono": "^4.9.9",
-    "x402-fetch": "^0.6.0",
+    "hono": "^4.9.10",
+    "x402-fetch": "^0.6.6",
     "x402-hono": "^0.6.5"
   },
   "keywords": [],

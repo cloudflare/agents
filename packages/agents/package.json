@@ -4,9 +4,11 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.19.1",
-    "ai": "5.0.57",
+    "@ai-sdk/openai": "2.0.48",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "ai": "5.0.68",
     "cron-schedule": "^5.0.4",
+    "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.27",
     "nanoid": "^5.1.6",
@@ -106,10 +108,14 @@
   "name": "agents",
   "peerDependencies": {
     "react": "*",
+    "viem": ">=2.0.0",
     "x402": "^0.6.5"
   },
   "peerDependenciesMeta": {
     "x402": {
+      "optional": true
+    },
+    "viem": {
       "optional": true
     }
   },

@@ -1,15 +1,15 @@
 import { execSync } from "node:child_process";
-import { build } from "tsup";
+import { build } from "tsdown";
 
 async function main() {
   await build({
     clean: true,
     dts: true,
     entry: ["src/*.ts", "src/*.tsx"],
+    skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
-    sourcemap: true,
-    splitting: true
+    sourcemap: true
   });
 
   // then run prettier on the generated .d.ts files
