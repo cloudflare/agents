@@ -20,22 +20,22 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 const decoder = new TextDecoder();
 
 // Lazy-load AI SDK utilities
-type AIUtils = {
+type AISDK = {
   getToolName: (part: unknown) => string | undefined;
   isToolUIPart: (part: unknown) => part is ToolUIPart;
   parsePartialJson: (json: string) => Record<string, unknown>;
 };
-let aiUtils: AIUtils | undefined;
-function getAIUtils() {
-  if (!aiUtils) {
+let aiSDK: AISDK | undefined;
+function getAISDK() {
+  if (!aiSDK) {
     const ai = require("ai");
-    aiUtils = {
+    aiSDK = {
       getToolName: ai.getToolName,
       isToolUIPart: ai.isToolUIPart,
       parsePartialJson: ai.parsePartialJson
     };
   }
-  return aiUtils!;
+  return aiSDK!;
 }
 
 /**
@@ -412,7 +412,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             }
         )
       ) {
-        const { isToolUIPart } = getAIUtils();
+        const { isToolUIPart } = getAISDK();
         const part = message.parts.find(
           (part) =>
             isToolUIPart(part) &&
@@ -594,7 +594,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                     }
 
                     case "tool-input-start": {
-                      const { isToolUIPart } = getAIUtils();
+                      const { isToolUIPart } = getAISDK();
                       const toolInvocations =
                         message.parts.filter(isToolUIPart);
 
@@ -630,7 +630,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
                       partialToolCall.text += data.inputTextDelta;
 
-                      const { parsePartialJson } = getAIUtils();
+                      const { parsePartialJson } = getAISDK();
                       const partialArgsResult = await parsePartialJson(
                         partialToolCall.text
                       );
@@ -740,7 +740,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           preliminary: data.preliminary
                         });
                       } else {
-                        const { isToolUIPart, getToolName } = getAIUtils();
+                        const { isToolUIPart, getToolName } = getAISDK();
                         const toolInvocations = message.parts.filter(
                           isToolUIPart
                         ) as ToolUIPart[];
@@ -789,7 +789,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           errorText: data.errorText
                         });
                       } else {
-                        const { isToolUIPart, getToolName } = getAIUtils();
+                        const { isToolUIPart, getToolName } = getAISDK();
                         const toolInvocations = message.parts.filter(
                           isToolUIPart
                         ) as ToolUIPart[];

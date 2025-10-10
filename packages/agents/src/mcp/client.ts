@@ -341,11 +341,12 @@ export class MCPClientManager {
   getAITools(): ToolSet {
     // Lazy-load jsonSchema from ai package to avoid pulling in the entire package at module load time
     // This is loaded synchronously here (when getAITools is called), not at module import time
-    let jsonSchemaFn: ((schema: unknown) => unknown) | undefined;
+    type JsonSchemaFn = typeof import("ai").jsonSchema;
+    let jsonSchemaFn: JsonSchemaFn | undefined;
     const getJsonSchema = () => {
       if (!jsonSchemaFn) {
         // This will only execute when getAITools() is actually called
-        jsonSchemaFn = require("ai").jsonSchema;
+        jsonSchemaFn = require("ai").jsonSchema as JsonSchemaFn;
       }
       return jsonSchemaFn!;
     };
