@@ -53,7 +53,7 @@
     "lint-staged": "^16.2.3",
     "partyserver": "^0.0.75",
     "partysocket": "1.1.6",
-    "patch-package": "^8.0.0",
+    "patch-package": "^8.0.1",
     "pkg-pr-new": "^0.0.60",
     "playwright": "^1.55.1",
     "prettier": "^3.6.2",
