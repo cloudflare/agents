@@ -1,16 +1,13 @@
-import {
-  getToolName,
-  isToolUIPart,
-  parsePartialJson,
-  type UIMessage as ChatMessage,
-  type DynamicToolUIPart,
-  type ProviderMetadata,
-  type ReasoningUIPart,
-  type StreamTextOnFinishCallback,
-  type TextUIPart,
-  type ToolSet,
-  type ToolUIPart,
-  type UIMessageChunk
+import type {
+  UIMessage as ChatMessage,
+  DynamicToolUIPart,
+  ProviderMetadata,
+  ReasoningUIPart,
+  StreamTextOnFinishCallback,
+  TextUIPart,
+  ToolSet,
+  ToolUIPart,
+  UIMessageChunk
 } from "ai";
 import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
 import {
@@ -21,6 +18,26 @@ import {
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 
 const decoder = new TextDecoder();
+
+// Lazy-load AI SDK utilities
+type AISDK = {
+  getToolName: typeof import("ai").getToolName;
+  isToolUIPart: typeof import("ai").isToolUIPart;
+  parsePartialJson: typeof import("ai").parsePartialJson;
+};
+let aiSDK: AISDK | undefined;
+function getAISDK() {
+  if (!aiSDK) {
+    // Use destructuring to help with tree-shaking
+    const { getToolName, isToolUIPart, parsePartialJson } = require("ai");
+    aiSDK = {
+      getToolName,
+      isToolUIPart,
+      parsePartialJson
+    };
+  }
+  return aiSDK!;
+}
 
 /**
  * Extension of Agent with built-in chat capabilities
@@ -396,8 +413,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             }
         )
       ) {
+        const { isToolUIPart } = getAISDK();
         const part = message.parts.find(
-          (part) => isToolUIPart(part) && part.toolCallId === options.toolCallId
+          (part) =>
+            isToolUIPart(part) &&
+            (part as ToolUIPart).toolCallId === options.toolCallId
         ) as ToolUIPart | undefined;
 
         const anyOptions = options as Record<string, unknown>;
@@ -575,6 +595,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                     }
 
                     case "tool-input-start": {
+                      const { isToolUIPart } = getAISDK();
                       const toolInvocations =
                         message.parts.filter(isToolUIPart);
 
@@ -610,9 +631,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
                       partialToolCall.text += data.inputTextDelta;
 
-                      const { value: partialArgs } = await parsePartialJson(
+                      const { parsePartialJson } = getAISDK();
+                      const partialArgsResult = await parsePartialJson(
                         partialToolCall.text
                       );
+                      const partialArgs = (
+                        partialArgsResult as { value: Record<string, unknown> }
+                      ).value;
 
                       if (partialToolCall.dynamic) {
                         updateDynamicToolPart({
@@ -716,8 +741,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           preliminary: data.preliminary
                         });
                       } else {
-                        const toolInvocations =
-                          message.parts.filter(isToolUIPart);
+                        const { isToolUIPart, getToolName } = getAISDK();
+                        const toolInvocations = message.parts.filter(
+                          isToolUIPart
+                        ) as ToolUIPart[];
 
                         const toolInvocation = toolInvocations.find(
                           (invocation) =>
@@ -763,8 +790,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                           errorText: data.errorText
                         });
                       } else {
-                        const toolInvocations =
-                          message.parts.filter(isToolUIPart);
+                        const { isToolUIPart, getToolName } = getAISDK();
+                        const toolInvocations = message.parts.filter(
+                          isToolUIPart
+                        ) as ToolUIPart[];
 
                         const toolInvocation = toolInvocations.find(
                           (invocation) =>

@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.2.2",
-    "hono": "^4.9.9"
+    "hono": "^4.9.10"
   },
   "keywords": [],
   "scripts": {

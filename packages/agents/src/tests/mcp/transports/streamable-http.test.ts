@@ -224,6 +224,42 @@ describe("Streamable HTTP Transport", () => {
         jsonrpc: "2.0"
       });
     });
+
+    it("should accept JSON payloads containing Unicode characters", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const unicodeName = "José’s Café";
+      const unicodeRequest: JSONRPCMessage[] = [
+        {
+          id: "unicode-1",
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            name: "greet",
+            arguments: {
+              name: unicodeName
+            }
+          }
+        }
+      ];
+
+      const response = await sendPostRequest(
+        ctx,
+        baseUrl,
+        unicodeRequest,
+        sessionId
+      );
+
+      expect(response.status).toBe(200);
+
+      const sseText = await readSSEEvent(response);
+      const parsed = parseSSEData(sseText) as JSONRPCResponse;
+      expect(parsed.id).toBe("unicode-1");
+
+      const result = parsed.result as CallToolResult;
+      expect(result.content?.[0]?.text).toBe(`Hello, ${unicodeName}!`);
+    });
   });
 
   describe("Batch Operations", () => {

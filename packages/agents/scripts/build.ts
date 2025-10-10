@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { build } from "tsup";
+import { build } from "tsdown";
 
 async function main() {
   await build({
@@ -15,19 +15,10 @@ async function main() {
       "src/observability/index.ts",
       "src/codemode/ai.ts"
     ],
-    external: [
-      "cloudflare:workers",
-      "cloudflare:email",
-      "@ai-sdk/react",
-      "ai",
-      "react",
-      "zod",
-      "@modelcontextprotocol/sdk",
-      "x402"
-    ],
+    skipNodeModulesBundle: true,
+    external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
-    sourcemap: true,
-    splitting: true
+    sourcemap: true
   });
 
   // then run prettier on the generated .d.ts files

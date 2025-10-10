@@ -224,11 +224,14 @@ export const createStreamingHttpHandler = (
         request.headers.forEach((value, key) => {
           existingHeaders[key] = value;
         });
+
         const req = new Request(request.url, {
           headers: {
             ...existingHeaders,
             [MCP_HTTP_METHOD_HEADER]: "POST",
-            [MCP_MESSAGE_HEADER]: JSON.stringify(messages),
+            [MCP_MESSAGE_HEADER]: Buffer.from(
+              JSON.stringify(messages)
+            ).toString("base64"),
             Upgrade: "websocket"
           }
         });

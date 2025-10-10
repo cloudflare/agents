@@ -11,7 +11,8 @@ import type {
   ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
-import { type ToolSet, jsonSchema } from "ai";
+import type { ToolSet } from "ai";
+import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
@@ -21,6 +22,15 @@ import {
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
+
+let jsonSchemaFn: typeof import("ai").jsonSchema | undefined;
+function getJsonSchema() {
+  if (!jsonSchemaFn) {
+    const { jsonSchema } = require("ai");
+    jsonSchemaFn = jsonSchema;
+  }
+  return jsonSchemaFn;
+}
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -357,12 +367,9 @@ export class MCPClientManager {
               }
               return result;
             },
-            // @ts-expect-error drift between ai and mcp types
-            inputSchema: jsonSchema(tool.inputSchema),
-
+            inputSchema: getJsonSchema()!(tool.inputSchema as JSONSchema7),
             outputSchema: tool.outputSchema
-              ? // @ts-expect-error drift between ai and mcp types
-                jsonSchema(tool.outputSchema)
+              ? getJsonSchema()!(tool.outputSchema as JSONSchema7)
               : undefined
           }
         ];

@@ -151,9 +151,25 @@ export abstract class McpAgent<
         if (this._transport instanceof StreamableHTTPServerTransport) {
           switch (req.headers.get(MCP_HTTP_METHOD_HEADER)) {
             case "POST": {
-              // This returns the repsonse directly to the client
+              // This returns the response directly to the client
               const payloadHeader = req.headers.get(MCP_MESSAGE_HEADER);
-              const parsedBody = await JSON.parse(payloadHeader ?? "{}");
+              let rawPayload: string;
+
+              if (!payloadHeader) {
+                rawPayload = "{}";
+              } else {
+                try {
+                  rawPayload = Buffer.from(payloadHeader, "base64").toString(
+                    "utf-8"
+                  );
+                } catch (_error) {
+                  throw new Error(
+                    "Internal Server Error: Failed to decode MCP message header"
+                  );
+                }
+              }
+
+              const parsedBody = JSON.parse(rawPayload);
               this._transport?.handlePostRequest(req, parsedBody);
               break;
             }
