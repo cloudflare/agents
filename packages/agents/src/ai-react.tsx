@@ -124,6 +124,10 @@ export function useAgentChat<
 
   agentUrl.searchParams.delete("_pk");
   const agentUrlString = agentUrl.toString();
+
+  // we need to include agent.name in cache key to prevent collisions during agent switching.
+  // The URL may be stale between updateProperties() and reconnect(), but agent.name
+  // is updated synchronously, so each thread gets its own cache entry
   const initialMessagesCacheKey = `${agentUrlString}|${agent.agent ?? ""}|${agent.name ?? ""}`;
 
   // Keep a ref to always point to the latest agent instance
