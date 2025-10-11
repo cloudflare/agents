@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.13
+
+### Patch Changes
+
+- [#531](https://github.com/cloudflare/agents/pull/531) [`cdfc590`](https://github.com/cloudflare/agents/commit/cdfc590640bcc08da888d8707f923b926ca73225) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - update our cache key in useAgentChat to include agent name (fix for #420)
+
 ## 0.2.12
 
 ### Patch Changes
