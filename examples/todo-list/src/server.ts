@@ -1,4 +1,4 @@
-import { type AgentNamespace, routeAgentRequest } from "agents";
+import { type AgentNamespace, routeAgentRequest, AgentContext } from "agents";
 import { SyncAgent } from "../../../packages/agents/src/sync";
 
 type Env = {
@@ -12,8 +12,13 @@ export type Todo = {
   createdAt: number;
 };
 
+export type TodoState = {
+  todos: Todo[];
+  filter?: string;
+};
+
 export class TodoAgent extends SyncAgent<Env, {}> {
-  constructor(ctx: any, env: Env) {
+  constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
     this.sql`

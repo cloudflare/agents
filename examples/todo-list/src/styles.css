@@ -58,12 +58,6 @@ button {
   color: #e6e6e6;
 }
 
-.todo-app input::input-placeholder {
-  font-style: italic;
-  font-weight: 300;
-  color: #e6e6e6;
-}
-
 .header h1 {
   position: absolute;
   top: -155px;
@@ -334,17 +328,6 @@ html .clear-completed:active {
 
 .info p {
   line-height: 1;
-}
-
-@media screen and (-webkit-min-device-pixel-ratio: 0) {
-  .toggle-all,
-  .todo-list li .toggle {
-    background: none;
-  }
-
-  .todo-list li .toggle {
-    height: 40px;
-  }
 }
 
 @media (max-width: 430px) {

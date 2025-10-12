@@ -1,10 +1,5 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker, { type Env } from "./server";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("TodoAgent", () => {
   describe("State Management", () => {

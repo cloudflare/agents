@@ -122,7 +122,6 @@ function App() {
             placeholder="What needs to be done?"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
-            autoFocus
           />
         </form>
       </header>
@@ -147,12 +146,16 @@ function App() {
               >
                 <div className="view">
                   <input
+                    name="toggleInput"
                     className="toggle"
                     type="checkbox"
                     checked={todo.completed}
                     onChange={() => handleToggleTodo(todo.id, todo.completed)}
                   />
-                  <label onDoubleClick={() => handleStartEdit(todo)}>
+                  <label
+                    htmlFor="toggleInput"
+                    onDoubleClick={() => handleStartEdit(todo)}
+                  >
                     {todo.text}
                   </label>
                   <button
@@ -175,7 +178,6 @@ function App() {
                         handleCancelEdit();
                       }
                     }}
-                    autoFocus
                   />
                 )}
               </li>

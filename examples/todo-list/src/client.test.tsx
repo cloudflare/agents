@@ -1,6 +1,6 @@
 import React, { StrictMode, act } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "vitest-browser-react";
+import { render } from "vitest-browser-react";
 import { useAgent } from "agents/react";
 import type { TodoState } from "./server";
 
@@ -9,38 +9,15 @@ vi.mock("agents/react", () => ({
 }));
 
 describe("TodoApp React Integration", () => {
-  let mockAgent: ReturnType<typeof useAgent<TodoState>>;
+  let mockAgent: { call: typeof vi.fn };
   let onStateUpdateCallback: ((state: TodoState) => void) | undefined;
 
   beforeEach(() => {
     onStateUpdateCallback = undefined;
 
     mockAgent = {
-      _pkurl: "ws://localhost:3000",
-      _url: "ws://localhost:3000",
-      addEventListener: vi.fn(),
-      id: "test-todo-agent",
-      name: "test-room",
-      removeEventListener: vi.fn(),
-      send: vi.fn(),
-      call: vi.fn(),
-      close: vi.fn(),
-      readyState: 1,
-      bufferedAmount: 0,
-      extensions: "",
-      protocol: "",
-      url: "ws://localhost:3000",
-      binaryType: "blob" as BinaryType,
-      dispatchEvent: vi.fn(),
-      onclose: null,
-      onerror: null,
-      onmessage: null,
-      onopen: null,
-      CONNECTING: 0,
-      OPEN: 1,
-      CLOSING: 2,
-      CLOSED: 3
-    } as any;
+      call: vi.fn()
+    };
 
     vi.mocked(useAgent).mockImplementation((options) => {
       onStateUpdateCallback = options.onStateUpdate;
@@ -199,18 +176,21 @@ describe("TodoApp React Integration", () => {
       return (
         <div>
           <button
+            type="button"
             data-testid="toggle-btn"
             onClick={() => agent.call("toggleTodo", ["todo-1"])}
           >
             Toggle
           </button>
           <button
+            type="button"
             data-testid="delete-btn"
             onClick={() => agent.call("deleteTodo", ["todo-1"])}
           >
             Delete
           </button>
           <button
+            type="button"
             data-testid="filter-btn"
             onClick={() => agent.call("setFilter", ["completed"])}
           >

@@ -58,7 +58,7 @@ export function useDurableQuery<TArgs = unknown, TResult = unknown>(
     );
 
     lastFetchTimeRef.current = now;
-  }, [agent, queryName, JSON.stringify(args), enabled, staleTime]);
+  }, [agent, queryName, args, enabled, staleTime]);
 
   useEffect(() => {
     if (!enabled) {
@@ -87,7 +87,9 @@ export function useDurableQuery<TArgs = unknown, TResult = unknown>(
             setIsFetching(false);
           }
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error(e);
+      }
     };
 
     agent.addEventListener("message", handleMessage);
@@ -118,14 +120,7 @@ export function useDurableQuery<TArgs = unknown, TResult = unknown>(
         })
       );
     };
-  }, [
-    agent,
-    queryName,
-    JSON.stringify(args),
-    enabled,
-    fetchData,
-    refetchOnWindowFocus
-  ]);
+  }, [agent, queryName, args, enabled, fetchData, refetchOnWindowFocus]);
 
   const refetch = useCallback(() => {
     fetchData();
@@ -195,7 +190,9 @@ export function useDurableMutation<TArgs = unknown, TResult = unknown>(
             setIsPending(pendingMutationsRef.current.size > 0);
           }
         }
-      } catch (e) {}
+      } catch (e) {
+        console.error(e);
+      }
     };
 
     agent.addEventListener("message", handleMessage);
