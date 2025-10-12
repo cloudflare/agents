@@ -12,7 +12,7 @@ export type Effect =
   | {
       type: "pause";
       reason: "hitl" | "subagent" | "exhausted" | string;
-      payload?: any;
+      payload?: unknown;
     }
   | { type: "resume" }
   | {
@@ -187,6 +187,7 @@ export interface AgentMiddleware {
 }
 
 export type ToolHandler = ((
+  // biome-ignore lint/suspicious/noExplicitAny: need to think this proper
   input: any, // TODO: type this
   ctx: ToolContext
 ) => Promise<string | object | null>) & { __tool?: ToolMeta };

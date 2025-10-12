@@ -22,9 +22,7 @@ type HandlerOpions = {
  * export default createHandler(); // this is the entrypoint to the worker
  * ```
  */
-export const createHandler = (
-  opts: { baseUrl?: string; secret?: string } = {}
-) => {
+export const createHandler = (opts: HandlerOpions = {}) => {
   return {
     async fetch(
       req: Request,
