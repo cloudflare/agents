@@ -1,68 +1,32 @@
-import type { Provider } from "../providers";
-import type { AgentMiddleware, AgentState, ModelRequest } from "../types";
-
-export type StepVerdict =
-  | { kind: "continue"; state: AgentState }
-  | {
-      kind: "paused";
-      state: AgentState;
-      reason: "hitl" | "exhausted" | "subagent";
-    }
-  | { kind: "done"; state: AgentState }
-  | { kind: "error"; state: AgentState; error: Error };
+import type { AgentMiddleware, MWContext } from "../types";
+import { ModelPlanBuilder } from "../middleware/plan";
 
 export async function step(
-  provider: Provider,
-  middleware: AgentMiddleware[],
-  s: AgentState
-): Promise<StepVerdict> {
-  // 1) beforeModel
-  let state = s;
-  try {
-    for (const m of middleware) {
-      const up = await m.beforeModel?.(state);
-      if (up) state = { ...state, ...up };
-      if (state.jumpTo === "tools" || state.jumpTo === "end") break;
-    }
+  mws: AgentMiddleware[],
+  ctx: MWContext
+): Promise<void> {
+  // let MWs run any init logic for tick
+  for (const m of mws) await m.onTick?.(ctx);
 
-    // 2) compose ModelRequest
-    let req: ModelRequest = {
-      model: state.meta?.model ?? "openai:gpt-4.1",
-      systemPrompt: state.meta?.systemPrompt,
-      messages: state.messages.filter((m) => m.role !== "system"),
-      toolDefs: state.meta?.toolDefs ?? []
-    };
+  // build model req
+  const plan = new ModelPlanBuilder(ctx.store); // lets MWs add sys prompt, tool defs, etc.
+  for (const m of mws) await m.beforeModel?.(ctx, plan);
 
-    for (const m of middleware)
-      req = await (m.modifyModelRequest?.(req, state) ?? req);
+  if (ctx.agent.isPaused) return;
 
-    console.log("req", JSON.stringify(req.messages, null, 2));
-    const res = await provider.invoke(req, {});
-    console.log("res", JSON.stringify(res.message, null, 2));
-    state = { ...state, messages: [...state.messages, res.message] };
+  // invoke model
+  const req = plan.build();
+  const res = await ctx.provider.invoke(req, {});
 
-    // 4) afterModel (HITL / guardrails may pause)
-    for (const m of [...middleware].reverse()) {
-      const up = await m.afterModel?.(state);
-      if (up) state = { ...state, ...up };
-    }
+  // let MWs react to the model result
+  for (const m of mws) await m.onModelResult?.(ctx, res);
 
-    // If HITL flagged pending tool calls, pause now
-    if (state.meta?.pendingToolCalls?.length) {
-      return { kind: "paused", state, reason: "hitl" };
-    }
+  // Should we set this before or after the MWs?
+  ctx.store.appendMessages([res.message]);
 
-    // If assistant proposed tool calls, the outer scheduler will execute them and then call runStep again.
-    // If no tool calls, we consider that a completion signal when the assistant doesn't have more to do.
-    const last = state.messages[state.messages.length - 1];
-    const hasCalls =
-      last?.role === "assistant" &&
-      "tool_calls" in last &&
-      Array.isArray(last.tool_calls) &&
-      last.tool_calls.length > 0;
-
-    return hasCalls ? { kind: "continue", state } : { kind: "done", state };
-  } catch (e: unknown) {
-    return { kind: "error", state, error: e as Error };
-  }
+  const newToolCalls =
+    res.message && "tool_calls" in res.message && res.message.tool_calls
+      ? res.message.tool_calls
+      : [];
+  ctx.store.setPendingToolCalls(newToolCalls);
 }

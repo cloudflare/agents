@@ -1,5 +1,36 @@
 import type { env } from "cloudflare:workers";
-import type { AgentEvent } from "./events";
+import type { AgentEvent, AgentEventType } from "./events";
+import type { ModelPlanBuilder } from "./middleware/plan";
+import type { Store } from "./agent/store";
+import type { DeepAgent } from "./agent";
+import type { Provider } from "./providers";
+
+export type Effect =
+  | { type: "append_messages"; messages: ChatMessage[] }
+  | { type: "set_meta"; patch: Partial<AgentState["meta"]> }
+  | { type: "enqueue_tool_calls"; calls: ToolCall[] }
+  | {
+      type: "pause";
+      reason: "hitl" | "subagent" | "exhausted" | string;
+      payload?: any;
+    }
+  | { type: "resume" }
+  | {
+      type: "spawn_subagents";
+      tasks: Array<{
+        description: string;
+        subagent_type?: string;
+        link_to_tool_call_id?: string;
+        timeout_ms?: number;
+      }>;
+    }
+  | {
+      type: "emit_event";
+      event: { type: AgentEventType; data: AgentEvent["data"] };
+    }
+  | { type: "quota"; toolsPerTick?: number; modelMaxTokens?: number };
+
+export type Effects = { list: Effect[]; push: (...e: Effect[]) => void };
 
 export type RunStatus =
   | "idle"
@@ -67,6 +98,11 @@ export interface ModelRequest {
   stop?: string[];
 }
 
+export interface ParentInfo {
+  thread_id: string;
+  token: string;
+}
+
 export interface AgentState {
   messages: ChatMessage[];
   files?: Record<string, string>;
@@ -78,7 +114,7 @@ export interface AgentState {
     pendingToolCalls?: ToolCall[];
     runStatus?: RunStatus;
     lastReadPaths?: string[];
-    parent?: { thread_id: string; token: string };
+    parent?: ParentInfo;
     subagent_type?: string;
     waitingSubagents?: Array<{
       token: string;
@@ -109,26 +145,55 @@ export type SubagentDescriptor = {
   middleware?: AgentMiddleware[];
 };
 
+export type MWContext = {
+  provider: Provider;
+  // snapshotted, read-only view if you want one
+  store: Store;
+  // the good stuff
+  agent: DeepAgent;
+  // TODO: tool registry for dynamic additions, prolly mcp
+  // registerTool: (name: string, handler: ToolHandler) => void;
+};
+
 // Middleware lifecycle
 export interface AgentMiddleware {
   name: string;
-  beforeModel?(state: AgentState): Promise<Partial<AgentState> | void>;
-  modifyModelRequest?(
-    req: ModelRequest,
-    state: AgentState
-  ): Promise<ModelRequest>;
-  afterModel?(state: AgentState): Promise<Partial<AgentState> | void>;
-  // Optional: tool injection + typed state extension later
+  // optional, to inject into shared state
+  state?: (ctx: MWContext) => Record<string, unknown>;
+
+  onInit?(ctx: MWContext): Promise<void>; // optional, run once per DO
+
+  onTick?(ctx: MWContext): Promise<void>; // before building the model request
+
+  beforeModel?(ctx: MWContext, plan: ModelPlanBuilder): Promise<void>;
+
+  onModelResult?(ctx: MWContext, res: { message: ChatMessage }): Promise<void>;
+
+  onToolStart?(ctx: MWContext, call: ToolCall): Promise<void>;
+  onToolResult?(ctx: MWContext, call: ToolCall, result: unknown): Promise<void>;
+  onToolError?(ctx: MWContext, call: ToolCall, error: Error): Promise<void>;
+
+  onResume?(ctx: MWContext, reason: string, payload: unknown): Promise<void>;
+  onChildReport?(
+    ctx: MWContext,
+    child: {
+      thread_id: string;
+      token: string;
+      report?: string;
+    }
+  ): Promise<void>;
+
   tools?: Record<string, ToolHandler>;
 }
 
 export type ToolHandler = ((
   input: any, // TODO: type this
   ctx: ToolContext
-) => Promise<string | object>) & { __tool?: ToolMeta };
+) => Promise<string | object | null>) & { __tool?: ToolMeta };
 
 export type ToolContext = {
-  state: AgentState;
+  agent: DeepAgent;
+  store: Store;
   env: typeof env;
-  fetch: typeof fetch;
+  callId: string;
 };

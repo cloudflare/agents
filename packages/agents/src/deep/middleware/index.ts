@@ -25,6 +25,9 @@ import {
   EditFileSchema,
   TaskSchema
 } from "./schemas";
+import { AgentEventType } from "../events";
+import { getAgentByName } from "../../";
+import type { AgentEnv } from "..";
 
 /* -------------------- Planning: write_todos -------------------- */
 const write_todos = defineTool(
@@ -34,6 +37,7 @@ const write_todos = defineTool(
     parameters: WriteTodosSchema
   },
   async (p: { todos: Todo[] }, ctx) => {
+    const sql = ctx.store.sql;
     const clean = (p.todos ?? []).map((t) => ({
       content: String(t.content ?? "").slice(0, 2000),
       status:
@@ -41,7 +45,17 @@ const write_todos = defineTool(
           ? t.status
           : ("pending" as const)
     }));
-    ctx.state.todos = clean;
+    sql.exec("DELETE FROM todos");
+    let pos = 0;
+    for (const td of clean) {
+      sql.exec(
+        "INSERT INTO todos (content, status, pos, updated_at) VALUES (?, ?, ?, ?)",
+        td.content,
+        td.status,
+        pos++,
+        Date.now()
+      );
+    }
     return `Updated todo list (${clean.length} items).`;
   }
 );
@@ -50,27 +64,46 @@ export function planning(): AgentMiddleware {
   return {
     name: "planning",
     tools: { write_todos },
-    async modifyModelRequest(req, _state) {
-      return {
-        ...req,
-        systemPrompt: [req.systemPrompt, WRITE_TODOS_SYSTEM_PROMPT]
-          .filter(Boolean)
-          .join("\n\n")
-      };
+    async onInit(ctx) {
+      ctx.store.sql.exec(`
+CREATE TABLE IF NOT EXISTS todos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','in_progress','completed')),
+  pos INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+`);
+    },
+    state: (ctx) => {
+      const rows = ctx.store.sql.exec(
+        "SELECT content, status FROM todos ORDER BY pos ASC, id ASC"
+      );
+      const todos: Todo[] = [];
+      for (const r of rows) {
+        todos.push({
+          content: String(r.content ?? ""),
+          status: String(r.status) as Todo["status"]
+        });
+      }
+      return { todos };
+    },
+    async beforeModel(_, plan) {
+      plan.addSystemPrompt(WRITE_TODOS_SYSTEM_PROMPT);
     }
   };
 }
 
 /* -------------------- Filesystem: ls/read/write/edit -------------------- */
 
-export function filesystem(): AgentMiddleware {
+export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
   const ls = defineTool(
     {
       name: "ls",
       description: LIST_FILES_TOOL_DESCRIPTION,
       parameters: ListFilesSchema
     },
-    async (_: {}, ctx) => Object.keys(ctx.state.files ?? {})
+    async (_: {}, ctx) => Object.keys(ctx.store.listFiles())
   );
 
   const read_file = defineTool(
@@ -81,20 +114,18 @@ export function filesystem(): AgentMiddleware {
     },
     async (p: { path: string; offset?: number; limit?: number }, ctx) => {
       const path = String(p.path ?? "");
-      const files = ctx.state.files ?? {};
-      if (!(path in files)) return `Error: File '${path}' not found`;
-      const raw = files[path] ?? "";
+      const raw = ctx.store.readFile(path);
+      if (raw === undefined || raw === null)
+        return `Error: File '${path}' not found`;
 
-      if (!raw || raw.trim() === "") {
-        // mark as read anyway
-        ctx.state.meta = {
-          ...(ctx.state.meta ?? {}),
-          lastReadPaths: Array.from(
-            new Set([...(ctx.state.meta?.lastReadPaths ?? []), path])
-          )
-        };
+      ctx.store.setMeta(
+        "lastReadPaths",
+        Array.from(
+          new Set([...(ctx.store.meta<string[]>("lastReadPaths") ?? []), path])
+        )
+      );
+      if (raw.trim() === "")
         return "System reminder: File exists but has empty contents";
-      }
 
       const lines = raw.split(/\r?\n/);
       const offset = Math.max(0, Number(p.offset ?? 0));
@@ -111,14 +142,6 @@ export function filesystem(): AgentMiddleware {
         out.push(`${lineNum}\t${content}`);
       }
 
-      // remember “read” for edit precondition
-      ctx.state.meta = {
-        ...(ctx.state.meta ?? {}),
-        lastReadPaths: Array.from(
-          new Set([...(ctx.state.meta?.lastReadPaths ?? []), path])
-        )
-      };
-
       return out.join("\n");
     }
   );
@@ -132,7 +155,7 @@ export function filesystem(): AgentMiddleware {
     async (p: { path: string; content: string }, ctx) => {
       const path = String(p.path ?? "");
       const content = String(p.content ?? "");
-      ctx.state.files = { ...(ctx.state.files ?? {}), [path]: content };
+      ctx.store.writeFile(path, content);
       return `Updated file ${path}`;
     }
   );
@@ -153,35 +176,33 @@ export function filesystem(): AgentMiddleware {
       ctx
     ) => {
       const path = String(p.path ?? "");
-      const files = ctx.state.files ?? {};
+      const files = ctx.store.listFiles();
       if (!(path in files)) return `Error: File '${path}' not found`;
 
       // must read first at least once
-      const readSet = new Set(ctx.state.meta?.lastReadPaths ?? []);
+      const readSet = new Set(ctx.store.meta<string[]>("lastReadPaths") ?? []);
       if (!readSet.has(path)) {
         return `Error: You must read '${path}' before editing it`;
       }
 
-      const oldStr = String(p.old_string ?? "");
-      const newStr = String(p.new_string ?? "");
-      const replaceAll = Boolean(p.replace_all);
+      const { replaced } = ctx.store.editFile(
+        path,
+        p.old_string,
+        p.new_string,
+        p.replace_all
+      );
 
-      let content = files[path] ?? "";
-      const count = (content.match(new RegExp(escapeRegExp(oldStr), "g")) || [])
-        .length;
-
-      if (count === 0) return `Error: String not found in file: '${oldStr}'`;
-      if (!replaceAll && count > 1) {
-        return `Error: String '${oldStr}' appears ${count} times. Use replace_all=true or provide a more specific old_string.`;
+      if (replaced === 0)
+        return `Error: String not found in file: '${p.old_string}'`;
+      if (replaced < 0) {
+        return `Error: String '${p.old_string}' appears ${Math.abs(replaced)} times. Use replace_all=true or provide a more specific old_string.`;
+      }
+      if (!p.replace_all && replaced > 1) {
+        return `Error: String '${p.old_string}' appears ${replaced} times. Use replace_all=true or provide a more specific old_string.`;
       }
 
-      content = replaceAll
-        ? content.split(oldStr).join(newStr)
-        : content.replace(oldStr, newStr);
-
-      ctx.state.files = { ...files, [path]: content };
-      return replaceAll
-        ? `Successfully replaced ${count} instance(s) in '${path}'`
+      return p.replace_all
+        ? `Successfully replaced ${replaced} instance(s) in '${path}'`
         : `Successfully replaced string in '${path}'`;
     }
   );
@@ -189,26 +210,37 @@ export function filesystem(): AgentMiddleware {
   return {
     name: "filesystem",
     tools: { ls, read_file, write_file, edit_file },
-    async modifyModelRequest(req) {
-      return {
-        ...req,
-        systemPrompt: [req.systemPrompt, FILESYSTEM_SYSTEM_PROMPT]
-          .filter(Boolean)
-          .join("\n\n")
-      };
+    async beforeModel(_, plan) {
+      plan.addSystemPrompt(FILESYSTEM_SYSTEM_PROMPT);
+    },
+    async onInit(ctx) {
+      ctx.store.sql.exec(`CREATE TABLE IF NOT EXISTS files (
+        path TEXT PRIMARY KEY,
+        content BLOB,
+        updated_at INTEGER NOT NULL
+    )`);
+    },
+    state: (ctx) => {
+      const rows = ctx.store.sql.exec(
+        "SELECT path, content FROM files ORDER BY path ASC"
+      );
+      const files: Record<string, string> = {};
+      for (const r of rows ?? []) {
+        files[String(r.path)] =
+          typeof r.content === "string"
+            ? r.content
+            : new TextDecoder().decode(r.content as ArrayBuffer);
+      }
+      return { files };
     }
   };
-}
-
-function escapeRegExp(s: string) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /* -------------------- Subagents: task -------------------- */
 
 type TaskInput = {
   description: string;
-  subagent_type?: string;
+  subagent_type: string;
   timeout_ms?: number;
 };
 
@@ -229,27 +261,75 @@ export function subagents(
       description: taskDesc,
       parameters: TaskSchema
     },
-    async (p: TaskInput, _ctx) => {
-      return {
-        __spawn: {
-          description: p.description,
-          subagent_type: p.subagent_type,
-          timeout_ms: p.timeout_ms
-        }
+    async (p: TaskInput, ctx) => {
+      const { description, subagent_type } = p;
+      const token = crypto.randomUUID();
+      const childId = crypto.randomUUID();
+
+      // Fire SUBAGENT_SPAWNED event
+      ctx.agent.emit(AgentEventType.SUBAGENT_SPAWNED, {
+        child_thread_id: childId
+      });
+
+      // Get descriptor config
+      const descriptor = ctx.agent.subagents.get(subagent_type);
+
+      // Spawn child
+      const subagent = await getAgentByName(
+        (ctx.env as AgentEnv).DEEP_AGENT,
+        childId
+      );
+      const res = await subagent.fetch(
+        new Request("http://do/invoke", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            thread_id: childId,
+            messages: [{ role: "user", content: String(description ?? "") }],
+            meta: {
+              parent: { thread_id: ctx.store.threadId, token },
+              subagent_type: subagent_type,
+              systemPrompt: descriptor?.prompt,
+              model: descriptor?.model
+            }
+          })
+        })
+      );
+      if (!res.ok) {
+        // Spawn failed, return error immediately
+        return "Error: Failed to spawn subagent";
+      }
+
+      // Register waiter ONLY after successful spawn
+      const w = {
+        token,
+        child_thread_id: childId,
+        tool_call_id: ctx.callId
       };
+      ctx.store.pushWaitingSubagent(w);
+
+      if (ctx.store.runState && ctx.store.runState.status === "running") {
+        const rs = {
+          ...ctx.store.runState,
+          status: "paused" as const,
+          reason: "subagent"
+        };
+        ctx.store.upsertRun(rs);
+        ctx.agent.emit(AgentEventType.RUN_PAUSED, {
+          run_id: ctx.store.runState.run_id,
+          reason: "subagent"
+        });
+      }
+
+      return null; // Won't immediately get added as a tool result
     }
   );
 
   return {
     name: "subagents",
     tools: { task },
-    async modifyModelRequest(req) {
-      return {
-        ...req,
-        systemPrompt: [req.systemPrompt, TASK_SYSTEM_PROMPT]
-          .filter(Boolean)
-          .join("\n\n")
-      };
+    async beforeModel(_, plan) {
+      plan.addSystemPrompt(TASK_SYSTEM_PROMPT);
     }
   };
 }
@@ -257,8 +337,8 @@ export function subagents(
 export function hitl(opts: { interceptTools: string[] }): AgentMiddleware {
   return {
     name: "hitl",
-    async afterModel(state) {
-      const last = state.messages[state.messages.length - 1];
+    async onModelResult(ctx, res) {
+      const last = res.message;
       const calls =
         last?.role === "assistant" && "tool_calls" in last
           ? (last.tool_calls ?? [])
@@ -267,11 +347,15 @@ export function hitl(opts: { interceptTools: string[] }): AgentMiddleware {
         opts.interceptTools.includes(c.name)
       );
       if (risky) {
-        // stash pending tool calls and pause
-        return {
-          meta: { ...state.meta, pendingToolCalls: calls },
-          jumpTo: "end" as const
-        };
+        ctx.store.upsertRun({
+          ...ctx.store.runState!,
+          status: "paused",
+          reason: "hitl"
+        });
+        ctx.agent.emit(AgentEventType.RUN_PAUSED, {
+          run_id: ctx.store.runState!.run_id,
+          reason: "hitl"
+        });
       }
     }
   };

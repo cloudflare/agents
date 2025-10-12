@@ -4,15 +4,15 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "AgentThread",
-        "name": "AGENT_THREAD"
+        "class_name": "DeepAgent",
+        "name": "DEEP_AGENT"
       }
     ]
   },
   "main": "src/index.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["AgentThread"],
+      "new_sqlite_classes": ["DeepAgent"],
       "tag": "v1"
     }
   ],

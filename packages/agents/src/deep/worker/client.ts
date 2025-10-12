@@ -839,15 +839,15 @@ function handleEvent(threadId, ev) {
       addNode(threadId, "model", \`model: \${ev.data?.model ?? ""}\`, ev);
       break;
     }
-    case "model.completed": {
-      addNode(threadId, "model", "model ✓", ev);
-      break;
-    }
-    case "tool.started": {
-      const name = ev.data?.tool_name ?? "tool";
-      addNode(threadId, "tool", name, ev);
-      break;
-    }
+    // case "model.completed": {
+    //   addNode(threadId, "model", "model ✓", ev);
+    //   break;
+    // }
+    // case "tool.started": {
+    //   const name = ev.data?.tool_name ?? "tool";
+    //   addNode(threadId, "tool", name, ev);
+    //   break;
+    // }
     case "tool.output": {
       const name = ev.data?.tool_name ?? "tool";
       addNode(threadId, "tool", \`\${name} ✓\`, ev);

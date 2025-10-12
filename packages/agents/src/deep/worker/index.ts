@@ -1,6 +1,12 @@
 import { getAgentByName, type Agent } from "../..";
 import { html } from "./client";
 
+type HandlerOpions = {
+  baseUrl?: string;
+  /** Secret to use for authorization. Optional means no check. */
+  secret?: string;
+};
+
 /**
  * Creates a Worker entrypoint handler. Example usage:
  *
@@ -16,11 +22,13 @@ import { html } from "./client";
  * export default createHandler(); // this is the entrypoint to the worker
  * ```
  */
-export const createHandler = (_opts: { baseUrl?: string } = {}) => {
+export const createHandler = (
+  opts: { baseUrl?: string; secret?: string } = {}
+) => {
   return {
     async fetch(
       req: Request,
-      env: { AGENT_THREAD: DurableObjectNamespace<Agent> },
+      env: { DEEP_AGENT: DurableObjectNamespace<Agent> },
       _ctx: ExecutionContext
     ) {
       const url = new URL(req.url);
@@ -33,6 +41,10 @@ export const createHandler = (_opts: { baseUrl?: string } = {}) => {
         });
       }
 
+      if (opts.secret && req.headers.get("X-SECRET") !== opts.secret) {
+        return new Response("invalid secret", { status: 401 });
+      }
+
       if (req.method === "POST" && url.pathname === "/threads") {
         const id = crypto.randomUUID();
         return new Response(JSON.stringify({ id }), { status: 201 });
@@ -41,7 +53,7 @@ export const createHandler = (_opts: { baseUrl?: string } = {}) => {
       const match = url.pathname.match(/^\/threads\/([^/]+)(?:\/(.*))?$/);
       if (!match) return new Response("not found", { status: 404 });
       const [_, threadId, tail] = match;
-      const stub = await getAgentByName(env.AGENT_THREAD, threadId);
+      const stub = await getAgentByName(env.DEEP_AGENT, threadId);
 
       // Create a new request with the path that the DO expects
       const doUrl = new URL(req.url);
