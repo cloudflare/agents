@@ -77,12 +77,12 @@ function toOA(req: ModelRequest) {
   };
 }
 
-function fromOA(choice: any): ChatMessage {
+function fromOA(choice: { message: OAChatMsg }): ChatMessage {
   const msg = choice?.message ?? {};
-  if (msg?.tool_calls?.length) {
+  if ("tool_calls" in msg && msg?.tool_calls?.length) {
     return {
       role: "assistant",
-      tool_calls: msg.tool_calls.map((tc: any) => ({
+      tool_calls: msg.tool_calls.map((tc) => ({
         id: tc.id,
         name: tc.function?.name,
         // Try to parse, but fall back to raw string to avoid hard failures
