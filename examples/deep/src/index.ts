@@ -1,4 +1,4 @@
-import { createAgentThread, createHandler, makeOpenAI } from "agents/deep";
+import { createDeepAgent, createHandler, makeOpenAI } from "agents/deep";
 import { internet_search, read_website } from "./tools";
 import { research_agent_prompt, competitive_analysis_prompt } from "./prompts";
 import { env } from "cloudflare:workers"; // yes this is a worker :)
@@ -15,17 +15,12 @@ const subagent = {
 };
 
 // Main deep agent. Has planning, filesystem and subagent tools.
-const AgentThread = createAgentThread({
+const DeepAgent = createDeepAgent({
   provider: makeOpenAI(env.OPENAI_API_KEY),
   subagents: [subagent],
-  initialState: {
-    messages: [],
-    meta: {
-      systemPrompt: competitive_analysis_prompt,
-      model: "gpt-5-2025-08-07"
-    }
-  }
+  systemPrompt: competitive_analysis_prompt,
+  model: "gpt-5-2025-08-07"
 });
 
-export { AgentThread };
+export { DeepAgent };
 export default createHandler();
