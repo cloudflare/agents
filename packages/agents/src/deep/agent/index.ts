@@ -69,7 +69,7 @@ export abstract class DeepAgent<
 
   // Get middleware based on agent type
   get middleware(): AgentMiddleware[] {
-    const subagentType = this.store.meta<string>("subagent_type");
+    const subagentType = this.store.meta<string>("subagentType");
 
     if (subagentType && this.subagents.has(subagentType)) {
       return this.subagents.get(subagentType)?.middleware ?? [];
@@ -80,7 +80,7 @@ export abstract class DeepAgent<
 
   // Get tools based on agent type
   get tools(): Record<string, ToolHandler> {
-    const subagentType = this.store.meta<string>("subagent_type");
+    const subagentType = this.store.meta<string>("subagentType");
 
     if (subagentType && this.subagents.has(subagentType)) {
       return this.subagents.get(subagentType)?.tools ?? {};
@@ -107,7 +107,7 @@ export abstract class DeepAgent<
 
   get isDone(): boolean {
     const last = this.lastAssistant();
-    return !!last && (!("tool_calls" in last) || last.tool_calls?.length === 0);
+    return !!last && (!("toolCalls" in last) || last.toolCalls?.length === 0);
   }
 
   // TODO: step 4. of GPT answer + store events somewhere else. why does emit need persist?
@@ -115,7 +115,7 @@ export abstract class DeepAgent<
     const evt = {
       type,
       data,
-      thread_id: this.store.threadId || this.ctx.id.toString(),
+      threadId: this.store.threadId || this.ctx.id.toString(),
       ts: new Date().toISOString()
     } as AgentEvent;
 
@@ -155,9 +155,9 @@ export abstract class DeepAgent<
     try {
       const body = (await req.json().catch(() => ({}))) as InvokeBody;
 
-      // Store thread_id on first invoke if provided
-      if (body.thread_id && !this.store.threadId) {
-        this.store.setThreadId(body.thread_id);
+      // Store threadId on first invoke if provided
+      if (body.threadId && !this.store.threadId) {
+        this.store.setThreadId(body.threadId);
       }
 
       // Merge input into state
@@ -172,22 +172,22 @@ export abstract class DeepAgent<
         ["completed", "canceled", "error"].includes(runState.status)
       ) {
         runState = {
-          run_id: this.store.runState?.run_id ?? crypto.randomUUID(),
+          runId: this.store.runState?.runId ?? crypto.randomUUID(),
           status: "running",
           step: 0,
-          next_alarm_at: null
+          nextAlarmAt: null
         };
         this.store.upsertRun(runState);
         this.emit(AgentEventType.RUN_STARTED, {
-          run_id: runState.run_id
+          runId: runState.runId
         });
       } else if (runState.status === "paused") {
         // remains paused; client may be trying to push more messages—fine.
       }
 
       await this.ensureScheduled();
-      const { run_id, status } = runState;
-      return Response.json({ run_id, status }, { status: 202 });
+      const { runId, status } = runState;
+      return Response.json({ runId, status }, { status: 202 });
     } catch (error: unknown) {
       const err = error as Error;
       return Response.json(
@@ -207,7 +207,7 @@ export abstract class DeepAgent<
     if (!pending.length)
       return new Response("no pending tool calls", { status: 400 });
 
-    const decided = body.modified_tool_calls ?? pending;
+    const decided = body.modifiedToolCalls ?? pending;
     this.store.setPendingToolCalls(decided as ToolCall[]);
 
     // Resume run
@@ -215,10 +215,10 @@ export abstract class DeepAgent<
     runState.reason = undefined;
     this.emit(AgentEventType.HITL_RESUME, {
       approved: body.approved,
-      modified_tool_calls: decided
+      modifiedToolCalls: decided
     });
     this.emit(AgentEventType.RUN_RESUMED, {
-      run_id: runState.run_id
+      runId: runState.runId
     });
 
     this.store.upsertRun(runState);
@@ -232,7 +232,7 @@ export abstract class DeepAgent<
       runState.status = "canceled";
       runState.reason = "user";
       this.emit(AgentEventType.RUN_CANCELED, {
-        run_id: runState.run_id
+        runId: runState.runId
       });
       this.store.upsertRun(runState);
     }
@@ -244,7 +244,7 @@ export abstract class DeepAgent<
     let state = {
       messages: this.store.listMessages(),
       events: this.store.listEvents(),
-      thread_id: threadId
+      threadId
     };
     for (const m of this.middleware) {
       if (m.state) {
@@ -266,7 +266,7 @@ export abstract class DeepAgent<
     if (!schedules.length) {
       // now + 1 second
       const now = new Date(Date.now() + 1000);
-      runState.next_alarm_at = now.getTime();
+      runState.nextAlarmAt = now.getTime();
       this.store.upsertRun(runState);
       await this.schedule(now, "run");
     }
@@ -282,7 +282,7 @@ export abstract class DeepAgent<
     const TOOLS_PER_TICK = 25; // we reset this after each tick anyway
 
     this.emit(AgentEventType.RUN_TICK, {
-      run_id: runState.run_id,
+      runId: runState.runId,
       step: runState.step
     });
     runState.step += 1;
@@ -305,7 +305,7 @@ export abstract class DeepAgent<
     const toolResults = await Promise.all(
       toolBatch.map(async (call) => {
         this.emit(AgentEventType.TOOL_STARTED, {
-          tool_name: call.name,
+          toolName: call.name,
           args: call.args
         });
         try {
@@ -319,13 +319,13 @@ export abstract class DeepAgent<
           if (out === null) return { call, out };
           // Regular tool result
           this.emit(AgentEventType.TOOL_OUTPUT, {
-            tool_name: call.name,
+            toolName: call.name,
             output: out
           });
           return { call, out };
         } catch (e: unknown) {
           this.emit(AgentEventType.TOOL_ERROR, {
-            tool_name: call.name,
+            toolName: call.name,
             error: String(e instanceof Error ? e.message : e)
           });
           return { call, error: e };
@@ -361,7 +361,7 @@ export abstract class DeepAgent<
         return {
           role: "tool" as const,
           content,
-          tool_call_id: call.id
+          toolCallId: call.id
         };
       });
     this.store.appendMessages(messages);
@@ -404,10 +404,10 @@ export abstract class DeepAgent<
 
       const parent = this.store.meta<ParentInfo>("parent");
       // If it's a subagent, report back to the parent on completion
-      if (parent?.thread_id && parent?.token) {
+      if (parent?.threadId && parent?.token) {
         const parentAgent = await getAgentByName(
           this.env.DEEP_AGENT,
-          parent.thread_id
+          parent.threadId
         );
         await parentAgent.fetch(
           new Request("http://do/child_result", {
@@ -415,7 +415,7 @@ export abstract class DeepAgent<
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               token: parent.token,
-              child_thread_id: this.store.threadId || this.ctx.id.toString(),
+              childThreadId: this.store.threadId || this.ctx.id.toString(),
               report: last && "content" in last ? last.content : ""
             })
           })
@@ -441,7 +441,7 @@ export abstract class DeepAgent<
     const runState = this.store.runState;
     if (!runState) return;
     const now = new Date(Date.now() + 1000);
-    runState.next_alarm_at = now.getTime();
+    runState.nextAlarmAt = now.getTime();
     this.store.upsertRun(runState);
     await this.schedule(now, "run");
   }
@@ -450,22 +450,19 @@ export abstract class DeepAgent<
     return this.ctx.blockConcurrencyWhile(async () => {
       const body = (await req.json()) as {
         token: string;
-        child_thread_id: string;
+        childThreadId: string;
         report?: string;
       };
-      const hit = this.store.popWaitingSubagent(
-        body.token,
-        body.child_thread_id
-      );
+      const hit = this.store.popWaitingSubagent(body.token, body.childThreadId);
       if (!hit) return new Response("unknown token", { status: 400 });
 
       // append tool message with the subagent's report
       const content = body.report ?? "";
-      this.store.appendToolResult(hit.tool_call_id, content);
+      this.store.appendToolResult(hit.toolCallId, content);
 
       // events
       this.emit(AgentEventType.SUBAGENT_COMPLETED, {
-        child_thread_id: body.child_thread_id,
+        childThreadId: body.childThreadId,
         result: content
       });
 
@@ -479,7 +476,7 @@ export abstract class DeepAgent<
         runState.reason = undefined;
         this.store.upsertRun(runState);
         this.emit(AgentEventType.RUN_RESUMED, {
-          run_id: runState.run_id
+          runId: runState.runId
         });
         await this.ensureScheduled();
       }
@@ -524,8 +521,8 @@ export const createDeepAgent = (options: {
         const out = await options.provider.invoke(req, opts);
         this.emit(AgentEventType.MODEL_COMPLETED, {
           usage: {
-            input_tokens: out.usage?.promptTokens ?? 0,
-            output_tokens: out.usage?.completionTokens ?? 0
+            inputTokens: out.usage?.promptTokens ?? 0,
+            outputTokens: out.usage?.completionTokens ?? 0
           }
         });
         return out;

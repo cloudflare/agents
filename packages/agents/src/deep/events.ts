@@ -30,33 +30,29 @@ export enum AgentEventType {
   HITL_RESUME = "hitl.resume",
 
   SUBAGENT_SPAWNED = "subagent.spawned",
-  SUBAGENT_COMPLETED = "subagent.completed",
-
-  VFS_WRITE = "vfs.write",
-  VFS_EDIT = "vfs.edit",
-  VFS_DELETE = "vfs.delete"
+  SUBAGENT_COMPLETED = "subagent.completed"
 }
 
 export type AgentEvent = {
-  thread_id: string;
+  threadId: string;
   ts: string;
   seq?: number;
 } & AgentEventData;
 
 export type AgentEventData =
-  | { type: AgentEventType.THREAD_CREATED; data: { thread_id: string } }
-  | { type: AgentEventType.REQUEST_ACCEPTED; data: { idempotency_key: string } }
-  | { type: AgentEventType.RUN_STARTED; data: { run_id: string } }
-  | { type: AgentEventType.RUN_TICK; data: { run_id: string; step: number } }
+  | { type: AgentEventType.THREAD_CREATED; data: { threadId: string } }
+  | { type: AgentEventType.REQUEST_ACCEPTED; data: { idempotencyKey: string } }
+  | { type: AgentEventType.RUN_STARTED; data: { runId: string } }
+  | { type: AgentEventType.RUN_TICK; data: { runId: string; step: number } }
   | {
       type: AgentEventType.RUN_PAUSED;
       data: {
-        run_id: string;
+        runId: string;
         reason: "hitl" | "error" | "exhausted" | "subagent";
       };
     }
-  | { type: AgentEventType.RUN_RESUMED; data: { run_id: string } }
-  | { type: AgentEventType.RUN_CANCELED; data: { run_id: string } }
+  | { type: AgentEventType.RUN_RESUMED; data: { runId: string } }
+  | { type: AgentEventType.RUN_CANCELED; data: { runId: string } }
   | { type: AgentEventType.AGENT_STARTED; data: Record<string, never> }
   | { type: AgentEventType.AGENT_COMPLETED; data: { result?: unknown } }
   | {
@@ -65,52 +61,49 @@ export type AgentEventData =
     }
   | {
       type: AgentEventType.CHECKPOINT_SAVED;
-      data: { state_hash: string; size: number };
+      data: { stateHash: string; size: number };
     }
   | { type: AgentEventType.MODEL_STARTED; data: { model: string } }
   | { type: AgentEventType.MODEL_DELTA; data: { delta: string } }
   | {
       type: AgentEventType.MODEL_COMPLETED;
-      data: { usage?: { input_tokens: number; output_tokens: number } };
+      data: { usage?: { inputTokens: number; outputTokens: number } };
     }
   | {
       type: AgentEventType.MIDDLEWARE_BEFORE_MODEL;
-      data: { middleware_name: string };
+      data: { middlewareName: string };
     }
   | {
       type: AgentEventType.MIDDLEWARE_AFTER_MODEL;
-      data: { middleware_name: string };
+      data: { middlewareName: string };
     }
   | {
       type: AgentEventType.TOOL_STARTED;
-      data: { tool_name: string; args: unknown };
+      data: { toolName: string; args: unknown };
     }
   | {
       type: AgentEventType.TOOL_OUTPUT;
-      data: { tool_name: string; output: unknown };
+      data: { toolName: string; output: unknown };
     }
   | {
       type: AgentEventType.TOOL_ERROR;
-      data: { tool_name: string; error: string };
+      data: { toolName: string; error: string };
     }
   | {
       type: AgentEventType.HITL_INTERRUPT;
       data: {
-        proposed_tool_calls: Array<{ tool_name: string; args: unknown }>;
+        proposedToolCalls: Array<{ toolName: string; args: unknown }>;
       };
     }
   | {
       type: AgentEventType.HITL_RESUME;
       data: {
         approved: boolean;
-        modified_tool_calls?: Array<{ tool_name: string; args: unknown }>;
+        modifiedToolCalls?: Array<{ toolName: string; args: unknown }>;
       };
     }
-  | { type: AgentEventType.SUBAGENT_SPAWNED; data: { child_thread_id: string } }
+  | { type: AgentEventType.SUBAGENT_SPAWNED; data: { childThreadId: string } }
   | {
       type: AgentEventType.SUBAGENT_COMPLETED;
-      data: { child_thread_id: string; result?: unknown };
-    }
-  | { type: AgentEventType.VFS_WRITE; data: { path: string } }
-  | { type: AgentEventType.VFS_EDIT; data: { path: string } }
-  | { type: AgentEventType.VFS_DELETE; data: { path: string } };
+      data: { childThreadId: string; result?: unknown };
+    };

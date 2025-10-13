@@ -19,9 +19,9 @@ export type Effect =
       type: "spawn_subagents";
       tasks: Array<{
         description: string;
-        subagent_type?: string;
-        link_to_tool_call_id?: string;
-        timeout_ms?: number;
+        subagentType?: string;
+        linkToToolCallId?: string;
+        timeoutMs?: number;
       }>;
     }
   | {
@@ -41,16 +41,16 @@ export type RunStatus =
   | "error";
 
 export interface RunState {
-  run_id: string;
+  runId: string;
   status: RunStatus;
   step: number; // how many steps executed
   reason?: string; // pause/cancel reason
-  next_alarm_at?: number | null; // ms epoch
+  nextAlarmAt?: number | null; // ms epoch
 }
 
 export interface ApproveBody {
   approved: boolean;
-  modified_tool_calls?: Array<{ tool_name: string; args: unknown }>;
+  modifiedToolCalls?: Array<{ toolName: string; args: unknown }>;
 }
 
 export type Todo = {
@@ -74,11 +74,11 @@ export type ToolMeta = {
 
 export type ChatMessage =
   | { role: "system" | "user" | "assistant"; content: string }
-  | { role: "assistant"; tool_calls?: ToolCall[] }
-  | { role: "tool"; content: string; tool_call_id: string };
+  | { role: "assistant"; toolCalls?: ToolCall[] }
+  | { role: "tool"; content: string; toolCallId: string };
 
 export interface InvokeBody {
-  thread_id?: string;
+  threadId?: string;
   messages?: ChatMessage[]; // optional new user messages
   files?: Record<string, string>; // optional files to merge into VFS
   idempotencyKey?: string; // dedupe protection
@@ -99,7 +99,7 @@ export interface ModelRequest {
 }
 
 export interface ParentInfo {
-  thread_id: string;
+  threadId: string;
   token: string;
 }
 
@@ -115,11 +115,11 @@ export interface AgentState {
     runStatus?: RunStatus;
     lastReadPaths?: string[];
     parent?: ParentInfo;
-    subagent_type?: string;
+    subagentType?: string;
     waitingSubagents?: Array<{
       token: string;
-      child_thread_id: string;
-      tool_call_id: string;
+      childThreadId: string;
+      toolCallId: string;
     }>;
     toolDefs?: ToolMeta[];
   };
@@ -130,10 +130,10 @@ export interface AgentState {
 export type Persisted = {
   state: AgentState;
   run: RunState | null;
-  thread_id?: string; // human-readable thread identifier
+  threadId?: string; // human-readable thread identifier
   // ring buffer of recent events for dashboard
   events: AgentEvent[];
-  events_seq: number; // monotonically increasing sequence
+  eventsSeq: number; // monotonically increasing sequence
 };
 
 export type SubagentDescriptor = {
@@ -177,7 +177,7 @@ export interface AgentMiddleware {
   onChildReport?(
     ctx: MWContext,
     child: {
-      thread_id: string;
+      threadId: string;
       token: string;
       report?: string;
     }

@@ -82,7 +82,7 @@ export const WriteFileSchema = {
   title: "write_file"
 } as const;
 
-// edit_file(path: string, old_string: string, new_string: string, replace_all?: boolean)
+// edit_file(path: string, oldString: string, newString: string, replaceAll?: boolean)
 export const EditFileSchema = {
   type: "object",
   additionalProperties: false,
@@ -92,22 +92,22 @@ export const EditFileSchema = {
       pattern: "^/",
       description: "Absolute path to edit"
     },
-    old_string: {
+    oldString: {
       type: "string",
       description:
-        "Exact string to match (must be unique unless replace_all=true)"
+        "Exact string to match (must be unique unless replaceAll=true)"
     },
-    new_string: {
+    newString: {
       type: "string",
       description: "Replacement string (can be empty)"
     },
-    replace_all: {
+    replaceAll: {
       type: "boolean",
       default: false,
       description: "Replace every occurrence instead of enforcing uniqueness"
     }
   },
-  required: ["path", "old_string", "new_string"],
+  required: ["path", "oldString", "newString"],
   title: "edit_file"
 } as const;
 
@@ -116,8 +116,8 @@ export const TaskSchema = {
   additionalProperties: false,
   properties: {
     description: { type: "string" },
-    subagent_type: { type: "string" }
+    subagentType: { type: "string" }
   },
-  required: ["description", "subagent_type"],
+  required: ["description", "subagentType"],
   title: "task"
 } as const;

@@ -30,8 +30,8 @@ export class Store {
   private _pendingToolCalls?: ToolCall[];
   private _waitingSubagents?: {
     token: string;
-    child_thread_id: string;
-    tool_call_id: string;
+    childThreadId: string;
+    toolCallId: string;
   }[];
 
   constructor(
@@ -122,11 +122,11 @@ CREATE TABLE IF NOT EXISTS pending_tool_calls (
     if (!rows || rows.length === 0) return null;
     const r = rows[0];
     this._runState = {
-      run_id: r.run_id,
+      runId: r.run_id,
       status: r.status as RunState["status"],
       step: r.step,
       reason: r.reason,
-      next_alarm_at: r.next_alarm_at
+      nextAlarmAt: r.next_alarm_at
     };
     return this._runState;
   }
@@ -145,11 +145,11 @@ ON CONFLICT(run_id) DO UPDATE SET
   next_alarm_at=excluded.next_alarm_at,
   updated_at=excluded.updated_at
 `,
-      run.run_id,
+      run.runId,
       run.status,
       run.step,
       run.reason ?? null,
-      run.next_alarm_at ?? null,
+      run.nextAlarmAt ?? null,
       t,
       t
     );
@@ -164,11 +164,11 @@ ON CONFLICT(run_id) DO UPDATE SET
 
     // Store in SQL first
     for (const m of msgs) {
-      if (m.role === "assistant" && "tool_calls" in m && m.tool_calls) {
+      if (m.role === "assistant" && "toolCalls" in m && m.toolCalls) {
         this.sql.exec(
           `INSERT INTO messages (role, content, tool_call_id, tool_calls_json, created_at)
              VALUES ('assistant', NULL, NULL, ?, ?)`,
-          toJson(m.tool_calls),
+          toJson(m.toolCalls),
           t
         );
       } else if (m.role === "tool") {
@@ -176,7 +176,7 @@ ON CONFLICT(run_id) DO UPDATE SET
           `INSERT INTO messages (role, content, tool_call_id, tool_calls_json, created_at)
              VALUES ('tool', ?, ?, NULL, ?)`,
           String(m.content ?? ""),
-          String(m.tool_call_id ?? ""),
+          String(m.toolCallId ?? ""),
           t
         );
       } else {
@@ -210,13 +210,13 @@ ON CONFLICT(run_id) DO UPDATE SET
       if (role === "assistant" && r.tool_calls_json) {
         out.push({
           role: "assistant",
-          tool_calls: fromJson<ToolCall[]>(r.tool_calls_json) ?? []
+          toolCalls: fromJson<ToolCall[]>(r.tool_calls_json) ?? []
         });
       } else if (role === "tool") {
         out.push({
           role: "tool",
           content: String(r.content ?? ""),
-          tool_call_id: String(r.tool_call_id ?? "")
+          toolCallId: String(r.tool_call_id ?? "")
         });
       } else {
         out.push({
@@ -230,12 +230,12 @@ ON CONFLICT(run_id) DO UPDATE SET
   }
 
   /** Insert one tool result message */
-  appendToolResult(tool_call_id: string, content: string): void {
+  appendToolResult(toolCallId: string, content: string): void {
     this.sql.exec(
       `INSERT INTO messages (role, content, tool_call_id, tool_calls_json, created_at)
        VALUES ('tool', ?, ?, NULL, ?)`,
       content,
-      tool_call_id,
+      toolCallId,
       Date.now()
     );
     // Invalidate cache to ensure consistency with DB
@@ -434,16 +434,16 @@ ON CONFLICT(run_id) DO UPDATE SET
   // --------------------------
   pushWaitingSubagent(w: {
     token: string;
-    child_thread_id: string;
-    tool_call_id: string;
+    childThreadId: string;
+    toolCallId: string;
   }): void {
     this.sql.exec(
       `INSERT INTO waiting_subagents (token, child_thread_id, tool_call_id, created_at)
        VALUES (?, ?, ?, ?)
        ON CONFLICT(token) DO UPDATE SET child_thread_id=excluded.child_thread_id, tool_call_id=excluded.tool_call_id`,
       w.token,
-      w.child_thread_id,
-      w.tool_call_id,
+      w.childThreadId,
+      w.toolCallId,
       Date.now()
     );
     // Invalidate cache to ensure consistency
@@ -454,7 +454,7 @@ ON CONFLICT(run_id) DO UPDATE SET
     token: string,
     childId: string
   ): {
-    tool_call_id: string;
+    toolCallId: string;
   } | null {
     const rows = this.sql
       .exec(
@@ -472,13 +472,13 @@ ON CONFLICT(run_id) DO UPDATE SET
     );
     // Invalidate cache to ensure consistency
     this._waitingSubagents = undefined;
-    return { tool_call_id: String(rows[0].tool_call_id) };
+    return { toolCallId: String(rows[0].tool_call_id) };
   }
 
   get waitingSubagents(): {
     token: string;
-    child_thread_id: string;
-    tool_call_id: string;
+    childThreadId: string;
+    toolCallId: string;
   }[] {
     if (this._waitingSubagents) return [...this._waitingSubagents];
     const rows = this.sql
@@ -488,8 +488,8 @@ ON CONFLICT(run_id) DO UPDATE SET
       .toArray();
     this._waitingSubagents = rows.map((r) => ({
       token: String(r.token),
-      child_thread_id: String(r.child_thread_id),
-      tool_call_id: String(r.tool_call_id)
+      childThreadId: String(r.child_thread_id),
+      toolCallId: String(r.tool_call_id)
     }));
     return this._waitingSubagents;
   }
@@ -527,7 +527,7 @@ ON CONFLICT(run_id) DO UPDATE SET
     for (const r of rows) {
       const data = fromJson(r.data_json) ?? {};
       out.push({
-        thread_id: this.threadId ?? "",
+        threadId: this.threadId ?? "",
         ts: String(r.ts),
         seq: Number(r.seq),
         type: String(r.type),
