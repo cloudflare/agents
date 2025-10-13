@@ -1714,7 +1714,7 @@ export class Agent<
         throw new Error(`Binding '${bindingName}' not found in environment`);
       }
 
-      const functionName = options?.rpc?.functionName ?? "handle";
+      const functionName = options?.rpc?.functionName;
       const namespace = binding as unknown as DurableObjectNamespace<McpAgent>;
 
       const doId = namespace.idFromName(`rpc:${serverName}`);
