@@ -286,6 +286,7 @@ export abstract class DeepAgent<
       step: runState.step
     });
     runState.step += 1;
+    this.store.upsertRun(runState);
 
     // Execute pending tool calls first (e.g. after HITL resume)
     const { handlers: toolsMap, defs: toolDefs } = collectToolsAndDefs(
@@ -315,7 +316,7 @@ export abstract class DeepAgent<
             callId: call.id
           });
 
-          if (out === null) return { call };
+          if (out === null) return { call, out };
           // Regular tool result
           this.emit(AgentEventType.TOOL_OUTPUT, {
             tool_name: call.name,
@@ -350,13 +351,13 @@ export abstract class DeepAgent<
 
     // Append tool messages for regular (non-spawn) results
     const messages = toolResults
-      .filter((r) => !!r.out || !!r.error)
+      .filter((r) => r.out !== null || !!r.error)
       .map(({ call, out, error }) => {
         const content = error
           ? `Error: ${error instanceof Error ? error.message : String(error)}`
           : typeof out === "string"
             ? out
-            : JSON.stringify(out);
+            : JSON.stringify(out ?? "Tool had no output");
         return {
           role: "tool" as const,
           content,
