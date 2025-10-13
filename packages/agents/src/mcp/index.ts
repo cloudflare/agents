@@ -20,6 +20,7 @@ import {
   MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
+import { RPCServerTransport } from "./rpc-transport";
 
 export abstract class McpAgent<
   Env = unknown,
@@ -45,8 +46,8 @@ export abstract class McpAgent<
   }
 
   /** Read the transport type for this agent.
-   * This relies on the naming scheme being `sse:${sessionId}`
-   * or `streamable-http:${sessionId}`.
+   * This relies on the naming scheme being `sse:${sessionId}`,
+   * `streamable-http:${sessionId}`, or `rpc:${sessionId}`.
    */
   getTransportType(): BaseTransportType {
     const [t, ..._] = this.name.split(":");
@@ -55,6 +56,8 @@ export abstract class McpAgent<
         return "sse";
       case "streamable-http":
         return "streamable-http";
+      case "rpc":
+        return "rpc";
       default:
         throw new Error(
           "Invalid transport type. McpAgent must be addressed with a valid protocol."
@@ -94,6 +97,9 @@ export abstract class McpAgent<
       case "streamable-http": {
         return new StreamableHTTPServerTransport({});
       }
+      case "rpc": {
+        return new RPCServerTransport();
+      }
     }
   }
 
@@ -127,7 +133,12 @@ export abstract class McpAgent<
     const server = await this.server;
     // Connect to the MCP server
     this._transport = this.initTransport();
+
+    if (!this._transport) {
+      throw new Error("Failed to initialize transport");
+    }
     await server.connect(this._transport);
+
     await this.reinitializeServer();
   }
 
@@ -350,6 +361,35 @@ export abstract class McpAgent<
     return false;
   }
 
+  /**
+   * Handle an RPC message for MCP
+   * This method is called by the RPC stub to process MCP messages
+   * @param message The JSON-RPC message to handle
+   * @returns The response message(s) or undefined
+   */
+  async handleMcpMessage(
+    message: JSONRPCMessage
+  ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
+    // Create an RPC transport for this single request
+    const transport = new RPCServerTransport();
+
+    // Get or initialize the server
+    if (!this._transport) {
+      const server = await this.server;
+      this._transport = transport;
+      await server.connect(transport);
+      await this.reinitializeServer();
+    } else {
+      // Reuse existing transport setup but handle via RPC
+      const server = await this.server;
+      this._transport = transport;
+      await server.connect(transport);
+    }
+
+    // Process the message through the transport
+    return await transport.handle(message);
+  }
+
   /** Return a handler for the given path for this MCP.
    * Defaults to Streamable HTTP transport.
    */
@@ -436,6 +476,13 @@ export abstract class McpAgent<
 // Export client transport classes
 export { SSEEdgeClientTransport } from "./sse-edge";
 export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+export {
+  RPCClientTransport,
+  RPCServerTransport,
+  type MCPStub,
+  type RPCClientTransportOptions,
+  type RPCServerTransportOptions
+} from "./rpc-transport";
 
 // Export elicitation types and schemas
 export {

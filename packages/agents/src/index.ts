@@ -29,6 +29,7 @@ import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import type { McpAgent } from "./mcp";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -1620,8 +1621,54 @@ export class Agent<
     return this.handleOAuthCallbackResponse(result, request);
   }
 
+  /*
+   * handle all the logistics before connection
+   * then connect
+   * broadcast.
+   * in future this could be combined with the master addMcpServer()?
+   */
+  async addRpcMcpServer(
+    serverName: string,
+    bindingString: string,
+    options?: {
+      functionName?: string;
+      client?: ConstructorParameters<typeof Client>[1];
+    }
+  ): Promise<{ id: string }> {
+    const { id } = await this._connectToMcpServerInternal(
+      serverName,
+      `rpc://${bindingString}`,
+      "rpc://internal",
+      {
+        client: options?.client,
+        rpc: {
+          bindingName: bindingString,
+          functionName: options?.functionName
+        }
+      }
+    );
+
+    // Store in database for persistence (callback_url is required by schema but not used for RPC)
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${id},
+        ${serverName},
+        ${`rpc://${bindingString}`},
+        ${null},
+        ${null},
+        ${"rpc://internal"},
+        ${JSON.stringify({ rpc: { bindingName: bindingString, functionName: options?.functionName } })}
+      );
+    `;
+
+    this.broadcastMcpServers();
+
+    return { id };
+  }
+
   private async _connectToMcpServerInternal(
-    _serverName: string,
+    serverName: string,
     url: string,
     callbackUrl: string,
     // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
@@ -1638,6 +1685,13 @@ export class Agent<
         headers?: HeadersInit;
         type?: TransportType;
       };
+      /**
+       * RPC-specific options
+       */
+      rpc?: {
+        bindingName: string;
+        functionName?: string;
+      };
     },
     reconnect?: {
       id: string;
@@ -1648,6 +1702,46 @@ export class Agent<
     authUrl: string | undefined;
     clientId: string | undefined;
   }> {
+    if (options?.rpc) {
+      // RPC connection logic
+      const bindingName = options?.rpc?.bindingName;
+      if (!bindingName) {
+        throw new Error("Binding name is required for RPC connections");
+      }
+
+      const binding = this.env[bindingName as keyof Env];
+      if (!binding) {
+        throw new Error(`Binding '${bindingName}' not found in environment`);
+      }
+
+      const functionName = options?.rpc?.functionName ?? "handle";
+      const namespace = binding as unknown as DurableObjectNamespace<McpAgent>;
+
+      const doId = namespace.idFromName(`rpc:${serverName}`);
+      const stub = namespace.get(
+        doId
+      ) as unknown as DurableObjectStub<McpAgent>;
+
+      await stub.setName(`rpc:${serverName}`);
+
+      const { id } = await this.mcp.connect(`rpc://${serverName}`, {
+        client: options?.client,
+        reconnect,
+        transport: {
+          type: "rpc",
+          stub,
+          functionName
+        }
+      });
+
+      return {
+        authUrl: undefined,
+        clientId: undefined,
+        id
+      };
+    }
+
+    // HTTP/SSE connection logic
     const authProvider = new DurableObjectOAuthClientProvider(
       this.ctx.storage,
       this.name,

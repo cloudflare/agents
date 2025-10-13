@@ -69,7 +69,8 @@ const model = openai("gpt-4o-2024-11-20");
  */
 export class Chat extends AIChatAgent<Env> {
   async onStart(): Promise<void> {
-    // connect to MCP on start
+    await this.mcp.closeAllConnections();
+    await this.addRpcMcpServer("test-server", "MyMCP");
   }
   /**
    * Handles incoming chat messages and manages the response stream
