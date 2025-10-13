@@ -4,11 +4,6 @@ export type MaybeConnectionTag = { role: string } | undefined;
 export type BaseTransportType = "sse" | "streamable-http" | "rpc";
 export type TransportType = BaseTransportType | "auto";
 
-export interface RPCServeOptions {
-  binding: string;
-  functionName?: string;
-}
-
 export interface CORSOptions {
   origin?: string;
   methods?: string;
@@ -21,5 +16,4 @@ export interface ServeOptions {
   binding?: string;
   corsOptions?: CORSOptions;
   transport?: BaseTransportType;
-  rpc?: RPCServeOptions;
 }
