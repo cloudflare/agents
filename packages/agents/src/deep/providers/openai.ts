@@ -28,17 +28,17 @@ function toOA(req: ModelRequest) {
       msgs.push({
         role: "tool",
         content: m.content ?? "",
-        tool_call_id: m.tool_call_id
+        tool_call_id: m.toolCallId
       });
     } else if (
       m.role === "assistant" &&
-      "tool_calls" in m &&
-      m.tool_calls?.length
+      "toolCalls" in m &&
+      m.toolCalls?.length
     ) {
       msgs.push({
         role: "assistant",
-        content: "", // TODO: check whether we can skip this when we have tool_calls
-        tool_calls: m.tool_calls.map(({ id, name, args }) => ({
+        content: "", // TODO: check whether we can skip this when we have toolCalls
+        tool_calls: m.toolCalls.map(({ id, name, args }) => ({
           id,
           type: "function",
           function: {
@@ -82,7 +82,7 @@ function fromOA(choice: { message: OAChatMsg }): ChatMessage {
   if ("tool_calls" in msg && msg?.tool_calls?.length) {
     return {
       role: "assistant",
-      tool_calls: msg.tool_calls.map((tc) => ({
+      toolCalls: msg.tool_calls.map((tc) => ({
         id: tc.id,
         name: tc.function?.name,
         // Try to parse, but fall back to raw string to avoid hard failures
@@ -99,7 +99,6 @@ function fromOA(choice: { message: OAChatMsg }): ChatMessage {
   return { role: "assistant", content: msg?.content ?? "" };
 }
 
-// TODO: implement one of these
 export function makeOpenAI(
   apiKey: string,
   baseUrl = "https://api.openai.com/v1"

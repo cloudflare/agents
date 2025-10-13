@@ -57,14 +57,14 @@ export const createHandler = (opts: HandlerOpions = {}) => {
       const doUrl = new URL(req.url);
       doUrl.pathname = `/${tail || ""}`;
 
-      // For invoke requests, inject thread_id into the body
+      // For invoke requests, inject threadId into the body
       let doReq: Request;
       if (tail === "invoke" && req.method === "POST") {
         const body = (await req.json().catch(() => ({}))) as Record<
           string,
           unknown
         >;
-        body.thread_id = threadId;
+        body.threadId = threadId;
         doReq = new Request(doUrl, {
           method: req.method,
           headers: req.headers,

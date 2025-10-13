@@ -220,7 +220,7 @@ Available agent types and the tools they have access to:
 - general-purpose: General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.
 {other_agents}
 
-When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+When using the Task tool, you must specify a subagentType parameter to select which agent type to use.
 
 ## Usage notes:
 1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
@@ -349,11 +349,11 @@ export const EDIT_FILE_TOOL_DESCRIPTION = `Performs exact string replacements in
 
 Usage:
 - You must use your \`Read\` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file. 
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the old_string or new_string.
+- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
 - ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.
 - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if \`old_string\` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use \`replace_all\` to change every instance of \`old_string\`. 
-- Use \`replace_all\` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.`;
+- The edit will FAIL if \`oldString\` is not unique in the file. Either provide a larger string with more surrounding context to make it unique or use \`replaceAll\` to change every instance of \`oldString\`. 
+- Use \`replaceAll\` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.`;
 
 export const WRITE_FILE_TOOL_DESCRIPTION = `Writes to a file in the local filesystem.
 
@@ -401,7 +401,7 @@ When NOT to use the task tool:
 - If splitting would add latency without benefit
 
 ## Important Task Tool Usage Notes to Remember
-- Whenever possible, parallelize the work that you do. This is true for both tool_calls, and for tasks. Whenever you have independent steps to complete - make tool_calls, or kick off tasks (subagents) in parallel to accomplish them faster. This saves time for the user, which is incredibly important.
+- Whenever possible, parallelize the work that you do. This is true for both tool calls, and for tasks. Whenever you have independent steps to complete - make tool calls, or kick off tasks (subagents) in parallel to accomplish them faster. This saves time for the user, which is incredibly important.
 - Remember to use the \`task\` tool to silo independent tasks within a multi-part objective.
 - You should use the \`task\` tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient.`;
 

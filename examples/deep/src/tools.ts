@@ -1,6 +1,6 @@
 import { defineTool } from "agents/deep";
 
-export const internet_search = defineTool(
+export const internetSearch = defineTool(
   {
     name: "internet_search",
     description: "Search the internet for information",
@@ -43,7 +43,7 @@ export const internet_search = defineTool(
   }
 );
 
-export const read_website = defineTool(
+export const readWebsite = defineTool(
   {
     name: "read_website",
     description: "Read the contents of a website(s) for information",

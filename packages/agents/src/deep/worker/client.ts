@@ -844,17 +844,17 @@ function handleEvent(threadId, ev) {
     //   break;
     // }
     // case "tool.started": {
-    //   const name = ev.data?.tool_name ?? "tool";
+    //   const name = ev.data?.toolName ?? "tool";
     //   addNode(threadId, "tool", name, ev);
     //   break;
     // }
     case "tool.output": {
-      const name = ev.data?.tool_name ?? "tool";
+      const name = ev.data?.toolName ?? "tool";
       addNode(threadId, "tool", \`\${name} ✓\`, ev);
       break;
     }
     case "tool.error": {
-      const name = ev.data?.tool_name ?? "tool";
+      const name = ev.data?.toolName ?? "tool";
       addNode(threadId, "error", \`\${name} ✗\`, ev);
       break;
     }
@@ -876,7 +876,7 @@ function handleEvent(threadId, ev) {
       break;
     }
     case "subagent.spawned": {
-      const child = ev.data?.child_thread_id;
+      const child = ev.data?.childThreadId;
       const spawnKey = addNode(threadId, "tool", \`spawn \${short(child)}\`, ev);
       childSpawnMap.set(child, spawnKey);
       // auto-connect to child lane WS
@@ -884,7 +884,7 @@ function handleEvent(threadId, ev) {
       break;
     }
     case "subagent.completed": {
-      const child = ev.data?.child_thread_id;
+      const child = ev.data?.childThreadId;
       const doneKey = addNode(threadId, "tool", \`child \${short(child)} ✓\`, ev);
       // connect dashed from child's last to this node (if we have it)
       const childLast = lastNodeInLane.get(child);
@@ -990,7 +990,7 @@ async function primeEvents(threadId) {
     (j.events||[]).forEach(ev => {
       handleEvent(threadId, ev)
       if (ev?.type === "subagent.spawned" || ev?.type === "subagent.completed") {
-        const cid = ev?.data?.child_thread_id;
+        const cid = ev?.data?.childThreadId;
         if (cid) foundChildren.add(cid);
       }
     });
@@ -1042,8 +1042,8 @@ function connectThreadWS(threadId) {
   socket.onmessage = (m)=>{
     try {
       const ev = JSON.parse(m.data);
-      // Events from child sockets will have their own thread_id
-      const tid = ev.thread_id || threadId;
+      // Events from child sockets will have their own threadId
+      const tid = ev.threadId || threadId;
       handleEvent(tid, ev);
     } catch (err) {
       console.error("WS message error:", err, m.data);
@@ -1084,7 +1084,7 @@ async function hitl(approved) {
     await fetch("/threads/" + id + "/approve", {
       method:"POST",
       headers:{"content-type":"application/json"},
-      body: JSON.stringify({ approved, modified_tool_calls: [] })
+      body: JSON.stringify({ approved, modifiedToolCalls: [] })
     });
     showNotification(\`\${approved ? "Approved" : "Rejected"} HITL request\`, "success");
   } catch (error) {

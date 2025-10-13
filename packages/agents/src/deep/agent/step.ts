@@ -25,8 +25,8 @@ export async function step(
   ctx.store.appendMessages([res.message]);
 
   const newToolCalls =
-    res.message && "tool_calls" in res.message && res.message.tool_calls
-      ? res.message.tool_calls
+    res.message && "toolCalls" in res.message && res.message.toolCalls
+      ? res.message.toolCalls
       : [];
   ctx.store.setPendingToolCalls(newToolCalls);
 }

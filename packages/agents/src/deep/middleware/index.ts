@@ -169,9 +169,9 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
     async (
       p: {
         path: string;
-        old_string: string;
-        new_string: string;
-        replace_all?: boolean;
+        oldString: string;
+        newString: string;
+        replaceAll?: boolean;
       },
       ctx
     ) => {
@@ -187,21 +187,21 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
 
       const { replaced } = ctx.store.editFile(
         path,
-        p.old_string,
-        p.new_string,
-        p.replace_all
+        p.oldString,
+        p.newString,
+        p.replaceAll
       );
 
       if (replaced === 0)
-        return `Error: String not found in file: '${p.old_string}'`;
+        return `Error: String not found in file: '${p.oldString}'`;
       if (replaced < 0) {
-        return `Error: String '${p.old_string}' appears ${Math.abs(replaced)} times. Use replace_all=true or provide a more specific old_string.`;
+        return `Error: String '${p.oldString}' appears ${Math.abs(replaced)} times. Use replaceAll=true or provide a more specific oldString.`;
       }
-      if (!p.replace_all && replaced > 1) {
-        return `Error: String '${p.old_string}' appears ${replaced} times. Use replace_all=true or provide a more specific old_string.`;
+      if (!p.replaceAll && replaced > 1) {
+        return `Error: String '${p.oldString}' appears ${replaced} times. Use replaceAll=true or provide a more specific oldString.`;
       }
 
-      return p.replace_all
+      return p.replaceAll
         ? `Successfully replaced ${replaced} instance(s) in '${path}'`
         : `Successfully replaced string in '${path}'`;
     }
@@ -240,8 +240,8 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
 
 type TaskInput = {
   description: string;
-  subagent_type: string;
-  timeout_ms?: number;
+  subagentType: string;
+  timeoutMs?: number;
 };
 
 function renderOtherAgents(subagents: SubagentDescriptor[]) {
@@ -262,17 +262,17 @@ export function subagents(
       parameters: TaskSchema
     },
     async (p: TaskInput, ctx) => {
-      const { description, subagent_type } = p;
+      const { description, subagentType } = p;
       const token = crypto.randomUUID();
       const childId = crypto.randomUUID();
 
       // Fire SUBAGENT_SPAWNED event
       ctx.agent.emit(AgentEventType.SUBAGENT_SPAWNED, {
-        child_thread_id: childId
+        childThreadId: childId
       });
 
       // Get descriptor config
-      const descriptor = ctx.agent.subagents.get(subagent_type);
+      const descriptor = ctx.agent.subagents.get(subagentType);
 
       // Spawn child
       const subagent = await getAgentByName(
@@ -284,11 +284,11 @@ export function subagents(
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            thread_id: childId,
+            threadId: childId,
             messages: [{ role: "user", content: String(description ?? "") }],
             meta: {
-              parent: { thread_id: ctx.store.threadId, token },
-              subagent_type: subagent_type,
+              parent: { threadId: ctx.store.threadId, token },
+              subagentType: subagentType,
               systemPrompt: descriptor?.prompt,
               model: descriptor?.model
             }
@@ -303,8 +303,8 @@ export function subagents(
       // Register waiter ONLY after successful spawn
       const w = {
         token,
-        child_thread_id: childId,
-        tool_call_id: ctx.callId
+        childThreadId: childId,
+        toolCallId: ctx.callId
       };
       ctx.store.pushWaitingSubagent(w);
 
@@ -316,7 +316,7 @@ export function subagents(
         };
         ctx.store.upsertRun(rs);
         ctx.agent.emit(AgentEventType.RUN_PAUSED, {
-          run_id: ctx.store.runState.run_id,
+          runId: ctx.store.runState.runId,
           reason: "subagent"
         });
       }
@@ -340,8 +340,8 @@ export function hitl(opts: { interceptTools: string[] }): AgentMiddleware {
     async onModelResult(ctx, res) {
       const last = res.message;
       const calls =
-        last?.role === "assistant" && "tool_calls" in last
-          ? (last.tool_calls ?? [])
+        last?.role === "assistant" && "toolCalls" in last
+          ? (last.toolCalls ?? [])
           : [];
       const risky = calls.find((c: ToolCall) =>
         opts.interceptTools.includes(c.name)
@@ -353,7 +353,7 @@ export function hitl(opts: { interceptTools: string[] }): AgentMiddleware {
           reason: "hitl"
         });
         ctx.agent.emit(AgentEventType.RUN_PAUSED, {
-          run_id: ctx.store.runState!.run_id,
+          runId: ctx.store.runState!.runId,
           reason: "hitl"
         });
       }
