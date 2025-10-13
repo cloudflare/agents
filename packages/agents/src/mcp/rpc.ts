@@ -1,24 +1,143 @@
-// aim is to have an mcp transport which can work over cloudflare rpc service binding
-// caveats: body must be serializable, no streams I dont think.
-// no auth needed as its internal to the worker
-// usage: mcp.serve('/mcp', { transport: 'rpc', binding: 'MCP_RPC', functionName: 'handle' })
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
-//simular to callable functions in the sdk
+export interface MCPStub {
+  handleMcpMessage(
+    message: JSONRPCMessage
+  ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined>;
+}
 
-// rpc client transport
+export interface RPCClientTransportOptions {
+  stub: MCPStub;
+  functionName?: string;
+}
 
-// rpc server transport
+export class RPCClientTransport implements Transport {
+  private _stub: MCPStub;
+  private _functionName: string;
+  private _started = false;
 
-// implement this in examples/rpc-transport/src/server.ts
-// you will have to build the agents sdk package and then run npm i in the example folder to pick up changes
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
 
-// the aim is to declare.
+  constructor(options: RPCClientTransportOptions) {
+    this._stub = options.stub;
+    this._functionName = options.functionName ?? "handleMcpMessage";
+  }
 
-//  mcp.addMCPServer({
-//    binding: 'MCP_RPC',
-//    functionName: 'handle'
-//  })
+  async start(): Promise<void> {
+    if (this._started) {
+      throw new Error("Transport already started");
+    }
+    this._started = true;
+  }
 
-// its tough to work out the developer experience since all the other transports have a url and this wont. maybe we overload the addMCPServer method to take either a url or a binding+functionName?
-// there will be no authentication since its internal to the worker
-// we should look at what constitutes a transport.
+  async close(): Promise<void> {
+    this._started = false;
+    this.onclose?.();
+  }
+
+  async send(message: JSONRPCMessage): Promise<void> {
+    if (!this._started) {
+      throw new Error("Transport not started");
+    }
+
+    try {
+      const result =
+        await this._stub[this._functionName as keyof MCPStub](message);
+
+      if (!result) {
+        return;
+      }
+
+      if (Array.isArray(result)) {
+        for (const msg of result) {
+          this.onmessage?.(msg);
+        }
+      } else {
+        this.onmessage?.(result);
+      }
+    } catch (error) {
+      this.onerror?.(error as Error);
+      throw error;
+    }
+  }
+}
+
+export interface RPCServerTransportOptions {
+  sessionId?: string;
+}
+
+export class RPCServerTransport implements Transport {
+  private _started = false;
+  private _pendingResponse: JSONRPCMessage | JSONRPCMessage[] | null = null;
+
+  sessionId?: string;
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: (message: JSONRPCMessage) => void;
+
+  constructor(options?: RPCServerTransportOptions) {
+    this.sessionId = options?.sessionId;
+  }
+
+  async start(): Promise<void> {
+    if (this._started) {
+      throw new Error("Transport already started");
+    }
+    this._started = true;
+  }
+
+  async close(): Promise<void> {
+    this._started = false;
+    this.onclose?.();
+  }
+
+  async send(message: JSONRPCMessage): Promise<void> {
+    if (!this._started) {
+      throw new Error("Transport not started");
+    }
+
+    if (!this._pendingResponse) {
+      this._pendingResponse = message;
+    } else if (Array.isArray(this._pendingResponse)) {
+      this._pendingResponse.push(message);
+    } else {
+      this._pendingResponse = [this._pendingResponse, message];
+    }
+  }
+
+  async handle(
+    message: JSONRPCMessage
+  ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
+    if (!this._started) {
+      throw new Error("Transport not started");
+    }
+
+    this._pendingResponse = null;
+    this.onmessage?.(message);
+
+    const isNotification = !("id" in message);
+    if (isNotification) {
+      // notifications do not get responses
+      return undefined;
+    }
+
+    await new Promise<void>((resolve) => {
+      const checkResponse = () => {
+        if (this._pendingResponse !== null) {
+          resolve();
+        } else {
+          setTimeout(checkResponse, 10);
+        }
+      };
+      checkResponse();
+    });
+
+    const response = this._pendingResponse;
+    this._pendingResponse = null;
+
+    return response ?? undefined;
+  }
+}

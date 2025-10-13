@@ -3,7 +3,7 @@ import {
   RPCClientTransport,
   RPCServerTransport,
   type MCPStub
-} from "../../../mcp/rpc-transport";
+} from "../../../mcp/rpc";
 import type {
   JSONRPCMessage,
   JSONRPCRequest,
@@ -20,10 +20,14 @@ describe("RPC Transport", () => {
       const transport = new RPCClientTransport({ stub: mockStub });
 
       await transport.start();
-      expect(transport["_started"]).toBe(true);
+
+      let closeCalled = false;
+      transport.onclose = () => {
+        closeCalled = true;
+      };
 
       await transport.close();
-      expect(transport["_started"]).toBe(false);
+      expect(closeCalled).toBe(true);
     });
 
     it("should throw error when sending before start", async () => {
@@ -219,10 +223,14 @@ describe("RPC Transport", () => {
       const transport = new RPCServerTransport();
 
       await transport.start();
-      expect(transport["_started"]).toBe(true);
+
+      let closeCalled = false;
+      transport.onclose = () => {
+        closeCalled = true;
+      };
 
       await transport.close();
-      expect(transport["_started"]).toBe(false);
+      expect(closeCalled).toBe(true);
     });
 
     it("should handle request and return response", async () => {

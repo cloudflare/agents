@@ -20,7 +20,7 @@ import {
   MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
-import { RPCServerTransport } from "./rpc-transport";
+import { RPCServerTransport } from "./rpc";
 
 export abstract class McpAgent<
   Env = unknown,
@@ -482,7 +482,7 @@ export {
   type MCPStub,
   type RPCClientTransportOptions,
   type RPCServerTransportOptions
-} from "./rpc-transport";
+} from "./rpc";
 
 // Export elicitation types and schemas
 export {

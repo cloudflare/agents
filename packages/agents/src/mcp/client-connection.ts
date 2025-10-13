@@ -33,10 +33,7 @@ import {
 } from "./errors";
 import { SSEEdgeClientTransport } from "./sse-edge";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
-import {
-  RPCClientTransport,
-  type RPCClientTransportOptions
-} from "./rpc-transport";
+import { RPCClientTransport, type RPCClientTransportOptions } from "./rpc";
 import type { BaseTransportType, TransportType } from "./types";
 
 /**
