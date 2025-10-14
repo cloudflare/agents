@@ -118,10 +118,13 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
       if (raw === undefined || raw === null)
         return `Error: File '${path}' not found`;
 
-      ctx.store.setMeta(
+      ctx.store.kv.put(
         "lastReadPaths",
         Array.from(
-          new Set([...(ctx.store.meta<string[]>("lastReadPaths") ?? []), path])
+          new Set([
+            ...(ctx.store.kv.get<string[]>("lastReadPaths") ?? []),
+            path
+          ])
         )
       );
       if (raw.trim() === "")
@@ -180,7 +183,9 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
       if (!(path in files)) return `Error: File '${path}' not found`;
 
       // must read first at least once
-      const readSet = new Set(ctx.store.meta<string[]>("lastReadPaths") ?? []);
+      const readSet = new Set(
+        ctx.store.kv.get<string[]>("lastReadPaths") ?? []
+      );
       if (!readSet.has(path)) {
         return `Error: You must read '${path}' before editing it`;
       }
@@ -271,9 +276,6 @@ export function subagents(
         childThreadId: childId
       });
 
-      // Get descriptor config
-      const descriptor = ctx.agent.subagents.get(subagentType);
-
       // Spawn child
       const subagent = await getAgentByName(
         (ctx.env as AgentEnv).DEEP_AGENT,
@@ -286,12 +288,8 @@ export function subagents(
           body: JSON.stringify({
             threadId: childId,
             messages: [{ role: "user", content: String(description ?? "") }],
-            meta: {
-              parent: { threadId: ctx.store.threadId, token },
-              subagentType: subagentType,
-              systemPrompt: descriptor?.prompt,
-              model: descriptor?.model
-            }
+            agentType: subagentType,
+            parent: { threadId: ctx.store.threadId, token }
           })
         })
       );

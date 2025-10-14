@@ -9,8 +9,8 @@ export async function step(
   for (const m of mws) await m.onTick?.(ctx);
 
   // build model req
-  const plan = new ModelPlanBuilder(ctx.store); // lets MWs add sys prompt, tool defs, etc.
-  for (const m of mws) await m.beforeModel?.(ctx, plan);
+  const plan = new ModelPlanBuilder(ctx.agent);
+  for (const m of mws) await m.beforeModel?.(ctx, plan); // lets MWs add sys prompt, tool defs, etc.
 
   if (ctx.agent.isPaused) return;
 
