@@ -493,6 +493,9 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
+          // Restore MCP state from database if this is an OAuth callback after hibernation
+          await this._restoreMcpStateForOAuthCallback(request);
+
           if (this.mcp.isCallbackRequest(request)) {
             const result = await this.mcp.handleCallbackRequest(request);
             this.broadcastMcpServers();
@@ -1458,30 +1461,105 @@ export class Agent<
 
     const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
-    const result = await this._connectToMcpServerInternal(
-      serverName,
-      url,
-      callbackUrl,
-      options
-    );
+    // Generate a serverId upfront
+    const serverId = nanoid(8);
 
+    // Persist to database BEFORE starting OAuth flow to survive DO hibernation
     this.sql`
-        INSERT
-        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+        INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (
-        ${result.id},
+        ${serverId},
         ${serverName},
         ${url},
-        ${result.clientId ?? null},
-        ${result.authUrl ?? null},
+        ${null},
+        ${null},
         ${callbackUrl},
         ${options ? JSON.stringify(options) : null}
         );
     `;
 
+    // _connectToMcpServerInternal will call mcp.connect which registers the callback URL
+    const result = await this._connectToMcpServerInternal(
+      serverName,
+      url,
+      callbackUrl,
+      options,
+      { id: serverId }
+    );
+
+    // Update database with OAuth client info if auth is required
+    if (result.clientId || result.authUrl) {
+      this.sql`
+        UPDATE cf_agents_mcp_servers
+        SET client_id = ${result.clientId ?? null}, auth_url = ${result.authUrl ?? null}
+        WHERE id = ${serverId}
+      `;
+    }
+
     this.broadcastMcpServers();
 
     return result;
+  }
+
+  /**
+   * Restore MCP server state from database for OAuth callbacks after DO hibernation.
+   * Checks if request is an OAuth callback and restores the callback URL and connection if needed.
+   */
+  private async _restoreMcpStateForOAuthCallback(
+    request: Request
+  ): Promise<void> {
+    // Check if this is an OAuth callback by URL pattern
+    // Pattern: /agents/{agent-name}/{agent-id}/callback/{serverId}?code=...
+    const url = new URL(request.url);
+    const isCallbackPath =
+      url.pathname.includes("/callback/") && url.searchParams.has("code");
+
+    if (!isCallbackPath) {
+      return;
+    }
+
+    // Extract serverId from callback URL
+    const pathParts = url.pathname.split("/");
+    const callbackIndex = pathParts.indexOf("callback");
+    const serverId = callbackIndex !== -1 ? pathParts[callbackIndex + 1] : null;
+
+    if (!serverId) {
+      return;
+    }
+
+    // Restore callback URLs and connection from database if not in memory
+    const server = this.sql<MCPServerRow>`
+      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
+      FROM cf_agents_mcp_servers
+      WHERE id = ${serverId}
+    `.find((s) => s.id === serverId);
+
+    if (!server) {
+      return;
+    }
+
+    // Register callback URL (restores it after hibernation)
+    if (server.callback_url) {
+      this.mcp.registerCallbackUrl(`${server.callback_url}/${server.id}`);
+    }
+
+    // Restore connection if not in memory
+    if (!this.mcp.mcpConnections[serverId]) {
+      try {
+        await this._connectToMcpServerInternal(
+          server.name,
+          server.server_url,
+          server.callback_url,
+          server.server_options ? JSON.parse(server.server_options) : undefined,
+          {
+            id: server.id,
+            oauthClientId: server.client_id ?? undefined
+          }
+        );
+      } catch (error) {
+        console.error(`Failed to restore connection for ${serverId}:`, error);
+      }
+    }
   }
 
   private async _connectToMcpServerInternal(
