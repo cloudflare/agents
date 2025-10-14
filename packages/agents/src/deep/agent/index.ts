@@ -1,7 +1,6 @@
 import type { Provider } from "../providers";
 import type {
   AgentMiddleware,
-  AgentState,
   ToolHandler,
   ApproveBody,
   ToolCall,
@@ -54,11 +53,13 @@ export abstract class DeepAgent<
   Env extends AgentEnv = AgentEnv
 > extends Agent<Env> {
   abstract provider: Provider;
-  abstract defaultMiddleware: AgentMiddleware[];
+  abstract _model?: string;
   abstract subagents: Map<string, SubagentDescriptor>;
-  abstract extraTools: Record<string, ToolHandler>;
-  initial?: AgentState;
+  protected abstract _systemPrompt: string;
+  protected abstract defaultMiddleware: AgentMiddleware[];
+  protected abstract extraTools: Record<string, ToolHandler>;
   protected store: Store;
+  private _agentType?: string;
   observability = undefined;
 
   constructor(ctx: AgentContext, env: Env) {
@@ -67,26 +68,49 @@ export abstract class DeepAgent<
     this.store.init();
   }
 
+  // Get system prompt based on agent type
+  get systemPrompt(): string {
+    if (this.agentType && this.subagents.has(this.agentType)) {
+      return this.subagents.get(this.agentType)?.prompt ?? "";
+    }
+
+    return this._systemPrompt;
+  }
+
   // Get middleware based on agent type
   get middleware(): AgentMiddleware[] {
-    const subagentType = this.store.meta<string>("subagentType");
-
-    if (subagentType && this.subagents.has(subagentType)) {
-      return this.subagents.get(subagentType)?.middleware ?? [];
+    if (this.agentType && this.subagents.has(this.agentType)) {
+      return this.subagents.get(this.agentType)?.middleware ?? [];
     }
 
     return this.defaultMiddleware;
   }
 
   // Get tools based on agent type
-  get tools(): Record<string, ToolHandler> {
-    const subagentType = this.store.meta<string>("subagentType");
-
-    if (subagentType && this.subagents.has(subagentType)) {
-      return this.subagents.get(subagentType)?.tools ?? {};
+  get tools(): { handlers: Record<string, ToolHandler>; defs: ToolMeta[] } {
+    let tools = this.extraTools;
+    if (this.agentType && this.subagents.has(this.agentType)) {
+      tools = this.subagents.get(this.agentType)?.tools ?? {};
     }
 
-    return this.extraTools;
+    return collectToolsAndDefs(this.middleware, tools);
+  }
+
+  get model() {
+    if (this.agentType && this.subagents.has(this.agentType)) {
+      return this.subagents.get(this.agentType)?.model;
+    }
+
+    return this._model;
+  }
+
+  get messages() {
+    return this.store.listMessages();
+  }
+
+  get agentType() {
+    if (this._agentType) return this._agentType;
+    return this.store.kv.get<string>("agentType");
   }
 
   get mwContext(): MWContext {
@@ -110,7 +134,6 @@ export abstract class DeepAgent<
     return !!last && (!("toolCalls" in last) || last.toolCalls?.length === 0);
   }
 
-  // TODO: step 4. of GPT answer + store events somewhere else. why does emit need persist?
   emit(type: AgentEventType, data: unknown) {
     const evt = {
       type,
@@ -123,7 +146,6 @@ export abstract class DeepAgent<
 
     // broadcast to connected clients if any
     this.broadcast(JSON.stringify({ ...evt, seq }));
-    console.log(JSON.stringify({ ...evt, seq }, null, 2));
   }
 
   async onStart() {
@@ -163,7 +185,11 @@ export abstract class DeepAgent<
       // Merge input into state
       if (body.messages?.length) this.store.appendMessages(body.messages);
       if (body.files) this.store.mergeFiles(body.files);
-      if (body.meta) this.store.mergeMeta(body.meta);
+      if (body.agentType) {
+        this._agentType = body.agentType;
+        this.store.kv.put("agentType", body.agentType);
+      }
+      if (body.parent) this.store.kv.put("parent", body.parent);
 
       let { runState } = this.store;
       // Start or continue run
@@ -228,7 +254,37 @@ export abstract class DeepAgent<
 
   async cancel(_req: Request) {
     const { runState } = this.store;
-    if (runState) {
+    if (runState && runState.status !== "completed") {
+      // Cancel all waiting subagents first
+      const waitingSubagents = this.store.waitingSubagents;
+      if (waitingSubagents.length > 0) {
+        await Promise.all(
+          waitingSubagents.map(async (subagent) => {
+            try {
+              const childAgent = await getAgentByName(
+                this.env.DEEP_AGENT,
+                subagent.childThreadId
+              );
+              await childAgent.fetch(
+                new Request("http://do/cancel", {
+                  method: "POST"
+                })
+              );
+            } catch (error) {
+              // Log error but continue canceling other subagents
+              console.error(
+                `Failed to cancel subagent ${subagent.childThreadId}:`,
+                error
+              );
+            }
+          })
+        );
+        // Clear waiting subagents from the database
+        for (const subagent of waitingSubagents) {
+          this.store.popWaitingSubagent(subagent.token, subagent.childThreadId);
+        }
+      }
+
       runState.status = "canceled";
       runState.reason = "user";
       this.emit(AgentEventType.RUN_CANCELED, {
@@ -241,10 +297,17 @@ export abstract class DeepAgent<
 
   getState(_req: Request) {
     const { runState, threadId } = this.store;
+    const {
+      model,
+      agentType,
+      tools: { defs }
+    } = this;
     let state = {
       messages: this.store.listMessages(),
-      events: this.store.listEvents(),
-      threadId
+      threadId,
+      agentType,
+      model,
+      tools: defs
     };
     for (const m of this.middleware) {
       if (m.state) {
@@ -288,13 +351,6 @@ export abstract class DeepAgent<
     runState.step += 1;
     this.store.upsertRun(runState);
 
-    // Execute pending tool calls first (e.g. after HITL resume)
-    const { handlers: toolsMap, defs: toolDefs } = collectToolsAndDefs(
-      this.middleware,
-      this.tools
-    );
-    this.store.setMeta("toolDefs", toolDefs);
-
     const toolBatch = this.store.popPendingToolBatch(TOOLS_PER_TICK);
 
     const mws = this.middleware;
@@ -302,6 +358,7 @@ export abstract class DeepAgent<
       await Promise.all(mws.map((m) => m.onToolStart?.(this.mwContext, call)));
 
     // Execute all tool calls in parallel
+    const tools = this.tools.handlers;
     const toolResults = await Promise.all(
       toolBatch.map(async (call) => {
         this.emit(AgentEventType.TOOL_STARTED, {
@@ -309,7 +366,11 @@ export abstract class DeepAgent<
           args: call.args
         });
         try {
-          const out = await toolsMap[call.name]?.(call.args, {
+          if (!tools[call.name]) {
+            return { call, error: new Error(`Tool ${call.name} not found`) };
+          }
+
+          const out = await tools[call.name](call.args, {
             agent: this,
             store: this.store,
             env: this.env,
@@ -402,7 +463,7 @@ export abstract class DeepAgent<
       const last = this.lastAssistant();
       this.emit(AgentEventType.AGENT_COMPLETED, { result: last });
 
-      const parent = this.store.meta<ParentInfo>("parent");
+      const parent = this.store.kv.get<ParentInfo>("parent");
       // If it's a subagent, report back to the parent on completion
       if (parent?.threadId && parent?.token) {
         const parentAgent = await getAgentByName(
@@ -491,8 +552,8 @@ export abstract class DeepAgent<
  */
 export const createDeepAgent = (options: {
   provider: Provider;
+  systemPrompt: string;
   middleware?: AgentMiddleware[];
-  systemPrompt?: string;
   model?: string;
   tools?: Record<string, ToolHandler>;
   subagents?: SubagentDescriptor[];
@@ -511,6 +572,8 @@ export const createDeepAgent = (options: {
     ];
     subagents = subagentDescriptorMap;
     extraTools = options.tools ?? {};
+    _systemPrompt = options.systemPrompt;
+    _model = options.model;
 
     // Wrapped provider to emit events
     provider: Provider = {
@@ -541,15 +604,5 @@ export const createDeepAgent = (options: {
         return out;
       }
     };
-
-    async onStart() {
-      await super.onStart();
-      if (!this.store.meta<string>("systemPrompt") && options.systemPrompt) {
-        this.store.setMeta("systemPrompt", options.systemPrompt);
-      }
-      if (!this.store.meta<string>("model") && options.model) {
-        this.store.setMeta("model", options.model);
-      }
-    }
   };
 };

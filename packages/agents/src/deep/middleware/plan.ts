@@ -1,5 +1,5 @@
 import type { ModelRequest, ToolMeta } from "../types";
-import type { Store } from "../agent/store";
+import type { DeepAgent } from "../agent";
 
 export class ModelPlanBuilder {
   private sysParts: string[] = [];
@@ -11,7 +11,7 @@ export class ModelPlanBuilder {
   private _stop?: string[];
   private _model?: string;
 
-  constructor(private readonly store: Store) {}
+  constructor(private readonly agent: DeepAgent) {}
 
   addSystemPrompt(...parts: Array<string | undefined | null>) {
     for (const p of parts) if (p) this.sysParts.push(p);
@@ -41,18 +41,16 @@ export class ModelPlanBuilder {
   }
 
   build(): ModelRequest {
-    const persisted = this.store.meta<ToolMeta[]>("toolDefs") ?? [];
-    for (const d of persisted) {
+    const { defs } = this.agent.tools;
+    for (const d of defs) {
       if (d?.name && !this.defs.has(d.name)) this.defs.set(d.name, d);
     }
-    const systemPrompt = [this.store.meta("systemPrompt"), ...this.sysParts]
+    const systemPrompt = [this.agent.systemPrompt, ...this.sysParts]
       .filter(Boolean)
       .join("\n\n");
-    const messages = this.store
-      .listMessages()
-      .filter((m) => m.role !== "system");
+    const messages = this.agent.messages.filter((m) => m.role !== "system");
     return {
-      model: this._model ?? this.store.meta("model") ?? "openai:gpt-4.1",
+      model: this._model ?? this.agent.model ?? "openai:gpt-4.1",
       systemPrompt,
       messages,
       toolDefs: Array.from(this.defs.values()),

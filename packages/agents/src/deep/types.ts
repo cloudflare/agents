@@ -1,36 +1,8 @@
 import type { env } from "cloudflare:workers";
-import type { AgentEvent, AgentEventType } from "./events";
 import type { ModelPlanBuilder } from "./middleware/plan";
 import type { Store } from "./agent/store";
 import type { DeepAgent } from "./agent";
 import type { Provider } from "./providers";
-
-export type Effect =
-  | { type: "append_messages"; messages: ChatMessage[] }
-  | { type: "set_meta"; patch: Partial<AgentState["meta"]> }
-  | { type: "enqueue_tool_calls"; calls: ToolCall[] }
-  | {
-      type: "pause";
-      reason: "hitl" | "subagent" | "exhausted" | string;
-      payload?: unknown;
-    }
-  | { type: "resume" }
-  | {
-      type: "spawn_subagents";
-      tasks: Array<{
-        description: string;
-        subagentType?: string;
-        linkToToolCallId?: string;
-        timeoutMs?: number;
-      }>;
-    }
-  | {
-      type: "emit_event";
-      event: { type: AgentEventType; data: AgentEvent["data"] };
-    }
-  | { type: "quota"; toolsPerTick?: number; modelMaxTokens?: number };
-
-export type Effects = { list: Effect[]; push: (...e: Effect[]) => void };
 
 export type RunStatus =
   | "idle"
@@ -82,7 +54,8 @@ export interface InvokeBody {
   messages?: ChatMessage[]; // optional new user messages
   files?: Record<string, string>; // optional files to merge into VFS
   idempotencyKey?: string; // dedupe protection
-  meta?: Partial<AgentState["meta"]>;
+  agentType?: string; // optional subagent type
+  parent?: ParentInfo; // optional parent thread info
 }
 
 export interface ModelRequest {
@@ -102,39 +75,6 @@ export interface ParentInfo {
   threadId: string;
   token: string;
 }
-
-export interface AgentState {
-  messages: ChatMessage[];
-  files?: Record<string, string>;
-  meta?: {
-    model?: string;
-    systemPrompt?: string;
-    userId?: string;
-    usdSpent?: number;
-    pendingToolCalls?: ToolCall[];
-    runStatus?: RunStatus;
-    lastReadPaths?: string[];
-    parent?: ParentInfo;
-    subagentType?: string;
-    waitingSubagents?: Array<{
-      token: string;
-      childThreadId: string;
-      toolCallId: string;
-    }>;
-    toolDefs?: ToolMeta[];
-  };
-  todos?: Todo[];
-  jumpTo?: "model" | "tools" | "end";
-}
-
-export type Persisted = {
-  state: AgentState;
-  run: RunState | null;
-  threadId?: string; // human-readable thread identifier
-  // ring buffer of recent events for dashboard
-  events: AgentEvent[];
-  eventsSeq: number; // monotonically increasing sequence
-};
 
 export type SubagentDescriptor = {
   name: string;

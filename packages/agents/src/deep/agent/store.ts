@@ -26,7 +26,6 @@ export class Store {
   private _messages?: ChatMessage[];
   private _events?: AgentEvent[];
   private _files?: Record<string, string>;
-  private _meta?: Record<string, unknown>;
   private _pendingToolCalls?: ToolCall[];
   private _waitingSubagents?: {
     token: string;
@@ -69,11 +68,6 @@ CREATE TABLE IF NOT EXISTS events (
   type TEXT NOT NULL,
   data_json TEXT NOT NULL,
   ts TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS waiting_subagents (
@@ -325,36 +319,6 @@ ON CONFLICT(run_id) DO UPDATE SET
       : current.replace(oldStr, newStr);
     this.writeFile(path, content);
     return { replaced: replaceAll ? count : 1, content };
-  }
-
-  // --------------------------
-  // Meta K/V (JSON)
-  // --------------------------
-  mergeMeta(meta: Record<string, unknown>): void {
-    this._meta = { ...(this._meta ?? {}), ...meta };
-    for (const [key, value] of Object.entries(meta)) {
-      this.setMeta(key, value);
-    }
-  }
-
-  setMeta(key: string, value: unknown): void {
-    this._meta = { ...(this._meta ?? {}), [key]: value };
-    this.sql.exec(
-      `INSERT INTO meta (key, value) VALUES (?, ?)
-       ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-      key,
-      toJson(value)
-    );
-  }
-
-  meta<T = unknown>(key: string): T | undefined {
-    if (this._meta?.[key]) return this._meta[key] as T;
-
-    const rows = this.sql
-      .exec("SELECT value FROM meta WHERE key = ? LIMIT 1", [key])
-      .toArray();
-    if (!rows || rows.length === 0) return undefined;
-    return fromJson<T>(rows[0].value);
   }
 
   // --------------------------
