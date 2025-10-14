@@ -69,9 +69,43 @@ const model = openai("gpt-4o-2024-11-20");
  */
 export class Chat extends AIChatAgent<Env> {
   async onStart(): Promise<void> {
-    await this.mcp.closeAllConnections();
+    // Configure OAuth callback to close popup window on success
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => {
+        if (result.authSuccess) {
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" },
+            status: 200
+          });
+        } else {
+          return new Response(
+            `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
+            {
+              headers: { "content-type": "text/html" },
+              status: 200
+            }
+          );
+        }
+      }
+    });
+
+    // rpc
     await this.addRpcMcpServer("test-server", "MyMCP");
+
+    // streamable-http
+    await this.addMcpServer(
+      "docs-server",
+      "https://docs.mcp.cloudflare.com/mcp",
+      "http://localhost:5174"
+    );
+
+    await this.addMcpServer(
+      "authenticated-server",
+      "https://observability.mcp.cloudflare.com/mcp",
+      "http://localhost:5174"
+    );
   }
+
   /**
    * Handles incoming chat messages and manages the response stream
    */
@@ -80,6 +114,7 @@ export class Chat extends AIChatAgent<Env> {
     _onFinish?: { abortSignal?: AbortSignal }
   ) {
     const allTools = this.mcp.getAITools();
+    console.log("Available tools:", Object.keys(allTools));
 
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
@@ -108,6 +143,7 @@ export class Chat extends AIChatAgent<Env> {
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+    console.log("Incoming request:", url.pathname);
 
     if (url.pathname === "/check-open-ai-key") {
       const hasOpenAIKey = !!process.env.OPENAI_API_KEY;
@@ -127,10 +163,13 @@ export default {
       return MyMCP.serve("/mcp", { binding: "MyMCP" }).fetch(request, env, ctx);
     }
 
-    return (
-      // Route the request to our chat agent or return 404 if not found
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
-    );
+    const response = await routeAgentRequest(request, env);
+    if (response) {
+      console.log("Agent handled request");
+      return response;
+    }
+
+    console.log("No route matched, returning 404");
+    return new Response("Not found", { status: 404 });
   }
 };

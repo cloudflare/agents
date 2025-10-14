@@ -23,7 +23,10 @@ import {
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
-import type { MCPConnectionState } from "./mcp/client-connection";
+import type {
+  MCPConnectionState,
+  MCPTransportOptions
+} from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
@@ -1406,14 +1409,25 @@ export class Agent<
   }
 
   /**
-   * Connect to a new MCP Server
+   * Connect to an MCP server via streamable-http, sse (deprecated), or rpc transport
    *
    * @param serverName Name of the MCP server
-   * @param url MCP Server SSE URL
-   * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request.
-   * @param agentsPrefix agents routing prefix if not using `agents`
+   * @param url MCP Server URL. Supports:
+   *   - HTTP/HTTPS: `https://example.com/mcp`
+   *   - RPC: `rpc://bindingName` (where bindingName is your Durable Object binding)
+   * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request. Not required for RPC connections.
+   * @param agentsPrefix agents routing prefix if not using `agents`. Not used for RPC connections.
    * @param options MCP client and transport options
-   * @returns authUrl
+   * @returns id and authUrl (authUrl is undefined for RPC connections)
+   *
+   * @example
+   * ```typescript
+   * // HTTP/SSE connection
+   * await agent.addMcpServer("my-server", "https://example.com/mcp");
+   *
+   * // RPC connection
+   * await agent.addMcpServer("my-server", "rpc://MyMCP");
+   * ```
    */
   async addMcpServer(
     serverName: string,
@@ -1426,59 +1440,71 @@ export class Agent<
         headers?: HeadersInit;
         type?: TransportType;
       };
+      /**
+       * RPC-specific options (only used when url starts with rpc://)
+       * Note: bindingName is extracted from the URL (rpc://bindingName)
+       */
+      rpc?: {
+        functionName?: string;
+      };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
-    // If callbackHost is not provided, derive it from the current request
-    let resolvedCallbackHost = callbackHost;
-    if (!resolvedCallbackHost) {
-      const { request } = getCurrentAgent();
-      if (!request) {
-        throw new Error(
-          "callbackHost is required when not called within a request context"
-        );
-      }
+    // Determine callback URL based on transport type
+    const parsedUrl = new URL(url);
+    const isRpc = parsedUrl.protocol === "rpc:";
 
-      // Extract the origin from the request
-      const requestUrl = new URL(request.url);
-      resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
+    let callbackUrl: string;
+    let reconnect: { id: string; oauthClientId?: string } | undefined;
+
+    if (isRpc) {
+      // RPC doesn't use callback URLs for OAuth
+      callbackUrl = "rpc://internal";
+      // Check if server already exists in database for reconnection
+      const existingServer = this.sql<MCPServerRow>`
+      SELECT id FROM cf_agents_mcp_servers WHERE server_url = ${url} LIMIT 1;
+    `.at(0);
+
+      if (existingServer) {
+        reconnect = { id: existingServer.id };
+      }
+    } else {
+      // HTTP/SSE: resolve callback host if not provided
+      let resolvedCallbackHost = callbackHost;
+      if (!resolvedCallbackHost) {
+        const { request } = getCurrentAgent();
+        if (!request) {
+          throw new Error(
+            "callbackHost is required when not called within a request context"
+          );
+        }
+        const requestUrl = new URL(request.url);
+        resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
+      }
+      callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
     }
 
-    const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
-
-    // Generate a serverId upfront
-    const serverId = nanoid(8);
-
-    // Persist to database BEFORE starting OAuth flow to survive DO hibernation
-    this.sql`
-        INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${serverId},
-        ${serverName},
-        ${url},
-        ${null},
-        ${null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-        );
-    `;
-
-    // _connectToMcpServerInternal will call mcp.connect which registers the callback URL
+    // Connect to server
     const result = await this._connectToMcpServerInternal(
       serverName,
       url,
       callbackUrl,
       options,
-      { id: serverId }
+      reconnect
     );
 
-    // Update database with OAuth client info if auth is required
-    if (result.clientId || result.authUrl) {
-      this.sql`
-        UPDATE cf_agents_mcp_servers
-        SET client_id = ${result.clientId ?? null}, auth_url = ${result.authUrl ?? null}
-        WHERE id = ${serverId}
-      `;
-    }
+    // Persist to database for reconnection purposes
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${result.id},
+        ${serverName},
+        ${url},
+        ${result.clientId ?? null},
+        ${result.authUrl ?? null},
+        ${callbackUrl},
+        ${options ? JSON.stringify(options) : null}
+      );
+    `;
 
     this.broadcastMcpServers();
 
@@ -1621,48 +1647,36 @@ export class Agent<
     return this.handleOAuthCallbackResponse(result, request);
   }
 
-  /*
-   * handle all the logistics before connection
-   * then connect
-   * broadcast.
-   * in future this could be combined with the master addMcpServer()?
+  /**
+   * Convenience wrapper for adding RPC MCP servers
+   * @param serverName Name of the MCP server
+   * @param bindingName The Durable Object binding name (e.g., "MyMCP")
+   * @param options RPC-specific options
+   * @returns id of the connected server
+   *
+   * @example
+   * ```typescript
+   * await agent.addRpcMcpServer("my-server", "MyMCP");
+   *
+   * // Or use addMcpServer directly
+   * await agent.addMcpServer("my-server", "rpc://MyMCP");
+   * ```
    */
   async addRpcMcpServer(
     serverName: string,
-    bindingString: string,
+    bindingName: string,
     options?: {
       functionName?: string;
       client?: ConstructorParameters<typeof Client>[1];
     }
   ): Promise<{ id: string }> {
-    const { id } = await this._connectToMcpServerInternal(
+    const { id } = await this.addMcpServer(
       serverName,
-      `rpc://${bindingString}`,
-      "rpc://internal",
-      {
-        client: options?.client,
-        rpc: {
-          bindingName: bindingString,
-          functionName: options?.functionName
-        }
-      }
+      `rpc://${bindingName}`,
+      undefined, // callbackHost not needed for RPC
+      undefined, // agentsPrefix not needed for RPC
+      options
     );
-
-    // Store in database for persistence (callback_url is required by schema but not used for RPC)
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${id},
-        ${serverName},
-        ${`rpc://${bindingString}`},
-        ${null},
-        ${null},
-        ${"rpc://internal"},
-        ${JSON.stringify({ rpc: { bindingName: bindingString, functionName: options?.functionName } })}
-      );
-    `;
-
-    this.broadcastMcpServers();
 
     return { id };
   }
@@ -1689,7 +1703,6 @@ export class Agent<
        * RPC-specific options
        */
       rpc?: {
-        bindingName: string;
         functionName?: string;
       };
     },
@@ -1702,11 +1715,18 @@ export class Agent<
     authUrl: string | undefined;
     clientId: string | undefined;
   }> {
-    if (options?.rpc) {
-      // RPC connection logic
-      const bindingName = options?.rpc?.bindingName;
+    // Detect transport type from URL protocol
+    const parsedUrl = new URL(url);
+    const isRpc = parsedUrl.protocol === "rpc:";
+
+    // Build transport options based on transport type
+    let transportOptions: MCPTransportOptions;
+
+    if (isRpc) {
+      // RPC transport: get stub from binding
+      const bindingName = parsedUrl.hostname;
       if (!bindingName) {
-        throw new Error("Binding name is required for RPC connections");
+        throw new Error("Invalid RPC URL format. Expected: rpc://bindingName");
       }
 
       const binding = this.env[bindingName as keyof Env];
@@ -1714,9 +1734,7 @@ export class Agent<
         throw new Error(`Binding '${bindingName}' not found in environment`);
       }
 
-      const functionName = options?.rpc?.functionName;
       const namespace = binding as unknown as DurableObjectNamespace<McpAgent>;
-
       const doId = namespace.idFromName(`rpc:${serverName}`);
       const stub = namespace.get(
         doId
@@ -1724,66 +1742,56 @@ export class Agent<
 
       await stub.setName(`rpc:${serverName}`);
 
-      const { id } = await this.mcp.connect(`rpc://${serverName}`, {
-        client: options?.client,
-        reconnect,
-        transport: {
-          type: "rpc",
-          stub,
-          functionName
-        }
-      });
-
-      return {
-        authUrl: undefined,
-        clientId: undefined,
-        id
+      transportOptions = {
+        type: "rpc",
+        stub,
+        functionName: options?.rpc?.functionName
       };
-    }
+    } else {
+      // HTTP/SSE transport: setup OAuth provider and headers
+      const authProvider = new DurableObjectOAuthClientProvider(
+        this.ctx.storage,
+        this.name,
+        callbackUrl
+      );
 
-    // HTTP/SSE connection logic
-    const authProvider = new DurableObjectOAuthClientProvider(
-      this.ctx.storage,
-      this.name,
-      callbackUrl
-    );
-
-    if (reconnect) {
-      authProvider.serverId = reconnect.id;
-      if (reconnect.oauthClientId) {
-        authProvider.clientId = reconnect.oauthClientId;
+      if (reconnect) {
+        authProvider.serverId = reconnect.id;
+        if (reconnect.oauthClientId) {
+          authProvider.clientId = reconnect.oauthClientId;
+        }
       }
-    }
 
-    // Use the transport type specified in options, or default to "auto"
-    const transportType: TransportType = options?.transport?.type ?? "auto";
+      const transportType: TransportType = options?.transport?.type ?? "auto";
+      let headerTransportOpts: SSEClientTransportOptions = {};
 
-    // allows passing through transport headers if necessary
-    // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
-    let headerTransportOpts: SSEClientTransportOptions = {};
-    if (options?.transport?.headers) {
-      headerTransportOpts = {
-        eventSourceInit: {
-          fetch: (url, init) =>
-            fetch(url, {
-              ...init,
-              headers: options?.transport?.headers
-            })
-        },
-        requestInit: {
-          headers: options?.transport?.headers
-        }
-      };
-    }
+      if (options?.transport?.headers) {
+        headerTransportOpts = {
+          eventSourceInit: {
+            fetch: (url, init) =>
+              fetch(url, {
+                ...init,
+                headers: options?.transport?.headers
+              })
+          },
+          requestInit: {
+            headers: options?.transport?.headers
+          }
+        };
+      }
 
-    const { id, authUrl, clientId } = await this.mcp.connect(url, {
-      client: options?.client,
-      reconnect,
-      transport: {
+      transportOptions = {
         ...headerTransportOpts,
         authProvider,
         type: transportType
-      }
+      };
+    }
+
+    // Connect to MCP server
+    const { id, authUrl, clientId } = await this.mcp.connect(url, {
+      client: options?.client,
+      reconnect,
+      transport: transportOptions
     });
 
     return {
