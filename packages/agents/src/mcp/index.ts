@@ -370,24 +370,19 @@ export abstract class McpAgent<
   async handleMcpMessage(
     message: JSONRPCMessage
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
-    // Create an RPC transport for this single request
-    const transport = new RPCServerTransport();
+    // Initialize the agent if not already done
+    if (!this._transport || this.getTransportType() !== "rpc") {
+      // Initialize the agent with RPC transport
+      await this.onStart();
+    }
 
-    // Get or initialize the server
-    if (!this._transport) {
-      const server = await this.server;
-      this._transport = transport;
-      await server.connect(transport);
-      await this.reinitializeServer();
-    } else {
-      // Reuse existing transport setup but handle via RPC
-      const server = await this.server;
-      this._transport = transport;
-      await server.connect(transport);
+    // The transport should now be an RPCServerTransport
+    if (!(this._transport instanceof RPCServerTransport)) {
+      throw new Error("Expected RPC transport");
     }
 
     // Process the message through the transport
-    return await transport.handle(message);
+    return await this._transport.handle(message);
   }
 
   /** Return a handler for the given path for this MCP.
