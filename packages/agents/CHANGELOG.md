@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.14
+
+### Patch Changes
+
+- [#566](https://github.com/cloudflare/agents/pull/566) [`7f4616c`](https://github.com/cloudflare/agents/commit/7f4616cb4262637520303c432f14333ccfff5a84) Thanks [@mattzcarey](https://github.com/mattzcarey)! - fix: Oauth2 client flow
+
 ## 0.2.13
 
 ### Patch Changes
