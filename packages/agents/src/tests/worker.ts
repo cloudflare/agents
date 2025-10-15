@@ -12,6 +12,7 @@ import {
 } from "../index.ts";
 import { AIChatAgent } from "../ai-chat-agent.ts";
 import type { UIMessage as ChatMessage } from "ai";
+import type { MCPClientConnection } from "../mcp/client-connection";
 
 interface ToolCallPart {
   type: string;
@@ -27,6 +28,7 @@ export type Env = {
   CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
+  TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
 };
 
 type State = unknown;
@@ -179,6 +181,115 @@ export class TestRaceAgent extends Agent<Env> {
     const tagged = !!conn.state?.tagged;
     // Echo a single JSON frame so the test can assert ordering
     conn.send(JSON.stringify({ type: "echo", tagged }));
+  }
+}
+
+// Test Agent for OAuth client side flows
+export class TestOAuthAgent extends Agent<Env> {
+  async onRequest(_request: Request): Promise<Response> {
+    return new Response("Test OAuth Agent");
+  }
+
+  async setupMockMcpConnection(
+    serverId: string,
+    _serverName: string,
+    _serverUrl: string,
+    callbackUrl: string
+  ): Promise<void> {
+    // Register the callback URL in memory (simulates non-hibernated state)
+    this.mcp.registerCallbackUrl(`${callbackUrl}/${serverId}`);
+
+    // Create a mock connection object in mcpConnections to fully simulate non-hibernated state
+    // This prevents _handlePotentialOAuthCallback from trying to restore the connection
+    this.mcp.mcpConnections[serverId] = {
+      connectionState: "ready",
+      tools: [],
+      resources: [],
+      prompts: [],
+      options: {
+        transport: {
+          authProvider: {
+            clientId: "test-client-id",
+            authUrl: "http://example.com/oauth/authorize"
+          }
+        }
+      },
+      completeAuthorization: async (_code: string) => {
+        // Mock successful authorization
+        this.mcp.mcpConnections[serverId].connectionState = "ready";
+      }
+    } as unknown as MCPClientConnection;
+  }
+
+  async setupMockOAuthState(
+    serverId: string,
+    _code: string,
+    _state: string,
+    options?: { createConnection?: boolean }
+  ): Promise<void> {
+    // Set up connection in authenticating state so OAuth callback can be processed
+
+    // If requested, pre-create a connection in authenticating state
+    // This is needed for non-hibernation tests where the connection already exists
+    if (options?.createConnection) {
+      this.mcp.mcpConnections[serverId] = {
+        connectionState: "authenticating",
+        tools: [],
+        resources: [],
+        prompts: [],
+        options: {
+          transport: {
+            authProvider: {
+              clientId: "test-client-id",
+              authUrl: "http://example.com/oauth/authorize"
+            }
+          }
+        },
+        completeAuthorization: async (_code: string) => {
+          // Mock successful authorization
+          this.mcp.mcpConnections[serverId].connectionState = "ready";
+        }
+      } as unknown as MCPClientConnection;
+    } else if (this.mcp.mcpConnections[serverId]) {
+      // Set existing connection state to "authenticating" and mock completeAuthorization
+      // so the callback can be processed
+      this.mcp.mcpConnections[serverId].connectionState = "authenticating";
+      this.mcp.mcpConnections[serverId].completeAuthorization = async (
+        _code: string
+      ) => {
+        // Mock successful authorization
+        this.mcp.mcpConnections[serverId].connectionState = "ready";
+      };
+    }
+  }
+
+  getMcpServerFromDb(serverId: string) {
+    const servers = this.sql<{
+      id: string;
+      name: string;
+      server_url: string;
+      client_id: string | null;
+      auth_url: string | null;
+      callback_url: string;
+      server_options: string | null;
+    }>`
+      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
+      FROM cf_agents_mcp_servers
+      WHERE id = ${serverId}
+    `;
+    return servers.length > 0 ? servers[0] : null;
+  }
+
+  isCallbackUrlRegistered(callbackUrl: string): boolean {
+    return this.mcp.isCallbackRequest(new Request(callbackUrl));
+  }
+
+  removeMcpConnection(serverId: string): void {
+    delete this.mcp.mcpConnections[serverId];
+  }
+
+  hasMcpConnection(serverId: string): boolean {
+    return !!this.mcp.mcpConnections[serverId];
   }
 }
 

@@ -23,6 +23,10 @@
       {
         "class_name": "TestChatAgent",
         "name": "TestChatAgent"
+      },
+      {
+        "class_name": "TestOAuthAgent",
+        "name": "TestOAuthAgent"
       }
     ]
   },
@@ -35,7 +39,8 @@
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",
         "TestRaceAgent",
-        "TestChatAgent"
+        "TestChatAgent",
+        "TestOAuthAgent"
       ],
       "tag": "v1"
     }
