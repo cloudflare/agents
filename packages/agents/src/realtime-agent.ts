@@ -308,3 +308,17 @@ export async function* processNDJSONStream(
     }
   }
 }
+
+/**
+ * Websocket message type for realtime
+ */
+export type RealtimeWebsocketMessage = {
+  type: string;
+  version: number;
+  identifier: string;
+  payload: {
+    content_type: string;
+    context_id: string;
+    data: string;
+  };
+};

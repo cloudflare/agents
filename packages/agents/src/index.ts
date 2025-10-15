@@ -36,11 +36,14 @@ import {
   REALTIME_AGENTS_SERVICE,
   RealtimeKitTransport,
   TextProcessor,
-  type RealtimePipelineComponent
+  type RealtimePipelineComponent,
+  type RealtimeWebsocketMessage
 } from "./realtime-agent";
 import { randomUUID } from "node:crypto";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
+
+const REALTIME_WS_TAG = "realtime_websocket";
 
 /**
  * RPC request message from client
@@ -101,6 +104,31 @@ function isRPCRequest(msg: unknown): msg is RPCRequest {
   );
 }
 
+function isRealtimeWebsocketMessage(
+  msg: unknown
+): msg is RealtimeWebsocketMessage {
+  const m = msg as any;
+  const p = m?.payload as any;
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "type" in m &&
+    typeof m.type === "string" &&
+    "version" in m &&
+    typeof m.version === "number" &&
+    "identifier" in m &&
+    typeof m.identifier === "string" &&
+    "payload" in m &&
+    typeof m.payload === "object" &&
+    m.payload !== null &&
+    "content_type" in p &&
+    typeof p.content_type === "string" &&
+    "context_id" in p &&
+    typeof p.context_id === "string" &&
+    "data" in p &&
+    typeof p.data === "string"
+  );
+}
 /**
  * Type guard for state update messages
  */
@@ -335,7 +363,6 @@ export class Agent<
   private _rtk_components: RealtimePipelineComponent[] = [];
   private _rtk_flowId = "";
   private _rtk_authToken = "";
-  private _rtk_ws?: WebSocket;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -590,46 +617,6 @@ export class Agent<
             "conn url:",
             connection.url
           );
-          // need to figure out if it's coming from realtime or not
-          // if (isRealtimeInternalWebsocket(connection) || true) {
-          if (typeof message === "string") {
-            const ws_message: {
-              type: string;
-              version: number;
-              identifier: string;
-              payload: {
-                content_type: string;
-                context_id: string;
-                data: string;
-              };
-            } = JSON.parse(message);
-            const textProcessor = this._rtk_components.filter(
-              (c) => c instanceof Agent
-            );
-            if (textProcessor.length > 0) {
-              textProcessor[0].onRealtimeTranscript(
-                ws_message.payload.data,
-                async (text) => {
-                  if (typeof text === "string") {
-                    textProcessor[0].speak(text, ws_message.payload.context_id);
-                    return;
-                  }
-
-                  for await (const chunk of processNDJSONStream(
-                    text.getReader()
-                  )) {
-                    if (!chunk.response) continue;
-                    textProcessor[0].speak(
-                      chunk.response,
-                      ws_message.payload.context_id
-                    );
-                  }
-                }
-              );
-            }
-          }
-          // return;
-          // }
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
           }
@@ -640,6 +627,11 @@ export class Agent<
           } catch (_e) {
             // silently fail and let the onMessage handler handle it
             return this._tryCatch(() => _onMessage(connection, message));
+          }
+
+          if (isRealtimeWebsocketMessage(parsed)) {
+            this._handleRealtimeWebsocketMessage(parsed);
+            return;
           }
 
           if (isStateUpdateMessage(parsed)) {
@@ -817,6 +809,58 @@ export class Agent<
       );
     };
   }
+
+  getConnectionTags(connection: Connection, ctx: ConnectionContext) {
+    //TODO(itzmanish): check if connection is from realtime runtime websocket
+    return [REALTIME_WS_TAG];
+  }
+
+  private _handleRealtimeWebsocketMessage(message: RealtimeWebsocketMessage) {
+    if (message.type === "media") {
+      switch (message.payload.content_type) {
+        case "text":
+          const agentClass = this._rtk_components.filter(
+            (c) => c instanceof Agent
+          );
+
+          if (agentClass.length > 0) {
+            agentClass[0].onRealtimeTranscript(
+              message.payload.data,
+              async (text, canInterrupt) => {
+                let contextId = undefined;
+
+                if (canInterrupt === undefined) {
+                  canInterrupt = true;
+                }
+
+                if (canInterrupt) {
+                  contextId = message.payload.context_id;
+                }
+
+                if (typeof text === "string") {
+                  agentClass[0].speak(text, contextId);
+                  return;
+                }
+
+                for await (const chunk of processNDJSONStream(
+                  text.getReader()
+                )) {
+                  if (!chunk.response) continue;
+                  agentClass[0].speak(chunk.response, contextId);
+                }
+              }
+            );
+          }
+
+          break;
+        case "audio":
+          break;
+        case "video":
+          break;
+      }
+    }
+  }
+  private _handleRealtimeRequest() {}
 
   private _setStateInternal(
     state: State,
@@ -2039,9 +2083,6 @@ export class Agent<
     const { success } = await startResponse.json<{ success: boolean }>();
     if (!success) throw new Error("failed to start pipeline");
     this.realtimePipelineRunning = true;
-    this._rtk_ws = new WebSocket(
-      `${REALTIME_AGENTS_SERVICE.replace("http", "ws")}/pipeline/media/ws?authToken=${this._rtk_authToken}&kind=text&elementName=ws_in_text`
-    );
   }
 
   /**
@@ -2073,25 +2114,50 @@ export class Agent<
     this.realtimePipelineRunning = false;
   }
 
+  /**
+   * Send text to the agent to speak
+   * @param text The text to send
+   * @param contextId The context id of the message
+   */
   async speak(text: string, contextId?: string) {
-    console.log("sending response:", text);
-    this._rtk_ws?.send(
-      JSON.stringify({
-        type: "media",
-        version: 1,
-        identifier: randomUUID(),
-        payload: {
-          content_type: "text",
-          context_id: contextId,
-          data: text
-        }
-      })
-    );
+    const connections = this.getConnections(REALTIME_WS_TAG);
+    let connCount = 0;
+    for (const conn of connections) {
+      try {
+        connCount++;
+        conn.send(
+          JSON.stringify({
+            type: "media",
+            version: 1,
+            identifier: randomUUID(),
+            payload: {
+              content_type: "text",
+              context_id: contextId,
+              data: text
+            }
+          })
+        );
+      } catch (e) {
+        console.error("failed to send text to agent", e);
+      }
+    }
+    if (connCount === 0)
+      throw new Error("no connections to realtime agent found");
   }
 
+  /**
+   * Called when the Agent receives a new transcript from the RealtimeWebsocket
+   * @param text The text of the transcript
+   * @param reply A function that the Agent should call to reply to the transcript
+   * @param {string|ReadableStream<Uint8Array>} reply.text The text of the reply or a ReadableStream containing the reply
+   * @param {boolean} reply.canInterrupt Whether the User is allowed to interrupt the Agent
+   */
   onRealtimeTranscript(
-    _text: string,
-    _reply: (text: string | ReadableStream<Uint8Array>) => void
+    text: string,
+    reply: (
+      text: string | ReadableStream<Uint8Array>,
+      canInterrupt?: boolean
+    ) => void
   ) {}
 }
 
