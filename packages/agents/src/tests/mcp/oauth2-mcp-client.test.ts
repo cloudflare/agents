@@ -163,13 +163,11 @@ describe("OAuth2 MCP Client", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    // Make a regular request (not a callback)
     const regularUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}`;
     const request = new Request(regularUrl, { method: "GET" });
 
     const response = await worker.fetch(request, env, ctx);
 
-    // Should handle normally without attempting OAuth restoration
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).toBe("Test OAuth Agent");
@@ -184,20 +182,17 @@ describe("OAuth2 MCP Client", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    // Try callback with a serverId that doesn't exist in the database
     const nonExistentServerId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback/${nonExistentServerId}?code=test-code&state=test-state`;
     const request = new Request(callbackUrl, { method: "GET" });
 
     const response = await worker.fetch(request, env, ctx);
 
-    // Should not crash, should return a 404 error for missing server
     expect(response.status).toBe(404);
   });
 
   it("should restore connection when callback URL is registered but connection is missing", async () => {
-    // This tests the specific bug: callback URL exists but mcpConnections[serverId] is empty
-    // This can happen after hibernation if callback URL persists but connections don't
+    // Not sure how this happens in practise but it does
 
     const agentId = env.TestOAuthAgent.idFromName("test-partial-state");
     const agentStub = env.TestOAuthAgent.get(agentId);
@@ -257,11 +252,8 @@ describe("OAuth2 MCP Client", () => {
 
     const response = await agentStub.fetch(request);
 
-    // Before the fix, this would fail with "Could not find serverId: xxx"
-    // After the fix, it should restore from database and NOT get a "Could not find serverId" error
+    // Before this would fail with "Could not find serverId: xxx"
     const responseText = await response.text();
-
-    // Should NOT be the "Could not find serverId" error
     expect(responseText).not.toContain("Could not find serverId");
 
     // Should not be 404 (would mean restoration didn't work)
