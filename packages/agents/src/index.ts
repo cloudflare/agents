@@ -493,28 +493,11 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          // Restore MCP state from database if this is an OAuth callback after hibernation
-          await this._restoreMcpStateForOAuthCallback(request);
-
-          if (this.mcp.isCallbackRequest(request)) {
-            const result = await this.mcp.handleCallbackRequest(request);
-            this.broadcastMcpServers();
-
-            if (result.authSuccess) {
-              // Start background connection if auth was successful
-              this.mcp
-                .establishConnection(result.serverId)
-                .catch((error) => {
-                  console.error("Background connection failed:", error);
-                })
-                .finally(() => {
-                  // Broadcast after background connection resolves (success/failure)
-                  this.broadcastMcpServers();
-                });
-            }
-
-            // Handle OAuth callback response using MCPClientManager configuration
-            return this.handleOAuthCallbackResponse(result, request);
+          // Check if this is an OAuth callback and restore state if needed
+          const callbackResult =
+            await this._handlePotentialOAuthCallback(request);
+          if (callbackResult) {
+            return callbackResult;
           }
 
           return this._tryCatch(() => _onRequest(request));
@@ -1502,20 +1485,24 @@ export class Agent<
   }
 
   /**
-   * Restore MCP server state from database for OAuth callbacks after DO hibernation.
-   * Checks if request is an OAuth callback and restores the callback URL and connection if needed.
+   * Handle potential OAuth callback requests after DO hibernation.
+   * Detects OAuth callbacks, restores state from database, and processes the callback.
+   * Returns a Response if this was an OAuth callback, otherwise returns undefined.
    */
-  private async _restoreMcpStateForOAuthCallback(
+  private async _handlePotentialOAuthCallback(
     request: Request
-  ): Promise<void> {
-    // Check if this is an OAuth callback by URL pattern
-    // Pattern: /agents/{agent-name}/{agent-id}/callback/{serverId}?code=...
+  ): Promise<Response | undefined> {
+    // Quick check: must be GET with callback pattern and code parameter
+    if (request.method !== "GET") {
+      return undefined;
+    }
+
     const url = new URL(request.url);
-    const isCallbackPath =
+    const hasCallbackPattern =
       url.pathname.includes("/callback/") && url.searchParams.has("code");
 
-    if (!isCallbackPath) {
-      return;
+    if (!hasCallbackPattern) {
+      return undefined;
     }
 
     // Extract serverId from callback URL
@@ -1524,42 +1511,113 @@ export class Agent<
     const serverId = callbackIndex !== -1 ? pathParts[callbackIndex + 1] : null;
 
     if (!serverId) {
-      return;
+      return new Response("Invalid callback URL: missing serverId", {
+        status: 400
+      });
     }
 
-    // Restore callback URLs and connection from database if not in memory
-    const server = this.sql<MCPServerRow>`
-      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
-      FROM cf_agents_mcp_servers
-      WHERE id = ${serverId}
-    `.find((s) => s.id === serverId);
-
-    if (!server) {
-      return;
+    // Check if callback is already registered AND connection exists (not hibernated)
+    if (
+      this.mcp.isCallbackRequest(request) &&
+      this.mcp.mcpConnections[serverId]
+    ) {
+      // State already restored, handle normally
+      return this._processOAuthCallback(request);
     }
 
-    // Register callback URL (restores it after hibernation)
-    if (server.callback_url) {
+    // Need to restore from database after hibernation
+    try {
+      const server = this.sql<MCPServerRow>`
+        SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
+        FROM cf_agents_mcp_servers
+        WHERE id = ${serverId}
+      `.find((s) => s.id === serverId);
+
+      if (!server) {
+        return new Response(
+          `OAuth callback failed: Server ${serverId} not found in database`,
+          { status: 404 }
+        );
+      }
+
+      // Register callback URL (restores it after hibernation)
+      if (!server.callback_url) {
+        return new Response(
+          `OAuth callback failed: No callback URL stored for server ${serverId}`,
+          { status: 500 }
+        );
+      }
+
       this.mcp.registerCallbackUrl(`${server.callback_url}/${server.id}`);
-    }
 
-    // Restore connection if not in memory
-    if (!this.mcp.mcpConnections[serverId]) {
-      try {
+      // Restore connection if not in memory
+      if (!this.mcp.mcpConnections[serverId]) {
+        let parsedOptions:
+          | {
+              client?: ConstructorParameters<typeof Client>[1];
+              transport?: {
+                headers?: HeadersInit;
+                type?: TransportType;
+              };
+            }
+          | undefined;
+        try {
+          parsedOptions = server.server_options
+            ? JSON.parse(server.server_options)
+            : undefined;
+        } catch {
+          return new Response(
+            `OAuth callback failed: Invalid server options in database for ${serverId}`,
+            { status: 500 }
+          );
+        }
+
         await this._connectToMcpServerInternal(
           server.name,
           server.server_url,
           server.callback_url,
-          server.server_options ? JSON.parse(server.server_options) : undefined,
+          parsedOptions,
           {
             id: server.id,
             oauthClientId: server.client_id ?? undefined
           }
         );
-      } catch (error) {
-        console.error(`Failed to restore connection for ${serverId}:`, error);
       }
+
+      // Now process the OAuth callback
+      return this._processOAuthCallback(request);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : "Unknown error";
+      console.error(`Failed to restore MCP state for ${serverId}:`, error);
+      return new Response(
+        `OAuth callback failed during state restoration: ${errorMsg}`,
+        { status: 500 }
+      );
     }
+  }
+
+  /**
+   * Process an OAuth callback request (assumes state is already restored)
+   */
+  private async _processOAuthCallback(request: Request): Promise<Response> {
+    const result = await this.mcp.handleCallbackRequest(request);
+    this.broadcastMcpServers();
+
+    if (result.authSuccess) {
+      // Start background connection if auth was successful
+      this.mcp
+        .establishConnection(result.serverId)
+        .catch((error) => {
+          console.error("Background connection failed:", error);
+        })
+        .finally(() => {
+          // Broadcast after background connection resolves (success/failure)
+          this.broadcastMcpServers();
+        });
+    }
+
+    // Handle OAuth callback response using MCPClientManager configuration
+    return this.handleOAuthCallbackResponse(result, request);
   }
 
   private async _connectToMcpServerInternal(
