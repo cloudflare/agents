@@ -20,6 +20,16 @@ export interface RunState {
   nextAlarmAt?: number | null; // ms epoch
 }
 
+export type AgentState = {
+  messages: ChatMessage[];
+  tools: ToolMeta[];
+  thread: ThreadMetadata;
+  threadId?: string;
+  parent?: ParentInfo;
+  agentType?: string;
+  model?: string;
+} & Record<string, unknown>;
+
 export interface ApproveBody {
   approved: boolean;
   modifiedToolCalls?: Array<{ toolName: string; args: unknown }>;
@@ -76,11 +86,39 @@ export interface ParentInfo {
   token: string;
 }
 
+export type ThreadRequestContext = {
+  userAgent?: string;
+  ip?: string;
+  referrer?: string;
+  origin?: string;
+  cf?: Record<string, unknown>;
+};
+
+export interface ThreadMetadata {
+  id: string;
+  createdAt: string;
+  request: ThreadRequestContext;
+  parent?: ParentInfo;
+  agentType?: string;
+}
+
+export type SubagentLinkStatus = "waiting" | "completed" | "canceled";
+
+export interface SubagentLink {
+  childThreadId: string;
+  token: string;
+  status: SubagentLinkStatus;
+  createdAt: number;
+  completedAt?: number;
+  report?: string;
+  toolCallId?: string;
+}
+
 export type SubagentDescriptor = {
   name: string;
   description: string;
   prompt: string;
-  tools?: Record<string, ToolHandler>;
+  tools?: ToolHandler[];
   model?: string;
   middleware?: AgentMiddleware[];
 };

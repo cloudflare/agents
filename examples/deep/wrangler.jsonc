@@ -9,6 +9,12 @@
       }
     ]
   },
+  "kv_namespaces": [
+    {
+      "binding": "AGENT_REGISTRY",
+      "id": "deep-demo-registry"
+    }
+  ],
   "main": "src/index.ts",
   "migrations": [
     {

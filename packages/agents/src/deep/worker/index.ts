@@ -1,10 +1,83 @@
 import { getAgentByName, type Agent } from "../..";
 import { html } from "./client";
+import type { ThreadMetadata, ThreadRequestContext } from "../types";
+import type { KVNamespace } from "@cloudflare/workers-types";
+
+const CF_CONTEXT_KEYS = [
+  "colo",
+  "country",
+  "city",
+  "region",
+  "timezone",
+  "postalCode",
+  "asOrganization"
+] as const;
+
+type CfRequest = Request & { cf?: Record<string, unknown> };
+
+function buildRequestContext(req: Request): ThreadRequestContext {
+  const headers = req.headers;
+  const cf = (req as CfRequest).cf ?? undefined;
+  const context: ThreadRequestContext = {
+    userAgent: headers.get("user-agent") ?? undefined,
+    ip: headers.get("cf-connecting-ip") ?? undefined,
+    referrer: headers.get("referer") ?? undefined,
+    origin: headers.get("origin") ?? undefined
+  };
+  if (cf) {
+    const filtered: Record<string, unknown> = {};
+    for (const key of CF_CONTEXT_KEYS) {
+      const value = (cf as Record<string, unknown>)[key];
+      if (value !== undefined) filtered[key] = value;
+    }
+    if (Object.keys(filtered).length > 0) {
+      context.cf = filtered;
+    }
+  }
+  return context;
+}
+
+async function saveThreadMetadata(
+  registry: KVNamespace,
+  metadata: ThreadMetadata
+) {
+  await registry.put(metadata.id, JSON.stringify(metadata));
+}
+
+async function readThreadMetadata(
+  registry: KVNamespace,
+  id: string
+): Promise<ThreadMetadata | null> {
+  const raw = await registry.get(id);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ThreadMetadata;
+  } catch (error) {
+    console.error("Failed to parse thread metadata", error);
+    return null;
+  }
+}
+
+async function listThreads(registry: KVNamespace): Promise<ThreadMetadata[]> {
+  const { keys } = await registry.list();
+  if (!keys.length) return [];
+  const items = await Promise.all(
+    keys.map(async (entry) => readThreadMetadata(registry, entry.name))
+  );
+  return items
+    .filter((item): item is ThreadMetadata => item !== null)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
 
 type HandlerOpions = {
   baseUrl?: string;
   /** Secret to use for authorization. Optional means no check. */
   secret?: string;
+};
+
+type HandlerEnv = {
+  DEEP_AGENT: DurableObjectNamespace<Agent>;
+  AGENT_REGISTRY: KVNamespace;
 };
 
 /**
@@ -24,11 +97,7 @@ type HandlerOpions = {
  */
 export const createHandler = (opts: HandlerOpions = {}) => {
   return {
-    async fetch(
-      req: Request,
-      env: { DEEP_AGENT: DurableObjectNamespace<Agent> },
-      _ctx: ExecutionContext
-    ) {
+    async fetch(req: Request, env: HandlerEnv, _ctx: ExecutionContext) {
       const url = new URL(req.url);
 
       // Serve dashboard client
@@ -43,9 +112,36 @@ export const createHandler = (opts: HandlerOpions = {}) => {
         return new Response("invalid secret", { status: 401 });
       }
 
+      if (req.method === "GET" && url.pathname === "/threads") {
+        const threads = await listThreads(env.AGENT_REGISTRY);
+        return Response.json({ threads });
+      }
+
       if (req.method === "POST" && url.pathname === "/threads") {
         const id = crypto.randomUUID();
-        return new Response(JSON.stringify({ id }), { status: 201 });
+        const metadata: ThreadMetadata = {
+          id,
+          createdAt: new Date().toISOString(),
+          request: buildRequestContext(req)
+        };
+        const stub = await getAgentByName(env.DEEP_AGENT, id);
+        const registerRes = await stub.fetch(
+          new Request("http://do/register", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(metadata)
+          })
+        );
+        if (!registerRes.ok) {
+          return new Response("failed to register thread", { status: 500 });
+        }
+
+        await saveThreadMetadata(env.AGENT_REGISTRY, metadata);
+
+        return Response.json(
+          { id, createdAt: metadata.createdAt },
+          { status: 201 }
+        );
       }
 
       const match = url.pathname.match(/^\/threads\/([^/]+)(?:\/(.*))?$/);

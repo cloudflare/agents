@@ -11,7 +11,7 @@ const subagent = {
   description: RESEARCH_SUB_AGENT_DESCRIPTION,
   prompt: RESEARCH_AGENT_PROMPT,
   model: "gpt-5-2025-08-07",
-  tools: { internetSearch, readWebsite }
+  tools: [internetSearch, readWebsite]
 };
 
 // Main deep agent. Has planning, filesystem and subagent tools.

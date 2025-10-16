@@ -25,6 +25,389 @@ export const html = `<!doctype html>
     margin: 0 auto;
     padding: 20px;
   }
+
+  .dashboard {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 20px;
+    align-items: flex-start;
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: calc(100vh - 160px);
+    gap: 12px;
+  }
+
+  .sidebar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .sidebar-header h3 {
+    margin: 0;
+    font-size: 18px;
+  }
+
+  .sidebar-header p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .sidebar-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .sidebar-actions button {
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--fg);
+    cursor: pointer;
+    transition: background 0.2s, transform 0.2s;
+  }
+
+  .sidebar-actions button:hover {
+    background: rgba(255, 255, 255, 0.12);
+    transform: translateY(-1px);
+  }
+
+  .sidebar-actions button.primary {
+    background: var(--info);
+    color: white;
+    border-color: var(--info);
+  }
+
+  .sidebar-actions button.primary:hover {
+    background: #4a96e0;
+  }
+
+  .threads-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .thread-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--fg);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.2s ease, border 0.2s ease, transform 0.2s;
+  }
+
+  .thread-item:hover {
+    background: rgba(90, 167, 255, 0.12);
+    border-color: var(--info);
+    transform: translateX(2px);
+  }
+
+  .thread-item.active {
+    border-color: var(--info);
+    background: rgba(90, 167, 255, 0.18);
+  }
+
+  .thread-title {
+    font-size: 14px;
+    font-weight: 600;
+    word-break: break-all;
+  }
+
+  .thread-meta {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .threads-empty {
+    text-align: center;
+    padding: 28px 14px;
+    border-radius: 12px;
+    border: 1px dashed var(--border-color);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--muted);
+    font-size: 13px;
+  }
+
+  .main-column {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .chat-card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .chat-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-end;
+    justify-content: space-between;
+  }
+
+  .chat-header .input-group {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .chat-header label {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .run-summary {
+    margin-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .run-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.08);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .run-badge.running {
+    background: rgba(90, 167, 255, 0.15);
+    border-color: var(--info);
+    color: var(--info);
+  }
+
+  .run-badge.paused {
+    background: rgba(240, 173, 78, 0.18);
+    border-color: var(--warn);
+    color: var(--warn);
+  }
+
+  .run-badge.completed {
+    background: rgba(43, 191, 106, 0.18);
+    border-color: var(--ok);
+    color: var(--ok);
+  }
+
+  .run-badge.error {
+    background: rgba(255, 77, 79, 0.18);
+    border-color: var(--err);
+    color: var(--err);
+  }
+
+  .run-meta {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .subagent-panel {
+    margin-top: 12px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.03);
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .subagent-panel.visible {
+    display: flex;
+  }
+
+  .subagent-panel h4 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+
+  .subagent-items {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .subagent-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .subagent-item.active {
+    border-color: var(--info);
+    background: rgba(90, 167, 255, 0.16);
+  }
+
+  .subagent-title {
+    font-size: 13px;
+    font-weight: 600;
+    word-break: break-word;
+  }
+
+  .subagent-status {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .subagent-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .subagent-actions button {
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--fg);
+    cursor: pointer;
+    transition: background 0.2s ease;
+  }
+
+  .subagent-actions button:hover {
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  .subagent-report {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: pre-wrap;
+  }
+
+  .chat-transcript {
+    background: rgba(5, 10, 21, 0.8);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 16px;
+    margin-top: 16px;
+    min-height: 240px;
+    max-height: 360px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .chat-empty {
+    text-align: center;
+    color: var(--muted);
+    padding: 40px 0;
+  }
+
+  .chat-message {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+    max-width: 80%;
+  }
+
+  .chat-message.user {
+    align-self: flex-end;
+    background: rgba(90, 167, 255, 0.12);
+    border-color: rgba(90, 167, 255, 0.4);
+  }
+
+  .chat-message.assistant {
+    align-self: flex-start;
+    background: rgba(43, 191, 106, 0.12);
+    border-color: rgba(43, 191, 106, 0.35);
+  }
+
+  .chat-message.tool {
+    align-self: flex-start;
+    background: rgba(155, 89, 182, 0.12);
+    border-color: rgba(155, 89, 182, 0.35);
+    font-family: Monaco, Consolas, monospace;
+  }
+
+  .chat-role {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+  }
+
+  .chat-content {
+    font-size: 14px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .tool-call {
+    margin-top: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    font-family: Monaco, Consolas, monospace;
+    font-size: 12px;
+  }
+
+  .chat-input {
+    margin-top: 16px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+
+  .chat-input textarea {
+    flex: 1;
+  }
+
+  .chat-actions {
+    margin-top: 12px;
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .grid-two {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+  }
   
   .header {
     display: flex;
@@ -347,6 +730,15 @@ export const html = `<!doctype html>
   }
   
   /* Responsive */
+  @media (max-width: 1100px) {
+    .dashboard {
+      grid-template-columns: 1fr;
+    }
+    .sidebar {
+      min-height: auto;
+    }
+  }
+
   @media (max-width: 768px) {
     .row {
       grid-template-columns: 1fr;
@@ -457,76 +849,108 @@ export const html = `<!doctype html>
       </div>
     </div>
     
-    <div class="card">
-      <div class="row">
-        <div>
-          <label for="threadId">Thread ID:</label>
-          <input id="threadId" placeholder="auto-created…" />
+    <div class="dashboard">
+      <aside class="card sidebar">
+        <div class="sidebar-header">
+          <div>
+            <h3>Threads</h3>
+            <p>Durable Object conversations</p>
+          </div>
+          <div class="sidebar-actions">
+            <button id="btnRefreshThreads" title="Refresh threads">↻</button>
+            <button id="btnNew" class="primary">New</button>
+          </div>
         </div>
-        <div class="button-group">
-          <button id="btnNew" class="primary">New Thread</button>
-          <button id="btnConnect">Connect</button>
+        <div class="threads-list" id="threadsList">
+          <div class="threads-empty">No threads yet. Create one to get started.</div>
+        </div>
+      </aside>
+
+      <div class="main-column">
+        <div class="card chat-card">
+          <div class="chat-header">
+            <div class="input-group">
+              <label for="threadId">Thread ID</label>
+              <input id="threadId" placeholder="Select or create a thread…" />
+            </div>
+          </div>
+
+          <div class="run-summary">
+            <span class="run-badge" id="runStatusBadge">Idle</span>
+            <span class="run-meta" id="runStep"></span>
+            <span class="run-meta" id="runModel"></span>
+          </div>
+
+          <div id="subagentPanel" class="subagent-panel">
+            <h4>Subagents</h4>
+            <div id="subagentItems" class="subagent-items"></div>
+          </div>
+
+          <div class="chat-transcript" id="chatTranscript">
+            <div class="chat-empty">Select a thread to load the conversation.</div>
+          </div>
+
+          <div class="chat-input">
+            <textarea id="msg" rows="3" placeholder="Type a user message…"></textarea>
+            <button id="btnSend" class="primary">Send</button>
+          </div>
+
+          <div class="chat-actions">
+            <div class="button-group">
+              <button id="btnApprove">Approve (HITL)</button>
+              <button id="btnReject">Reject (HITL)</button>
+              <button id="btnCancel" class="danger">Cancel Run</button>
+              <button id="btnState">Refresh State</button>
+            </div>
+          </div>
+
+          <div class="shortcuts-hint">
+            Press <span class="shortcut">Ctrl+Enter</span> to send, <span class="shortcut">Ctrl+N</span> for new thread
+          </div>
+        </div>
+
+        <div class="card graph-card">
+          <div class="graph-wrap">
+            <div class="legend">
+              <span class="badge"><span class="dot" style="background:var(--model)"></span>Model</span>
+              <span class="badge"><span class="dot" style="background:var(--tool)"></span>Tool</span>
+              <span class="badge"><span class="dot" style="background:var(--ok)"></span>Completed</span>
+              <span class="badge"><span class="dot" style="background:var(--warn)"></span>Paused</span>
+              <span class="badge"><span class="dot" style="background:var(--err)"></span>Error</span>
+              <span class="badge"><span class="dot" style="background:var(--info)"></span>Run Tick</span>
+              <span class="badge">Dashed link = Subagent relation</span>
+              <span class="badge" style="margin-left:auto;">💡 Click and drag to pan</span>
+            </div>
+            <svg id="graph"></svg>
+            <div class="zoom-controls">
+              <button id="zoomOut">-</button>
+              <span class="zoom-pct" id="zoomPct">100%</span>
+              <button id="zoomIn">+</button>
+              <button id="zoomReset">Reset</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid-two">
+          <div class="card">
+            <h3>Todos</h3>
+            <div class="todos-summary" id="todosSummary"></div>
+            <ul class="todo-list" id="todosList"></ul>
+          </div>
+          <div class="card">
+            <h3>Files</h3>
+            <div class="files-grid">
+              <div class="files-list" id="filesList"></div>
+              <pre class="file-preview"><code id="filePreview" class="code"></code></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>State</h3>
+          <pre id="state"></pre>
         </div>
       </div>
-
-      <div class="row">
-        <textarea id="msg" rows="3" placeholder="Type a user message…"></textarea>
-        <button id="btnSend" class="primary">Send</button>
-      </div>
-
-      <div class="shortcuts-hint">
-        Press <span class="shortcut">Ctrl+Enter</span> to send message, <span class="shortcut">Ctrl+N</span> for new thread
-      </div>
-
-      <div class="row">
-        <div class="button-group full-width">
-          <button id="btnApprove">Approve (HITL)</button>
-          <button id="btnReject">Reject (HITL)</button>
-          <button id="btnCancel" class="danger">Cancel Run</button>
-          <button id="btnState">Refresh State</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="graph-wrap">
-        <div class="legend">
-          <span class="badge"><span class="dot" style="background:var(--model)"></span>Model</span>
-          <span class="badge"><span class="dot" style="background:var(--tool)"></span>Tool</span>
-          <span class="badge"><span class="dot" style="background:var(--ok)"></span>Completed</span>
-          <span class="badge"><span class="dot" style="background:var(--warn)"></span>Paused</span>
-          <span class="badge"><span class="dot" style="background:var(--err)"></span>Error</span>
-          <span class="badge"><span class="dot" style="background:var(--info)"></span>Run Tick</span>
-          <span class="badge">Dashed link = Subagent relation</span>
-          <span class="badge" style="margin-left:auto;">💡 Click and drag to pan</span>
-        </div>
-        <svg id="graph"></svg>
-        <div class="zoom-controls">
-          <button id="zoomOut">-</button>
-          <span class="zoom-pct" id="zoomPct">100%</span>
-          <button id="zoomIn">+</button>
-          <button id="zoomReset">Reset</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>Todos</h3>
-      <div class="todos-summary" id="todosSummary"></div>
-      <ul class="todo-list" id="todosList"></ul>
-    </div>
-
-    <div class="card">
-      <h3>Files</h3>
-      <div class="files-grid">
-        <div class="files-list" id="filesList"></div>
-        <pre class="file-preview"><code id="filePreview" class="code"></code></pre>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>State</h3>
-      <pre id="state"></pre>
     </div>
   </div>
 
@@ -550,9 +974,21 @@ const modalTitle = $("modalTitle");
 const modalJson = $("modalJson");
 const modalClose = $("modalClose");
 const connectionStatus = $("connectionStatus");
+const threadsListEl = $("threadsList");
+const runStatusBadge = $("runStatusBadge");
+const runStepLabel = $("runStep");
+const runModelLabel = $("runModel");
+const chatTranscript = $("chatTranscript");
+const threadInput = $("threadId");
+const subagentPanel = $("subagentPanel");
+const subagentItems = $("subagentItems");
+const btnRefreshThreads = $("btnRefreshThreads");
 
 let mainThreadId = "";
 let ws; // main ws
+let selectedThreadId = "";
+let latestThreads = [];
+const extraThreads = new Map();
 
 // --- Graph state ---
 const palette = ["#2563eb","#16a34a","#9333ea","#ea580c","#0891b2","#b91c1c","#0ea5e9","#059669"];
@@ -566,6 +1002,7 @@ const lastNodeInLane = new Map(); // threadId -> last nodeKey
 const margin = {left:100, top:40, xStep:140, yStep:110};
 const arrowId = "arrowHead";
 const pendingEdges = new Map();
+const primingThreads = new Set();
 
 // Pan/drag state
 let panState = {
@@ -603,6 +1040,89 @@ function initSVG() {
   applyTransform();
 }
 initSVG();
+
+function resetGraphState() {
+  closeAllSockets();
+  initSVG();
+  lanes.clear();
+  laneOrder.splice(0);
+  nodeMap.clear();
+  lastNodePerLane.clear();
+  childSpawnMap.clear();
+  firstNodeInLane.clear();
+  lastNodeInLane.clear();
+  pendingEdges.clear();
+  primingThreads.clear();
+}
+
+function updateRunSummary(run, state) {
+   if (!run) {
+    runStatusBadge.textContent = "Idle";
+    runStatusBadge.className = "run-badge";
+    runStepLabel.textContent = "";
+    runModelLabel.textContent = "";
+    return;
+   }
+
+  const label = (run.status || "unknown").replace(/_/g, " ");  
+  runStatusBadge.textContent = label;
+  runStatusBadge.className = \`run-badge \${run.status}\`;
+
+  const parts = [];
+  if (typeof run.step === "number") parts.push(\`step \${run.step}\`);
+  if (run.reason) parts.push(\`reason: \${run.reason}\`);
+  runStepLabel.textContent = parts.join(" • ");
+
+  const meta = [];
+  const agentType = state?.agentType ?? state?.thread?.agentType;
+  if (agentType) meta.push(\`Agent: \${agentType}\`);
+  if (state?.model) meta.push(\`Model: \${state.model}\`);
+  runModelLabel.textContent = meta.join(" • ");
+
+}
+
+function resetThreadView() {
+  renderChat([]);
+  updateRunSummary(null, null);
+  renderTodos({});
+  renderFiles({});
+  S.textContent = "";
+  extraThreads.clear();
+  if (selectedThreadId && !latestThreads.some((t) => t.id === selectedThreadId)) {
+    extraThreads.set(selectedThreadId, {
+      id: selectedThreadId,
+      createdAt: new Date().toISOString(),
+      isSubagent: true,
+      status: "active"
+    });
+  }
+  if (subagentPanel) {
+    subagentPanel.classList.remove("visible");
+    if (subagentItems) subagentItems.innerHTML = "";
+  }
+  renderThreadList(latestThreads, selectedThreadId);
+}
+
+function closeAllSockets() {
+  for (const lane of lanes.values()) {
+    if (lane.ws && lane.ws.readyState === WebSocket.OPEN) {
+      try {
+        lane.ws.close(1000, "reset");
+      } catch (err) {
+        console.warn("Failed to close lane socket", err);
+      }
+    }
+  }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.close(1000, "reset");
+    } catch (err) {
+      console.warn("Failed to close main socket", err);
+    }
+  }
+  mainThreadId = "";
+  ws = undefined;
+}
 
 // Pan/drag handlers
 G.addEventListener("mousedown", (e) => {
@@ -762,11 +1282,6 @@ function addNode(threadId, type, label, payload) {
   laneObj.nodes.push(nodeKey);
   if (!firstNodeInLane.has(threadId)) firstNodeInLane.set(threadId, nodeKey);
   lastNodeInLane.set(threadId, nodeKey);
-  const pend = pendingEdges.get(threadId);
-  if (pend && pend.length) {
-    for (const parentKey of pend) connectLanes(nodeKey, parentKey);
-    pendingEdges.delete(threadId);
-  }
 
   // Animate in
   setTimeout(() => {
@@ -810,6 +1325,16 @@ function connectLanes(fromNodeKey, toNodeKey) {
   drawEdge(from.x, from.y, to.x, to.y, true);
 }
 
+function flushPendingEdgesForLane(threadId) {
+  if (primingThreads.has(threadId)) return;
+  const pend = pendingEdges.get(threadId);
+  if (!pend || !pend.length) return;
+  const lastKey = lastNodeInLane.get(threadId);
+  if (!lastKey) return;
+  for (const parentKey of pend) connectLanes(lastKey, parentKey);
+  pendingEdges.delete(threadId);
+}
+
 function openModal(payload, label, type) {
   modalTitle.textContent = label + " - " + type;
   modalJson.textContent = JSON.stringify(payload, null, 2);
@@ -843,11 +1368,11 @@ function handleEvent(threadId, ev) {
     //   addNode(threadId, "model", "model ✓", ev);
     //   break;
     // }
-    // case "tool.started": {
-    //   const name = ev.data?.toolName ?? "tool";
-    //   addNode(threadId, "tool", name, ev);
-    //   break;
-    // }
+    //case "tool.started": {
+    //  const name = ev.data?.toolName ?? "tool";
+    //  addNode(threadId, "tool", \`\${name} ▶\`, ev);
+    // break;
+    //}
     case "tool.output": {
       const name = ev.data?.toolName ?? "tool";
       addNode(threadId, "tool", \`\${name} ✓\`, ev);
@@ -888,7 +1413,7 @@ function handleEvent(threadId, ev) {
       const doneKey = addNode(threadId, "tool", \`child \${short(child)} ✓\`, ev);
       // connect dashed from child's last to this node (if we have it)
       const childLast = lastNodeInLane.get(child);
-      if (childLast) {
+      if (childLast && !primingThreads.has(child)) {
         connectLanes(childLast, doneKey);
       } else {
         const arr = pendingEdges.get(child) || [];
@@ -921,6 +1446,8 @@ function handleEvent(threadId, ev) {
     connectLanes(childSpawnMap.get(threadId), firstKey);
     childSpawnMap.delete(threadId);
   }
+
+  flushPendingEdgesForLane(threadId);
 }
 
 function short(id) { return (id||"").slice(0,6); }
@@ -949,33 +1476,40 @@ function updateConnectionStatus(connected) {
 // --- Existing UI functions (kept) ---
 async function newThread() {
   try {
-    const r = await fetch("/threads", {method:"POST"});
-    const j = await r.json();
-    $("threadId").value = j.id;
-    S.textContent = "";
-    initSVG();
-    lanes.clear(); laneOrder.splice(0); nodeMap.clear(); lastNodePerLane.clear();
-    childSpawnMap.clear(); firstNodeInLane.clear(); lastNodeInLane.clear();
+    const res = await fetch("/threads", { method: "POST" });
+    const json = await res.json();
+    const id = json.id;
+    if (!id) throw new Error("Thread creation missing id");
     showNotification("New thread created", "success");
+    await loadThreads(id);
+    await selectThread(id);
   } catch (error) {
     console.error("Failed to create new thread:", error);
     showNotification("Failed to create new thread: " + error.message, "error");
   }
 }
 
-async function connect() {
-  const id = $("threadId").value.trim();
+async function connect(idOverride) {
+  const id = (idOverride ?? $("threadId").value ?? "").trim();
   if (!id) {
     showNotification("Please enter a thread ID", "error");
     return;
   }
-  
+
   try {
+    const switching = id !== mainThreadId;
+    selectedThreadId = id;
+    if (threadInput) threadInput.value = id;
+    if (switching) {
+      resetGraphState();
+      resetThreadView();
+    }
     mainThreadId = id;
+    renderThreadList(latestThreads, id);
     await primeEventsDeep(id);
-    connectThreadWS(id);
     showNotification("Connected to thread", "success");
     await refreshState();
+    await loadThreads(id);
   } catch (error) {
     console.error("Connection error:", error);
     showNotification("Failed to connect: " + error.message, "error");
@@ -987,13 +1521,19 @@ async function primeEvents(threadId) {
     const r = await fetch(\`/threads/\${threadId}/events\`);
     const j = await r.json();
     const foundChildren = new Set();
-    (j.events||[]).forEach(ev => {
-      handleEvent(threadId, ev)
-      if (ev?.type === "subagent.spawned" || ev?.type === "subagent.completed") {
-        const cid = ev?.data?.childThreadId;
-        if (cid) foundChildren.add(cid);
-      }
-    });
+    primingThreads.add(threadId);
+    try {
+      (j.events||[]).forEach(ev => {
+        handleEvent(threadId, ev)
+        if (ev?.type === "subagent.spawned" || ev?.type === "subagent.completed") {
+          const cid = ev?.data?.childThreadId;
+          if (cid) foundChildren.add(cid);
+        }
+      });
+    } finally {
+      primingThreads.delete(threadId);
+      flushPendingEdgesForLane(threadId);
+    }
     return [...foundChildren];
   } catch (e) { 
     console.error("Failed to prime events:", e);
@@ -1067,6 +1607,7 @@ async function send() {
     });
     $("msg").value = "";
     showNotification("Message sent", "success");
+    await refreshState();
   } catch (error) {
     console.error("Failed to send message:", error);
     showNotification("Failed to send message: " + error.message, "error");
@@ -1086,7 +1627,8 @@ async function hitl(approved) {
       headers:{"content-type":"application/json"},
       body: JSON.stringify({ approved, modifiedToolCalls: [] })
     });
-    showNotification(\`\${approved ? "Approved" : "Rejected"} HITL request\`, "success");
+    showNotification((approved ? "Approved" : "Rejected") + " HITL request", "success");
+    await refreshState();
   } catch (error) {
     console.error("Failed to send HITL response:", error);
     showNotification("Failed to send HITL response: " + error.message, "error");
@@ -1103,6 +1645,7 @@ async function cancelRun() {
   try {
     await fetch("/threads/" + id + "/cancel", { method:"POST" });
     showNotification("Run cancelled", "success");
+    await refreshState();
   } catch (error) {
     console.error("Failed to cancel run:", error);
     showNotification("Failed to cancel run: " + error.message, "error");
@@ -1116,8 +1659,12 @@ async function refreshState() {
     const r = await fetch("/threads/" + id + "/state");
     const j = await r.json();
     S.textContent = JSON.stringify(j, null, 2);
-    renderTodos(j.state);
-    renderFiles(j.state);
+    const state = j.state ?? {};
+    renderChat(state.messages ?? []);
+    renderTodos(state);
+    renderFiles(state);
+    updateRunSummary(j.run, state);
+    renderSubagents(state.subagents ?? []);
   } catch (err) {
     console.error("Failed to refresh state:", err);
     showNotification("Failed to refresh state: " + err.message, "error");
@@ -1142,16 +1689,263 @@ document.addEventListener("keydown", (e) => {
 });
 
 // Button handlers
- $("btnNew").onclick = newThread;
- $("btnConnect").onclick = connect;
+ $("btnNew").onclick = () => newThread();
+ if (btnRefreshThreads) btnRefreshThreads.onclick = () => loadThreads();
  $("btnSend").onclick = send;
- $("btnApprove").onclick = ()=>hitl(true);
- $("btnReject").onclick = ()=>hitl(false);
+ $("btnApprove").onclick = () => hitl(true);
+ $("btnReject").onclick = () => hitl(false);
  $("btnCancel").onclick = cancelRun;
  $("btnState").onclick = refreshState;
+ if (threadInput) {
+   threadInput.addEventListener("keydown", (event) => {
+     if (event.key === "Enter") {
+       event.preventDefault();
+       const value = threadInput.value.trim();
+       if (value) selectThread(value);
+     }
+   });
+ }
 
-// Initialize with a new thread
-newThread();
+// Initial load
+resetThreadView();
+loadThreads();
+
+// Thread & chat helpers
+function formatRelativeTime(iso) {
+  if (!iso) return "";
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return iso;
+  const diff = Date.now() - ts;
+  const abs = Math.abs(diff);
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (abs < minute) return "just now";
+  if (abs < hour) return \`\${Math.round(abs / minute)}m ago\`;
+  if (abs < day) return \`\${Math.round(abs / hour)}h ago\`;
+  return new Date(ts).toLocaleString();
+}
+
+
+async function selectThread(id, { connectThread = true } = {}) {
+  if (!id) return;
+  selectedThreadId = id;
+  if (threadInput) threadInput.value = id;
+  renderThreadList(latestThreads, id);
+  if (connectThread) {
+    await connect(id);
+  } else {
+    await refreshState();
+  }
+}
+
+function renderSubagents(subagents = []) {
+  extraThreads.clear();
+  if (!subagentPanel || !subagentItems) return;
+
+  if (!Array.isArray(subagents) || subagents.length === 0) {
+    if (selectedThreadId && !latestThreads.some((t) => t.id === selectedThreadId)) {
+      extraThreads.set(selectedThreadId, {
+        id: selectedThreadId,
+        createdAt: new Date().toISOString(),
+        isSubagent: true,
+        status: "active"
+      });
+    }
+    subagentPanel.classList.remove("visible");
+    subagentItems.innerHTML = "";
+    renderThreadList(latestThreads, selectedThreadId);
+    return;
+  }
+
+  subagentPanel.classList.add("visible");
+  subagentItems.innerHTML = "";
+
+  for (const link of subagents) {
+    if (!link?.childThreadId) continue;
+    const childId = link.childThreadId;
+    const createdAtIso = new Date(link.createdAt ?? Date.now()).toISOString();
+    extraThreads.set(childId, {
+      id: childId,
+      createdAt: createdAtIso,
+      status: link.status,
+      parent: { threadId: selectedThreadId },
+      report: link.report,
+      isSubagent: true
+    });
+
+    const item = document.createElement("div");
+    item.className = "subagent-item" + (childId === selectedThreadId ? " active" : "");
+
+    const title = document.createElement("div");
+    title.className = "subagent-title";
+    title.textContent = childId;
+    item.appendChild(title);
+
+    const statusRow = document.createElement("div");
+    statusRow.className = "subagent-status";
+    const statusLabel = (link.status ?? "unknown").replace(/_/g, " ");
+    const statusParts = [\`Status: \${statusLabel}\`];
+    if (link.completedAt) statusParts.push("Completed");
+    statusParts.push(formatRelativeTime(createdAtIso));
+    statusRow.textContent = statusParts.join(" • ");
+    item.appendChild(statusRow);
+
+    if (link.report) {
+      const report = document.createElement("div");
+      report.className = "subagent-report";
+      report.textContent = link.report;
+      item.appendChild(report);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "subagent-actions";
+    const openBtn = document.createElement("button");
+    openBtn.textContent = "Open";
+    openBtn.onclick = () => selectThread(childId);
+    actions.appendChild(openBtn);
+    item.appendChild(actions);
+
+    subagentItems.appendChild(item);
+  }
+
+  renderThreadList(latestThreads, selectedThreadId);
+}
+
+function renderChat(messages = []) {
+  chatTranscript.innerHTML = "";
+  if (!messages.length) {
+    const empty = document.createElement("div");
+    empty.className = "chat-empty";
+    empty.textContent = "No messages yet. Send a user prompt to get started.";
+    chatTranscript.appendChild(empty);
+    return;
+  }
+
+  for (const msg of messages) {
+    const role = msg.role;
+    const bubble = document.createElement("div");
+    bubble.className = "chat-message " + role;
+
+    const roleLabel = document.createElement("div");
+    roleLabel.className = "chat-role";
+    roleLabel.textContent = role.toUpperCase();
+    bubble.appendChild(roleLabel);
+
+    const content = document.createElement("div");
+    content.className = "chat-content";
+
+    if (role === "assistant" && msg.toolCalls?.length) {
+      if (msg.content) {
+        const text = document.createElement("div");
+        text.textContent = msg.content;
+        content.appendChild(text);
+      }
+      for (const call of msg.toolCalls) {
+        const toolWrap = document.createElement("div");
+        toolWrap.className = "tool-call";
+        const title = document.createElement("div");
+        title.style.fontWeight = "600";
+        title.textContent = call.name || "tool";
+        const pre = document.createElement("pre");
+        pre.textContent = JSON.stringify(call.args ?? {}, null, 2);
+        toolWrap.appendChild(title);
+        toolWrap.appendChild(pre);
+        content.appendChild(toolWrap);
+      }
+    } else if (role === "tool") {
+      const pre = document.createElement("pre");
+      pre.textContent = msg.content ?? "";
+      content.appendChild(pre);
+    } else {
+      content.textContent = msg.content ?? "";
+    }
+
+    bubble.appendChild(content);
+    chatTranscript.appendChild(bubble);
+  }
+
+  chatTranscript.scrollTop = chatTranscript.scrollHeight;
+}
+
+async function loadThreads(activeId) {
+  try {
+    const res = await fetch("/threads");
+    const data = await res.json();
+    const threads = (data.threads ?? []).slice();
+    threads.sort((a, b) => {
+      const ta = Date.parse(a.createdAt ?? "");
+      const tb = Date.parse(b.createdAt ?? "");
+      if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;
+      return tb - ta;
+    });
+    latestThreads = threads;
+    renderThreadList(latestThreads, activeId ?? selectedThreadId);
+  } catch (error) {
+    console.error("Failed to load threads:", error);
+    showNotification("Failed to load threads", "error");
+  }
+}
+
+function renderThreadList(threads = [], activeId) {
+  const combined = new Map();
+
+  for (const meta of threads ?? []) {
+    if (!meta?.id) continue;
+    combined.set(meta.id, { ...meta, source: "root" });
+  }
+
+  for (const meta of extraThreads.values()) {
+    if (!meta?.id) continue;
+    if (!combined.has(meta.id)) combined.set(meta.id, meta);
+  }
+
+  const list = Array.from(combined.values());
+  list.sort((a, b) => {
+    const ta = Date.parse(a.createdAt ?? "");
+    const tb = Date.parse(b.createdAt ?? "");
+    if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+    if (Number.isNaN(ta)) return 1;
+    if (Number.isNaN(tb)) return -1;
+    return tb - ta;
+  });
+
+  threadsListEl.innerHTML = "";
+  if (!list.length) {
+    threadsListEl.innerHTML =
+      '<div class="threads-empty">No threads yet. Create one to get started.</div>';
+    return;
+  }
+
+  for (const meta of list) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const isActive = meta.id === activeId;
+    btn.className = "thread-item" + (isActive ? " active" : "");
+    const metaBits = [];
+    if (meta.createdAt) metaBits.push(formatRelativeTime(meta.createdAt));
+    if (meta.isSubagent) metaBits.push("Subagent");
+    if (meta.agentType) metaBits.push(\`Agent: \${meta.agentType}\`);
+    if (meta.status) metaBits.push(\`Status: \${meta.status}\`);
+    if (meta.parent?.threadId) metaBits.push(\`Child of \${short(meta.parent.threadId)}\`);
+    const city = meta.request?.cf?.city;
+    if (city) metaBits.push(city);
+
+    btn.innerHTML = \`
+      <div class="thread-title">\${escapeHtml(meta.id)}</div>
+      <div class="thread-meta">\${metaBits.map((part) => escapeHtml(String(part))).join(" • ")}</div>
+    \`;
+    const tooltip = [];
+    if (meta.request?.userAgent) tooltip.push(meta.request.userAgent);
+    if (meta.report) tooltip.push(\`Report: \${meta.report}\`);
+    if (tooltip.length) btn.title = tooltip.join("\\n\\n");
+    btn.onclick = () => selectThread(meta.id);
+    threadsListEl.appendChild(btn);
+  }
+}
+
+
+// ---- Todos ----
 
 function renderTodos(state) {
   const todos = state?.todos || [];
