@@ -159,6 +159,58 @@ export class Chat extends AIChatAgent<Env> {
 }
 ```
 
+### Passing props from client to server
+
+Since RPC transport doesn't have an OAuth flow, you can pass user context (like userId, role, etc.) directly as props:
+
+```typescript
+export class Chat extends AIChatAgent<Env> {
+  async onStart(): Promise<void> {
+    // Pass props to provide user context to the MCP server
+    await this.addMcpServer("my-mcp", this.env.MyMCP, {
+      transport: { type: "rpc" },
+      props: { userId: "user-123", role: "admin" }
+    });
+  }
+}
+```
+
+Your `McpAgent` can then access these props:
+
+```typescript
+export class MyMCP extends McpAgent<
+  Env,
+  State,
+  { userId?: string; role?: string }
+> {
+  async init() {
+    this.server.tool("whoami", "Get current user info", {}, async () => {
+      const userId = this.props?.userId || "anonymous";
+      const role = this.props?.role || "guest";
+
+      return {
+        content: [{ type: "text", text: `User ID: ${userId}, Role: ${role}` }]
+      };
+    });
+  }
+}
+```
+
+The props are:
+
+- **Type-safe**: TypeScript extracts the Props type from your McpAgent generic
+- **Persistent**: Stored in Durable Object storage via `updateProps()`
+- **Available immediately**: Set before any tool calls are made
+
+This is useful for:
+
+- User authentication context
+- Tenant/organization IDs
+- Feature flags or permissions
+- Any per-connection configuration
+
+#### How RPC transport works
+
 The RPC transport:
 
 1. Validates the binding exists in your environment

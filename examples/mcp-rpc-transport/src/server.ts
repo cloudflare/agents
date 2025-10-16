@@ -19,11 +19,16 @@ type State = {
   counter: number;
 };
 
+type Props = {
+  userId: string;
+  role: string;
+};
+
 type Env = {
   MyMCP: DurableObjectNamespace<MyMCP>;
 };
 
-export class MyMCP extends McpAgent<Env, State, {}> {
+export class MyMCP extends McpAgent<Env, State, Props> {
   server = new McpServer({
     name: "Demo",
     version: "1.0.0"
@@ -51,6 +56,25 @@ export class MyMCP extends McpAgent<Env, State, {}> {
         };
       }
     );
+
+    this.server.tool(
+      "whoami",
+      "Get information about the current user from props",
+      {},
+      async () => {
+        const userId = this.props?.userId || "anonymous";
+        const role = this.props?.role || "guest";
+
+        return {
+          content: [
+            {
+              text: `User ID: ${userId}, Role: ${role}`,
+              type: "text"
+            }
+          ]
+        };
+      }
+    );
   }
 
   onStateUpdate(state: State) {
@@ -69,9 +93,11 @@ const model = openai("gpt-4o-2024-11-20");
  */
 export class Chat extends AIChatAgent<Env> {
   async onStart(): Promise<void> {
-    // Connect to MCP server via RPC
+    // Connect to MCP server via RPC with props
+    // In a real app, you'd get userId/role from authentication
     await this.addMcpServer("test-server", this.env.MyMCP, {
-      transport: { type: "rpc" }
+      transport: { type: "rpc" },
+      props: { userId: "demo-user-123", role: "admin" }
     });
   }
 

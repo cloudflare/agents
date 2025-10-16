@@ -1455,17 +1455,26 @@ export class Agent<
    * // RPC transport
    * await agent.addMcpServer("my-server", env.MyMCP, { transport: { type: "rpc" } });
    *
+   * // RPC transport with props (pass user context to MCP server)
+   * await agent.addMcpServer("my-server", env.MyMCP, {
+   *   transport: { type: "rpc" },
+   *   props: { userId: "user-123", role: "admin" }
+   * });
+   *
    * // HTTP/SSE transport
    * await agent.addMcpServer("my-server", "https://example.com/mcp", "https://my-app.com");
    * ```
    */
-  async addMcpServer<T extends McpAgent>(
+  async addMcpServer<
+    T extends McpAgent<unknown, unknown, Record<string, unknown>> = McpAgent
+  >(
     serverName: string,
     binding: DurableObjectNamespace<T> | string,
     options: {
       transport: { type: "rpc" };
       functionName?: string;
       client?: ConstructorParameters<typeof Client>[1];
+      props?: T extends McpAgent<unknown, unknown, infer Props> ? Props : never;
     }
   ): Promise<{ id: string; authUrl: undefined }>;
 
@@ -1484,7 +1493,9 @@ export class Agent<
     }
   ): Promise<{ id: string; authUrl: string | undefined }>;
 
-  async addMcpServer<T extends McpAgent>(
+  async addMcpServer<
+    T extends McpAgent<unknown, unknown, Record<string, unknown>> = McpAgent
+  >(
     serverName: string,
     urlOrBinding: string | DurableObjectNamespace<T>,
     callbackHostOrOptions?:
@@ -1493,6 +1504,9 @@ export class Agent<
           transport: { type: "rpc" };
           functionName?: string;
           client?: ConstructorParameters<typeof Client>[1];
+          props?: T extends McpAgent<unknown, unknown, infer Props>
+            ? Props
+            : never;
         },
     agentsPrefix = "agents",
     options?: {
@@ -1514,6 +1528,9 @@ export class Agent<
         transport: { type: "rpc" };
         functionName?: string;
         client?: ConstructorParameters<typeof Client>[1];
+        props?: T extends McpAgent<unknown, unknown, infer Props>
+          ? Props
+          : never;
       };
 
       const namespace = this._resolveRpcBinding<T>(
@@ -1536,7 +1553,8 @@ export class Agent<
         url,
         options: {
           functionName: rpcOptions.functionName,
-          client: rpcOptions.client
+          client: rpcOptions.client,
+          props: rpcOptions.props
         },
         reconnect
       });
@@ -1751,6 +1769,10 @@ export class Agent<
     const stub = namespace.get(doId) as unknown as DurableObjectStub<McpAgent>;
 
     await stub.setName(`rpc:${serverName}`);
+
+    if (options?.props) {
+      await stub.updateProps(options.props);
+    }
 
     return {
       type: "rpc",

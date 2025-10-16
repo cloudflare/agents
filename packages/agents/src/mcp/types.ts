@@ -24,7 +24,9 @@ export interface ServeOptions {
 /**
  * Configuration for connecting to an MCP server via RPC transport
  */
-export type McpRpcConnectionConfig<T extends McpAgent = McpAgent> = {
+export type McpRpcConnectionConfig<
+  T extends McpAgent<unknown, unknown, Record<string, unknown>> = McpAgent
+> = {
   type: "rpc";
   serverName: string;
   url: string;
@@ -32,6 +34,7 @@ export type McpRpcConnectionConfig<T extends McpAgent = McpAgent> = {
   options?: {
     functionName?: string;
     client?: ConstructorParameters<typeof Client>[1];
+    props?: T extends McpAgent<unknown, unknown, infer Props> ? Props : never;
   };
   reconnect?: { id: string };
 };
