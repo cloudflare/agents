@@ -168,8 +168,7 @@ Since RPC transport doesn't have an OAuth flow, you can pass user context (like 
 ```typescript
 // Pass props to provide user context to the MCP server
 await this.addMcpServer("my-mcp", this.env.MyMCP, {
-  transport: { type: "rpc" },
-  props: { userId: "user-123", role: "admin" }
+  transport: { type: "rpc", props: { userId: "user-123", role: "admin" } }
 });
 ```
 

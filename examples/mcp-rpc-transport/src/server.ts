@@ -96,8 +96,10 @@ export class Chat extends AIChatAgent<Env> {
     // Connect to MCP server via RPC with props
     // In a real app, you'd get userId/role from authentication
     await this.addMcpServer("test-server", this.env.MyMCP, {
-      transport: { type: "rpc" },
-      props: { userId: "demo-user-123", role: "admin" }
+      transport: {
+        type: "rpc",
+        props: { userId: "demo-user-123", role: "admin" }
+      }
     });
   }
 

@@ -1733,7 +1733,7 @@ export class Agent<
     const { serverName, namespace, options } = config;
 
     const doId = namespace.idFromName(`rpc:${serverName}`);
-    const stub = namespace.get(doId) as unknown as DurableObjectStub<McpAgent>;
+    const stub = namespace.get(doId) as unknown as DurableObjectStub<T>;
 
     await stub.setName(`rpc:${serverName}`);
 
