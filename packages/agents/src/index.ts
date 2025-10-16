@@ -30,20 +30,13 @@ import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
 import {
-  CLOUDFLARE_BASE,
   DataKind,
-  processNDJSONStream,
-  REALTIME_AGENTS_SERVICE,
-  RealtimeKitTransport,
-  TextProcessor,
-  type RealtimePipelineComponent,
-  type RealtimeWebsocketMessage
-} from "./realtime-agent";
+  type RealtimePipelineComponent
+} from "./realtime-components";
+import { isRealtimeRequest, Realtime, REALTIME_WS_TAG } from "./realtime";
 import { randomUUID } from "node:crypto";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
-
-const REALTIME_WS_TAG = "realtime_websocket";
 
 /**
  * RPC request message from client
@@ -104,31 +97,6 @@ function isRPCRequest(msg: unknown): msg is RPCRequest {
   );
 }
 
-function isRealtimeWebsocketMessage(
-  msg: unknown
-): msg is RealtimeWebsocketMessage {
-  const m = msg as any;
-  const p = m?.payload as any;
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in m &&
-    typeof m.type === "string" &&
-    "version" in m &&
-    typeof m.version === "number" &&
-    "identifier" in m &&
-    typeof m.identifier === "string" &&
-    "payload" in m &&
-    typeof m.payload === "object" &&
-    m.payload !== null &&
-    "content_type" in p &&
-    typeof p.content_type === "string" &&
-    "context_id" in p &&
-    typeof p.context_id === "string" &&
-    "data" in p &&
-    typeof p.data === "string"
-  );
-}
 /**
  * Type guard for state update messages
  */
@@ -360,9 +328,7 @@ export class Agent<
 {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
-  private _rtk_components: RealtimePipelineComponent[] = [];
-  private _rtk_flowId = "";
-  private _rtk_authToken = "";
+  private realtime?: Realtime;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -373,7 +339,6 @@ export class Agent<
   );
 
   realtimePipelineComponents?: () => RealtimePipelineComponent[];
-  realtimePipelineRunning = false;
 
   input_kind() {
     return DataKind.Text;
@@ -479,6 +444,7 @@ export class Agent<
       throw this.onError(e);
     }
   }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
@@ -563,40 +529,8 @@ export class Agent<
             return callbackResult;
           }
 
-          const url = new URL(request.url);
-          const split = url.pathname.split("realtime");
-          if (split.length > 2 && this.realtimePipelineComponents) {
-            const path = split[split.length - 1];
-            switch (path) {
-              case "/rtk/produce": {
-                const payload = await request.json<{
-                  producingTransportId: string;
-                  producerId: string;
-                  kind: string;
-                }>();
-                const meeting = this._rtk_components.filter(
-                  (c) => c instanceof RealtimeKitTransport
-                )[0].meeting!;
-                if (meeting.self.roomJoined) {
-                  console.log("bot joined the meeting");
-                  await meeting.self.produce(payload);
-                } else {
-                  console.log("bot not joined the meeting");
-                  meeting.self.on("roomJoined", () =>
-                    meeting.self.produce(payload)
-                  );
-                }
-                return new Response(null, { status: 200 });
-              }
-              case "/start": {
-                await this.startRealtimePipeline();
-                return new Response(null, { status: 200 });
-              }
-              case "/stop": {
-                await this.stopRealtimePipeline();
-                return new Response(null, { status: 200 });
-              }
-            }
+          if (this.realtime && isRealtimeRequest(request)) {
+            return this.realtime.handleRequests(request);
           }
 
           return this._tryCatch(() => _onRequest(request));
@@ -629,8 +563,7 @@ export class Agent<
             return this._tryCatch(() => _onMessage(connection, message));
           }
 
-          if (isRealtimeWebsocketMessage(parsed)) {
-            this._handleRealtimeWebsocketMessage(parsed);
+          if (this.realtime?.handleWebsocketMessage(parsed)) {
             return;
           }
 
@@ -803,6 +736,25 @@ export class Agent<
                   });
               });
             }
+
+            if (this.realtimePipelineComponents) {
+              const { CF_ACCOUNT_ID, CF_API_TOKEN } = this.env as {
+                CF_ACCOUNT_ID: string;
+                CF_API_TOKEN: string;
+              };
+              if (!CF_ACCOUNT_ID) throw new Error("CF_ACCOUNT_ID is required");
+              if (!CF_API_TOKEN) throw new Error("CF_API_TOKEN is required");
+
+              const agentId = this.name;
+              const agentName = camelCaseToKebabCase(this._ParentClass.name);
+
+              this.realtime = new Realtime(this.realtimePipelineComponents(), {
+                CF_ACCOUNT_ID,
+                CF_API_TOKEN,
+                agentId,
+                agentName
+              });
+            }
             return _onStart(props);
           });
         }
@@ -812,55 +764,8 @@ export class Agent<
 
   getConnectionTags(connection: Connection, ctx: ConnectionContext) {
     //TODO(itzmanish): check if connection is from realtime runtime websocket
-    return [REALTIME_WS_TAG];
+    return this.realtime?.getConnectionTags(connection, ctx) || [];
   }
-
-  private _handleRealtimeWebsocketMessage(message: RealtimeWebsocketMessage) {
-    if (message.type === "media") {
-      switch (message.payload.content_type) {
-        case "text":
-          const agentClass = this._rtk_components.filter(
-            (c) => c instanceof Agent
-          );
-
-          if (agentClass.length > 0) {
-            agentClass[0].onRealtimeTranscript(
-              message.payload.data,
-              async (text, canInterrupt) => {
-                let contextId = undefined;
-
-                if (canInterrupt === undefined) {
-                  canInterrupt = true;
-                }
-
-                if (canInterrupt) {
-                  contextId = message.payload.context_id;
-                }
-
-                if (typeof text === "string") {
-                  agentClass[0].speak(text, contextId);
-                  return;
-                }
-
-                for await (const chunk of processNDJSONStream(
-                  text.getReader()
-                )) {
-                  if (!chunk.response) continue;
-                  agentClass[0].speak(chunk.response, contextId);
-                }
-              }
-            );
-          }
-
-          break;
-        case "audio":
-          break;
-        case "video":
-          break;
-      }
-    }
-  }
-  private _handleRealtimeRequest() {}
 
   private _setStateInternal(
     state: State,
@@ -1546,6 +1451,7 @@ export class Agent<
     await this.ctx.storage.deleteAll();
     this._disposables.dispose();
     await this.mcp.dispose?.();
+    await this.realtime?.dispose();
     this.ctx.abort("destroyed"); // enforce that the agent is evicted
 
     this.observability?.emit(
@@ -1942,176 +1848,6 @@ export class Agent<
     // Default behavior - redirect to base URL
     const baseUrl = new URL(request.url).origin;
     return Response.redirect(baseUrl);
-  }
-
-  private async initRealtimePipeline(components: RealtimePipelineComponent[]) {
-    const { CF_ACCOUNT_ID, CF_API_TOKEN } = this.env as {
-      CF_ACCOUNT_ID: string;
-      CF_API_TOKEN: string;
-    };
-    if (!CF_ACCOUNT_ID) throw new Error("CF_ACCOUNT_ID is required");
-    if (!CF_API_TOKEN) throw new Error("CF_API_TOKEN is required");
-
-    let last_component: RealtimePipelineComponent | undefined;
-    for (const component of components) {
-      if (
-        last_component &&
-        last_component.output_kind() !== component.input_kind()
-      ) {
-        throw new Error(
-          `cannot link up component of output kind ${last_component.output_kind()} with one of input kind ${component.input_kind()}`
-        );
-      }
-      last_component = component;
-    }
-
-    const { request } = getCurrentAgent();
-    if (!request) throw new Error("request is required");
-
-    const requestUrl = new URL(request.url);
-    const agentId = this.name;
-    const agentName = camelCaseToKebabCase(this._ParentClass.name);
-    const agentURL = `${requestUrl.host}/agents/${agentName}/${agentId}/realtime`;
-
-    // We need to check if the components array have any instance of
-    // Agent or TextProcessor, in that case we need to split the components
-    // into two layers, where the first layers end at that component
-    // and the second layer starts from that component. The Agent/TextProcessor
-    // are websocket element, we will be using bidirectional websocket so only
-    // one websocket element will be acting as input and output both.
-
-    const layers: { id: number; name: string; elements: string[] }[] = [
-      {
-        id: 1,
-        name: "default",
-        elements: []
-      }
-    ];
-    let elements: { name: string; [K: string]: unknown }[] = [];
-
-    for (const component of components) {
-      const schema = component.schema();
-      if (component instanceof Agent || component instanceof TextProcessor) {
-        if (component instanceof Agent) {
-          schema.type = "websocket";
-          schema.url = `wss://${agentURL}`;
-        }
-        layers[layers.length - 1].elements.push(schema.name);
-
-        layers.push({
-          id: layers.length + 1,
-          name: `default-${layers.length + 1}`,
-          elements: []
-        });
-      }
-
-      if (component instanceof RealtimeKitTransport) {
-        schema.worker_url = `https://${agentURL}`;
-      }
-      elements.push(schema);
-      layers[layers.length - 1].elements.push(schema.name);
-    }
-
-    elements = elements.filter(
-      (v, idx, arr) => idx === arr.findIndex((v1) => v1.name === v.name)
-    );
-
-    console.log("layers", layers, "elements", elements);
-
-    const response = await fetch(
-      `${CLOUDFLARE_BASE}/client/v4/accounts/${CF_ACCOUNT_ID}/realtime/agents/pipeline`,
-      // `${REALTIME_AGENTS_SERVICE}/pipeline`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${CF_API_TOKEN}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          event: "pipeline.provision",
-          id: randomUUID(),
-          elements,
-          layers
-        })
-      }
-    );
-    const { id, token } = await response.json<{ id: string; token: string }>();
-    if (!id || !token) throw new Error("invalid response from streamline");
-    console.log("pipeline provisioned", id, token);
-    // TODO: need to store these values in storage
-    this._rtk_flowId = id;
-    this._rtk_authToken = token;
-    this._rtk_components = components;
-    await this._rtk_components
-      .filter((c) => c instanceof RealtimeKitTransport)[0]
-      .init(token);
-
-    const meetingTranport = this._rtk_components.filter(
-      (c) => c instanceof RealtimeKitTransport
-    );
-    if (meetingTranport.length > 0) {
-      meetingTranport[0].meeting.self.on("roomLeft", () =>
-        this.stopRealtimePipeline()
-      );
-    }
-    this.schedule(Date.now() + 10000, "wakeup");
-  }
-
-  wakeup() {}
-
-  /**
-   * Start the agent
-   */
-  async startRealtimePipeline() {
-    // check if instance is already started
-    if (this.realtimePipelineRunning)
-      throw new Error("agent is already running");
-    await this.initRealtimePipeline(this.realtimePipelineComponents!());
-
-    const startResponse = await fetch(
-      `${REALTIME_AGENTS_SERVICE}/pipeline?authToken=${this._rtk_authToken}`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          action: "start"
-        })
-      }
-    );
-    const { success } = await startResponse.json<{ success: boolean }>();
-    if (!success) throw new Error("failed to start pipeline");
-    this.realtimePipelineRunning = true;
-  }
-
-  /**
-   * Stop the agent
-   */
-  async stopRealtimePipeline() {
-    if (!this.realtimePipelineRunning) throw new Error("agent not running");
-    const meetingTransports = this._rtk_components.filter(
-      (c) => c instanceof RealtimeKitTransport
-    );
-    if (meetingTransports.length > 0) {
-      if (meetingTransports[0].meeting.self.roomJoined)
-        meetingTransports[0].meeting.leave();
-    }
-    const response = await fetch(
-      `${REALTIME_AGENTS_SERVICE}/pipeline?authToken=${this._rtk_authToken}`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          action: "stop"
-        })
-      }
-    );
-    const { success } = await response.json<{ success: boolean }>();
-    if (!success) throw new Error("failed to stop agent");
-    this.realtimePipelineRunning = false;
   }
 
   /**

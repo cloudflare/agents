@@ -1,9 +1,5 @@
-import type { Connection } from "./";
 import RealtimeKitClient from "@cloudflare/realtimekit";
-
-export const REALTIME_AGENTS_SERVICE = "https://agents.realtime.cloudflare.com";
-// export const REALTIME_AGENTS_SERVICE = "https://curly-radios-eat.loca.lt";
-export const CLOUDFLARE_BASE = "https://api.cloudflare.com";
+import { REALTIME_AGENTS_SERVICE } from "./realtime";
 
 export enum DataKind {
   Text = "TEXT",
@@ -188,6 +184,7 @@ export class ElevenLabsTTS implements RealtimePipelineComponent {
 
 export abstract class TextProcessor implements RealtimePipelineComponent {
   abstract get url(): string;
+  abstract get parameters(): { send_events: boolean };
 
   abstract onRealtimeTranscript(
     text: string,
@@ -210,7 +207,8 @@ export abstract class TextProcessor implements RealtimePipelineComponent {
     return {
       name: this.name,
       type: "text_processor",
-      url: this.url
+      url: this.url,
+      ...this.parameters
     };
   }
 }
@@ -240,85 +238,3 @@ export abstract class MediaProcessor implements RealtimePipelineComponent {
     };
   }
 }
-
-export function createRealtimePipeline(
-  cb: () => RealtimePipelineComponent[]
-): RealtimePipelineComponent[] {
-  const components = cb();
-  return components;
-}
-
-export function isRealtimeInternalWebsocket(ws: Connection): boolean {
-  const url = new URL(ws.url);
-  return url.hostname === REALTIME_AGENTS_SERVICE.split("://")[1];
-}
-
-export async function* processNDJSONStream(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  leftOverBuffer = ""
-) {
-  const decoder = new TextDecoder();
-  let buffer = leftOverBuffer;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      if (line.trim()) {
-        if (line.startsWith("data: ")) {
-          const jsonLine = line.slice(6).trim();
-          if (jsonLine === "[DONE]") {
-            return; // End of stream
-          }
-          yield JSON.parse(jsonLine);
-        }
-      }
-    }
-  }
-
-  // Handle leftover buffer
-  if (buffer.trim()) {
-    const lines = buffer.split("\n").filter((line) => line.trim());
-    if (lines.length > 1) {
-      /**
-       * This case usually happens when leftOverBuffer has more than 1 line
-       * and the reader returned DONE;
-       */
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const jsonLine = line.slice(6).trim();
-          if (jsonLine === "[DONE]") {
-            return; // End of stream
-          }
-          yield JSON.parse(jsonLine);
-        }
-      }
-    } else if (buffer.startsWith("data: ")) {
-      const jsonLine = buffer.slice(6).trim();
-      if (jsonLine === "[DONE]") {
-        return; // End of stream
-      }
-      yield JSON.parse(jsonLine);
-    }
-  }
-}
-
-/**
- * Websocket message type for realtime
- */
-export type RealtimeWebsocketMessage = {
-  type: string;
-  version: number;
-  identifier: string;
-  payload: {
-    content_type: string;
-    context_id: string;
-    data: string;
-  };
-};
