@@ -4,40 +4,63 @@ export const html = `<!doctype html>
 <title>Agent Dashboard</title>
 <style>
   :root {
-    --bg:#0b1020; --fg:#dfe7ff; --muted:#a9b2cc;
-    --ok:#2bbf6a; --warn:#eec643; --err:#ff4d4f; --info:#5aa7ff;
-    --tool:#9b59b6; --model:#00c2a8; --pause:#f0ad4e;
-    --card-bg: rgba(255, 255, 255, 0.05);
-    --border-color: rgba(255, 255, 255, 0.1);
+    --bg: #050608;
+    --surface: rgba(10, 14, 22, 0.92);
+    --surface-alt: rgba(13, 18, 29, 0.85);
+    --fg: #f5f7fa;
+    --muted: #9da5ba;
+    --accent: #f97316;
+    --accent-soft: rgba(249, 115, 22, 0.14);
+    --border: rgba(255, 255, 255, 0.1);
+    --border-strong: rgba(249, 115, 22, 0.4);
+    --ok: #22c55e;
+    --warn: #facc15;
+    --err: #ef4444;
+    --info: #60a5fa;
+    --tool: #c084fc;
+    --model: #34d399;
+    --pause: #fb923c;
   }
   
   body { 
-    font: 14px system-ui, sans-serif; 
+    font: 14px "Inter", system-ui, sans-serif; 
     margin: 0; 
     padding: 0;
-    background: linear-gradient(135deg, #0a0e1a 0%, #151929 100%);
     color: var(--fg);
+    background-color: #0b101c;
+    background-image:
+      radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 0),
+      radial-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 0);
+    background-size: 28px 28px, 12px 12px;
+    background-position: 0 0, 14px 14px;
     min-height: 100vh;
   }
   
+  ::selection {
+    background: var(--accent);
+    color: #0b0e1a;
+  }
+  
   .container {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 20px;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 28px 36px 60px;
   }
 
   .dashboard {
     display: grid;
-    grid-template-columns: 280px 1fr;
-    gap: 20px;
+    grid-template-columns: 260px minmax(0, 1fr);
+    gap: 24px;
     align-items: flex-start;
   }
 
   .sidebar {
     display: flex;
     flex-direction: column;
-    min-height: calc(100vh - 160px);
-    gap: 12px;
+    min-height: calc(100vh - 180px);
+    gap: 16px;
   }
 
   .sidebar-header {
@@ -50,43 +73,19 @@ export const html = `<!doctype html>
   .sidebar-header h3 {
     margin: 0;
     font-size: 18px;
+    letter-spacing: 0.02em;
   }
 
   .sidebar-header p {
-    margin: 4px 0 0;
+    margin: 6px 0 0;
     color: var(--muted);
-    font-size: 13px;
+    font-size: 12px;
   }
 
   .sidebar-actions {
     display: flex;
-    gap: 6px;
+    gap: 8px;
     align-items: center;
-  }
-
-  .sidebar-actions button {
-    padding: 6px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
-    background: rgba(255, 255, 255, 0.05);
-    color: var(--fg);
-    cursor: pointer;
-    transition: background 0.2s, transform 0.2s;
-  }
-
-  .sidebar-actions button:hover {
-    background: rgba(255, 255, 255, 0.12);
-    transform: translateY(-1px);
-  }
-
-  .sidebar-actions button.primary {
-    background: var(--info);
-    color: white;
-    border-color: var(--info);
-  }
-
-  .sidebar-actions button.primary:hover {
-    background: #4a96e0;
   }
 
   .threads-list {
@@ -94,7 +93,8 @@ export const html = `<!doctype html>
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
+    padding-right: 4px;
   }
 
   .thread-item {
@@ -102,10 +102,10 @@ export const html = `<!doctype html>
     flex-direction: column;
     align-items: flex-start;
     gap: 6px;
-    padding: 10px 12px;
-    border-radius: 10px;
-    border: 1px solid var(--border-color);
-    background: rgba(255, 255, 255, 0.04);
+    padding: 12px 14px;
+    border-radius: 8px;
+    border: 1px dashed transparent;
+    background: rgba(255, 255, 255, 0.02);
     color: var(--fg);
     text-align: left;
     cursor: pointer;
@@ -113,14 +113,14 @@ export const html = `<!doctype html>
   }
 
   .thread-item:hover {
-    background: rgba(90, 167, 255, 0.12);
-    border-color: var(--info);
+    background: rgba(249, 115, 22, 0.08);
+    border-color: var(--border);
     transform: translateX(2px);
   }
 
   .thread-item.active {
-    border-color: var(--info);
-    background: rgba(90, 167, 255, 0.18);
+    border-color: var(--accent);
+    background: rgba(249, 115, 22, 0.16);
   }
 
   .thread-title {
@@ -131,7 +131,7 @@ export const html = `<!doctype html>
 
   .thread-meta {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
     color: var(--muted);
     font-size: 12px;
@@ -139,12 +139,23 @@ export const html = `<!doctype html>
 
   .threads-empty {
     text-align: center;
-    padding: 28px 14px;
-    border-radius: 12px;
-    border: 1px dashed var(--border-color);
-    background: rgba(255, 255, 255, 0.03);
+    padding: 24px 14px;
+    border-radius: 8px;
+    border: 1px dashed var(--border);
+    background: rgba(255, 255, 255, 0.02);
     color: var(--muted);
     font-size: 13px;
+  }
+
+  .main-content {
+    display: grid;
+    grid-template-columns: minmax(0, 3.5fr) minmax(320px, 1.4fr);
+    grid-template-areas:
+      "chat side"
+      "thread side"
+      "state side";
+    gap: 28px;
+    align-items: flex-start;
   }
 
   .main-column {
@@ -154,8 +165,12 @@ export const html = `<!doctype html>
   }
 
   .chat-card {
+    grid-area: chat;
     display: flex;
     flex-direction: column;
+    gap: 20px;
+    min-height: 580px;
+    max-height: 1000px
   }
 
   .chat-header {
@@ -163,23 +178,23 @@ export const html = `<!doctype html>
     flex-wrap: wrap;
     gap: 16px;
     align-items: flex-end;
-    justify-content: space-between;
   }
 
   .chat-header .input-group {
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
   }
 
   .chat-header label {
     font-size: 13px;
     color: var(--muted);
+    letter-spacing: 0.04em;
   }
 
   .run-summary {
-    margin-top: 12px;
+    margin-top: 16px;
     display: flex;
     flex-wrap: wrap;
     gap: 12px;
@@ -190,37 +205,37 @@ export const html = `<!doctype html>
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 10px;
+    padding: 4px 12px;
     border-radius: 999px;
-    border: 1px solid var(--border-color);
-    background: rgba(255, 255, 255, 0.08);
+    border: 1px dashed var(--border);
+    background: rgba(255, 255, 255, 0.04);
     font-size: 12px;
     font-weight: 600;
     text-transform: capitalize;
   }
 
   .run-badge.running {
-    background: rgba(90, 167, 255, 0.15);
-    border-color: var(--info);
-    color: var(--info);
+    color: var(--accent);
+    border-color: var(--border-strong);
+    background: var(--accent-soft);
   }
 
   .run-badge.paused {
-    background: rgba(240, 173, 78, 0.18);
-    border-color: var(--warn);
-    color: var(--warn);
+    color: var(--pause);
+    border-color: rgba(251, 146, 60, 0.35);
+    background: rgba(251, 146, 60, 0.15);
   }
 
   .run-badge.completed {
-    background: rgba(43, 191, 106, 0.18);
-    border-color: var(--ok);
     color: var(--ok);
+    border-color: rgba(34, 197, 94, 0.35);
+    background: rgba(34, 197, 94, 0.18);
   }
 
   .run-badge.error {
-    background: rgba(255, 77, 79, 0.18);
-    border-color: var(--err);
     color: var(--err);
+    border-color: rgba(239, 68, 68, 0.4);
+    background: rgba(239, 68, 68, 0.18);
   }
 
   .run-meta {
@@ -228,173 +243,133 @@ export const html = `<!doctype html>
     color: var(--muted);
   }
 
-  .subagent-panel {
-    margin-top: 12px;
-    padding: 12px;
-    border-radius: 10px;
-    border: 1px solid var(--border-color);
-    background: rgba(255, 255, 255, 0.03);
-    display: none;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .subagent-panel.visible {
-    display: flex;
-  }
-
-  .subagent-panel h4 {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--muted);
-  }
-
-  .subagent-items {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .subagent-item {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
-    background: rgba(255, 255, 255, 0.06);
-  }
-
-  .subagent-item.active {
-    border-color: var(--info);
-    background: rgba(90, 167, 255, 0.16);
-  }
-
-  .subagent-title {
-    font-size: 13px;
-    font-weight: 600;
-    word-break: break-word;
-  }
-
-  .subagent-status {
-    font-size: 12px;
-    color: var(--muted);
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .subagent-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-
-  .subagent-actions button {
-    padding: 5px 10px;
-    border-radius: 6px;
-    border: 1px solid var(--border-color);
-    background: rgba(255, 255, 255, 0.08);
-    color: var(--fg);
-    cursor: pointer;
-    transition: background 0.2s ease;
-  }
-
-  .subagent-actions button:hover {
-    background: rgba(255, 255, 255, 0.16);
-  }
-
-  .subagent-report {
-    font-size: 12px;
-    color: var(--muted);
-    white-space: pre-wrap;
-  }
 
   .chat-transcript {
-    background: rgba(5, 10, 21, 0.8);
-    border: 1px solid var(--border-color);
-    border-radius: 12px;
-    padding: 16px;
+    background: var(--surface-alt);
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 18px;
     margin-top: 16px;
-    min-height: 240px;
-    max-height: 360px;
+    min-height: 360px;
+    max-height: none;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 14px;
   }
 
   .chat-empty {
     text-align: center;
     color: var(--muted);
-    padding: 40px 0;
+    padding: 48px 0;
   }
 
   .chat-message {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 12px;
-    border-radius: 12px;
-    border: 1px solid var(--border-color);
-    max-width: 80%;
+    gap: 8px;
+    padding: 14px 16px;
+    border-radius: 8px;
+    border: 1px dashed rgba(255, 255, 255, 0.08);
+    max-width: 70%;
+    background: rgba(255, 255, 255, 0.02);
   }
 
   .chat-message.user {
     align-self: flex-end;
-    background: rgba(90, 167, 255, 0.12);
-    border-color: rgba(90, 167, 255, 0.4);
+    background: rgba(249, 115, 22, 0.2);
+    border-color: rgba(249, 115, 22, 0.5);
+    color: #fff7ed;
   }
 
   .chat-message.assistant {
     align-self: flex-start;
-    background: rgba(43, 191, 106, 0.12);
-    border-color: rgba(43, 191, 106, 0.35);
+    background: rgba(34, 197, 94, 0.18);
+    border-color: rgba(34, 197, 94, 0.45);
   }
 
   .chat-message.tool {
     align-self: flex-start;
-    background: rgba(155, 89, 182, 0.12);
-    border-color: rgba(155, 89, 182, 0.35);
-    font-family: Monaco, Consolas, monospace;
+    background: rgba(192, 132, 252, 0.16);
+    border-color: rgba(192, 132, 252, 0.45);
   }
 
   .chat-role {
     font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.1em;
     color: var(--muted);
   }
 
   .chat-content {
     font-size: 14px;
-    line-height: 1.5;
+    line-height: 1.6;
     white-space: pre-wrap;
     word-break: break-word;
   }
 
   .tool-call {
     margin-top: 10px;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    padding: 8px;
-    background: rgba(255, 255, 255, 0.04);
-    font-family: Monaco, Consolas, monospace;
+    border: 1px dashed rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    background: rgba(6, 10, 18, 0.92);
+    font-family: "JetBrains Mono", Consolas, monospace;
     font-size: 12px;
+    overflow: hidden;
+  }
+
+  .tool-call.collapsed .tool-call-body {
+    display: none;
+  }
+
+  .tool-call-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+  }
+
+  .tool-call-title {
+    font-weight: 600;
+    color: var(--fg);
+  }
+
+  .tool-call-toggle {
+    border: 1px dashed rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .tool-call-toggle:hover {
+    background: rgba(249, 115, 22, 0.16);
+    color: var(--fg);
+  }
+
+  .tool-call-body {
+    padding: 0 12px 12px;
+    max-height: 420px;
+    overflow: auto;
   }
 
   .chat-input {
     margin-top: 16px;
     display: flex;
     gap: 12px;
-    align-items: flex-start;
+    align-items: center;
   }
 
   .chat-input textarea {
     flex: 1;
+    min-height: 80px;
   }
 
   .chat-actions {
@@ -403,25 +378,34 @@ export const html = `<!doctype html>
     justify-content: flex-end;
   }
 
-  .grid-two {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 20px;
+  .shortcuts-hint {
+    font-size: 12px;
+    color: var(--muted);
   }
-  
+
+  .shortcut {
+    display: inline-block;
+    padding: 2px 6px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    font-family: monospace;
+    margin: 0 2px;
+  }
+
   .header {
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 24px;
     padding-bottom: 16px;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px dashed var(--border);
   }
   
   .header h1 {
     margin: 0;
-    font-size: 24px;
+    font-size: 26px;
     font-weight: 600;
+    letter-spacing: 0.04em;
     color: var(--fg);
   }
   
@@ -434,11 +418,13 @@ export const html = `<!doctype html>
   .status-indicator {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 8px;
+    gap: 8px;
+    padding: 6px 12px;
     border-radius: 999px;
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
+    border: 1px dashed var(--border);
+    background: rgba(255, 255, 255, 0.03);
   }
   
   .status-dot {
@@ -448,78 +434,69 @@ export const html = `<!doctype html>
   }
   
   .status-indicator.connected { 
-    background: rgba(43, 191, 106, 0.2);
     color: var(--ok);
+    border-color: rgba(34, 197, 94, 0.4);
   }
   .status-indicator.connected .status-dot { 
     background-color: var(--ok);
   }
   .status-indicator.disconnected { 
-    background: rgba(255, 77, 79, 0.2);
     color: var(--err);
+    border-color: rgba(239, 68, 68, 0.4);
   }
   .status-indicator.disconnected .status-dot { 
     background-color: var(--err);
   }
   
   .card {
-    background: var(--card-bg);
-    border-radius: 12px;
-    padding: 16px;
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 20px;
     margin-bottom: 16px;
-    backdrop-filter: blur(10px);
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    border: 1px solid var(--border-color);
-  }
-  
-  .row { 
-    display: grid; 
-    grid-template-columns: 1fr auto; 
-    gap: 8px; 
-    align-items: center; 
-    margin-bottom: 16px;
-  }
-  
-  .full-width {
-    grid-column: 1 / -1;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    border: 1px dashed var(--border);
   }
   
   textarea, input { 
+    box-sizing: border-box;
     width: 100%; 
     padding: 10px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
-    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    border: 1px dashed rgba(255, 255, 255, 0.12);
+    background: rgba(6, 10, 18, 0.9);
     color: var(--fg);
     font-family: inherit;
   }
   
   textarea:focus, input:focus {
     outline: none;
-    border-color: var(--info);
-    box-shadow: 0 0 0 2px rgba(90, 167, 255, 0.2);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.25);
   }
   
   pre { 
-    background: var(--bg); 
+    background: rgba(6, 10, 18, 0.9); 
     color: var(--fg); 
-    padding: 12px; 
-    border-radius: 8px; 
+    padding: 16px; 
+    border-radius: 6px; 
     max-height: 500px; 
     overflow: auto; 
     word-wrap: break-word; 
     white-space: pre-wrap;
-    border: 1px solid var(--border-color);
+    border: 1px dashed var(--border);
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 12px;
   }
   
   button { 
     padding: 8px 12px; 
-    border-radius: 8px; 
-    border: 1px solid var(--border-color); 
-    background: rgba(255, 255, 255, 0.05);
+    border-radius: 6px; 
+    border: 1px dashed var(--border); 
+    background: rgba(255, 255, 255, 0.04);
     color: var(--fg);
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition: background 0.2s ease, transform 0.2s ease, border-color 0.2s ease;
   }
   
   button:hover {
@@ -532,99 +509,131 @@ export const html = `<!doctype html>
   }
   
   button.primary {
-    background: var(--info);
-    color: white;
-    border-color: var(--info);
+    background: var(--accent);
+    color: #050608;
+    border-color: var(--border-strong);
   }
   
   button.primary:hover {
-    background: #4a96e0;
+    background: #fb8f3c;
   }
   
   button.danger {
-    background: var(--err);
-    color: white;
-    border-color: var(--err);
+    background: rgba(239, 68, 68, 0.15);
+    color: #fecaca;
+    border-color: rgba(239, 68, 68, 0.45);
   }
   
   button.danger:hover {
-    background: #e04343;
+    background: rgba(239, 68, 68, 0.3);
   }
   
   .button-group {
     display: flex;
-    gap: 8px;
+    gap: 10px;
     flex-wrap: wrap;
   }
   
   code { 
     white-space: pre-wrap; 
-    font-family: Monaco, Consolas, monospace;
+    font-family: "JetBrains Mono", Consolas, monospace;
   }
 
   /* Graph area */
-  .graph-wrap { 
-    border:1px solid var(--border-color); 
-    border-radius:10px; 
-    padding:16px; 
-    background: var(--card-bg);
-    overflow:hidden; 
-    height:650px;
-    position: relative;
+  .threadline-card {
+    grid-area: thread;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
+
+  .threadline-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .threadline-header .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px dashed var(--border);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .threadline-badge-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .graph-wrap { 
+    position: relative;
+    border: 1px dashed var(--border); 
+    border-radius: 6px; 
+    padding: 0;
+    background:
+      radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 0),
+      linear-gradient(160deg, rgba(10, 14, 22, 0.85), rgba(13, 18, 29, 0.9));
+    background-size: 20px 20px, 100% 100%;
+    overflow:hidden; 
+    height: 620px;
+  }
+
   #graph { 
     display:block; 
     width: 100%;
-    height: calc(100% - 32px);
-    background:linear-gradient(180deg, #0a0e1a, #151929); 
-    border-radius:8px;
+    height: 100%;
     user-select: none;
     -webkit-user-select: none;
   }
-  .legend { 
-    display:flex; 
-    gap:8px; 
-    flex-wrap:wrap; 
-    color:var(--muted); 
-    font-size:12px; 
-    margin-bottom: 12px;
-  }
-  .badge { 
-    display:inline-flex; 
-    align-items:center; 
-    gap:6px; 
-    padding:4px 8px; 
-    border-radius:999px; 
-    background: rgba(255, 255, 255, 0.05);
-  }
-  .dot { 
-    width:10px; 
-    height:10px; 
-    border-radius:50%; 
-    display:inline-block; 
-  }
+
   .laneLabel { 
-    font: 11px system-ui; 
+    font: 11px "Inter", system-ui, sans-serif; 
     fill:var(--muted); 
     font-weight:600; 
+    letter-spacing: 0.06em;
   }
+
   .node-circle { 
     cursor:pointer; 
     transition:opacity 0.2s; 
   }
+
   .node-circle:hover { 
     opacity:1 !important; 
+  }
+
+  .lane-label-card {
+    fill: rgba(8, 12, 20, 0.88);
+    stroke: rgba(255, 255, 255, 0.14);
+    stroke-dasharray: 4 4;
+  }
+
+  .lane-label-title {
+    font: 12px "Inter", system-ui, sans-serif;
+    fill: var(--fg);
+    font-weight: 600;
+  }
+
+  .lane-label-meta {
+    font: 11px "Inter", system-ui, sans-serif;
+    fill: var(--muted);
+    letter-spacing: 0.04em;
   }
 
   /* Modal */
   .modal { 
     display:none; 
     position:fixed; 
-    top:0; 
-    left:0; 
-    width:100%; 
-    height:100%; 
-    background:rgba(0,0,0,0.7); 
+    inset:0; 
+    background:rgba(0,0,0,0.78); 
     z-index:1000; 
     align-items:center; 
     justify-content:center; 
@@ -633,16 +642,16 @@ export const html = `<!doctype html>
     display:flex; 
   }
   .modal-content { 
-    background: linear-gradient(135deg, #1a1f36 0%, #0f1419 100%);
+    background: linear-gradient(135deg, rgba(18,26,42,0.95) 0%, rgba(6,10,18,0.98) 100%);
     color: var(--fg); 
     padding:24px; 
-    border-radius:12px; 
-    max-width:700px; 
+    border-radius:8px; 
+    max-width:760px; 
     max-height:80vh; 
     overflow:auto; 
     position:relative; 
-    box-shadow:0 10px 30px rgba(0,0,0,0.5);
-    border: 1px solid var(--border-color);
+    box-shadow:0 20px 60px rgba(0,0,0,0.6);
+    border: 1px dashed var(--border);
   }
   .modal-header {
     display: flex;
@@ -650,12 +659,12 @@ export const html = `<!doctype html>
     align-items: center;
     margin-bottom: 16px;
     padding-bottom: 12px;
-    border-bottom: 1px solid var(--border-color);
+    border-bottom: 1px dashed var(--border);
   }
   .modal-title { 
     margin:0; 
     font-size:18px; 
-    color:var(--info); 
+    color:var(--accent); 
     display: flex;
     align-items: center;
     gap: 8px;
@@ -674,28 +683,157 @@ export const html = `<!doctype html>
     background: rgba(255, 255, 255, 0.2); 
   }
   .modal-json { 
-    background:#050a15; 
+    background:rgba(6,10,18,0.92); 
     padding:16px; 
-    border-radius:8px; 
+    border-radius:6px; 
     overflow:auto; 
-    max-height:500px; 
-    font:12px Monaco, monospace; 
+    max-height:520px; 
+    font:12px "JetBrains Mono", monospace; 
     white-space:pre-wrap; 
     word-wrap:break-word; 
     overflow-wrap:break-word;
-    border: 1px solid var(--border-color);
+    border: 1px dashed var(--border);
   }
   
-  /* Notifications */
+
+  .zoom-controls {
+    position: absolute;
+    bottom: 14px;
+    right: 14px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    background: rgba(10, 14, 22, 0.82);
+    border: 1px dashed var(--border);
+    padding: 6px 8px;
+    border-radius: 6px;
+    backdrop-filter: blur(8px);
+  }
+  .zoom-controls button {
+    padding: 4px 10px;
+  }
+  .zoom-controls .zoom-pct {
+    min-width: 52px;
+    text-align: center;
+    font-weight: 600;
+    color: var(--muted);
+  }
+
+  .side-panel {
+    grid-area: side;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-width: 0;
+  }
+
+  .panel-tabs {
+    display: flex;
+    gap: 8px;
+  }
+
+  .panel-tab {
+    flex: 1;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px dashed transparent;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .panel-tab.active {
+    color: var(--fg);
+    border-color: var(--border-strong);
+    background: rgba(249, 115, 22, 0.14);
+  }
+
+  .panel-section {
+    display: none;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .panel-section.active {
+    display: flex;
+  }
+
+  .todos-summary {
+    display:flex; 
+    gap:10px; 
+    flex-wrap:wrap; 
+    margin: 8px 0 12px;
+    color: var(--muted); 
+    font-size: 12px;
+  }
+  .todo-pill {
+    display:inline-flex; align-items:center; gap:6px;
+    padding:4px 8px; border-radius:999px; border:1px dashed var(--border);
+    background: rgba(255,255,255,0.03); font-weight: 600;
+  }
+  .todo-pill.pending { color:#a5b1c2; }
+  .todo-pill.in_progress { color: var(--info); }
+  .todo-pill.completed { color: var(--ok); }
+
+  .todo-list { list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:10px; }
+  .todo-item {
+    display:flex; align-items:flex-start; gap:12px;
+    padding:10px 12px; border:1px dashed var(--border);
+    border-radius:6px; background: rgba(255,255,255,0.02);
+  }
+  .todo-status {
+    min-width: 8px; min-height:8px; border-radius:999px; margin-top:6px;
+  }
+  .todo-status.pending { background:#9ca3af; }
+  .todo-status.in_progress { background: var(--info); }
+  .todo-status.completed { background: var(--ok); }
+  .todo-content { word-break:break-word; font-size: 13px; }
+
+  .files-panel {
+    display:flex; flex-direction:column; gap:12px;
+  }
+  .files-list {
+    border:1px dashed var(--border); border-radius:6px;
+    background: rgba(255,255,255,0.02); overflow:auto; max-height:420px;
+  }
+  .file-row {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 12px; cursor:pointer; border-bottom:1px dashed rgba(255,255,255,0.06);
+  }
+  .file-row:last-child { border-bottom: none; }
+  .file-row:hover { background: rgba(249,115,22,0.08); }
+  .file-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width: 180px;
+  }
+  .file-meta { font-size:12px; color: var(--muted); }
+  .file-preview {
+    background:rgba(6,10,18,0.9); padding:12px; border:1px dashed var(--border);
+    border-radius:6px; max-height:420px; overflow:auto;
+  }
+
+  /* line numbers in preview */
+  .ln { color:#5f6a87; user-select:none; margin-right:10px; display:inline-block; width:48px; text-align:right; }
+  .code { white-space:pre; font-size: 12px; }
+
+  .state-card {
+    grid-area: state;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
   .notification {
     position: fixed;
-    bottom: 20px;
-    right: 20px;
+    bottom: 24px;
+    right: 24px;
     padding: 12px 16px;
-    border-radius: 8px;
+    border-radius: 6px;
     color: white;
-    font-weight: 500;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    font-weight: 600;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3);
     z-index: 2000;
     opacity: 1;
     transition: opacity 0.3s ease;
@@ -712,130 +850,54 @@ export const html = `<!doctype html>
   .notification.info {
     background: var(--info);
   }
-  
-  /* Keyboard shortcuts hint */
-  .shortcuts-hint {
-    font-size: 12px;
-    color: var(--muted);
-    margin-top: 8px;
-  }
-  
-  .shortcut {
-    display: inline-block;
-    padding: 2px 4px;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 4px;
-    font-family: monospace;
-    margin: 0 2px;
-  }
-  
-  /* Responsive */
-  @media (max-width: 1100px) {
+
+  @media (max-width: 1280px) {
     .dashboard {
       grid-template-columns: 1fr;
     }
+
     .sidebar {
       min-height: auto;
     }
   }
 
-  @media (max-width: 768px) {
-    .row {
+  @media (max-width: 1024px) {
+    .main-content {
       grid-template-columns: 1fr;
+      grid-template-areas:
+        "chat"
+        "side"
+        "thread"
+        "state";
     }
-    
-    .header {
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 12px;
+
+    .side-panel {
+      order: 2;
     }
-    
+
+    .threadline-card {
+      order: 3;
+    }
+  }
+
+  @media (max-width: 768px) {
+    .container {
+      padding: 20px 16px 40px;
+    }
+
+    .chat-card {
+      min-height: 420px;
+    }
+
     .graph-wrap {
-      height: 400px;
+      height: 420px;
     }
-    
+
     .modal-content {
       max-width: 90%;
-      padding: 16px;
+      padding: 18px;
     }
   }
-
-  .zoom-controls {
-    position: absolute;
-    bottom: 12px;
-    right: 12px;
-    display: flex;
-    gap: 6px;
-    align-items: center;
-    background: rgba(0, 0, 0, 0.3);
-    border: 1px solid var(--border-color);
-    padding: 6px 8px;
-    border-radius: 8px;
-    backdrop-filter: blur(6px);
-  }
-  .zoom-controls button {
-    padding: 4px 8px;
-  }
-  .zoom-controls .zoom-pct {
-    min-width: 48px;
-    text-align: center;
-    font-weight: 600;
-    color: var(--muted);
-  }
-
-  .todos-summary {
-      display:flex; gap:12px; flex-wrap:wrap; margin: 8px 0 12px;
-      color: var(--muted); font-size: 13px;
-    }
-    .todo-pill {
-      display:inline-flex; align-items:center; gap:6px;
-      padding:4px 8px; border-radius:999px; border:1px solid var(--border-color);
-      background: rgba(255,255,255,0.04); font-weight: 600;
-    }
-    .todo-pill.pending { color:#9ca3af; }
-    .todo-pill.in_progress { color: var(--info); }
-    .todo-pill.completed { color: var(--ok); }
-
-    .todo-list { list-style:none; padding:0; margin:0; }
-    .todo-item {
-      display:flex; align-items:flex-start; gap:10px;
-      padding:8px 10px; border:1px solid var(--border-color);
-      border-radius:10px; margin-bottom:8px; background: var(--card-bg);
-    }
-    .todo-status {
-      min-width: 10px; min-height:10px; border-radius:999px; margin-top:6px;
-    }
-    .todo-status.pending { background:#9ca3af; }
-    .todo-status.in_progress { background: var(--info); }
-    .todo-status.completed { background: var(--ok); }
-    .todo-content { white-space:pre-wrap; word-break:break-word; }
-
-    .files-grid {
-      display:grid; grid-template-columns: 260px 1fr; gap:12px;
-    }
-    .files-list {
-      border:1px solid var(--border-color); border-radius:10px;
-      background: var(--card-bg); overflow:auto; max-height:420px;
-    }
-    .file-row {
-      display:flex; align-items:center; justify-content:space-between;
-      padding:8px 10px; cursor:pointer; border-bottom:1px solid var(--border-color);
-    }
-    .file-row:last-child { border-bottom: none; }
-    .file-row:hover { background: rgba(255,255,255,0.06); }
-    .file-name {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width: 180px;
-    }
-    .file-meta { font-size:12px; color: var(--muted); }
-    .file-preview {
-      background:#050a15; padding:12px; border:1px solid var(--border-color);
-      border-radius:10px; max-height:420px; overflow:auto;
-    }
-
-    /* line numbers in preview */
-    .ln { color:#64748b; user-select:none; margin-right:10px; display:inline-block; width:56px; text-align:right; }
-    .code { white-space:pre; }
 </style>
 <body>
   <div class="container">
@@ -866,8 +928,8 @@ export const html = `<!doctype html>
         </div>
       </aside>
 
-      <div class="main-column">
-        <div class="card chat-card">
+      <div class="main-content">
+        <section class="card chat-card">
           <div class="chat-header">
             <div class="input-group">
               <label for="threadId">Thread ID</label>
@@ -879,11 +941,6 @@ export const html = `<!doctype html>
             <span class="run-badge" id="runStatusBadge">Idle</span>
             <span class="run-meta" id="runStep"></span>
             <span class="run-meta" id="runModel"></span>
-          </div>
-
-          <div id="subagentPanel" class="subagent-panel">
-            <h4>Subagents</h4>
-            <div id="subagentItems" class="subagent-items"></div>
           </div>
 
           <div class="chat-transcript" id="chatTranscript">
@@ -900,27 +957,27 @@ export const html = `<!doctype html>
               <button id="btnApprove">Approve (HITL)</button>
               <button id="btnReject">Reject (HITL)</button>
               <button id="btnCancel" class="danger">Cancel Run</button>
-              <button id="btnState">Refresh State</button>
-            </div>
-          </div>
-
-          <div class="shortcuts-hint">
-            Press <span class="shortcut">Ctrl+Enter</span> to send, <span class="shortcut">Ctrl+N</span> for new thread
+            <button id="btnState">Refresh State</button>
           </div>
         </div>
 
-        <div class="card graph-card">
+        <div class="shortcuts-hint">
+          Press <span class="shortcut">Ctrl+Enter</span> to send, <span class="shortcut">Ctrl+N</span> for new thread
+        </div>
+        </section>
+
+        <section class="card threadline-card">
+          <div class="threadline-header">
+            <span class="badge"><span class="threadline-badge-dot" style="background:var(--model)"></span>Model</span>
+            <span class="badge"><span class="threadline-badge-dot" style="background:var(--tool)"></span>Tool</span>
+            <span class="badge"><span class="threadline-badge-dot" style="background:var(--ok)"></span>Completed</span>
+            <span class="badge"><span class="threadline-badge-dot" style="background:var(--warn)"></span>Paused</span>
+            <span class="badge"><span class="threadline-badge-dot" style="background:var(--err)"></span>Error</span>
+            <span class="badge"><span class="threadline-badge-dot" style="background:var(--info)"></span>Run Tick</span>
+            <span class="badge">Dashed path = linked agent</span>
+            <span class="badge" style="margin-left:auto;">💡 Drag to pan • Ctrl/Cmd + scroll to zoom</span>
+          </div>
           <div class="graph-wrap">
-            <div class="legend">
-              <span class="badge"><span class="dot" style="background:var(--model)"></span>Model</span>
-              <span class="badge"><span class="dot" style="background:var(--tool)"></span>Tool</span>
-              <span class="badge"><span class="dot" style="background:var(--ok)"></span>Completed</span>
-              <span class="badge"><span class="dot" style="background:var(--warn)"></span>Paused</span>
-              <span class="badge"><span class="dot" style="background:var(--err)"></span>Error</span>
-              <span class="badge"><span class="dot" style="background:var(--info)"></span>Run Tick</span>
-              <span class="badge">Dashed link = Subagent relation</span>
-              <span class="badge" style="margin-left:auto;">💡 Click and drag to pan</span>
-            </div>
             <svg id="graph"></svg>
             <div class="zoom-controls">
               <button id="zoomOut">-</button>
@@ -929,27 +986,29 @@ export const html = `<!doctype html>
               <button id="zoomReset">Reset</button>
             </div>
           </div>
-        </div>
+        </section>
 
-        <div class="grid-two">
-          <div class="card">
-            <h3>Todos</h3>
+        <aside class="card side-panel">
+          <div class="panel-tabs">
+            <button class="panel-tab active" data-panel-target="todosPanel">Todos</button>
+            <button class="panel-tab" data-panel-target="filesPanel">Files</button>
+          </div>
+          <div id="todosPanel" class="panel-section active">
             <div class="todos-summary" id="todosSummary"></div>
             <ul class="todo-list" id="todosList"></ul>
           </div>
-          <div class="card">
-            <h3>Files</h3>
-            <div class="files-grid">
+          <div id="filesPanel" class="panel-section">
+            <div class="files-panel">
               <div class="files-list" id="filesList"></div>
               <pre class="file-preview"><code id="filePreview" class="code"></code></pre>
             </div>
           </div>
-        </div>
+        </aside>
 
-        <div class="card">
+        <section class="card state-card">
           <h3>State</h3>
           <pre id="state"></pre>
-        </div>
+        </section>
       </div>
     </div>
   </div>
@@ -980,9 +1039,24 @@ const runStepLabel = $("runStep");
 const runModelLabel = $("runModel");
 const chatTranscript = $("chatTranscript");
 const threadInput = $("threadId");
-const subagentPanel = $("subagentPanel");
-const subagentItems = $("subagentItems");
 const btnRefreshThreads = $("btnRefreshThreads");
+const panelTabs = Array.from(document.querySelectorAll(".panel-tab"));
+const panelSections = new Map(
+  Array.from(document.querySelectorAll(".panel-section")).map((section) => [section.id, section])
+);
+
+for (const btn of panelTabs) {
+  btn.addEventListener("click", () => {
+    const target = btn.getAttribute("data-panel-target");
+    if (!target || !panelSections.has(target)) return;
+    for (const other of panelTabs) {
+      other.classList.toggle("active", other === btn);
+    }
+    for (const [id, section] of panelSections) {
+      section.classList.toggle("active", id === target);
+    }
+  });
+}
 
 let mainThreadId = "";
 let ws; // main ws
@@ -992,14 +1066,15 @@ const extraThreads = new Map();
 
 // --- Graph state ---
 const palette = ["#2563eb","#16a34a","#9333ea","#ea580c","#0891b2","#b91c1c","#0ea5e9","#059669"];
-const lanes = new Map(); // threadId -> { lane, color, ws?, nodes:[], lastNodeKey?:string }
+const lanes = new Map(); // threadId -> { lane, color, ws?, nodes:[], lastNodeKey?:string, label?:{...} }
+const laneMeta = new Map(); // threadId -> meta info
 const laneOrder = []; // threadIds in display order
 const nodeMap = new Map(); // nodeKey -> {x,y,type,elCircle,elText,threadId}
 const lastNodePerLane = new Map(); // lane -> nodeKey
 const childSpawnMap = new Map(); // childId -> spawnNodeKey (in parent)
 const firstNodeInLane = new Map(); // threadId -> first nodeKey
 const lastNodeInLane = new Map(); // threadId -> last nodeKey
-const margin = {left:100, top:40, xStep:140, yStep:110};
+const margin = {left:220, top:40, xStep:140, yStep:110};
 const arrowId = "arrowHead";
 const pendingEdges = new Map();
 const primingThreads = new Set();
@@ -1027,7 +1102,7 @@ function initSVG() {
   marker.setAttribute("orient","auto-start-reverse");
   marker.setAttribute("markerUnits","userSpaceOnUse"); // keep size stable on zoom
   const path = document.createElementNS("http://www.w3.org/2000/svg","path");
-  path.setAttribute("d","M 0 0 L 10 5 L 0 10 z"); path.setAttribute("fill","#64748b");
+  path.setAttribute("d","M 0 0 L 10 5 L 0 10 z"); path.setAttribute("fill","rgba(148, 163, 184, 0.7)");
   marker.appendChild(path); defs.appendChild(marker); G.appendChild(defs);
   
   // Create main group for all graph elements
@@ -1045,6 +1120,7 @@ function resetGraphState() {
   closeAllSockets();
   initSVG();
   lanes.clear();
+  laneMeta.clear();
   laneOrder.splice(0);
   nodeMap.clear();
   lastNodePerLane.clear();
@@ -1079,6 +1155,15 @@ function updateRunSummary(run, state) {
   if (state?.model) meta.push(\`Model: \${state.model}\`);
   runModelLabel.textContent = meta.join(" • ");
 
+  const threadId = selectedThreadId || mainThreadId || state?.thread?.id;
+  updateLaneMeta(threadId, {
+    title: agentType || (threadId === mainThreadId ? "Root Agent" : undefined),
+    agentType,
+    status: run.status,
+    model: state?.model,
+    createdAt: state?.thread?.createdAt
+  });
+
 }
 
 function resetThreadView() {
@@ -1089,16 +1174,18 @@ function resetThreadView() {
   S.textContent = "";
   extraThreads.clear();
   if (selectedThreadId && !latestThreads.some((t) => t.id === selectedThreadId)) {
+    const created = new Date().toISOString();
     extraThreads.set(selectedThreadId, {
       id: selectedThreadId,
-      createdAt: new Date().toISOString(),
+      createdAt: created,
       isSubagent: true,
       status: "active"
     });
-  }
-  if (subagentPanel) {
-    subagentPanel.classList.remove("visible");
-    if (subagentItems) subagentItems.innerHTML = "";
+    updateLaneMeta(selectedThreadId, {
+      status: "active",
+      createdAt: created,
+      isSubagent: true
+    });
   }
   renderThreadList(latestThreads, selectedThreadId);
 }
@@ -1178,31 +1265,141 @@ function applyTransform() {
 function laneFor(threadId) {
   if (lanes.has(threadId)) return lanes.get(threadId).lane;
   const lane = lanes.size;
-  lanes.set(threadId, { lane, color: palette[lane % palette.length], nodes: [] });
+  const laneObj = { lane, color: palette[lane % palette.length], nodes: [] };
+  lanes.set(threadId, laneObj);
   laneOrder.push(threadId);
 
-  // draw lane label - positioned above the lane
   const y = margin.top + lane * margin.yStep;
-  
-  // Add background rect for better readability
-  const rect = document.createElementNS("http://www.w3.org/2000/svg","rect");
-  rect.setAttribute("x", 5);
-  rect.setAttribute("y", y-40);
-  rect.setAttribute("width", 85);
-  rect.setAttribute("height", 16);
-  rect.setAttribute("fill", "rgba(255, 255, 255, 0.05)");
-  rect.setAttribute("rx", 4);
-  graphGroup.appendChild(rect);
-  
-  const label = document.createElementNS("http://www.w3.org/2000/svg","text");
-  label.setAttribute("x", 10);
-  label.setAttribute("y", y-28);
-  label.setAttribute("class", "laneLabel");
-  label.textContent = lane === 0 ? \`Root Thread\` : \`Subagent #\${lane}\`;
-  graphGroup.appendChild(label);
+  const labelX = Math.max(8, margin.left - 260);
+
+  const labelGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+  labelGroup.setAttribute("transform", \`translate(\${labelX}, \${y - 52})\`);
+
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("x", "0");
+  rect.setAttribute("y", "0");
+  rect.setAttribute("rx", "6");
+  rect.setAttribute("class", "lane-label-card");
+  rect.setAttribute("width", "1");
+  rect.setAttribute("height", "1");
+  labelGroup.appendChild(rect);
+
+  const titleText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  titleText.setAttribute("x", 12);
+  titleText.setAttribute("y", 20);
+  titleText.setAttribute("class", "lane-label-title");
+  titleText.textContent = short(threadId);
+  labelGroup.appendChild(titleText);
+
+  const metaText = document.createElementNS("http://www.w3.org/2000/svg", "text");
+  metaText.setAttribute("x", 12);
+  metaText.setAttribute("y", 38);
+  metaText.setAttribute("class", "lane-label-meta");
+  metaText.textContent = "connecting…";
+  labelGroup.appendChild(metaText);
+
+  graphGroup.appendChild(labelGroup);
+
+  const guide = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  guide.setAttribute("stroke", "rgba(249, 115, 22, 0.35)");
+  guide.setAttribute("stroke-width", "1.5");
+  guide.setAttribute("stroke-dasharray", "6 6");
+  guide.setAttribute("vector-effect", "non-scaling-stroke");
+  graphGroup.insertBefore(guide, labelGroup);
+
+  laneObj.label = { group: labelGroup, rectEl: rect, titleEl: titleText, metaEl: metaText, guideEl: guide };
+
+  layoutLaneLabel(threadId);
 
   resizeSVG();
   return lane;
+}
+
+function updateLaneMeta(threadId, meta = {}) {
+  if (!threadId) return;
+  const current = laneMeta.get(threadId) || {};
+  laneMeta.set(threadId, { ...current, ...meta });
+  if (lanes.has(threadId)) applyLaneMeta(threadId);
+}
+
+function applyLaneMeta(threadId) {
+  const laneObj = lanes.get(threadId);
+  if (!laneObj?.label) return;
+  const meta = laneMeta.get(threadId) || {};
+
+  const baseTitle =
+    meta.title ||
+    meta.agentName ||
+    meta.agentType ||
+    (threadId === mainThreadId ? "Root Agent" : meta.isSubagent ? "Subagent" : "Agent");
+  laneObj.label.titleEl.textContent = baseTitle;
+
+  const detailParts = [short(threadId)];
+  if (meta.status) detailParts.push(String(meta.status).replace(/_/g, " "));
+  if (meta.model) detailParts.push(meta.model);
+  if (meta.createdAt) detailParts.push(formatRelativeTime(meta.createdAt));
+
+  const lines = [];
+  const maxChars = 32;
+  let current = "";
+  for (const part of detailParts) {
+    if (!part) continue;
+    if (!current) {
+      current = part;
+      continue;
+    }
+    const candidate = \`\${current} • \${part}\`;
+    if (candidate.length > maxChars) {
+      lines.push(current);
+      current = part;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) lines.push(current);
+  if (!lines.length) lines.push("listening…");
+
+  const metaEl = laneObj.label.metaEl;
+  while (metaEl.firstChild) metaEl.removeChild(metaEl.firstChild);
+  metaEl.setAttribute("x", 12);
+  metaEl.setAttribute("y", 38);
+
+  lines.forEach((line, index) => {
+    const tspan = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+    tspan.setAttribute("x", "12");
+    tspan.setAttribute("dy", index === 0 ? "0" : "14");
+    tspan.textContent = line;
+    metaEl.appendChild(tspan);
+  });
+
+  layoutLaneLabel(threadId);
+}
+
+function layoutLaneLabel(threadId) {
+  const laneObj = lanes.get(threadId);
+  if (!laneObj?.label) return;
+  const { group, rectEl, titleEl, metaEl, guideEl } = laneObj.label;
+  const laneIndex = laneObj.lane;
+  const y = margin.top + laneIndex * margin.yStep;
+
+  const titleBox = titleEl.getBBox();
+  const metaBox = metaEl.getBBox();
+  const contentWidth = Math.max(titleBox.x + titleBox.width, metaBox.x + metaBox.width);
+  const contentHeight = Math.max(titleBox.y + titleBox.height, metaBox.y + metaBox.height);
+
+  const width = Math.max(180, contentWidth + 20);
+  const height = Math.max(52, contentHeight + 14);
+  const labelX = Math.max(8, margin.left - width - 44);
+  const topY = y - height - 14;
+
+  group.setAttribute("transform", \`translate(\${labelX}, \${topY})\`);
+  rectEl.setAttribute("width", String(width));
+  rectEl.setAttribute("height", String(height));
+
+  guideEl.setAttribute("x1", String(labelX + width + 18));
+  guideEl.setAttribute("y1", y);
+  guideEl.setAttribute("x2", String(margin.left - 20));
+  guideEl.setAttribute("y2", y);
 }
 
 function resizeSVG() {
@@ -1265,7 +1462,7 @@ function addNode(threadId, type, label, payload) {
   // label
   const t = document.createElementNS("http://www.w3.org/2000/svg","text");
   t.setAttribute("x", x); t.setAttribute("y", y + (type==="tick"? -18 : 36));
-  t.setAttribute("text-anchor","middle"); t.setAttribute("font-size","11"); t.setAttribute("fill","#334155");
+  t.setAttribute("text-anchor","middle"); t.setAttribute("font-size","11"); t.setAttribute("fill","var(--muted)");
   t.textContent = label;
 
   // tooltip
@@ -1305,16 +1502,33 @@ function addNode(threadId, type, label, payload) {
   return nodeKey;
 }
 
-function drawEdge(x1,y1,x2,y2,dashed) {
-  const line = document.createElementNS("http://www.w3.org/2000/svg","line");
-  line.setAttribute("x1", x1); line.setAttribute("y1", y1);
-  line.setAttribute("x2", x2); line.setAttribute("y2", y2);
-  line.setAttribute("stroke", "#64748b");
+function drawEdge(x1, y1, x2, y2, dashed) {
+  if (dashed) {
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const midX = (x1 + x2) / 2;
+    const curve = Math.max(40, Math.abs(y1 - y2) * 0.6);
+    const c1y = y1 < y2 ? y1 + curve : y1 - curve;
+    const c2y = y2 > y1 ? y2 - curve : y2 + curve;
+    path.setAttribute("d", \`M \${x1} \${y1} C \${midX} \${c1y}, \${midX} \${c2y}, \${x2} \${y2}\`);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", "rgba(249, 115, 22, 0.7)");
+    path.setAttribute("stroke-width", "3");
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-dasharray", "10 6");
+    path.setAttribute("vector-effect", "non-scaling-stroke");
+    graphGroup.insertBefore(path, graphGroup.firstChild || null);
+    return;
+  }
+
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+  line.setAttribute("x1", x1);
+  line.setAttribute("y1", y1);
+  line.setAttribute("x2", x2);
+  line.setAttribute("y2", y2);
+  line.setAttribute("stroke", "rgba(148, 163, 184, 0.6)");
   line.setAttribute("stroke-width", "1.5");
   line.setAttribute("vector-effect", "non-scaling-stroke");
-  if (dashed) line.setAttribute("stroke-dasharray","5,4");
   line.setAttribute("marker-end", \`url(#\${arrowId})\`);
-  // insert edges behind nodes
   graphGroup.insertBefore(line, graphGroup.firstChild || null);
 }
 
@@ -1357,22 +1571,16 @@ function handleEvent(threadId, ev) {
   // Map event to node
   switch (t) {
     case "run.tick": {
+      updateLaneMeta(threadId, { status: "running" });
       addNode(threadId, "tick", \`tick #\${ev.data?.step ?? "?"}\`, ev);
       break;
     }
     case "model.started": {
-      addNode(threadId, "model", \`model: \${ev.data?.model ?? ""}\`, ev);
+      const modelName = ev.data?.model ?? "";
+      updateLaneMeta(threadId, { status: "running", model: modelName });
+      addNode(threadId, "model", \`model: \${modelName}\`, ev);
       break;
     }
-    // case "model.completed": {
-    //   addNode(threadId, "model", "model ✓", ev);
-    //   break;
-    // }
-    //case "tool.started": {
-    //  const name = ev.data?.toolName ?? "tool";
-    //  addNode(threadId, "tool", \`\${name} ▶\`, ev);
-    // break;
-    //}
     case "tool.output": {
       const name = ev.data?.toolName ?? "tool";
       addNode(threadId, "tool", \`\${name} ✓\`, ev);
@@ -1380,38 +1588,43 @@ function handleEvent(threadId, ev) {
     }
     case "tool.error": {
       const name = ev.data?.toolName ?? "tool";
+      updateLaneMeta(threadId, { status: "error" });
       addNode(threadId, "error", \`\${name} ✗\`, ev);
       break;
     }
     case "run.paused": {
       const r = ev.data?.reason ?? "paused";
+      updateLaneMeta(threadId, { status: "paused" });
       addNode(threadId, "paused", \`paused (\${r})\`, ev);
       break;
     }
     case "run.resumed": {
+      updateLaneMeta(threadId, { status: "running" });
       addNode(threadId, "tick", "resumed", ev);
       break;
     }
     case "agent.completed": {
+      updateLaneMeta(threadId, { status: "completed" });
       addNode(threadId, "done", "done ✓", ev);
       break;
     }
     case "agent.error": {
+      updateLaneMeta(threadId, { status: "error" });
       addNode(threadId, "error", "error", ev);
       break;
     }
     case "subagent.spawned": {
       const child = ev.data?.childThreadId;
+      updateLaneMeta(child, { status: "spawning", isSubagent: true });
       const spawnKey = addNode(threadId, "tool", \`spawn \${short(child)}\`, ev);
       childSpawnMap.set(child, spawnKey);
-      // auto-connect to child lane WS
       if (child) connectThreadWS(child);
       break;
     }
     case "subagent.completed": {
       const child = ev.data?.childThreadId;
+      updateLaneMeta(child, { status: "completed" });
       const doneKey = addNode(threadId, "tool", \`child \${short(child)} ✓\`, ev);
-      // connect dashed from child's last to this node (if we have it)
       const childLast = lastNodeInLane.get(child);
       if (childLast && !primingThreads.has(child)) {
         connectLanes(childLast, doneKey);
@@ -1423,14 +1636,12 @@ function handleEvent(threadId, ev) {
       break;
     }
     default:
-      // ignore or lightly mark important checkpoints
       if (t === "checkpoint.saved") {
-        // tiny dot on current lane
         const lane = laneFor(threadId);
         const prevKey = lastNodePerLane.get(lane);
         const prev = prevKey && nodeMap.get(prevKey);
         if (prev) {
-          const dot = document.createElementNS("http://www.w3.org/2000/svg","circle");
+          const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
           dot.setAttribute("cx", prev.x + 10);
           dot.setAttribute("cy", prev.y - 14);
           dot.setAttribute("r", 3);
@@ -1440,7 +1651,6 @@ function handleEvent(threadId, ev) {
       }
   }
 
-  // If this is the first node in a child lane and we had a spawn in parent, connect dashed edge parent->child
   const firstKey = firstNodeInLane.get(threadId);
   if (firstKey && childSpawnMap.has(threadId)) {
     connectLanes(childSpawnMap.get(threadId), firstKey);
@@ -1573,16 +1783,17 @@ function connectThreadWS(threadId) {
 
   socket.onopen = ()=>{
     console.log(\`[ws] \${threadId} connected\`);
+    updateLaneMeta(threadId, { status: "listening" });
     if (threadId === mainThreadId) updateConnectionStatus(true);
   };
   socket.onclose = ()=>{
     console.log(\`[ws] \${threadId} closed\`);
+    updateLaneMeta(threadId, { status: "offline" });
     if (threadId === mainThreadId) updateConnectionStatus(false);
   };
   socket.onmessage = (m)=>{
     try {
       const ev = JSON.parse(m.data);
-      // Events from child sockets will have their own threadId
       const tid = ev.threadId || threadId;
       handleEvent(tid, ev);
     } catch (err) {
@@ -1741,72 +1952,50 @@ async function selectThread(id, { connectThread = true } = {}) {
 
 function renderSubagents(subagents = []) {
   extraThreads.clear();
-  if (!subagentPanel || !subagentItems) return;
 
-  if (!Array.isArray(subagents) || subagents.length === 0) {
-    if (selectedThreadId && !latestThreads.some((t) => t.id === selectedThreadId)) {
-      extraThreads.set(selectedThreadId, {
-        id: selectedThreadId,
-        createdAt: new Date().toISOString(),
+  if (Array.isArray(subagents)) {
+    for (const link of subagents) {
+      if (!link?.childThreadId) continue;
+      const childId = link.childThreadId;
+      const createdAtIso = new Date(link.createdAt ?? Date.now()).toISOString();
+      extraThreads.set(childId, {
+        id: childId,
+        createdAt: createdAtIso,
+        status: link.status,
+        parent: { threadId: selectedThreadId },
+        report: link.report,
+        agentType: link.agentType,
+        isSubagent: true
+      });
+      updateLaneMeta(childId, {
+        title: link.agentName || link.agentType || "Subagent",
+        agentName: link.agentName,
+        agentType: link.agentType,
+        status: link.status,
+        createdAt: createdAtIso,
         isSubagent: true,
-        status: "active"
+        report: link.report
       });
     }
-    subagentPanel.classList.remove("visible");
-    subagentItems.innerHTML = "";
-    renderThreadList(latestThreads, selectedThreadId);
-    return;
   }
 
-  subagentPanel.classList.add("visible");
-  subagentItems.innerHTML = "";
-
-  for (const link of subagents) {
-    if (!link?.childThreadId) continue;
-    const childId = link.childThreadId;
-    const createdAtIso = new Date(link.createdAt ?? Date.now()).toISOString();
-    extraThreads.set(childId, {
-      id: childId,
-      createdAt: createdAtIso,
-      status: link.status,
-      parent: { threadId: selectedThreadId },
-      report: link.report,
+  if (
+    selectedThreadId &&
+    !latestThreads.some((t) => t.id === selectedThreadId) &&
+    !extraThreads.has(selectedThreadId)
+  ) {
+    const created = new Date().toISOString();
+    extraThreads.set(selectedThreadId, {
+      id: selectedThreadId,
+      createdAt: created,
+      isSubagent: true,
+      status: "active"
+    });
+    updateLaneMeta(selectedThreadId, {
+      status: "active",
+      createdAt: created,
       isSubagent: true
     });
-
-    const item = document.createElement("div");
-    item.className = "subagent-item" + (childId === selectedThreadId ? " active" : "");
-
-    const title = document.createElement("div");
-    title.className = "subagent-title";
-    title.textContent = childId;
-    item.appendChild(title);
-
-    const statusRow = document.createElement("div");
-    statusRow.className = "subagent-status";
-    const statusLabel = (link.status ?? "unknown").replace(/_/g, " ");
-    const statusParts = [\`Status: \${statusLabel}\`];
-    if (link.completedAt) statusParts.push("Completed");
-    statusParts.push(formatRelativeTime(createdAtIso));
-    statusRow.textContent = statusParts.join(" • ");
-    item.appendChild(statusRow);
-
-    if (link.report) {
-      const report = document.createElement("div");
-      report.className = "subagent-report";
-      report.textContent = link.report;
-      item.appendChild(report);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "subagent-actions";
-    const openBtn = document.createElement("button");
-    openBtn.textContent = "Open";
-    openBtn.onclick = () => selectThread(childId);
-    actions.appendChild(openBtn);
-    item.appendChild(actions);
-
-    subagentItems.appendChild(item);
   }
 
   renderThreadList(latestThreads, selectedThreadId);
@@ -1821,6 +2010,45 @@ function renderChat(messages = []) {
     chatTranscript.appendChild(empty);
     return;
   }
+
+  const buildToolCall = (titleText, bodyText) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "tool-call collapsed";
+
+    const header = document.createElement("div");
+    header.className = "tool-call-header";
+
+    const heading = document.createElement("span");
+    heading.className = "tool-call-title";
+    heading.textContent = titleText;
+    header.appendChild(heading);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "tool-call-toggle";
+    header.appendChild(toggle);
+
+    wrapper.appendChild(header);
+
+    const body = document.createElement("pre");
+    body.className = "tool-call-body";
+    body.textContent = bodyText;
+    wrapper.appendChild(body);
+
+    const updateToggle = () => {
+      const collapsed = wrapper.classList.contains("collapsed");
+      toggle.textContent = collapsed ? "Show output" : "Hide output";
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+    };
+
+    updateToggle();
+    toggle.addEventListener("click", () => {
+      wrapper.classList.toggle("collapsed");
+      updateToggle();
+    });
+
+    return wrapper;
+  };
 
   for (const msg of messages) {
     const role = msg.role;
@@ -1842,21 +2070,14 @@ function renderChat(messages = []) {
         content.appendChild(text);
       }
       for (const call of msg.toolCalls) {
-        const toolWrap = document.createElement("div");
-        toolWrap.className = "tool-call";
-        const title = document.createElement("div");
-        title.style.fontWeight = "600";
-        title.textContent = call.name || "tool";
-        const pre = document.createElement("pre");
-        pre.textContent = JSON.stringify(call.args ?? {}, null, 2);
-        toolWrap.appendChild(title);
-        toolWrap.appendChild(pre);
-        content.appendChild(toolWrap);
+        const title = call.name || "tool";
+        const body = JSON.stringify(call.args ?? {}, null, 2);
+        content.appendChild(buildToolCall(title, body));
       }
     } else if (role === "tool") {
-      const pre = document.createElement("pre");
-      pre.textContent = msg.content ?? "";
-      content.appendChild(pre);
+      const title = msg.toolName || msg.name || "Tool output";
+      const body = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? "", null, 2);
+      content.appendChild(buildToolCall(title, body));
     } else {
       content.textContent = msg.content ?? "";
     }
@@ -1918,6 +2139,15 @@ function renderThreadList(threads = [], activeId) {
   }
 
   for (const meta of list) {
+    updateLaneMeta(meta.id, {
+      title: meta.agentName || meta.agentType || (meta.isSubagent ? "Subagent" : "Agent"),
+      agentName: meta.agentName,
+      agentType: meta.agentType,
+      status: meta.status,
+      createdAt: meta.createdAt,
+      isSubagent: meta.isSubagent
+    });
+
     const btn = document.createElement("button");
     btn.type = "button";
     const isActive = meta.id === activeId;
