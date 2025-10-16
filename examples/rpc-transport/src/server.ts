@@ -69,41 +69,8 @@ const model = openai("gpt-4o-2024-11-20");
  */
 export class Chat extends AIChatAgent<Env> {
   async onStart(): Promise<void> {
-    // Configure OAuth callback to close popup window on success
-    this.mcp.configureOAuthCallback({
-      customHandler: (result) => {
-        if (result.authSuccess) {
-          return new Response("<script>window.close();</script>", {
-            headers: { "content-type": "text/html" },
-            status: 200
-          });
-        } else {
-          return new Response(
-            `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
-            {
-              headers: { "content-type": "text/html" },
-              status: 200
-            }
-          );
-        }
-      }
-    });
-
     // rpc
     await this.addRpcMcpServer("test-server", "MyMCP");
-
-    // streamable-http
-    await this.addMcpServer(
-      "docs-server",
-      "https://docs.mcp.cloudflare.com/mcp",
-      "http://localhost:5174"
-    );
-
-    await this.addMcpServer(
-      "authenticated-server",
-      "https://observability.mcp.cloudflare.com/mcp",
-      "http://localhost:5174"
-    );
   }
 
   /**

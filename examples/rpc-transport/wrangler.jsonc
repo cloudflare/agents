@@ -3,7 +3,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    "directory": "public"
+    "run_worker_first": ["/agents/*"]
   },
   "durable_objects": {
     "bindings": [

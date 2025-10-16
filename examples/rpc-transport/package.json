@@ -4,7 +4,8 @@
   "name": "@cloudflare/agents-rpc-transport-demo",
   "private": true,
   "scripts": {
-    "start": "vite dev"
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy"
   },
   "type": "module"
 }
