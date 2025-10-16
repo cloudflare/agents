@@ -161,60 +161,6 @@ export class Chat extends AIChatAgent<Env> {
 
 Note that in production you would not connect to MCP servers in `onStart` but in standalone method you could add error handling. See this [MCP client example](examples/mcp-client)
 
-### Passing props from client to server
-
-Since RPC transport doesn't have an OAuth flow, you can pass user context (like userId, role, etc.) directly as props:
-
-```typescript
-// Pass props to provide user context to the MCP server
-await this.addMcpServer("my-mcp", this.env.MyMCP, {
-  transport: { type: "rpc", props: { userId: "user-123", role: "admin" } }
-});
-```
-
-Your `McpAgent` can then access these props:
-
-```typescript
-export class MyMCP extends McpAgent<
-  Env,
-  State,
-  { userId?: string; role?: string }
-> {
-  async init() {
-    this.server.tool("whoami", "Get current user info", {}, async () => {
-      const userId = this.props?.userId || "anonymous";
-      const role = this.props?.role || "guest";
-
-      return {
-        content: [{ type: "text", text: `User ID: ${userId}, Role: ${role}` }]
-      };
-    });
-  }
-}
-```
-
-The props are:
-
-- **Type-safe**: TypeScript extracts the Props type from your McpAgent generic
-- **Persistent**: Stored in Durable Object storage via `updateProps()`
-- **Available immediately**: Set before any tool calls are made
-
-This is useful for:
-
-- User authentication context
-- Tenant/organization IDs
-- Feature flags or permissions
-- Any per-connection configuration
-
-#### How RPC transport works
-
-The RPC transport:
-
-1. Validates the binding exists in your environment
-2. Gets the Durable Object stub from `env.MyMCP.get(id)`
-3. Creates an RPC transport that calls `stub.handleMcpMessage(message)`
-4. Connects your agent's MCP client to this transport
-
 #### Step 3: Configure Durable Object bindings
 
 In your `wrangler.jsonc`, define bindings for both Durable Objects:
@@ -275,6 +221,51 @@ That's it! When your agent makes an MCP call, it:
 2. Calls `stub.handleMcpMessage(message)` over RPC
 3. The `McpAgent` processes it and returns the response
 4. Your agent receives the result - all without any network calls
+
+### Passing props from client to server
+
+Since RPC transport doesn't have an OAuth flow, you can pass user context (like userId, role, etc.) directly as props:
+
+```typescript
+// Pass props to provide user context to the MCP server
+await this.addMcpServer("my-mcp", this.env.MyMCP, {
+  transport: { type: "rpc", props: { userId: "user-123", role: "admin" } }
+});
+```
+
+Your `McpAgent` can then access these props:
+
+```typescript
+export class MyMCP extends McpAgent<
+  Env,
+  State,
+  { userId?: string; role?: string }
+> {
+  async init() {
+    this.server.tool("whoami", "Get current user info", {}, async () => {
+      const userId = this.props?.userId || "anonymous";
+      const role = this.props?.role || "guest";
+
+      return {
+        content: [{ type: "text", text: `User ID: ${userId}, Role: ${role}` }]
+      };
+    });
+  }
+}
+```
+
+The props are:
+
+- **Type-safe**: TypeScript extracts the Props type from your McpAgent generic
+- **Persistent**: Stored in Durable Object storage via `updateProps()`
+- **Available immediately**: Set before any tool calls are made
+
+This is useful for:
+
+- User authentication context
+- Tenant/organization IDs
+- Feature flags or permissions
+- Any per-connection configuration
 
 ### How RPC transport works under the hood
 
