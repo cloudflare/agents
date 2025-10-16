@@ -120,7 +120,7 @@ export abstract class McpAgent<
   }
 
   /*
-   * Base Agent / Parykit Server overrides
+   * Base Agent / Partykit Server overrides
    */
 
   /** Sets up the MCP transport and server every time the Agent is started.*/
@@ -370,18 +370,16 @@ export abstract class McpAgent<
   async handleMcpMessage(
     message: JSONRPCMessage
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
-    // Initialize the agent if not already done
-    if (!this._transport || this.getTransportType() !== "rpc") {
-      // Initialize the agent with RPC transport
-      await this.onStart();
+    if (!this._transport) {
+      const server = await this.server;
+      this._transport = new RPCServerTransport();
+      await server.connect(this._transport);
     }
 
-    // The transport should now be an RPCServerTransport
     if (!(this._transport instanceof RPCServerTransport)) {
       throw new Error("Expected RPC transport");
     }
 
-    // Process the message through the transport
     return await this._transport.handle(message);
   }
 
