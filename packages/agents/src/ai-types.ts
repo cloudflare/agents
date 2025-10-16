@@ -13,7 +13,16 @@ export enum MessageType {
   CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
   CF_MCP_AGENT_EVENT = "cf_mcp_agent_event",
   CF_AGENT_STATE = "cf_agent_state",
-  RPC = "rpc"
+  RPC = "rpc",
+
+  CF_AGENT_QUERY_SUBSCRIBE = "cf_agent_query_subscribe",
+  CF_AGENT_QUERY_UNSUBSCRIBE = "cf_agent_query_unsubscribe",
+  CF_AGENT_QUERY_DATA = "cf_agent_query_data",
+  CF_AGENT_QUERY_ERROR = "cf_agent_query_error",
+  CF_AGENT_MUTATION = "cf_agent_mutation",
+  CF_AGENT_MUTATION_RESULT = "cf_agent_mutation_result",
+  CF_AGENT_HEARTBEAT = "cf_agent_heartbeat",
+  CF_AGENT_VERSION_MISMATCH = "cf_agent_version_mismatch"
 }
 
 /**
@@ -90,4 +99,24 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       /** Indicates the user wants to stop generation of this message */
       type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL;
       id: string;
+    }
+  | {
+      /** Query subscription request */
+      type: MessageType.CF_AGENT_QUERY_SUBSCRIBE;
+      queryName: string;
+      args: unknown;
+      subscriptionId: string;
+    }
+  | {
+      /** Query unsubscription request */
+      type: MessageType.CF_AGENT_QUERY_UNSUBSCRIBE;
+      queryName: string;
+      args: unknown;
+    }
+  | {
+      /** Mutation execution request */
+      type: MessageType.CF_AGENT_MUTATION;
+      mutationName: string;
+      args: unknown;
+      mutationId: string;
     };
