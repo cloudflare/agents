@@ -51,9 +51,11 @@ The agent calls out to the MCP server using Cloudflare's RPC bindings:
 export class Chat extends AIChatAgent<Env> {
   async onStart(): Promise<void> {
     // Connect to MyMCP server via RPC
-    await this.addMcpServerRpc("test-server", this.env.MyMCP);
+    await this.addMcpServer("test-server", this.env.MyMCP, {
+      transport: { type: "rpc" }
+    });
     // Or pass the binding name as a string:
-    // await this.addMcpServerRpc("test-server", "MyMCP");
+    // await this.addMcpServer("test-server", "MyMCP", { transport: { type: "rpc" } });
   }
 
   async onChatMessage(onFinish: StreamTextOnFinishCallback<ToolSet>) {

@@ -123,7 +123,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
 
 #### Step 2: Connect your Agent to the MCP server
 
-In your `Agent`, call `addMcpServerRpc()` in the `onStart()` method:
+In your `Agent`, call `addMcpServer()` with RPC transport in the `onStart()` method:
 
 ```typescript
 import { AIChatAgent } from "agents/ai-chat-agent";
@@ -131,13 +131,17 @@ import { AIChatAgent } from "agents/ai-chat-agent";
 export class Chat extends AIChatAgent<Env> {
   async onStart(): Promise<void> {
     // Connect to MyMCP via RPC using binding directly
-    await this.addMcpServerRpc("my-mcp", this.env.MyMCP);
+    await this.addMcpServer("my-mcp", this.env.MyMCP, {
+      transport: { type: "rpc" }
+    });
 
     // Or using binding name string
-    await this.addMcpServerRpc("my-mcp", "MyMCP");
-    //                          ▲         ▲
-    //                          │         └─ Binding name (from wrangler.jsonc)
-    //                          └─ Server ID (any unique string)
+    await this.addMcpServer("my-mcp", "MyMCP", {
+      transport: { type: "rpc" }
+    });
+    //                      ▲         ▲
+    //                      │         └─ Binding name (from wrangler.jsonc) or namespace
+    //                      └─ Server ID (any unique string)
   }
 
   async onChatMessage(onFinish) {
@@ -155,7 +159,7 @@ export class Chat extends AIChatAgent<Env> {
 }
 ```
 
-The `addMcpServerRpc()` method:
+The RPC transport:
 
 1. Validates the binding exists in your environment
 2. Gets the Durable Object stub from `env.MyMCP.get(id)`
@@ -175,7 +179,7 @@ In your `wrangler.jsonc`, define bindings for both Durable Objects:
         "class_name": "Chat"
       },
       {
-        "name": "MyMCP", // This is the binding name you pass to addMcpServerRpc
+        "name": "MyMCP", // This is the binding name you pass to addMcpServer
         "class_name": "MyMCP"
       }
     ]
@@ -225,7 +229,7 @@ That's it! When your agent makes an MCP call, it:
 
 ### How RPC transport works under the hood
 
-When you call `addMcpServerRpc()`, the SDK creates an RPC transport that calls the `handleMcpMessage()` method on your `McpAgent`:
+When you call `addMcpServer()` with RPC transport, the SDK creates an RPC transport that calls the `handleMcpMessage()` method on your `McpAgent`:
 
 ```typescript
 // Built into the McpAgent base class
@@ -257,7 +261,8 @@ The RPC transport is minimal by design (~350 lines) and fully supports:
 By default, the RPC transport calls the `handleMcpMessage` function. You can customize this:
 
 ```typescript
-await this.addMcpServerRpc("my-server", "MyMCP", {
+await this.addMcpServer("my-server", "MyMCP", {
+  transport: { type: "rpc" },
   functionName: "customHandler"
 });
 ```

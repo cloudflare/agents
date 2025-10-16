@@ -28,7 +28,12 @@ import type {
   MCPTransportOptions
 } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
-import type { McpConnectionConfig, TransportType } from "./mcp/types";
+import type {
+  McpConnectionConfig,
+  McpHttpConnectionConfig,
+  McpRpcConnectionConfig,
+  TransportType
+} from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
@@ -1429,73 +1434,15 @@ export class Agent<
   }
 
   /**
-   * Connect to an MCP server via RPC transport using a Durable Object binding
+   * Connect to an MCP server via RPC or HTTP/SSE transport
    *
+   * RPC Transport (internal Durable Object communication):
    * @param serverName Name of the MCP server
    * @param binding Durable Object binding (e.g., env.MyMCP) or binding name (e.g., "MyMCP")
-   * @param options RPC-specific options
+   * @param options Options with transport.type = "rpc"
    * @returns id (authUrl is undefined for RPC connections)
    *
-   * @example
-   * ```typescript
-   * // Using binding directly
-   * await agent.addMcpServerRpc("my-server", this.env.MyMCP);
-   *
-   * // Using binding name string
-   * await agent.addMcpServerRpc("my-server", "MyMCP");
-   * ```
-   */
-  async addMcpServerRpc<T extends McpAgent>(
-    serverName: string,
-    binding: DurableObjectNamespace<T> | string,
-    options?: {
-      functionName?: string;
-      client?: ConstructorParameters<typeof Client>[1];
-    }
-  ): Promise<{ id: string; authUrl: undefined }> {
-    // Validate and resolve binding
-    const namespace = this._resolveRpcBinding(binding);
-    const url = `rpc://${serverName}`;
-
-    // Check if server already exists in database for reconnection
-    const existingServer = this.sql<MCPServerRow>`
-      SELECT id FROM cf_agents_mcp_servers WHERE server_url = ${url} LIMIT 1;
-    `.at(0);
-
-    const reconnect = existingServer ? { id: existingServer.id } : undefined;
-
-    // Connect to server
-    const result = await this._connectToMcpServerInternal({
-      type: "rpc",
-      serverName,
-      namespace,
-      url,
-      options,
-      reconnect
-    });
-
-    // Persist to database for reconnection purposes
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${result.id},
-        ${serverName},
-        ${url},
-        ${result.clientId ?? null},
-        ${result.authUrl ?? null},
-        ${"rpc://internal"},
-        ${options ? JSON.stringify(options) : null}
-      );
-    `;
-
-    this.broadcastMcpServers();
-
-    return { id: result.id, authUrl: undefined };
-  }
-
-  /**
-   * Connect to an MCP server via HTTP/SSE transport
-   *
+   * HTTP/SSE Transport (remote servers):
    * @param serverName Name of the MCP server
    * @param url MCP Server URL (e.g., "https://example.com/mcp")
    * @param callbackHost Base host for the agent, used for OAuth redirect URI
@@ -1505,13 +1452,48 @@ export class Agent<
    *
    * @example
    * ```typescript
+   * // RPC transport
+   * await agent.addMcpServer("my-server", env.MyMCP, { transport: { type: "rpc" } });
+   *
+   * // HTTP/SSE transport
    * await agent.addMcpServer("my-server", "https://example.com/mcp", "https://my-app.com");
    * ```
    */
+  async addMcpServer<T extends McpAgent>(
+    serverName: string,
+    binding: DurableObjectNamespace<T> | string,
+    options: {
+      transport: { type: "rpc" };
+      functionName?: string;
+      client?: ConstructorParameters<typeof Client>[1];
+    }
+  ): Promise<{ id: string; authUrl: undefined }>;
+
+  // Overload for HTTP/SSE transport
   async addMcpServer(
     serverName: string,
     url: string,
     callbackHost?: string,
+    agentsPrefix?: string,
+    options?: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport?: {
+        headers?: HeadersInit;
+        type?: Exclude<TransportType, "rpc">;
+      };
+    }
+  ): Promise<{ id: string; authUrl: string | undefined }>;
+
+  async addMcpServer<T extends McpAgent>(
+    serverName: string,
+    urlOrBinding: string | DurableObjectNamespace<T>,
+    callbackHostOrOptions?:
+      | string
+      | {
+          transport: { type: "rpc" };
+          functionName?: string;
+          client?: ConstructorParameters<typeof Client>[1];
+        },
     agentsPrefix = "agents",
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
@@ -1521,6 +1503,66 @@ export class Agent<
       };
     }
   ): Promise<{ id: string; authUrl: string | undefined }> {
+    // Determine if this is RPC or HTTP based on parameters
+    const isRpc =
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions.transport?.type === "rpc";
+
+    if (isRpc) {
+      // RPC transport path
+      const rpcOptions = callbackHostOrOptions as {
+        transport: { type: "rpc" };
+        functionName?: string;
+        client?: ConstructorParameters<typeof Client>[1];
+      };
+
+      const namespace = this._resolveRpcBinding<T>(
+        urlOrBinding as DurableObjectNamespace<T> | string
+      );
+      const url = `rpc://${serverName}`;
+
+      // Check if server already exists in database for reconnection
+      const existingServer = this.sql<MCPServerRow>`
+        SELECT id FROM cf_agents_mcp_servers WHERE server_url = ${url} LIMIT 1;
+      `.at(0);
+
+      const reconnect = existingServer ? { id: existingServer.id } : undefined;
+
+      // Connect to server
+      const result = await this._connectToMcpServerInternal({
+        type: "rpc",
+        serverName,
+        namespace,
+        url,
+        options: {
+          functionName: rpcOptions.functionName,
+          client: rpcOptions.client
+        },
+        reconnect
+      });
+
+      // Persist to database for reconnection purposes
+      this.sql`
+        INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+        VALUES (
+          ${result.id},
+          ${serverName},
+          ${url},
+          ${result.clientId ?? null},
+          ${result.authUrl ?? null},
+          ${"rpc://internal"},
+          ${rpcOptions ? JSON.stringify(rpcOptions) : null}
+        );
+      `;
+
+      this.broadcastMcpServers();
+
+      return result as { id: string; authUrl: undefined };
+    }
+
+    // HTTP/SSE transport path (original implementation)
+    const url = urlOrBinding as string;
+    const callbackHost = callbackHostOrOptions as string | undefined;
     // Resolve callback host if not provided
     let resolvedCallbackHost = callbackHost;
     if (!resolvedCallbackHost) {
@@ -1700,66 +1742,45 @@ export class Agent<
     return this.handleOAuthCallbackResponse(result, request);
   }
 
-  private async _connectToMcpServerInternal<T extends McpAgent = McpAgent>(
-    config: McpConnectionConfig<T>
-  ): Promise<{
-    id: string;
-    authUrl: string | undefined;
-    clientId: string | undefined;
-  }> {
-    // Build transport options based on config type
-    let transportOptions: MCPTransportOptions;
+  private async _buildRpcTransportOptions<T extends McpAgent>(
+    config: McpRpcConnectionConfig<T>
+  ): Promise<MCPTransportOptions> {
+    const { serverName, namespace, options } = config;
 
-    if (config.type === "rpc") {
-      // RPC transport: get stub from binding
-      const { serverName, namespace, options, reconnect, url } = config;
+    const doId = namespace.idFromName(`rpc:${serverName}`);
+    const stub = namespace.get(doId) as unknown as DurableObjectStub<McpAgent>;
 
-      const doId = namespace.idFromName(`rpc:${serverName}`);
-      const stub = namespace.get(
-        doId
-      ) as unknown as DurableObjectStub<McpAgent>;
+    await stub.setName(`rpc:${serverName}`);
 
-      await stub.setName(`rpc:${serverName}`);
+    return {
+      type: "rpc",
+      stub,
+      functionName: options?.functionName
+    };
+  }
 
-      transportOptions = {
-        type: "rpc",
-        stub,
-        functionName: options?.functionName
-      };
+  private _buildHttpTransportOptions(
+    config: McpHttpConnectionConfig
+  ): MCPTransportOptions {
+    const { callbackUrl, options, reconnect } = config;
 
-      // Connect to MCP server
-      const { id, authUrl, clientId } = await this.mcp.connect(url, {
-        client: options?.client,
-        reconnect,
-        transport: transportOptions
-      });
+    const authProvider = new DurableObjectOAuthClientProvider(
+      this.ctx.storage,
+      this.name,
+      callbackUrl
+    );
 
-      return {
-        authUrl,
-        clientId,
-        id
-      };
-    } else {
-      // HTTP/SSE transport: setup OAuth provider and headers
-      const { url, callbackUrl, options, reconnect } = config;
-      const authProvider = new DurableObjectOAuthClientProvider(
-        this.ctx.storage,
-        this.name,
-        callbackUrl
-      );
-
-      if (reconnect) {
-        authProvider.serverId = reconnect.id;
-        if (reconnect.oauthClientId) {
-          authProvider.clientId = reconnect.oauthClientId;
-        }
+    if (reconnect) {
+      authProvider.serverId = reconnect.id;
+      if (reconnect.oauthClientId) {
+        authProvider.clientId = reconnect.oauthClientId;
       }
+    }
 
-      const transportType: TransportType = options?.transport?.type ?? "auto";
-      let headerTransportOpts: SSEClientTransportOptions = {};
-
-      if (options?.transport?.headers) {
-        headerTransportOpts = {
+    const transportType: TransportType = options?.transport?.type ?? "auto";
+    const headerTransportOpts: SSEClientTransportOptions = options?.transport
+      ?.headers
+      ? {
           eventSourceInit: {
             fetch: (url, init) =>
               fetch(url, {
@@ -1770,28 +1791,35 @@ export class Agent<
           requestInit: {
             headers: options.transport!.headers
           }
-        };
-      }
+        }
+      : {};
 
-      transportOptions = {
-        ...headerTransportOpts,
-        authProvider,
-        type: transportType
-      };
+    return {
+      ...headerTransportOpts,
+      authProvider,
+      type: transportType
+    };
+  }
 
-      // Connect to MCP server
-      const { id, authUrl, clientId } = await this.mcp.connect(url, {
-        client: options?.client,
-        reconnect,
-        transport: transportOptions
-      });
+  private async _connectToMcpServerInternal<T extends McpAgent = McpAgent>(
+    config: McpConnectionConfig<T>
+  ): Promise<{
+    id: string;
+    authUrl: string | undefined;
+    clientId: string | undefined;
+  }> {
+    const transportOptions =
+      config.type === "rpc"
+        ? await this._buildRpcTransportOptions(config)
+        : this._buildHttpTransportOptions(config);
 
-      return {
-        authUrl,
-        clientId,
-        id
-      };
-    }
+    const { id, authUrl, clientId } = await this.mcp.connect(config.url, {
+      client: config.options?.client,
+      reconnect: config.reconnect,
+      transport: transportOptions
+    });
+
+    return { id, authUrl, clientId };
   }
 
   async removeMcpServer(id: string) {
