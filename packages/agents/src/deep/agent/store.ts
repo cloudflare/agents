@@ -1,5 +1,12 @@
 // storage/store.ts
-import type { ChatMessage, ToolCall, RunState } from "../types";
+import type {
+  ChatMessage,
+  ToolCall,
+  RunState,
+  ThreadMetadata,
+  SubagentLink,
+  ParentInfo
+} from "../types";
 import type { AgentEvent } from "../events";
 
 function toJson(v: unknown) {
@@ -32,6 +39,10 @@ export class Store {
     childThreadId: string;
     toolCallId: string;
   }[];
+  private _threadMetadata?: ThreadMetadata | null;
+  private _agentType?: string | null;
+  private _parentInfo?: ParentInfo | null;
+  private _subagentLinks?: SubagentLink[];
 
   constructor(
     // Public so middlewares can access it
@@ -82,6 +93,21 @@ CREATE TABLE IF NOT EXISTS pending_tool_calls (
   name TEXT NOT NULL,
   args_json TEXT NOT NULL,
   created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS thread_meta (
+  id TEXT PRIMARY KEY,
+  metadata_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subagent_links (
+  child_thread_id TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('waiting','completed','canceled')),
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  report TEXT,
+  tool_call_id TEXT
 );
 `
     );
@@ -147,6 +173,185 @@ ON CONFLICT(run_id) DO UPDATE SET
       t,
       t
     );
+  }
+
+  // --------------------------
+  // Thread metadata
+  // --------------------------
+  ensureThreadMetadata(meta: {
+    id: string;
+    createdAt?: string;
+    request?: ThreadMetadata["request"];
+    parent?: ParentInfo;
+    agentType?: string;
+  }): ThreadMetadata {
+    const existing = this.threadMetadata;
+    if (existing) return existing;
+    const next: ThreadMetadata = {
+      id: meta.id,
+      createdAt: meta.createdAt ?? new Date().toISOString(),
+      request: meta.request ?? {},
+      parent: meta.parent,
+      agentType: meta.agentType
+    };
+    this.setThreadMetadata(next);
+    return next;
+  }
+
+  setThreadMetadata(meta: ThreadMetadata): void {
+    this._threadMetadata = { ...meta };
+    this._agentType = meta.agentType ?? null;
+    this._parentInfo = meta.parent ?? null;
+    this.sql.exec(
+      `INSERT INTO thread_meta (id, metadata_json)
+       VALUES (?, ?)
+       ON CONFLICT(id) DO UPDATE SET metadata_json=excluded.metadata_json`,
+      meta.id,
+      toJson(meta)
+    );
+  }
+
+  get agentType(): string | undefined {
+    if (this._agentType !== undefined) {
+      return this._agentType ?? undefined;
+    }
+    const meta = this.threadMetadata;
+    this._agentType = meta?.agentType ?? null;
+    return meta?.agentType ?? undefined;
+  }
+
+  setAgentType(agentType?: string): void {
+    this._agentType = agentType ?? null;
+    const current = this.threadMetadata;
+    if (!current) return;
+    const next: ThreadMetadata = { ...current };
+    if (agentType) next.agentType = agentType;
+    else delete (next as Partial<ThreadMetadata>).agentType;
+    this.setThreadMetadata(next);
+  }
+
+  get parentInfo(): ParentInfo | undefined {
+    if (this._parentInfo !== undefined) {
+      return this._parentInfo ?? undefined;
+    }
+    const meta = this.threadMetadata;
+    this._parentInfo = meta?.parent ?? null;
+    return meta?.parent ?? undefined;
+  }
+
+  setParentInfo(parent?: ParentInfo): void {
+    this._parentInfo = parent ?? null;
+    const current = this.threadMetadata;
+    if (!current) return;
+    const next: ThreadMetadata = { ...current };
+    if (parent) next.parent = parent;
+    else delete (next as Partial<ThreadMetadata>).parent;
+    this.setThreadMetadata(next);
+  }
+
+  get threadMetadata(): ThreadMetadata | null {
+    if (this._threadMetadata !== undefined) {
+      return this._threadMetadata ? { ...this._threadMetadata } : null;
+    }
+    const rows = this.sql
+      .exec<{
+        metadata_json: string;
+      }>("SELECT metadata_json FROM thread_meta LIMIT 1")
+      .toArray();
+    if (!rows.length) {
+      this._threadMetadata = null;
+      return null;
+    }
+    const meta = fromJson<ThreadMetadata>(rows[0].metadata_json) ?? null;
+    this._threadMetadata = meta;
+    if (meta) {
+      this._agentType = meta.agentType ?? null;
+      this._parentInfo = meta.parent ?? null;
+    }
+    return meta ? { ...meta } : null;
+  }
+
+  // --------------------------
+  // Subagent links
+  // --------------------------
+  recordSubagentSpawn(link: {
+    token: string;
+    childThreadId: string;
+    toolCallId: string;
+  }): void {
+    this.sql.exec(
+      `INSERT INTO subagent_links (child_thread_id, token, status, created_at, tool_call_id)
+       VALUES (?, ?, 'waiting', ?, ?)
+       ON CONFLICT(child_thread_id) DO UPDATE SET
+         token=excluded.token,
+         status='waiting',
+         created_at=excluded.created_at,
+         completed_at=NULL,
+         report=NULL,
+         tool_call_id=excluded.tool_call_id`,
+      link.childThreadId,
+      link.token,
+      Date.now(),
+      link.toolCallId
+    );
+    this._subagentLinks = undefined;
+  }
+
+  markSubagentCompleted(childThreadId: string, report?: string): void {
+    const completedAt = Date.now();
+    this.sql.exec(
+      `UPDATE subagent_links
+       SET status='completed', completed_at=?, report=?
+       WHERE child_thread_id = ?`,
+      completedAt,
+      report ?? null,
+      childThreadId
+    );
+    this._subagentLinks = undefined;
+  }
+
+  markSubagentCanceled(childThreadId: string): void {
+    this.sql.exec(
+      `UPDATE subagent_links
+       SET status='canceled', completed_at=?
+       WHERE child_thread_id = ?`,
+      Date.now(),
+      childThreadId
+    );
+    this._subagentLinks = undefined;
+  }
+
+  listSubagentLinks(): SubagentLink[] {
+    if (this._subagentLinks) return [...this._subagentLinks];
+    const rows = this.sql.exec(
+      `SELECT child_thread_id, token, status, created_at, completed_at, report, tool_call_id
+       FROM subagent_links ORDER BY created_at ASC`
+    );
+    const links: SubagentLink[] = [];
+    for (const r of rows ?? []) {
+      const completedAtRaw = r.completed_at;
+      const reportRaw = r.report;
+      links.push({
+        childThreadId: String(r.child_thread_id),
+        token: String(r.token ?? ""),
+        status: String(r.status) as SubagentLink["status"],
+        createdAt: Number(r.created_at ?? Date.now()),
+        completedAt:
+          completedAtRaw === null || completedAtRaw === undefined
+            ? undefined
+            : Number(completedAtRaw),
+        report:
+          reportRaw === null || reportRaw === undefined
+            ? undefined
+            : String(reportRaw),
+        toolCallId:
+          r.tool_call_id === null || r.tool_call_id === undefined
+            ? undefined
+            : String(r.tool_call_id)
+      });
+    }
+    this._subagentLinks = [...links];
+    return [...links];
   }
 
   // --------------------------
@@ -410,6 +615,7 @@ ON CONFLICT(run_id) DO UPDATE SET
       w.toolCallId,
       Date.now()
     );
+    this.recordSubagentSpawn(w);
     // Invalidate cache to ensure consistency
     this._waitingSubagents = undefined;
   }

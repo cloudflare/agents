@@ -8,7 +8,8 @@ import type {
   ToolMeta,
   SubagentDescriptor,
   MWContext,
-  ParentInfo
+  ThreadMetadata,
+  AgentState
 } from "../types";
 import { Agent, getAgentByName, type AgentContext } from "../..";
 import { subagents, planning, filesystem, getToolMeta } from "../middleware";
@@ -90,7 +91,10 @@ export abstract class DeepAgent<
   get tools(): { handlers: Record<string, ToolHandler>; defs: ToolMeta[] } {
     let tools = this.extraTools;
     if (this.agentType && this.subagents.has(this.agentType)) {
-      tools = this.subagents.get(this.agentType)?.tools ?? {};
+      const specificTools = this.subagents.get(this.agentType)?.tools;
+      tools = Object.fromEntries(
+        (specificTools ?? []).map((t) => [getToolMeta(t)?.name, t])
+      );
     }
 
     return collectToolsAndDefs(this.middleware, tools);
@@ -110,7 +114,7 @@ export abstract class DeepAgent<
 
   get agentType() {
     if (this._agentType) return this._agentType;
-    return this.store.kv.get<string>("agentType");
+    return this.store.agentType;
   }
 
   get mwContext(): MWContext {
@@ -168,8 +172,33 @@ export abstract class DeepAgent<
         return this.getEvents(req);
       case "/child_result":
         return this.childResult(req);
+      case "/register":
+        if (req.method === "POST") return this.registerThread(req);
+        return new Response("method not allowed", { status: 405 });
       default:
         return new Response("not found", { status: 404 });
+    }
+  }
+
+  async registerThread(req: Request) {
+    try {
+      const metadata = (await req
+        .json()
+        .catch(() => null)) as ThreadMetadata | null;
+      if (!metadata || !metadata.id) {
+        return new Response("invalid metadata", { status: 400 });
+      }
+      if (!this.store.threadId) {
+        this.store.setThreadId(metadata.id);
+      }
+      this.store.setThreadMetadata({
+        ...metadata,
+        request: metadata.request ?? {}
+      });
+      return Response.json({ ok: true });
+    } catch (error: unknown) {
+      const err = error as Error;
+      return Response.json({ error: err.message }, { status: 500 });
     }
   }
 
@@ -182,14 +211,26 @@ export abstract class DeepAgent<
         this.store.setThreadId(body.threadId);
       }
 
+      const threadId =
+        this.store.threadId ?? body.threadId ?? this.ctx.id.toString();
+      const parentInfo = body.parent ?? this.store.parentInfo;
+      const agentType = body.agentType ?? this.store.agentType;
+      this.store.ensureThreadMetadata({
+        id: threadId,
+        parent: parentInfo,
+        agentType
+      });
+
       // Merge input into state
       if (body.messages?.length) this.store.appendMessages(body.messages);
       if (body.files) this.store.mergeFiles(body.files);
       if (body.agentType) {
         this._agentType = body.agentType;
-        this.store.kv.put("agentType", body.agentType);
+        this.store.setAgentType(body.agentType);
       }
-      if (body.parent) this.store.kv.put("parent", body.parent);
+      if (body.parent) {
+        this.store.setParentInfo(body.parent);
+      }
 
       let { runState } = this.store;
       // Start or continue run
@@ -282,6 +323,7 @@ export abstract class DeepAgent<
         // Clear waiting subagents from the database
         for (const subagent of waitingSubagents) {
           this.store.popWaitingSubagent(subagent.token, subagent.childThreadId);
+          this.store.markSubagentCanceled(subagent.childThreadId);
         }
       }
 
@@ -302,13 +344,29 @@ export abstract class DeepAgent<
       agentType,
       tools: { defs }
     } = this;
-    let state = {
+    const fallbackThreadId = threadId ?? this.ctx.id.toString();
+    const cachedParent = this.store.parentInfo;
+    const threadMeta =
+      this.store.threadMetadata ??
+      this.store.ensureThreadMetadata({
+        id: fallbackThreadId,
+        parent: cachedParent
+      });
+    const subagentLinks = this.store.listSubagentLinks();
+    let state: AgentState = {
       messages: this.store.listMessages(),
       threadId,
       agentType,
       model,
-      tools: defs
+      tools: defs,
+      thread: threadMeta
     };
+    if (cachedParent || threadMeta.parent) {
+      state = { ...state, parent: threadMeta.parent ?? cachedParent };
+    }
+    if (subagentLinks.length) {
+      state = { ...state, subagents: subagentLinks };
+    }
     for (const m of this.middleware) {
       if (m.state) {
         state = { ...state, ...m.state(this.mwContext) };
@@ -385,10 +443,6 @@ export abstract class DeepAgent<
           });
           return { call, out };
         } catch (e: unknown) {
-          this.emit(AgentEventType.TOOL_ERROR, {
-            toolName: call.name,
-            error: String(e instanceof Error ? e.message : e)
-          });
           return { call, error: e };
         }
       })
@@ -397,6 +451,11 @@ export abstract class DeepAgent<
     await Promise.all(
       toolResults.map(async (r) => {
         if ("error" in r && r.error) {
+          const { error, call } = r;
+          this.emit(AgentEventType.TOOL_ERROR, {
+            toolName: call.name,
+            error: String(error instanceof Error ? error.message : error)
+          });
           await Promise.all(
             mws.map((m) =>
               m.onToolError?.(this.mwContext, r.call, r.error as Error)
@@ -463,7 +522,7 @@ export abstract class DeepAgent<
       const last = this.lastAssistant();
       this.emit(AgentEventType.AGENT_COMPLETED, { result: last });
 
-      const parent = this.store.kv.get<ParentInfo>("parent");
+      const parent = this.store.parentInfo;
       // If it's a subagent, report back to the parent on completion
       if (parent?.threadId && parent?.token) {
         const parentAgent = await getAgentByName(
@@ -520,6 +579,7 @@ export abstract class DeepAgent<
       // append tool message with the subagent's report
       const content = body.report ?? "";
       this.store.appendToolResult(hit.toolCallId, content);
+      this.store.markSubagentCompleted(body.childThreadId, content);
 
       // events
       this.emit(AgentEventType.SUBAGENT_COMPLETED, {
@@ -555,11 +615,15 @@ export const createDeepAgent = (options: {
   systemPrompt: string;
   middleware?: AgentMiddleware[];
   model?: string;
-  tools?: Record<string, ToolHandler>;
+  tools?: ToolHandler[];
   subagents?: SubagentDescriptor[];
 }): typeof Agent<unknown> => {
   // Build configuration maps from subagent descriptors
   const subagentDescriptorMap = new Map<string, SubagentDescriptor>();
+
+  const extraTools = Object.fromEntries(
+    (options.tools ?? []).map((t) => [getToolMeta(t)?.name, t])
+  );
 
   for (const desc of options.subagents ?? []) {
     subagentDescriptorMap.set(desc.name, desc);
@@ -571,7 +635,7 @@ export const createDeepAgent = (options: {
       subagents({ subagents: options.subagents })
     ];
     subagents = subagentDescriptorMap;
-    extraTools = options.tools ?? {};
+    extraTools = extraTools;
     _systemPrompt = options.systemPrompt;
     _model = options.model;
 
