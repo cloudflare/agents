@@ -159,20 +159,18 @@ export class Chat extends AIChatAgent<Env> {
 }
 ```
 
+Note that in production you would not connect to MCP servers in `onStart` but in standalone method you could add error handling. See this [MCP client example](examples/mcp-client)
+
 ### Passing props from client to server
 
 Since RPC transport doesn't have an OAuth flow, you can pass user context (like userId, role, etc.) directly as props:
 
 ```typescript
-export class Chat extends AIChatAgent<Env> {
-  async onStart(): Promise<void> {
-    // Pass props to provide user context to the MCP server
-    await this.addMcpServer("my-mcp", this.env.MyMCP, {
-      transport: { type: "rpc" },
-      props: { userId: "user-123", role: "admin" }
-    });
-  }
-}
+// Pass props to provide user context to the MCP server
+await this.addMcpServer("my-mcp", this.env.MyMCP, {
+  transport: { type: "rpc" },
+  props: { userId: "user-123", role: "admin" }
+});
 ```
 
 Your `McpAgent` can then access these props:
