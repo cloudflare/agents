@@ -306,14 +306,50 @@ The RPC transport is minimal by design (~350 lines) and fully supports:
 - Notifications (messages without `id` field)
 - Automatic reconnection after Durable Object hibernation
 
+### Configuring RPC Transport Server Timeout
+
+The RPC transport has a configurable timeout for waiting for tool responses. By default, the server will wait **60 seconds** for a tool handler to call `send()`. You can customize this by overriding the `getRpcTransportOptions()` method in your `McpAgent`:
+
+```typescript
+export class MyMCP extends McpAgent<Env, State, {}> {
+  server = new McpServer({
+    name: "MyMCP",
+    version: "1.0.0"
+  });
+
+  // Configure RPC transport timeout
+  protected getRpcTransportOptions() {
+    return {
+      timeout: 120000 // 2 minutes (default is 60000)
+    };
+  }
+
+  async init() {
+    this.server.tool(
+      "long-running-task",
+      "A tool that takes a while to complete",
+      { input: z.string() },
+      async ({ input }) => {
+        // This tool has up to 2 minutes to complete
+        await longRunningOperation(input);
+        return {
+          content: [{ type: "text", text: "Task completed" }]
+        };
+      }
+    );
+  }
+}
+```
+
+The timeout ensures that if a tool handler fails to respond (e.g., due to an infinite loop or forgotten `send()` call), the request will fail with a clear timeout error rather than hanging indefinitely.
+
 ### Advanced: Custom RPC function names
 
 By default, the RPC transport calls the `handleMcpMessage` function. You can customize this:
 
 ```typescript
 await this.addMcpServer("my-server", "MyMCP", {
-  transport: { type: "rpc" },
-  functionName: "customHandler"
+  transport: { type: "rpc", functionName: "customHandler" }
 });
 ```
 

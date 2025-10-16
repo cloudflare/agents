@@ -37,7 +37,11 @@ import type {
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
-import type { McpAgent } from "./mcp";
+import type {
+  McpAgent,
+  RpcConnectionOptions,
+  HttpConnectionOptions
+} from "./mcp";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -1470,12 +1474,7 @@ export class Agent<
   >(
     serverName: string,
     binding: DurableObjectNamespace<T> | string,
-    options: {
-      transport: { type: "rpc" };
-      functionName?: string;
-      client?: ConstructorParameters<typeof Client>[1];
-      props?: T extends McpAgent<unknown, unknown, infer Props> ? Props : never;
-    }
+    options: RpcConnectionOptions<T>
   ): Promise<{ id: string; authUrl: undefined }>;
 
   // Overload for HTTP/SSE transport
@@ -1484,13 +1483,7 @@ export class Agent<
     url: string,
     callbackHost?: string,
     agentsPrefix?: string,
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      transport?: {
-        headers?: HeadersInit;
-        type?: Exclude<TransportType, "rpc">;
-      };
-    }
+    options?: HttpConnectionOptions
   ): Promise<{ id: string; authUrl: string | undefined }>;
 
   async addMcpServer<
@@ -1498,24 +1491,9 @@ export class Agent<
   >(
     serverName: string,
     urlOrBinding: string | DurableObjectNamespace<T>,
-    callbackHostOrOptions?:
-      | string
-      | {
-          transport: { type: "rpc" };
-          functionName?: string;
-          client?: ConstructorParameters<typeof Client>[1];
-          props?: T extends McpAgent<unknown, unknown, infer Props>
-            ? Props
-            : never;
-        },
+    callbackHostOrOptions?: string | RpcConnectionOptions<T>,
     agentsPrefix = "agents",
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
-      };
-    }
+    options?: HttpConnectionOptions
   ): Promise<{ id: string; authUrl: string | undefined }> {
     // Determine if this is RPC or HTTP based on parameters
     const isRpc =
@@ -1524,14 +1502,7 @@ export class Agent<
 
     if (isRpc) {
       // RPC transport path
-      const rpcOptions = callbackHostOrOptions as {
-        transport: { type: "rpc" };
-        functionName?: string;
-        client?: ConstructorParameters<typeof Client>[1];
-        props?: T extends McpAgent<unknown, unknown, infer Props>
-          ? Props
-          : never;
-      };
+      const rpcOptions = callbackHostOrOptions as RpcConnectionOptions<T>;
 
       const namespace = this._resolveRpcBinding<T>(
         urlOrBinding as DurableObjectNamespace<T> | string
@@ -1551,11 +1522,7 @@ export class Agent<
         serverName,
         namespace,
         url,
-        options: {
-          functionName: rpcOptions.functionName,
-          client: rpcOptions.client,
-          props: rpcOptions.props
-        },
+        options: rpcOptions,
         reconnect
       });
 
@@ -1770,14 +1737,14 @@ export class Agent<
 
     await stub.setName(`rpc:${serverName}`);
 
-    if (options?.props) {
-      await stub.updateProps(options.props);
+    if (options?.transport?.props) {
+      await stub.updateProps(options.transport.props);
     }
 
     return {
       type: "rpc",
       stub,
-      functionName: options?.functionName
+      functionName: options?.transport?.functionName
     };
   }
 

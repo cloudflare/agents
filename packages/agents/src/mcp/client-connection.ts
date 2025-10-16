@@ -34,7 +34,12 @@ import {
 import { SSEEdgeClientTransport } from "./sse-edge";
 import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
 import { RPCClientTransport, type RPCClientTransportOptions } from "./rpc";
-import type { BaseTransportType, TransportType } from "./types";
+import type {
+  BaseTransportType,
+  TransportType,
+  McpClientOptions,
+  HttpTransportType
+} from "./types";
 
 /**
  * Connection state for MCP client connections
@@ -46,12 +51,18 @@ export type MCPConnectionState =
   | "discovering"
   | "failed";
 
+/**
+ * Transport options for MCP client connections.
+ * Combines transport-specific options with auth provider and type selection.
+ */
 export type MCPTransportOptions = (
   | SSEClientTransportOptions
   | StreamableHTTPClientTransportOptions
   | RPCClientTransportOptions
 ) & {
+  /** Optional OAuth provider for authenticating with the MCP server */
   authProvider?: AgentsOAuthProvider;
+  /** The transport type to use. "auto" will try streamable-http, then fall back to SSE */
   type?: TransportType;
 };
 
@@ -75,7 +86,7 @@ export class MCPClientConnection {
     info: ConstructorParameters<typeof Client>[0],
     public options: {
       transport: MCPTransportOptions;
-      client: ConstructorParameters<typeof Client>[1];
+      client: McpClientOptions;
     } = { client: {}, transport: {} }
   ) {
     const clientOptions = {
@@ -144,10 +155,7 @@ export class MCPClientConnection {
       throw new Error("Transport type must be specified");
     }
 
-    const finishAuth = async (base: BaseTransportType) => {
-      if (base === "rpc") {
-        throw new Error("RPC transport does not support authentication");
-      }
+    const finishAuth = async (base: HttpTransportType) => {
       const transport = this.getTransport(base);
       if (
         "finishAuth" in transport &&

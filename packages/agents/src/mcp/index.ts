@@ -20,7 +20,7 @@ import {
   MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
-import { RPCServerTransport } from "./rpc";
+import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 
 export abstract class McpAgent<
   Env = unknown,
@@ -88,6 +88,23 @@ export abstract class McpAgent<
     return websockets[0];
   }
 
+  /**
+   * Returns options for configuring the RPC server transport.
+   * Override this method to customize RPC transport behavior (e.g., timeout).
+   *
+   * @example
+   * ```typescript
+   * class MyMCP extends McpAgent {
+   *   protected getRpcTransportOptions() {
+   *     return { timeout: 120000 }; // 2 minutes
+   *   }
+   * }
+   * ```
+   */
+  protected getRpcTransportOptions(): RPCServerTransportOptions {
+    return {};
+  }
+
   /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
@@ -98,7 +115,7 @@ export abstract class McpAgent<
         return new StreamableHTTPServerTransport({});
       }
       case "rpc": {
-        return new RPCServerTransport();
+        return new RPCServerTransport(this.getRpcTransportOptions());
       }
     }
   }
@@ -372,7 +389,7 @@ export abstract class McpAgent<
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
     if (!this._transport) {
       const server = await this.server;
-      this._transport = new RPCServerTransport();
+      this._transport = new RPCServerTransport(this.getRpcTransportOptions());
       await server.connect(this._transport);
     }
 
@@ -489,3 +506,12 @@ export type {
   MCPClientOAuthResult,
   MCPClientOAuthCallbackConfig
 } from "./client";
+
+// Export connection configuration types
+export type {
+  RpcConnectionOptions,
+  HttpConnectionOptions,
+  McpClientOptions,
+  RpcTransportOptions,
+  HttpTransportOptions
+} from "./types";

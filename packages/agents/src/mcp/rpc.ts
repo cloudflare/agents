@@ -319,6 +319,21 @@ export interface RPCServerTransportOptions {
    * ```
    */
   onsessionclosed?: (sessionId: string) => void | Promise<void>;
+
+  /**
+   * Timeout in milliseconds for waiting for a response from the onmessage handler.
+   * If the handler doesn't call send() within this time, the request will fail with a timeout error.
+   *
+   * @default 60000 (60 seconds)
+   *
+   * @example
+   * ```typescript
+   * const transport = new RPCServerTransport({
+   *   timeout: 30000 // 30 seconds
+   * });
+   * ```
+   */
+  timeout?: number;
 }
 
 export class RPCServerTransport implements Transport {
@@ -331,6 +346,7 @@ export class RPCServerTransport implements Transport {
   private _initialized = false;
   private _onsessioninitialized?: (sessionId: string) => void | Promise<void>;
   private _onsessionclosed?: (sessionId: string) => void | Promise<void>;
+  private _timeout: number;
 
   sessionId?: string;
   onclose?: () => void;
@@ -341,6 +357,7 @@ export class RPCServerTransport implements Transport {
     this._sessionIdGenerator = options?.sessionIdGenerator;
     this._onsessioninitialized = options?.onsessioninitialized;
     this._onsessionclosed = options?.onsessionclosed;
+    this._timeout = options?.timeout ?? 60000; // Default 60 seconds
   }
 
   setProtocolVersion(version: string): void {
@@ -402,12 +419,19 @@ export class RPCServerTransport implements Transport {
       this._pendingResponse = [this._pendingResponse, message];
     }
 
-    // Resolve the promise on the next tick to allow multiple sends to accumulate
+    // Resolve the promise on the next tick to allow multiple send() calls to accumulate
+    // Note: Only the first send() triggers resolution; subsequent sends just accumulate
+    // until the microtask executes and handle() returns all responses
     if (this._responseResolver) {
       const resolver = this._responseResolver;
       this._responseResolver = null;
       // Use queueMicrotask to allow additional send() calls to accumulate
       queueMicrotask(() => resolver());
+    } else if (this._currentRequestId !== null) {
+      // This shouldn't happen - send() called after promise already resolved
+      console.warn(
+        `send() called after response already resolved for request ${this._currentRequestId}`
+      );
     }
   }
 
@@ -516,14 +540,40 @@ export class RPCServerTransport implements Transport {
     this._currentRequestId = (message as { id: string | number | null }).id;
 
     // Set up the promise before calling onmessage to handle race conditions
-    const responsePromise = new Promise<void>((resolve) => {
-      this._responseResolver = resolve;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const responsePromise = new Promise<void>((resolve, reject) => {
+      // Set up timeout
+      timeoutId = setTimeout(() => {
+        this._responseResolver = null;
+        reject(
+          new Error(
+            `Request timeout: No response received within ${this._timeout}ms for request ID ${this._currentRequestId}`
+          )
+        );
+      }, this._timeout);
+
+      // Wrap the resolver to clear timeout when response is received
+      this._responseResolver = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        resolve();
+      };
     });
 
     this.onmessage?.(message);
 
     // Wait for a response using a promise that resolves when send() is called
-    await responsePromise;
+    try {
+      await responsePromise;
+    } catch (error) {
+      // Clean up on timeout
+      this._pendingResponse = null;
+      this._currentRequestId = null;
+      this._responseResolver = null;
+      throw error;
+    }
 
     const response = this._pendingResponse;
     this._pendingResponse = null;
