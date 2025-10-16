@@ -1,7 +1,7 @@
 {
   "author": "Matt Carey <mcarey@cloudflare.com>",
   "keywords": [],
-  "name": "@cloudflare/agents-rpc-transport-demo",
+  "name": "@cloudflare/agents-mcp-rpc-transport-demo",
   "private": true,
   "scripts": {
     "start": "vite dev",
