@@ -20,6 +20,7 @@ import {
   MCP_MESSAGE_HEADER
 } from "./utils";
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
+import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 
 export abstract class McpAgent<
   Env = unknown,
@@ -45,8 +46,8 @@ export abstract class McpAgent<
   }
 
   /** Read the transport type for this agent.
-   * This relies on the naming scheme being `sse:${sessionId}`
-   * or `streamable-http:${sessionId}`.
+   * This relies on the naming scheme being `sse:${sessionId}`,
+   * `streamable-http:${sessionId}`, or `rpc:${sessionId}`.
    */
   getTransportType(): BaseTransportType {
     const [t, ..._] = this.name.split(":");
@@ -55,6 +56,8 @@ export abstract class McpAgent<
         return "sse";
       case "streamable-http":
         return "streamable-http";
+      case "rpc":
+        return "rpc";
       default:
         throw new Error(
           "Invalid transport type. McpAgent must be addressed with a valid protocol."
@@ -85,6 +88,23 @@ export abstract class McpAgent<
     return websockets[0];
   }
 
+  /**
+   * Returns options for configuring the RPC server transport.
+   * Override this method to customize RPC transport behavior (e.g., timeout).
+   *
+   * @example
+   * ```typescript
+   * class MyMCP extends McpAgent {
+   *   protected getRpcTransportOptions() {
+   *     return { timeout: 120000 }; // 2 minutes
+   *   }
+   * }
+   * ```
+   */
+  protected getRpcTransportOptions(): RPCServerTransportOptions {
+    return {};
+  }
+
   /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
@@ -93,6 +113,9 @@ export abstract class McpAgent<
       }
       case "streamable-http": {
         return new StreamableHTTPServerTransport({});
+      }
+      case "rpc": {
+        return new RPCServerTransport(this.getRpcTransportOptions());
       }
     }
   }
@@ -114,7 +137,7 @@ export abstract class McpAgent<
   }
 
   /*
-   * Base Agent / Parykit Server overrides
+   * Base Agent / Partykit Server overrides
    */
 
   /** Sets up the MCP transport and server every time the Agent is started.*/
@@ -127,7 +150,12 @@ export abstract class McpAgent<
     const server = await this.server;
     // Connect to the MCP server
     this._transport = this.initTransport();
+
+    if (!this._transport) {
+      throw new Error("Failed to initialize transport");
+    }
     await server.connect(this._transport);
+
     await this.reinitializeServer();
   }
 
@@ -350,6 +378,40 @@ export abstract class McpAgent<
     return false;
   }
 
+  /**
+   * Handle an RPC message for MCP
+   * This method is called by the RPC stub to process MCP messages
+   * @param message The JSON-RPC message(s) to handle
+   * @returns The response message(s) or undefined
+   */
+  async handleMcpMessage(
+    message: JSONRPCMessage | JSONRPCMessage[]
+  ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
+    if (!this._transport) {
+      this.props = await this.ctx.storage.get("props");
+
+      // Re-run init() to register tools on the server
+      await this.init();
+      const server = await this.server;
+
+      this._transport = this.initTransport();
+
+      if (!this._transport) {
+        throw new Error("Failed to initialize transport");
+      }
+      await server.connect(this._transport);
+
+      // Reinitialize the server with any stored initialize request
+      await this.reinitializeServer();
+    }
+
+    if (!(this._transport instanceof RPCServerTransport)) {
+      throw new Error("Expected RPC transport");
+    }
+
+    return await this._transport.handle(message);
+  }
+
   /** Return a handler for the given path for this MCP.
    * Defaults to Streamable HTTP transport.
    */
@@ -436,6 +498,13 @@ export abstract class McpAgent<
 // Export client transport classes
 export { SSEEdgeClientTransport } from "./sse-edge";
 export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+export {
+  RPCClientTransport,
+  RPCServerTransport,
+  type MCPStub,
+  type RPCClientTransportOptions,
+  type RPCServerTransportOptions
+} from "./rpc";
 
 // Export elicitation types and schemas
 export {
@@ -449,3 +518,12 @@ export type {
   MCPClientOAuthResult,
   MCPClientOAuthCallbackConfig
 } from "./client";
+
+// Export connection configuration types
+export type {
+  RpcConnectionOptions,
+  HttpConnectionOptions,
+  McpClientOptions,
+  RpcTransportOptions,
+  HttpTransportOptions
+} from "./types";
