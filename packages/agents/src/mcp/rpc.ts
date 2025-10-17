@@ -167,20 +167,38 @@ function validateJSONRPCMessage(message: unknown): message is JSONRPCMessage {
   );
 }
 
+/**
+ * Type for RPC handler functions that can process MCP messages
+ */
+export type MCPMessageHandler = (
+  message: JSONRPCMessage | JSONRPCMessage[]
+) => Promise<JSONRPCMessage | JSONRPCMessage[] | undefined>;
+
+/**
+ * Base interface for objects that can handle MCP messages via RPC
+ */
 export interface MCPStub {
-  handleMcpMessage(
-    message: JSONRPCMessage | JSONRPCMessage[]
-  ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined>;
+  handleMcpMessage: MCPMessageHandler;
+  setName?(name: string): Promise<void>;
 }
 
-export interface RPCClientTransportOptions {
-  stub: MCPStub;
-  functionName?: string;
+export interface RPCClientTransportOptions<
+  TStub extends MCPStub = MCPStub,
+  TMethod extends keyof TStub = "handleMcpMessage"
+> {
+  stub: TStub;
+  functionName?: TMethod extends string ? TMethod : never;
+  doName?: string;
 }
 
-export class RPCClientTransport implements Transport {
-  private _stub: MCPStub;
-  private _functionName: string;
+export class RPCClientTransport<
+  TStub extends MCPStub = MCPStub,
+  TMethod extends keyof TStub = "handleMcpMessage"
+> implements Transport
+{
+  private _stub: TStub;
+  private _functionName: TMethod extends string ? TMethod : "handleMcpMessage";
+  private _doName?: string;
   private _started = false;
   private _protocolVersion?: string;
 
@@ -189,9 +207,13 @@ export class RPCClientTransport implements Transport {
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
-  constructor(options: RPCClientTransportOptions) {
+  constructor(options: RPCClientTransportOptions<TStub, TMethod>) {
     this._stub = options.stub;
-    this._functionName = options.functionName ?? "handleMcpMessage";
+    this._functionName = (options.functionName ??
+      "handleMcpMessage") as TMethod extends string
+      ? TMethod
+      : "handleMcpMessage";
+    this._doName = options.doName;
   }
 
   setProtocolVersion(version: string): void {
@@ -229,9 +251,14 @@ export class RPCClientTransport implements Transport {
       validateJSONRPCMessage(message);
     }
 
+    // Set the name if the stub is a DO
+    if (this._doName && this._stub.setName) {
+      await this._stub.setName(this._doName);
+    }
+
     try {
-      const result =
-        await this._stub[this._functionName as keyof MCPStub](message);
+      const handler = this._stub[this._functionName] as MCPMessageHandler;
+      const result = await handler(message);
 
       if (!result) {
         return;

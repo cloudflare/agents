@@ -388,9 +388,21 @@ export abstract class McpAgent<
     message: JSONRPCMessage
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
     if (!this._transport) {
+      this.props = await this.ctx.storage.get("props");
+
+      // Re-run init() to register tools on the server
+      await this.init();
       const server = await this.server;
-      this._transport = new RPCServerTransport(this.getRpcTransportOptions());
+
+      this._transport = this.initTransport();
+
+      if (!this._transport) {
+        throw new Error("Failed to initialize transport");
+      }
       await server.connect(this._transport);
+
+      // Reinitialize the server with any stored initialize request
+      await this.reinitializeServer();
     }
 
     if (!(this._transport instanceof RPCServerTransport)) {

@@ -1732,10 +1732,9 @@ export class Agent<
   ): Promise<MCPTransportOptions> {
     const { serverName, namespace, options } = config;
 
-    const doId = namespace.idFromName(`rpc:${serverName}`);
+    const doName = `rpc:${serverName}`;
+    const doId = namespace.idFromName(doName);
     const stub = namespace.get(doId) as unknown as DurableObjectStub<T>;
-
-    await stub.setName(`rpc:${serverName}`);
 
     if (options?.transport?.props) {
       await stub.updateProps(options.transport.props);
@@ -1744,7 +1743,8 @@ export class Agent<
     return {
       type: "rpc",
       stub,
-      functionName: options?.transport?.functionName
+      functionName: options?.transport?.functionName,
+      doName
     };
   }
 
