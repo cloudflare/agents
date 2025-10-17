@@ -381,11 +381,11 @@ export abstract class McpAgent<
   /**
    * Handle an RPC message for MCP
    * This method is called by the RPC stub to process MCP messages
-   * @param message The JSON-RPC message to handle
+   * @param message The JSON-RPC message(s) to handle
    * @returns The response message(s) or undefined
    */
   async handleMcpMessage(
-    message: JSONRPCMessage
+    message: JSONRPCMessage | JSONRPCMessage[]
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
     if (!this._transport) {
       this.props = await this.ctx.storage.get("props");

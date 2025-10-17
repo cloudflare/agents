@@ -441,7 +441,7 @@ describe("RPC Transport", () => {
       await serverTransport.start();
 
       const stub: MCPStub = {
-        handleMcpMessage: async (msg: JSONRPCMessage) => {
+        handleMcpMessage: async (msg: JSONRPCMessage | JSONRPCMessage[]) => {
           return await serverTransport.handle(msg);
         }
       };

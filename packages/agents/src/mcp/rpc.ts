@@ -177,27 +177,20 @@ export type MCPMessageHandler = (
 /**
  * Base interface for objects that can handle MCP messages via RPC
  */
-export interface MCPStub {
+export interface MCPStub extends Record<string, unknown> {
   handleMcpMessage: MCPMessageHandler;
   setName?(name: string): Promise<void>;
 }
 
-export interface RPCClientTransportOptions<
-  TStub extends MCPStub = MCPStub,
-  TMethod extends keyof TStub = "handleMcpMessage"
-> {
-  stub: TStub;
-  functionName?: TMethod extends string ? TMethod : never;
+export interface RPCClientTransportOptions {
+  stub: MCPStub;
+  functionName?: string;
   doName?: string;
 }
 
-export class RPCClientTransport<
-  TStub extends MCPStub = MCPStub,
-  TMethod extends keyof TStub = "handleMcpMessage"
-> implements Transport
-{
-  private _stub: TStub;
-  private _functionName: TMethod extends string ? TMethod : "handleMcpMessage";
+export class RPCClientTransport implements Transport {
+  private _stub: MCPStub;
+  private _functionName: string;
   private _doName?: string;
   private _started = false;
   private _protocolVersion?: string;
@@ -207,12 +200,9 @@ export class RPCClientTransport<
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
-  constructor(options: RPCClientTransportOptions<TStub, TMethod>) {
+  constructor(options: RPCClientTransportOptions) {
     this._stub = options.stub;
-    this._functionName = (options.functionName ??
-      "handleMcpMessage") as TMethod extends string
-      ? TMethod
-      : "handleMcpMessage";
+    this._functionName = options.functionName ?? "handleMcpMessage";
     this._doName = options.doName;
   }
 
@@ -452,11 +442,6 @@ export class RPCServerTransport implements Transport {
       // Use queueMicrotask to allow additional send() calls to accumulate
       // Resolver is reused for concurrent sends within the same tick
       queueMicrotask(() => resolver());
-    } else if (this._currentRequestId !== null) {
-      // This shouldn't happen - send() called after promise already resolved
-      console.warn(
-        `send() called after response already resolved for request ${this._currentRequestId}`
-      );
     }
   }
 
