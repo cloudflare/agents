@@ -420,12 +420,10 @@ export class RPCServerTransport implements Transport {
     }
 
     // Resolve the promise on the next tick to allow multiple send() calls to accumulate
-    // Note: Only the first send() triggers resolution; subsequent sends just accumulate
-    // until the microtask executes and handle() returns all responses
     if (this._responseResolver) {
       const resolver = this._responseResolver;
-      this._responseResolver = null;
       // Use queueMicrotask to allow additional send() calls to accumulate
+      // Resolver is reused for concurrent sends within the same tick
       queueMicrotask(() => resolver());
     } else if (this._currentRequestId !== null) {
       // This shouldn't happen - send() called after promise already resolved
@@ -553,11 +551,14 @@ export class RPCServerTransport implements Transport {
       }, this._timeout);
 
       // Wrap the resolver to clear timeout when response is received
+      // Note: Don't null out here - send() needs it to remain available for concurrent calls
       this._responseResolver = () => {
         if (timeoutId) {
           clearTimeout(timeoutId);
           timeoutId = null;
         }
+        // Null out after resolution to prevent reuse across different requests
+        this._responseResolver = null;
         resolve();
       };
     });

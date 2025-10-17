@@ -303,6 +303,40 @@ describe("RPC Transport", () => {
       expect(result).toEqual(expectedResponses);
     });
 
+    it("should handle concurrent sends within the same request", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const expectedResponses: JSONRPCMessage[] = [
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          result: { first: true }
+        },
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          result: { second: true }
+        }
+      ];
+
+      transport.onmessage = () => {
+        // Simulate concurrent sends (don't await)
+        transport.send(expectedResponses[0]);
+        transport.send(expectedResponses[1]);
+      };
+
+      const handlePromise = transport.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "test",
+        params: {}
+      });
+
+      const result = await handlePromise;
+      expect(result).toEqual(expectedResponses);
+    });
+
     it("should handle notification without waiting for response", async () => {
       const transport = new RPCServerTransport();
       await transport.start();
