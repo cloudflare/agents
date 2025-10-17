@@ -6,7 +6,7 @@
     "x402-hono": "^0.6.5"
   },
   "keywords": [],
-  "name": "@cloudflare/agents-deep-example",
+  "name": "@cloudflare/agents-deep-soc-example",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",

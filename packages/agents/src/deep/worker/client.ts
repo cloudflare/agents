@@ -103,6 +103,7 @@ export const html = `<!doctype html>
     align-items: flex-start;
     gap: 6px;
     padding: 12px 14px;
+    padding-left: calc(12px + (var(--depth, 0) * 14px));
     border-radius: 8px;
     border: 1px dashed transparent;
     background: rgba(255, 255, 255, 0.02);
@@ -124,6 +125,9 @@ export const html = `<!doctype html>
   }
 
   .thread-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
     font-size: 14px;
     font-weight: 600;
     word-break: break-all;
@@ -137,6 +141,28 @@ export const html = `<!doctype html>
     font-size: 12px;
   }
 
+  .thread-prefix {
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: pre;
+    display: inline-block;
+    min-width: 3ch;
+    text-align: right;
+    margin-right: 6px;
+    opacity: 0.8;
+  }
+
+  .thread-root-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5ch;
+    font-size: 11px;
+    color: var(--accent);
+    margin-right: 6px;
+  }
+
   .threads-empty {
     text-align: center;
     padding: 24px 14px;
@@ -147,21 +173,70 @@ export const html = `<!doctype html>
     font-size: 13px;
   }
 
-  .main-content {
-    display: grid;
-    grid-template-columns: minmax(0, 3.5fr) minmax(320px, 1.4fr);
-    grid-template-areas:
-      "chat side"
-      "thread side"
-      "state side";
-    gap: 28px;
-    align-items: flex-start;
-  }
-
-  .main-column {
+  .main-area {
     display: flex;
     flex-direction: column;
     gap: 20px;
+    min-width: 0;
+  }
+
+  .view-tabs {
+    display: flex;
+    gap: 10px;
+  }
+
+  .view-tab {
+    flex: 1;
+    padding: 10px 14px;
+    border-radius: 6px;
+    border: 1px dashed transparent;
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .view-tab.active {
+    color: var(--fg);
+    border-color: var(--border-strong);
+    background: rgba(249, 115, 22, 0.14);
+  }
+
+  .view-section {
+    display: none;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .view-section.active {
+    display: flex;
+  }
+
+  .view-chat-main {
+    display: flex;
+    gap: 20px;
+    align-items: stretch;
+    flex-wrap: nowrap;
+  }
+
+  .view-chat-main .chat-card {
+    flex: 1;
+  }
+
+  .todos-column {
+    flex: 0 0 260px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .todos-column .todos-card {
+    flex: 1;
+  }
+
+  .state-card {
+    margin-top: 8px;
   }
 
   .chat-card {
@@ -583,7 +658,7 @@ export const html = `<!doctype html>
       linear-gradient(160deg, rgba(10, 14, 22, 0.85), rgba(13, 18, 29, 0.9));
     background-size: 20px 20px, 100% 100%;
     overflow:hidden; 
-    height: 620px;
+    height: calc(90vh - 150px);
   }
 
   #graph { 
@@ -719,45 +794,11 @@ export const html = `<!doctype html>
     color: var(--muted);
   }
 
-  .side-panel {
-    grid-area: side;
+  .todos-card,
+  .files-card {
     display: flex;
-    flex-direction: column;
-    gap: 20px;
-    min-width: 0;
-  }
-
-  .panel-tabs {
-    display: flex;
-    gap: 8px;
-  }
-
-  .panel-tab {
-    flex: 1;
-    padding: 10px 12px;
-    border-radius: 6px;
-    border: 1px dashed transparent;
-    background: rgba(255, 255, 255, 0.04);
-    color: var(--muted);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-  }
-
-  .panel-tab.active {
-    color: var(--fg);
-    border-color: var(--border-strong);
-    background: rgba(249, 115, 22, 0.14);
-  }
-
-  .panel-section {
-    display: none;
     flex-direction: column;
     gap: 16px;
-  }
-
-  .panel-section.active {
-    display: flex;
   }
 
   .todos-summary {
@@ -811,7 +852,7 @@ export const html = `<!doctype html>
   .file-meta { font-size:12px; color: var(--muted); }
   .file-preview {
     background:rgba(6,10,18,0.9); padding:12px; border:1px dashed var(--border);
-    border-radius:6px; max-height:420px; overflow:auto;
+    border-radius:6px; max-height:65vh; overflow:auto;
   }
 
   /* line numbers in preview */
@@ -862,21 +903,20 @@ export const html = `<!doctype html>
   }
 
   @media (max-width: 1024px) {
-    .main-content {
-      grid-template-columns: 1fr;
-      grid-template-areas:
-        "chat"
-        "side"
-        "thread"
-        "state";
+    .view-tabs {
+      flex-direction: column;
     }
 
-    .side-panel {
-      order: 2;
+    .view-tab {
+      width: 100%;
     }
 
-    .threadline-card {
-      order: 3;
+    .view-chat-main {
+      flex-direction: column;
+    }
+
+    .todos-column {
+      flex: 1 1 auto;
     }
   }
 
@@ -928,87 +968,100 @@ export const html = `<!doctype html>
         </div>
       </aside>
 
-      <div class="main-content">
-        <section class="card chat-card">
-          <div class="chat-header">
-            <div class="input-group">
-              <label for="threadId">Thread ID</label>
-              <input id="threadId" placeholder="Select or create a thread…" />
+      <div class="main-area">
+        <div class="view-tabs">
+          <button class="view-tab active" data-view-target="viewChat">Chat &amp; Todos</button>
+          <button class="view-tab" data-view-target="viewGraph">Graph</button>
+          <button class="view-tab" data-view-target="viewFiles">Files</button>
+        </div>
+
+        <div id="viewChat" class="view-section active">
+          <div class="view-chat-main">
+            <section class="card chat-card">
+              <div class="chat-header">
+                <div class="input-group">
+                  <label for="threadId">Thread ID</label>
+                  <input id="threadId" placeholder="Select or create a thread…" />
+                </div>
+              </div>
+
+              <div class="run-summary">
+                <span class="run-badge" id="runStatusBadge">Idle</span>
+                <span class="run-meta" id="runStep"></span>
+                <span class="run-meta" id="runModel"></span>
+              </div>
+
+              <div class="chat-transcript" id="chatTranscript">
+                <div class="chat-empty">Select a thread to load the conversation.</div>
+              </div>
+
+              <div class="chat-input">
+                <textarea id="msg" rows="3" placeholder="Type a user message…"></textarea>
+                <button id="btnSend" class="primary">Send</button>
+              </div>
+
+              <div class="chat-actions">
+                <div class="button-group">
+                  <button id="btnApprove">Approve (HITL)</button>
+                  <button id="btnReject">Reject (HITL)</button>
+                  <button id="btnCancel" class="danger">Cancel Run</button>
+                  <button id="btnState">Refresh State</button>
+                </div>
+              </div>
+
+              <div class="shortcuts-hint">
+                Press <span class="shortcut">Ctrl+Enter</span> to send, <span class="shortcut">Ctrl+N</span> for new thread
+              </div>
+            </section>
+
+            <div class="todos-column">
+              <section class="card todos-card">
+                <h3>Todos</h3>
+                <div class="todos-summary" id="todosSummary"></div>
+                <ul class="todo-list" id="todosList"></ul>
+              </section>
             </div>
           </div>
 
-          <div class="run-summary">
-            <span class="run-badge" id="runStatusBadge">Idle</span>
-            <span class="run-meta" id="runStep"></span>
-            <span class="run-meta" id="runModel"></span>
-          </div>
-
-          <div class="chat-transcript" id="chatTranscript">
-            <div class="chat-empty">Select a thread to load the conversation.</div>
-          </div>
-
-          <div class="chat-input">
-            <textarea id="msg" rows="3" placeholder="Type a user message…"></textarea>
-            <button id="btnSend" class="primary">Send</button>
-          </div>
-
-          <div class="chat-actions">
-            <div class="button-group">
-              <button id="btnApprove">Approve (HITL)</button>
-              <button id="btnReject">Reject (HITL)</button>
-              <button id="btnCancel" class="danger">Cancel Run</button>
-            <button id="btnState">Refresh State</button>
-          </div>
+          <section class="card state-card">
+            <h3>State</h3>
+            <pre id="state"></pre>
+          </section>
         </div>
 
-        <div class="shortcuts-hint">
-          Press <span class="shortcut">Ctrl+Enter</span> to send, <span class="shortcut">Ctrl+N</span> for new thread
-        </div>
-        </section>
-
-        <section class="card threadline-card">
-          <div class="threadline-header">
-            <span class="badge"><span class="threadline-badge-dot" style="background:var(--model)"></span>Model</span>
-            <span class="badge"><span class="threadline-badge-dot" style="background:var(--tool)"></span>Tool</span>
-            <span class="badge"><span class="threadline-badge-dot" style="background:var(--ok)"></span>Completed</span>
-            <span class="badge"><span class="threadline-badge-dot" style="background:var(--warn)"></span>Paused</span>
-            <span class="badge"><span class="threadline-badge-dot" style="background:var(--err)"></span>Error</span>
-            <span class="badge"><span class="threadline-badge-dot" style="background:var(--info)"></span>Run Tick</span>
-            <span class="badge">Dashed path = linked agent</span>
-            <span class="badge" style="margin-left:auto;">💡 Drag to pan • Ctrl/Cmd + scroll to zoom</span>
-          </div>
-          <div class="graph-wrap">
-            <svg id="graph"></svg>
-            <div class="zoom-controls">
-              <button id="zoomOut">-</button>
-              <span class="zoom-pct" id="zoomPct">100%</span>
-              <button id="zoomIn">+</button>
-              <button id="zoomReset">Reset</button>
+        <div id="viewGraph" class="view-section">
+          <section class="card threadline-card">
+            <div class="threadline-header">
+              <span class="badge"><span class="threadline-badge-dot" style="background:var(--model)"></span>Model</span>
+              <span class="badge"><span class="threadline-badge-dot" style="background:var(--tool)"></span>Tool</span>
+              <span class="badge"><span class="threadline-badge-dot" style="background:var(--ok)"></span>Completed</span>
+              <span class="badge"><span class="threadline-badge-dot" style="background:var(--warn)"></span>Paused</span>
+              <span class="badge"><span class="threadline-badge-dot" style="background:var(--err)"></span>Error</span>
+              <span class="badge"><span class="threadline-badge-dot" style="background:var(--info)"></span>Run Tick</span>
+              <span class="badge">Dashed path = linked agent</span>
+              <span class="badge" style="margin-left:auto;">💡 Drag to pan • Ctrl/Cmd + scroll to zoom</span>
             </div>
-          </div>
-        </section>
+            <div class="graph-wrap">
+              <svg id="graph"></svg>
+              <div class="zoom-controls">
+                <button id="zoomOut">-</button>
+                <span class="zoom-pct" id="zoomPct">100%</span>
+                <button id="zoomIn">+</button>
+                <button id="zoomReset">Reset</button>
+              </div>
+            </div>
+          </section>
+        </div>
 
-        <aside class="card side-panel">
-          <div class="panel-tabs">
-            <button class="panel-tab active" data-panel-target="todosPanel">Todos</button>
-            <button class="panel-tab" data-panel-target="filesPanel">Files</button>
-          </div>
-          <div id="todosPanel" class="panel-section active">
-            <div class="todos-summary" id="todosSummary"></div>
-            <ul class="todo-list" id="todosList"></ul>
-          </div>
-          <div id="filesPanel" class="panel-section">
+        <div id="viewFiles" class="view-section">
+          <section class="card files-card">
+            <h3>Files</h3>
             <div class="files-panel">
               <div class="files-list" id="filesList"></div>
               <pre class="file-preview"><code id="filePreview" class="code"></code></pre>
             </div>
-          </div>
-        </aside>
-
-        <section class="card state-card">
-          <h3>State</h3>
-          <pre id="state"></pre>
-        </section>
+          </section>
+        </div>
       </div>
     </div>
   </div>
@@ -1040,19 +1093,19 @@ const runModelLabel = $("runModel");
 const chatTranscript = $("chatTranscript");
 const threadInput = $("threadId");
 const btnRefreshThreads = $("btnRefreshThreads");
-const panelTabs = Array.from(document.querySelectorAll(".panel-tab"));
-const panelSections = new Map(
-  Array.from(document.querySelectorAll(".panel-section")).map((section) => [section.id, section])
+const viewTabs = Array.from(document.querySelectorAll(".view-tab"));
+const viewSections = new Map(
+  Array.from(document.querySelectorAll(".view-section")).map((section) => [section.id, section])
 );
 
-for (const btn of panelTabs) {
+for (const btn of viewTabs) {
   btn.addEventListener("click", () => {
-    const target = btn.getAttribute("data-panel-target");
-    if (!target || !panelSections.has(target)) return;
-    for (const other of panelTabs) {
+    const target = btn.getAttribute("data-view-target");
+    if (!target || !viewSections.has(target)) return;
+    for (const other of viewTabs) {
       other.classList.toggle("active", other === btn);
     }
-    for (const [id, section] of panelSections) {
+    for (const [id, section] of viewSections) {
       section.classList.toggle("active", id === target);
     }
   });
@@ -1063,6 +1116,10 @@ let ws; // main ws
 let selectedThreadId = "";
 let latestThreads = [];
 const extraThreads = new Map();
+let stateRefreshTimer = null;
+let stateRefreshInFlight = false;
+const REFRESH_DEBOUNCE_MS = 220;
+const REFRESH_PRIORITY_MS = 40;
 
 // --- Graph state ---
 const palette = ["#2563eb","#16a34a","#9333ea","#ea580c","#0891b2","#b91c1c","#0ea5e9","#059669"];
@@ -1129,6 +1186,30 @@ function resetGraphState() {
   lastNodeInLane.clear();
   pendingEdges.clear();
   primingThreads.clear();
+}
+
+function scheduleStateRefresh(priority = false) {
+  if (!selectedThreadId) return;
+  if (primingThreads.has(selectedThreadId)) return;
+  const delay = priority ? REFRESH_PRIORITY_MS : REFRESH_DEBOUNCE_MS;
+  if (stateRefreshTimer) {
+    if (priority) {
+      clearTimeout(stateRefreshTimer);
+      stateRefreshTimer = setTimeout(runPendingStateRefresh, delay);
+    }
+    return;
+  }
+  stateRefreshTimer = setTimeout(runPendingStateRefresh, delay);
+}
+
+async function runPendingStateRefresh() {
+  stateRefreshTimer = null;
+  if (!selectedThreadId) return;
+  if (stateRefreshInFlight) {
+    scheduleStateRefresh(true);
+    return;
+  }
+  await refreshState();
 }
 
 function updateRunSummary(run, state) {
@@ -1559,14 +1640,47 @@ function closeModal() {
   modal.classList.remove("open");
 }
 
+const REFRESH_EVENTS = new Set([
+  "thread.created",
+  "request.accepted",
+  "run.started",
+  "run.tick",
+  "run.paused",
+  "run.resumed",
+  "run.completed",
+  "run.canceled",
+  "agent.started",
+  "agent.completed",
+  "agent.error",
+  "model.started",
+  "model.completed",
+  "tool.started",
+  "tool.output",
+  "tool.error",
+  "hitl.interrupt",
+  "hitl.resume",
+  "subagent.spawned",
+  "subagent.completed",
+  "checkpoint.saved"
+]);
+
+const PRIORITY_REFRESH_EVENTS = new Set([
+  "agent.completed",
+  "agent.error",
+  "run.completed",
+  "run.paused",
+  "run.resumed",
+  "run.canceled",
+  "tool.error",
+  "subagent.spawned",
+  "subagent.completed",
+  "hitl.resume"
+]);
+
 function handleEvent(threadId, ev) {
   const t = ev?.type;
   if (!t) return;
-  
-  // Auto-refresh state on key events
-  if (["agent.completed", "run.paused", "run.completed", "agent.error"].includes(t)) {
-    refreshState();
-  }
+  const isPriming = primingThreads.has(threadId);
 
   // Map event to node
   switch (t) {
@@ -1658,6 +1772,14 @@ function handleEvent(threadId, ev) {
   }
 
   flushPendingEdgesForLane(threadId);
+
+  if (
+    !isPriming &&
+    threadId === selectedThreadId &&
+    REFRESH_EVENTS.has(t)
+  ) {
+    scheduleStateRefresh(PRIORITY_REFRESH_EVENTS.has(t));
+  }
 }
 
 function short(id) { return (id||"").slice(0,6); }
@@ -1718,7 +1840,7 @@ async function connect(idOverride) {
     renderThreadList(latestThreads, id);
     await primeEventsDeep(id);
     showNotification("Connected to thread", "success");
-    await refreshState();
+    await refreshState(true);
     await loadThreads(id);
   } catch (error) {
     console.error("Connection error:", error);
@@ -1818,7 +1940,7 @@ async function send() {
     });
     $("msg").value = "";
     showNotification("Message sent", "success");
-    await refreshState();
+    await refreshState(true);
   } catch (error) {
     console.error("Failed to send message:", error);
     showNotification("Failed to send message: " + error.message, "error");
@@ -1839,7 +1961,7 @@ async function hitl(approved) {
       body: JSON.stringify({ approved, modifiedToolCalls: [] })
     });
     showNotification((approved ? "Approved" : "Rejected") + " HITL request", "success");
-    await refreshState();
+    await refreshState(true);
   } catch (error) {
     console.error("Failed to send HITL response:", error);
     showNotification("Failed to send HITL response: " + error.message, "error");
@@ -1856,16 +1978,27 @@ async function cancelRun() {
   try {
     await fetch("/threads/" + id + "/cancel", { method:"POST" });
     showNotification("Run cancelled", "success");
-    await refreshState();
+    await refreshState(true);
   } catch (error) {
     console.error("Failed to cancel run:", error);
     showNotification("Failed to cancel run: " + error.message, "error");
   }
 }
 
-async function refreshState() {
-  const id = $("threadId").value.trim();
+async function refreshState(force = false) {
+  if (stateRefreshInFlight && !force) return;
+  if (stateRefreshTimer) {
+    clearTimeout(stateRefreshTimer);
+    stateRefreshTimer = null;
+  }
+  const id = (selectedThreadId || threadInput?.value || "").trim();
   if (!id) return;
+  if (stateRefreshInFlight && force) {
+    scheduleStateRefresh(true);
+    return;
+  }
+
+  stateRefreshInFlight = true;
   try {
     const r = await fetch("/threads/" + id + "/state");
     const j = await r.json();
@@ -1879,6 +2012,8 @@ async function refreshState() {
   } catch (err) {
     console.error("Failed to refresh state:", err);
     showNotification("Failed to refresh state: " + err.message, "error");
+  } finally {
+    stateRefreshInFlight = false;
   }
 }
 
@@ -1946,7 +2081,7 @@ async function selectThread(id, { connectThread = true } = {}) {
   if (connectThread) {
     await connect(id);
   } else {
-    await refreshState();
+    await refreshState(true);
   }
 }
 
@@ -2122,14 +2257,6 @@ function renderThreadList(threads = [], activeId) {
   }
 
   const list = Array.from(combined.values());
-  list.sort((a, b) => {
-    const ta = Date.parse(a.createdAt ?? "");
-    const tb = Date.parse(b.createdAt ?? "");
-    if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
-    if (Number.isNaN(ta)) return 1;
-    if (Number.isNaN(tb)) return -1;
-    return tb - ta;
-  });
 
   threadsListEl.innerHTML = "";
   if (!list.length) {
@@ -2138,6 +2265,7 @@ function renderThreadList(threads = [], activeId) {
     return;
   }
 
+  const nodeMap = new Map();
   for (const meta of list) {
     updateLaneMeta(meta.id, {
       title: meta.agentName || meta.agentType || (meta.isSubagent ? "Subagent" : "Agent"),
@@ -2147,34 +2275,129 @@ function renderThreadList(threads = [], activeId) {
       createdAt: meta.createdAt,
       isSubagent: meta.isSubagent
     });
+    nodeMap.set(meta.id, { meta: { ...meta }, children: [] });
+  }
 
+  for (const node of nodeMap.values()) {
+    const parentId = node.meta.parent?.threadId;
+    if (parentId && nodeMap.has(parentId)) {
+      nodeMap.get(parentId).children.push(node);
+    }
+  }
+
+  const roots = [];
+  for (const node of nodeMap.values()) {
+    const parentId = node.meta.parent?.threadId;
+    if (!parentId || !nodeMap.has(parentId)) {
+      roots.push(node);
+    }
+  }
+
+  const compareNodes = (a, b) => {
+    const ta = Date.parse(a.meta.createdAt ?? "");
+    const tb = Date.parse(b.meta.createdAt ?? "");
+    if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
+    if (Number.isNaN(ta)) return 1;
+    if (Number.isNaN(tb)) return -1;
+    return tb - ta;
+  };
+
+  const sortBranch = (arr) => {
+    arr.sort(compareNodes);
+    for (const node of arr) {
+      if (node.children.length) sortBranch(node.children);
+    }
+  };
+
+  sortBranch(roots);
+
+  const frag = document.createDocumentFragment();
+
+  const buildButton = (meta, depth, connector) => {
     const btn = document.createElement("button");
     btn.type = "button";
     const isActive = meta.id === activeId;
     btn.className = "thread-item" + (isActive ? " active" : "");
+    btn.dataset.depth = String(depth);
+    btn.style.setProperty("--depth", String(depth));
+
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "thread-title";
+
+    if (depth === 0) {
+      if (meta.parent?.threadId) {
+        const prefix = document.createElement("span");
+        prefix.className = "thread-prefix";
+        prefix.textContent = "↳ ";
+        titleWrap.appendChild(prefix);
+      } else {
+        const dot = document.createElement("span");
+        dot.className = "thread-root-dot";
+        dot.textContent = "●";
+        titleWrap.appendChild(dot);
+      }
+    } else if (connector) {
+      const prefix = document.createElement("span");
+      prefix.className = "thread-prefix";
+      prefix.textContent = connector;
+      titleWrap.appendChild(prefix);
+    }
+
+    const titleText = document.createElement("span");
+    titleText.textContent = meta.id;
+    titleWrap.appendChild(titleText);
+    btn.appendChild(titleWrap);
+
+    const metaWrap = document.createElement("div");
+    metaWrap.className = "thread-meta";
     const metaBits = [];
     if (meta.createdAt) metaBits.push(formatRelativeTime(meta.createdAt));
-    if (meta.isSubagent) metaBits.push("Subagent");
-    if (meta.agentType) metaBits.push(\`Agent: \${meta.agentType}\`);
-    if (meta.status) metaBits.push(\`Status: \${meta.status}\`);
-    if (meta.parent?.threadId) metaBits.push(\`Child of \${short(meta.parent.threadId)}\`);
+    if (meta.parent?.threadId) {
+      metaBits.push("Subagent");
+      if (depth === 0) {
+        metaBits.push("Parent: " + short(meta.parent.threadId));
+      }
+    } else {
+      metaBits.push("Root");
+    }
+    if (meta.agentType) metaBits.push("Agent: " + meta.agentType);
+    if (meta.status) metaBits.push("Status: " + meta.status);
     const city = meta.request?.cf?.city;
     if (city) metaBits.push(city);
+    metaWrap.textContent = metaBits.filter(Boolean).join(" • ");
+    btn.appendChild(metaWrap);
 
-    btn.innerHTML = \`
-      <div class="thread-title">\${escapeHtml(meta.id)}</div>
-      <div class="thread-meta">\${metaBits.map((part) => escapeHtml(String(part))).join(" • ")}</div>
-    \`;
     const tooltip = [];
     if (meta.request?.userAgent) tooltip.push(meta.request.userAgent);
-    if (meta.report) tooltip.push(\`Report: \${meta.report}\`);
+    if (meta.report) tooltip.push("Report: " + meta.report);
+    if (meta.parent?.threadId && depth > 0) tooltip.push("Parent: " + meta.parent.threadId);
     if (tooltip.length) btn.title = tooltip.join("\\n\\n");
+
     btn.onclick = () => selectThread(meta.id);
-    threadsListEl.appendChild(btn);
-  }
+    return btn;
+  };
+
+  const renderBranch = (nodes, depth, prefix) => {
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const isLast = i === nodes.length - 1;
+      const connector = depth === 0 ? "" : prefix + (isLast ? "└─ " : "├─ ");
+      frag.appendChild(buildButton(node.meta, depth, connector));
+      const nextPrefix =
+        depth === 0
+          ? isLast
+            ? "   "
+            : "│  "
+          : prefix + (isLast ? "   " : "│  ");
+      if (node.children.length) {
+        renderBranch(node.children, depth + 1, nextPrefix);
+      }
+    }
+  };
+
+  renderBranch(roots, 0, "");
+  threadsListEl.appendChild(frag);
 }
-
-
 // ---- Todos ----
 
 function renderTodos(state) {
