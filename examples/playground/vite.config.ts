@@ -4,6 +4,9 @@ import chalk from "chalk";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  resolve: {
+    dedupe: ["agents"]
+  },
   plugins: [
     react(),
     cloudflare(),

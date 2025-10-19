@@ -119,13 +119,18 @@ export class StreamableHTTPServerTransport implements Transport {
   onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
   constructor(options: StreamableHTTPServerTransportOptions) {
-    const { agent } = getCurrentAgent<McpAgent>();
-    if (!agent)
-      throw new Error("McpAgent was not found in Transport constructor");
+    const context = getCurrentAgent<McpAgent>();
+    if (!context.agent) {
+      throw new Error(
+        "McpAgent was not found in Transport constructor. " +
+        "This typically indicates the transport is being created outside of agent context. " +
+        "Make sure to call this from within an agent method or establish context manually."
+      );
+    }
 
     // Initialization is handled in `McpAgent.serve()` and agents are addressed by sessionId,
     // so we'll always have this available.
-    this.sessionId = agent.getSessionId();
+    this.sessionId = context.agent.getSessionId();
     this._eventStore = options.eventStore;
   }
 
@@ -145,9 +150,14 @@ export class StreamableHTTPServerTransport implements Transport {
    */
   async handleGetRequest(req: Request): Promise<void> {
     // Get the WS connection so we can tag it as the standalone stream
-    const { connection } = getCurrentAgent();
-    if (!connection)
-      throw new Error("Connection was not found in handleGetRequest");
+    const context = getCurrentAgent();
+    if (!context.connection) {
+      throw new Error(
+        "Connection not found in handleGetRequest. " +
+        "This typically indicates the method is being called outside of a WebSocket connection context. " +
+        "Make sure this is called from within an agent message handler."
+      );
+    }
 
     // Handle resumability: check for Last-Event-ID header
     if (this._eventStore) {
@@ -172,9 +182,14 @@ export class StreamableHTTPServerTransport implements Transport {
       return;
     }
 
-    const { connection } = getCurrentAgent();
-    if (!connection)
-      throw new Error("Connection was not available in replayEvents");
+    const context = getCurrentAgent();
+    if (!context.connection) {
+      throw new Error(
+        "Connection not available in replayEvents. " +
+        "This indicates the method is being called outside of agent context. " +
+        "Make sure replayEvents is called from within an agent method."
+      );
+    }
 
     try {
       await this._eventStore?.replayEventsAfter(lastEventId, {
@@ -251,9 +266,13 @@ export class StreamableHTTPServerTransport implements Transport {
         this.onmessage?.(message, { authInfo, requestInfo });
       }
     } else if (hasRequests) {
-      const { connection } = getCurrentAgent();
-      if (!connection)
-        throw new Error("Connection was not found in handlePostRequest");
+      const context = getCurrentAgent();
+      if (!context.connection) {
+        throw new Error(
+          "Connection not found in handlePostRequest. " +
+          "This indicates the method is being called outside of agent context."
+        );
+      }
 
       // We need to track by request ID to maintain the connection
       const requestIds = messages
@@ -275,10 +294,16 @@ export class StreamableHTTPServerTransport implements Transport {
 
   async close(): Promise<void> {
     // Close all SSE connections
-    const { agent } = getCurrentAgent();
-    if (!agent) throw new Error("Agent was not found in close");
+    const context = getCurrentAgent();
+    if (!context.agent) {
+      throw new Error(
+        "Agent not found in close. " +
+        "This indicates the method is being called outside of agent context. " +
+        "Make sure close is called from within an agent method."
+      );
+    }
 
-    for (const conn of agent.getConnections()) {
+    for (const conn of context.agent.getConnections()) {
       conn.close(1000, "Session closed");
     }
     this.onclose?.();
@@ -288,8 +313,14 @@ export class StreamableHTTPServerTransport implements Transport {
     message: JSONRPCMessage,
     options?: { relatedRequestId?: RequestId }
   ): Promise<void> {
-    const { agent } = getCurrentAgent();
-    if (!agent) throw new Error("Agent was not found in send");
+    const context = getCurrentAgent();
+    if (!context.agent) {
+      throw new Error(
+        "Agent not found in send. " +
+        "This indicates the method is being called outside of agent context. " +
+        "Make sure send is called from within an agent method."
+      );
+    }
 
     let requestId = options?.relatedRequestId;
     if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
@@ -309,7 +340,7 @@ export class StreamableHTTPServerTransport implements Transport {
       }
 
       let standaloneConnection: Connection | undefined;
-      for (const conn of agent.getConnections<{ _standaloneSse?: boolean }>()) {
+      for (const conn of context.agent.getConnections<{ _standaloneSse?: boolean }>()) {
         if (conn.state?._standaloneSse) standaloneConnection = conn;
       }
 
@@ -335,7 +366,7 @@ export class StreamableHTTPServerTransport implements Transport {
 
     // Get the response for this request
     const connection = Array.from(
-      agent.getConnections<{ requestIds?: number[] }>()
+      context.agent.getConnections<{ requestIds?: number[] }>()
     ).find((conn) => conn.state?.requestIds?.includes(requestId as number));
     if (!connection) {
       throw new Error(

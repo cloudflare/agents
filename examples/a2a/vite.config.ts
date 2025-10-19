@@ -8,7 +8,8 @@ export default defineConfig({
     alias: {
       // a2a-js/sdk has a dependency on express, which vite tries to bundle. This alias prevents that.
       express: path.resolve(__dirname, "./src/express-alias.js")
-    }
+    },
+    dedupe: ["agents"]
   },
   plugins: [react(), cloudflare()]
 });

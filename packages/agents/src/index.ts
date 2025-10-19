@@ -1600,24 +1600,30 @@ export class Agent<
    * Process an OAuth callback request (assumes state is already restored)
    */
   private async _processOAuthCallback(request: Request): Promise<Response> {
-    const result = await this.mcp.handleCallbackRequest(request);
-    this.broadcastMcpServers();
+    // Ensure agent context is available for the OAuth callback processing
+    return agentContext.run(
+      { agent: this, connection: undefined, request, email: undefined },
+      async () => {
+        const result = await this.mcp.handleCallbackRequest(request);
+        this.broadcastMcpServers();
 
-    if (result.authSuccess) {
-      // Start background connection if auth was successful
-      this.mcp
-        .establishConnection(result.serverId)
-        .catch((error) => {
-          console.error("Background connection failed:", error);
-        })
-        .finally(() => {
-          // Broadcast after background connection resolves (success/failure)
-          this.broadcastMcpServers();
-        });
-    }
+        if (result.authSuccess) {
+          // Start background connection if auth was successful
+          this.mcp
+            .establishConnection(result.serverId)
+            .catch((error) => {
+              console.error("Background connection failed:", error);
+            })
+            .finally(() => {
+              // Broadcast after background connection resolves (success/failure)
+              this.broadcastMcpServers();
+            });
+        }
 
-    // Handle OAuth callback response using MCPClientManager configuration
-    return this.handleOAuthCallbackResponse(result, request);
+        // Handle OAuth callback response using MCPClientManager configuration
+        return this.handleOAuthCallbackResponse(result, request);
+      }
+    );
   }
 
   private async _connectToMcpServerInternal(
