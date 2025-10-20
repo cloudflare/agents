@@ -1,0 +1,10 @@
+{
+  "name": "mcp-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --bundle src/index.ts",
+    "deploy": "wrangler deploy --bundle src/index.ts"
+  }
+}
