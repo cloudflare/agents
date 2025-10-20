@@ -1,3 +1,13 @@
+/**
+ * Durable Object-based MCP transports for McpAgent.
+ *
+ * These transports use WebSocket connections as a bridge between HTTP clients
+ * and the MCP server running inside a Durable Object. They support hibernation
+ * and are designed for stateful, long-lived MCP sessions.
+ *
+ * For stateless workers, see worker-transport.ts instead.
+ */
+
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   type MessageExtraInfo,

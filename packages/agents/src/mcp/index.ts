@@ -449,3 +449,19 @@ export type {
   MCPClientOAuthResult,
   MCPClientOAuthCallbackConfig
 } from "./client";
+
+// Export stateless handler for simple fetch exports
+export {
+  experimental_createMcpHandler,
+  type CreateMcpHandlerOptions,
+  type OAuthProvider
+} from "./handler";
+
+// Export auth context helpers
+export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
+
+// Export worker transport
+export {
+  WorkerTransport,
+  type WorkerTransportOptions
+} from "./worker-transport";
