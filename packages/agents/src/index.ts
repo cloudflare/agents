@@ -1425,16 +1425,26 @@ export class Agent<
   private _resolveRpcBinding<T extends McpAgent>(
     binding: DurableObjectNamespace<T> | string
   ): DurableObjectNamespace<T> {
-    if (typeof binding === "string") {
-      const namespace = this.env[binding as keyof typeof this.env];
-      if (!namespace) {
-        throw new Error(`Binding '${binding}' not found in environment`);
-      }
-      return namespace as unknown as DurableObjectNamespace<T>;
-    } else {
-      // Direct namespace object, would probs be good to do some validation here?
-      return binding;
+    if (!binding) {
+      throw new Error(`Expected binding, received: '${binding}`);
     }
+
+    let namespace: DurableObjectNamespace<T>;
+    if (typeof binding === "string") {
+      namespace = this.env[
+        binding as keyof typeof this.env
+      ] as unknown as DurableObjectNamespace<T>;
+    } else {
+      namespace = binding;
+    }
+
+    if (!namespace || typeof namespace.get !== "function") {
+      throw new Error(
+        `Expected DurableObjectNamespace or binding name string, received: ${namespace}`
+      );
+    }
+
+    return namespace;
   }
 
   /**
