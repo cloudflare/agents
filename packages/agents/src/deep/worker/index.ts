@@ -1,5 +1,5 @@
 import { getAgentByName, type Agent } from "../..";
-import { html } from "./client";
+import html from "./client.html";
 import type { ThreadMetadata, ThreadRequestContext } from "../types";
 import type { KVNamespace } from "@cloudflare/workers-types";
 

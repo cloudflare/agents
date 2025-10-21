@@ -19,7 +19,14 @@ async function main() {
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
-    sourcemap: true
+    sourcemap: true,
+    splitting: true,
+    esbuildOptions(options, _) {
+      options.loader = {
+        ...options.loader,
+        ".html": "text"
+      };
+    }
   });
 
   // then run prettier on the generated .d.ts files

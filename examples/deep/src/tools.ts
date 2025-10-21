@@ -61,8 +61,8 @@ export const getTopNTextTool = defineTool(
     parameters: zodToJsonSchema(GetTopNTextParams)
   },
   async (p: GetTopNTextArgs, ctx) => {
-    const start = ctx.store.kv.get<number>("current_window.start");
-    const end = ctx.store.kv.get<number>("current_window.end");
+    const start = ctx.agent.store.kv.get<number>("current_window.start");
+    const end = ctx.agent.store.kv.get<number>("current_window.end");
     const { dimension, limit, startISO, endISO, maxRows, zoneTag, andFilters } =
       p;
     if (!validDimension(dimension))
@@ -136,8 +136,8 @@ export const getTimeseriesTextTool = defineTool(
     parameters: zodToJsonSchema(GetTimeseriesTextParams)
   },
   async (p: GetTimeseriesTextArgs, ctx) => {
-    const start = ctx.store.kv.get<number>("current_window.start");
-    const end = ctx.store.kv.get<number>("current_window.end");
+    const start = ctx.agent.store.kv.get<number>("current_window.start");
+    const end = ctx.agent.store.kv.get<number>("current_window.end");
     const {
       startISO,
       endISO,
@@ -221,8 +221,8 @@ export const setTimeWindowTool = defineTool(
     if (typeof lookbackHours === "number" && lookbackHours > 0) {
       const end = new Date();
       const start = new Date(end.getTime() - lookbackHours * 3600000);
-      ctx.store.kv.put("current_window.start", start.getTime());
-      ctx.store.kv.put("current_window.end", end.getTime());
+      ctx.agent.store.kv.put("current_window.start", start.getTime());
+      ctx.agent.store.kv.put("current_window.end", end.getTime());
       return describe(start, end);
     }
 
@@ -238,14 +238,16 @@ export const setTimeWindowTool = defineTool(
       ) {
         throw new Error("Invalid absolute start/end.");
       }
-      ctx.store.kv.put("current_window.start", s.getTime());
-      ctx.store.kv.put("current_window.end", e.getTime());
+      ctx.agent.store.kv.put("current_window.start", s.getTime());
+      ctx.agent.store.kv.put("current_window.end", e.getTime());
       return describe(s, e);
     }
 
     if (zoom === "in" || zoom === "out") {
-      let start = new Date(ctx.store.kv.get<number>("current_window.start")!);
-      let end = new Date(ctx.store.kv.get<number>("current_window.end")!);
+      let start = new Date(
+        ctx.agent.store.kv.get<number>("current_window.start")!
+      );
+      let end = new Date(ctx.agent.store.kv.get<number>("current_window.end")!);
       const dur = end.getTime() - start.getTime();
       const k = typeof factor === "number" && factor > 0 ? factor : 2;
       const center = start.getTime() + dur / 2;
@@ -271,8 +273,10 @@ export const getCurrentWindowTool = defineTool(
     description: "Return the current time window used by other tools."
   },
   async (_: GetCurrentWindowArgs, ctx) => {
-    const start = new Date(ctx.store.kv.get<number>("current_window.start")!);
-    const end = new Date(ctx.store.kv.get<number>("current_window.end")!);
+    const start = new Date(
+      ctx.agent.store.kv.get<number>("current_window.start")!
+    );
+    const end = new Date(ctx.agent.store.kv.get<number>("current_window.end")!);
     return `Current window: ${start.toISOString()} → ${end.toISOString()} (duration ${(end.getTime() - start.getTime()) / 3600000}h).`;
   }
 );
