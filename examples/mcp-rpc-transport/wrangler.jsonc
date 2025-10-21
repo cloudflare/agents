@@ -24,5 +24,8 @@
       "tag": "v1"
     }
   ],
-  "name": "mcp-rpc-transport-demo"
+  "name": "mcp-rpc-transport-demo",
+  "observability": {
+    "enabled": true
+  }
 }
