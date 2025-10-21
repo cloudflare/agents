@@ -180,18 +180,22 @@ export type MCPMessageHandler = (
 export interface MCPStub extends Record<string, unknown> {
   handleMcpMessage: MCPMessageHandler;
   setName?(name: string): Promise<void>;
+  updateProps?(props: Record<string, unknown>): Promise<void>;
 }
 
 export interface RPCClientTransportOptions {
   stub: MCPStub;
   functionName?: string;
   doName?: string;
+  props?: Record<string, unknown>;
 }
 
 export class RPCClientTransport implements Transport {
   private _stub: MCPStub;
   private _functionName: string;
   private _doName?: string;
+  private _props?: Record<string, unknown>;
+  private _propsInitialized = false;
   private _started = false;
   private _protocolVersion?: string;
 
@@ -204,6 +208,7 @@ export class RPCClientTransport implements Transport {
     this._stub = options.stub;
     this._functionName = options.functionName ?? "handleMcpMessage";
     this._doName = options.doName;
+    this._props = options.props;
   }
 
   setProtocolVersion(version: string): void {
@@ -244,6 +249,12 @@ export class RPCClientTransport implements Transport {
     // Set the name if the stub is a DO
     if (this._doName && this._stub.setName) {
       await this._stub.setName(this._doName);
+    }
+
+    // Initialize props on first send
+    if (this._props && !this._propsInitialized && this._stub.updateProps) {
+      await this._stub.updateProps(this._props);
+      this._propsInitialized = true;
     }
 
     try {

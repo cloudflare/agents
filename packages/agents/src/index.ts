@@ -1746,15 +1746,12 @@ export class Agent<
     const doId = namespace.idFromName(doName);
     const stub = namespace.get(doId) as unknown as DurableObjectStub<T>;
 
-    if (options?.transport?.props) {
-      await stub.updateProps(options.transport.props);
-    }
-
     return {
       type: "rpc",
       stub,
       functionName: options?.transport?.functionName,
-      doName
+      doName,
+      props: options?.transport?.props
     };
   }
 
