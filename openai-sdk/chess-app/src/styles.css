@@ -1,0 +1,121 @@
+html,
+body {
+  height: 100%;
+  overflow: hidden; /* disable page scrolling */
+  margin: 0; /* remove default body margin that can cause scrollbars */
+}
+
+#root {
+  height: 200px;
+  width: 100vw; /* fill the whole viewport width */
+}
+
+.container {
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: center; /* vertical centering within 200px */
+  gap: 8px;
+  padding: 8px 16px; /* inset margin */
+  box-sizing: border-box;
+  overflow: hidden; /* ensure nothing spills out of 200px height */
+  font-family:
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    Helvetica,
+    Arial,
+    "Apple Color Emoji",
+    "Segoe UI Emoji";
+}
+
+.session-id {
+  font-family: inherit; /* switch to sans-serif */
+  font-size: 10px;
+  opacity: 0.7;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.counter-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 120px; /* fills most of the 200px space */
+  gap: 0; /* use explicit margin on button */
+}
+
+.counter-value {
+  margin: 0;
+  flex: 1 1 auto; /* take remaining space but allow shrinking */
+  min-width: 0; /* allow flex item to shrink below content width */
+  font-weight: 800;
+  line-height: 1;
+  font-size: clamp(40px, 14vw, 88px); /* bigger number, still responsive */
+  letter-spacing: -1px;
+  white-space: nowrap; /* keep on one line */
+  overflow: hidden; /* clip overflow without ellipsis */
+
+  /* Animated gradient text fill */
+  background: radial-gradient(
+    circle,
+    #ff7a7a,
+    #ffd56a,
+    #7aff9a,
+    #7acbff,
+    #c97aff,
+    #ff7a7a
+  );
+  background-size: 600% 100%; /* larger gradient for smoother shifts */
+  animation: gradientMove 30s ease-in-out infinite alternate; /* slightly faster pulsing (back-and-forth) */
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+@keyframes gradientMove {
+  0% {
+    background-position: 0% 0;
+  }
+  100% {
+    background-position: 100% 0;
+  }
+}
+
+.increment-btn {
+  flex: 0 0 auto; /* fixed, reasonable width */
+  width: clamp(120px, 30vw, 240px); /* stays reasonable across viewports */
+  align-self: stretch; /* fill row height */
+  margin-left: 16px; /* explicit space between number and button */
+  border: none;
+  border-radius: 10px;
+  padding: 0 12px;
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #111;
+  background: linear-gradient(135deg, #fafafa, #f0f0f0); /* lighter off white */
+  transition: transform 0.05s ease;
+}
+
+.increment-btn:hover {
+  background: linear-gradient(
+    135deg,
+    #ffffff,
+    #f5f5f5
+  ); /* simple hover, no shadow */
+}
+
+.increment-btn:active {
+  transform: translateY(1px);
+}
+
+.board {
+  width: 750px;
+  height: 750px;
+}
