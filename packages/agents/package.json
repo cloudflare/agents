@@ -4,9 +4,9 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.48",
-    "@modelcontextprotocol/sdk": "^1.20.0",
-    "ai": "5.0.68",
+    "@ai-sdk/openai": "2.0.53",
+    "@modelcontextprotocol/sdk": "^1.20.1",
+    "ai": "5.0.76",
     "cron-schedule": "^5.0.4",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
@@ -22,7 +22,7 @@
   },
   "description": "A home for your AI agents",
   "devDependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.0.11",
+    "@cloudflare/workers-oauth-provider": "^0.0.12",
     "react": "*",
     "vitest-browser-react": "^1.0.1"
   },
