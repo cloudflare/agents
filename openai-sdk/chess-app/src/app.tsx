@@ -120,7 +120,6 @@ function App() {
   );
   const [gameIdInput, setGameIdInput] = useState(widgetGameId);
   const [menuError, setMenuError] = useState<string | null>(null);
-  const [copyFeedback, setCopyFeedback] = useState<"" | "copied" | "error">("");
 
   const gameRef = useRef(new Chess());
   const [fen, setFen] = useState(gameRef.current.fen());
@@ -137,12 +136,6 @@ function App() {
     }
   }, [widgetGameId, gameId, gameIdInput]);
 
-  useEffect(() => {
-    if (!copyFeedback) return;
-    const timer = setTimeout(() => setCopyFeedback(""), 1600);
-    return () => clearTimeout(timer);
-  }, [copyFeedback]);
-
   const canCopy =
     typeof navigator !== "undefined" &&
     typeof navigator.clipboard?.writeText === "function";
@@ -153,7 +146,6 @@ function App() {
     setPending(false);
     setMyColor("spectator");
     setServerState(null);
-    setCopyFeedback("");
   }
 
   const activeGameName = gameId ?? "__lobby__";
@@ -200,7 +192,7 @@ function App() {
 
   async function handleStartNewGame() {
     const newId = crypto.randomUUID();
-    await window.openai.setWidgetState({ gameId: newId });
+    await window.openai?.setWidgetState({ gameId: newId });
     resetLocalGame();
     setMenuError(null);
     setGameIdInput(newId);
@@ -215,21 +207,8 @@ function App() {
     }
     resetLocalGame();
     setMenuError(null);
-    await window.openai.setWidgetState({ gameId: trimmed });
+    await window.openai?.setWidgetState({ gameId: trimmed });
     setGameId(trimmed);
-  }
-
-  async function handleCopyGameId() {
-    if (!gameId || !canCopy) {
-      setCopyFeedback("error");
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(gameId);
-      setCopyFeedback("copied");
-    } catch {
-      setCopyFeedback("error");
-    }
   }
 
   const handleHelpClick = () => {
@@ -425,7 +404,9 @@ function App() {
                 <div style={{ fontSize: "0.9rem", color: "#475569" }}>
                   {myColor === "spectator"
                     ? "You are watching as a spectator"
-                    : `You are playing as ${myColor === "w" ? "White" : "Black"}`}
+                    : playerId === serverState?.players[gameRef.current.turn()]
+                      ? "Your turn"
+                      : `Waiting for ${myColor === "w" ? "Black" : "White"}`}
                 </div>
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
