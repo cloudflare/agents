@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useAgent } from "agents/react";
 import { createRoot } from "react-dom/client";
 import { Chess, type Square } from "chess.js";
 import {
@@ -6,12 +7,9 @@ import {
   type ChessboardOptions,
   type PieceDropHandlerArgs
 } from "react-chessboard";
-import { useAgent } from "agents/react";
-import { useToolResponseMetadata } from "./react-utils";
 
-/** --------------------------
- *  Player / Game ID helpers
- *  -------------------------- */
+import type { State as ServerState } from "./chess";
+
 function usePlayerId() {
   const [pid] = useState(() => {
     const existing = localStorage.getItem("playerId");
@@ -23,27 +21,12 @@ function usePlayerId() {
   return pid;
 }
 
-/** --------------------------
- *  Types from server
- *  -------------------------- */
-type ServerState = {
-  board: string; // FEN
-  players: { w?: string; b?: string };
-  status: "waiting" | "active" | "mate" | "draw" | "resigned";
-  winner?: "w" | "b";
-};
-
 type JoinReply =
   | { ok: true; role: "w" | "b"; state: ServerState }
   | { ok: true; role: "spectator"; state: ServerState };
 
-function shortId(id: string): string {
-  if (id.length <= 10) return id;
-  return `${id.slice(0, 4)}…${id.slice(-4)}`;
-}
-
 function describeGameStatus(state: ServerState | null): string {
-  if (!state) return "Connecting to game…";
+  if (!state) return "Connecting to game...";
   switch (state.status) {
     case "waiting":
       return "Waiting for players";
@@ -94,7 +77,7 @@ function PlayerSlot({ label, playerId, isCurrent }: PlayerSlotProps) {
       <div style={{ fontSize: "0.85rem", color: "#475569" }}>
         {connected ? (
           <>
-            {isCurrent ? "You" : "Player"} · <code>{shortId(playerId!)}</code>
+            {isCurrent ? "You" : "Player"} · <code>{playerId!.slice(-8)}</code>
           </>
         ) : (
           "Waiting for player"
@@ -126,6 +109,7 @@ function App() {
   const [myColor, setMyColor] = useState<"w" | "b" | "spectator">("spectator");
   const [pending, setPending] = useState(false);
   const [serverState, setServerState] = useState<ServerState | null>(null);
+  const [joined, setJoined] = useState(false);
 
   useEffect(() => {
     if (!gameId && widgetGameId) {
@@ -163,7 +147,7 @@ function App() {
   });
 
   useEffect(() => {
-    if (!gameId) return;
+    if (!gameId || joined) return;
 
     let alive = true;
 
@@ -180,6 +164,7 @@ function App() {
         gameRef.current.load(res.state.board);
         setFen(res.state.board);
         setServerState(res.state);
+        setJoined(true);
       } catch (error) {
         console.error("Failed to join game", error);
       }
@@ -188,7 +173,7 @@ function App() {
     return () => {
       alive = false;
     };
-  }, [stub, playerId, gameId]);
+  }, [playerId, gameId, stub]);
 
   async function handleStartNewGame() {
     const newId = crypto.randomUUID();
@@ -211,10 +196,15 @@ function App() {
     setGameId(trimmed);
   }
 
+  // Trigger a message on the ChatGPT conversation to help with the current board state
   const handleHelpClick = () => {
     window.openai?.sendFollowUpMessage?.({
       prompt: `Help me with my chess game. I am playing as ${myColor} and the board is: ${fen}. Please only offer written advice as there are no tools for you to use.`
     });
+  };
+
+  const handleResign = async () => {
+    await stub.resign();
   };
 
   // Local-then-server move with reconcile
@@ -266,8 +256,6 @@ function App() {
     return true;
   }
 
-  // TODO: turn sign, clock, remove copy,
-
   const chessboardOptions: ChessboardOptions = useMemo(
     () =>
       ({
@@ -280,7 +268,7 @@ function App() {
     [fen, onPieceDrop, myColor, pending, activeGameName]
   );
 
-  const maxSize = window.openai?.maxHeight ?? 750;
+  const maxSize = window.openai?.maxHeight ?? 650;
   const boardSize = Math.max(Math.min(maxSize - 120, 560), 320);
   const statusText = describeGameStatus(serverState);
   const whiteId = serverState?.players?.w;
@@ -410,6 +398,20 @@ function App() {
                 </div>
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <button
+                  style={{
+                    padding: "10px 16px",
+                    borderRadius: "10px",
+                    border: "none",
+                    background: "red",
+                    color: "#ffffff",
+                    fontWeight: 600,
+                    cursor: "pointer"
+                  }}
+                  onClick={handleResign}
+                >
+                  Resign
+                </button>
                 <button
                   style={{
                     padding: "10px 16px",

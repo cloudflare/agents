@@ -1,6 +1,7 @@
 import { McpAgent } from "agents/mcp";
 import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import z from "zod";
 
 // Adapted from https://developers.openai.com/apps-sdk/build/examples
 export class McpWidgetAgent extends McpAgent<Env> {
@@ -43,7 +44,7 @@ export class McpWidgetAgent extends McpAgent<Env> {
           "openai/toolInvocation/invoked": "Chess widget opened"
         }
       },
-      async (_p, _extra) => {
+      async (_, _extra) => {
         return {
           content: [
             {

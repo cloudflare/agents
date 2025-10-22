@@ -97,6 +97,16 @@ export class ChessGame extends Agent<Env, State> {
     san?: string;
     status: State["status"];
   } {
+    // check there are 2 players
+    if (this.state.status === "waiting") {
+      return {
+        ok: false,
+        reason: "not-in-game",
+        fen: this.game.fen(),
+        status: this.state.status
+      };
+    }
+
     const { connection } = getCurrentAgent();
     if (!connection) throw new Error("Not connected");
     const { playerId } = connection.state as ConnectionState;
