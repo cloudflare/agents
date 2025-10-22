@@ -1,7 +1,6 @@
 import { McpAgent } from "agents/mcp";
 import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import z from "zod";
 
 // Adapted from https://developers.openai.com/apps-sdk/build/examples
 export class McpWidgetAgent extends McpAgent<Env> {
@@ -20,7 +19,7 @@ export class McpWidgetAgent extends McpAgent<Env> {
       "chess",
       "ui://widget/index.html",
       {},
-      async (uri, extra) => ({
+      async (_uri, _extra) => ({
         contents: [
           {
             uri: "ui://widget/index.html",
@@ -36,36 +35,23 @@ export class McpWidgetAgent extends McpAgent<Env> {
     this.server.registerTool(
       "startChessGame",
       {
-        title: "Starts or joins a chess game.",
-        inputSchema: {
-          gameId: z
-            .string()
-            .optional()
-            .describe(
-              "Optional game ID to join. If not provided, a new game will be started."
-            )
-        },
+        title: "Renders a chess game menu, ready to start or join a game.",
         annotations: { readOnlyHint: true },
         _meta: {
           "openai/outputTemplate": "ui://widget/index.html",
-          "openai/toolInvocation/invoking": "Opening counter widget",
-          "openai/toolInvocation/invoked": "Counter widget opened"
+          "openai/toolInvocation/invoking": "Opening chess widget",
+          "openai/toolInvocation/invoked": "Chess widget opened"
         }
       },
-      async (params, extra) => {
-        const gameId = params.gameId ?? crypto.randomUUID();
+      async (_p, _extra) => {
         return {
           content: [
             {
               type: "text",
-              text: params.gameId ? "Joined game!" : "Started new game!"
+              text: "Successfully rendered chess game menu"
             }
           ],
-          structuredContent: {},
-          _meta: {
-            sessionId: this.name,
-            gameId
-          }
+          structuredContent: {}
         };
       }
     );
