@@ -80,8 +80,8 @@ export interface McpRpcConnectionConfig<
   T extends McpAgent<unknown, unknown, Record<string, unknown>> = McpAgent
 > {
   type: "rpc";
-  serverName: string;
   url: string;
+  normalizedName: string;
   namespace: DurableObjectNamespace<T>;
   options?: RpcConnectionOptions<T>;
   reconnect?: { id: string };

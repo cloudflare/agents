@@ -1517,7 +1517,9 @@ export class Agent<
       const namespace = this._resolveRpcBinding<T>(
         urlOrBinding as DurableObjectNamespace<T> | string
       );
-      const url = `rpc://${serverName}`;
+
+      const normalizedName = serverName.toLowerCase().replace(/\s+/g, "-");
+      const url = `rpc://${normalizedName}`;
 
       // Check if server already exists in database for reconnection
       const existingServer = this.sql<MCPServerRow>`
@@ -1529,9 +1531,9 @@ export class Agent<
       // Connect to server
       const result = await this._connectToMcpServerInternal({
         type: "rpc",
-        serverName,
         namespace,
         url,
+        normalizedName,
         options: rpcOptions,
         reconnect
       });
@@ -1541,7 +1543,7 @@ export class Agent<
         INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
         VALUES (
           ${result.id},
-          ${serverName},
+          ${normalizedName},
           ${url},
           ${result.clientId ?? null},
           ${result.authUrl ?? null},
@@ -1740,9 +1742,9 @@ export class Agent<
   private async _buildRpcTransportOptions<T extends McpAgent>(
     config: McpRpcConnectionConfig<T>
   ): Promise<MCPTransportOptions> {
-    const { serverName, namespace, options } = config;
+    const { normalizedName, namespace, options } = config;
 
-    const doName = `rpc:${serverName}`;
+    const doName = `rpc:${normalizedName}`;
     const doId = namespace.idFromName(doName);
     const stub = namespace.get(doId) as unknown as DurableObjectStub<T>;
 
