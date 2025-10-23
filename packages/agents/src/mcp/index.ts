@@ -433,34 +433,28 @@ export abstract class McpAgent<
   }
 }
 
-// Export client transport classes
 export { SSEEdgeClientTransport } from "./sse-edge";
 export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
 
-// Export elicitation types and schemas
 export {
   ElicitRequestSchema,
   type ElicitRequest,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 
-// Export OAuth-related types
 export type {
   MCPClientOAuthResult,
   MCPClientOAuthCallbackConfig
 } from "./client";
 
-// Export stateless handler for simple fetch exports
 export {
   experimental_createMcpHandler,
   type CreateMcpHandlerOptions,
   type OAuthExecutionContext
 } from "./handler";
 
-// Export auth context helpers
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
 
-// Export worker transport
 export {
   WorkerTransport,
   type WorkerTransportOptions
