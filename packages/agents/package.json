@@ -104,7 +104,6 @@
   ],
   "keywords": [],
   "license": "MIT",
-  "main": "src/index.ts",
   "name": "agents",
   "peerDependencies": {
     "react": "*",
