@@ -67,6 +67,7 @@ function PlayerSlot({ label, playerId, isCurrent }: PlayerSlotProps) {
   return (
     <div
       style={{
+        width: "100%",
         borderRadius: "12px",
         padding: "12px 14px",
         backgroundColor: highlight,
@@ -120,10 +121,6 @@ function App() {
     }
   }, [widgetGameId, gameId, gameIdInput]);
 
-  const canCopy =
-    typeof navigator !== "undefined" &&
-    typeof navigator.clipboard?.writeText === "function";
-
   function resetLocalGame() {
     gameRef.current.reset();
     setFen(gameRef.current.fen());
@@ -149,8 +146,6 @@ function App() {
   useEffect(() => {
     if (!gameId || joined) return;
 
-    let alive = true;
-
     (async () => {
       try {
         const res = (await stub.join({
@@ -158,7 +153,7 @@ function App() {
           preferred: "any"
         })) as JoinReply;
 
-        if (!alive || !res?.ok) return;
+        if (!res?.ok) return;
 
         setMyColor(res.role);
         gameRef.current.load(res.state.board);
@@ -169,10 +164,6 @@ function App() {
         console.error("Failed to join game", error);
       }
     })();
-
-    return () => {
-      alive = false;
-    };
   }, [playerId, gameId, stub]);
 
   async function handleStartNewGame() {
@@ -428,6 +419,42 @@ function App() {
                 </button>
               </div>
             </div>
+            <div
+              style={{
+                backgroundColor: "#ffffff",
+                borderRadius: "16px",
+                padding: "16px",
+                boxShadow: "0 10px 24px rgba(15, 23, 42, 0.1)",
+                display: "flex",
+                flexDirection: "column",
+                gap: "12px"
+              }}
+            >
+              <div style={{ fontWeight: 600, fontSize: "1rem" }}>Players</div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "12px"
+                }}
+              >
+                <PlayerSlot
+                  label="White"
+                  playerId={whiteId}
+                  isCurrent={whiteId === playerId}
+                />
+                <PlayerSlot
+                  label="Black"
+                  playerId={blackId}
+                  isCurrent={blackId === playerId}
+                />
+              </div>
+              {myColor === "spectator" ? (
+                <div style={{ fontSize: "0.85rem", color: "#475569" }}>
+                  You're observing for now. We'll seat you automatically if a
+                  spot opens up.
+                </div>
+              ) : null}
+            </div>
 
             <div
               style={{
@@ -462,38 +489,6 @@ function App() {
                     }}
                   />
                 </div>
-              </div>
-
-              <div
-                style={{
-                  flex: "0 1 260px",
-                  minWidth: "240px",
-                  backgroundColor: "#ffffff",
-                  borderRadius: "16px",
-                  padding: "16px",
-                  boxShadow: "0 10px 24px rgba(15, 23, 42, 0.1)",
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "12px"
-                }}
-              >
-                <div style={{ fontWeight: 600, fontSize: "1rem" }}>Players</div>
-                <PlayerSlot
-                  label="White"
-                  playerId={whiteId}
-                  isCurrent={whiteId === playerId}
-                />
-                <PlayerSlot
-                  label="Black"
-                  playerId={blackId}
-                  isCurrent={blackId === playerId}
-                />
-                {myColor === "spectator" ? (
-                  <div style={{ fontSize: "0.85rem", color: "#475569" }}>
-                    You're observing for now. We'll seat you automatically if a
-                    spot opens up.
-                  </div>
-                ) : null}
               </div>
             </div>
           </div>
