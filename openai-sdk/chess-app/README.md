@@ -1,6 +1,12 @@
-# ChatGPT Apps
+[Reference](https://developers.openai.com/apps-sdk/)
 
-[Reference](https://developers.openai.com/apps-sdk/build/examples)
+# Multi-player Chess ChatGPT App
+
+Build a real-time multi-player chess game that runs on ChatGPT by using `McpAgent` to build your ChatGPT app and an `Agent` to be your remote game engine!
+
+The app also shows how you can call ChatGPT from within your app. You can always press the "Ask for help" button and ChatGPT will answer in your conversation with a proper strategy for you.
+
+It had never been easier to play chess with your friends with a tutor by your side!
 
 ## Requirements
 
