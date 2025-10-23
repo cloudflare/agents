@@ -1,7 +1,6 @@
 import { McpAgent } from "agents/mcp";
 import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import z from "zod";
 
 // Adapted from https://developers.openai.com/apps-sdk/build/examples
 export class McpWidgetAgent extends McpAgent<Env> {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { createRoot } from "react-dom/client";
 import { Chess, type Square } from "chess.js";
@@ -164,7 +164,7 @@ function App() {
         console.error("Failed to join game", error);
       }
     })();
-  }, [playerId, gameId, stub]);
+  }, [playerId, gameId, stub, joined]);
 
   async function handleStartNewGame() {
     const newId = crypto.randomUUID();
@@ -247,17 +247,13 @@ function App() {
     return true;
   }
 
-  const chessboardOptions: ChessboardOptions = useMemo(
-    () =>
-      ({
-        id: `pvp-${activeGameName}`,
-        position: fen,
-        onPieceDrop,
-        boardOrientation: myColor === "b" ? "black" : "white",
-        allowDragging: !pending && myColor !== "spectator"
-      }) as ChessboardOptions,
-    [fen, onPieceDrop, myColor, pending, activeGameName]
-  );
+  const chessboardOptions: ChessboardOptions = {
+    id: `pvp-${activeGameName}`,
+    position: fen,
+    onPieceDrop,
+    boardOrientation: myColor === "b" ? "black" : "white",
+    allowDragging: !pending && myColor !== "spectator"
+  };
 
   const maxSize = window.openai?.maxHeight ?? 650;
   const boardSize = Math.max(Math.min(maxSize - 120, 560), 320);
@@ -295,6 +291,7 @@ function App() {
               existing game by pasting its ID below.
             </p>
             <button
+              type="button"
               style={{
                 padding: "12px 16px",
                 borderRadius: "12px",
@@ -311,11 +308,15 @@ function App() {
             <div
               style={{ display: "flex", flexDirection: "column", gap: "8px" }}
             >
-              <label style={{ fontSize: "0.85rem", color: "#475569" }}>
+              <label
+                htmlFor="gameId"
+                style={{ fontSize: "0.85rem", color: "#475569" }}
+              >
                 Join with game ID
               </label>
               <div style={{ display: "flex", gap: "8px" }}>
                 <input
+                  name="gameId"
                   style={{
                     flex: 1,
                     padding: "10px 12px",
@@ -331,6 +332,7 @@ function App() {
                   }}
                 />
                 <button
+                  type="button"
                   style={{
                     padding: "10px 16px",
                     borderRadius: "10px",
@@ -390,6 +392,7 @@ function App() {
               </div>
               <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
                 <button
+                  type="button"
                   style={{
                     padding: "10px 16px",
                     borderRadius: "10px",
@@ -404,6 +407,7 @@ function App() {
                   Resign
                 </button>
                 <button
+                  type="button"
                   style={{
                     padding: "10px 16px",
                     borderRadius: "10px",
