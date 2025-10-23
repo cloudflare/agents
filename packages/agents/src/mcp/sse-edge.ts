@@ -1,11 +1,3 @@
-/**
- * Client-side SSE transport for Cloudflare Workers and edge environments.
- *
- * This transport allows MCP clients running in Cloudflare Workers to connect
- * to remote MCP servers using Server-Sent Events (SSE). It extends the official
- * SDK's SSEClientTransport with Workers-specific fetch handling.
- */
-
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import {
   SSEClientTransport,

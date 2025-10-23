@@ -1,12 +1,5 @@
 /**
- * Stateless MCP transport for Cloudflare Workers.
- *
- * Unlike the Durable Object-based transports in transport.ts, this transport
- * is designed for stateless workers using the standard fetch export pattern.
- * It handles GET (SSE), POST (JSON-RPC), and DELETE requests directly without
- * requiring WebSocket bridges or Durable Objects.
- *
- * Based on the Hono MCP transport implementation.
+ * Based on @hono/mcp transport implementation (https://github.com/honojs/middleware/tree/main/packages/mcp)
  */
 
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";

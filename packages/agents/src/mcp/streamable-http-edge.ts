@@ -1,11 +1,3 @@
-/**
- * Client-side Streamable HTTP transport for Cloudflare Workers and edge environments.
- *
- * This transport allows MCP clients running in Cloudflare Workers to connect
- * to remote MCP servers using the Streamable HTTP protocol. It extends the official
- * SDK's StreamableHTTPClientTransport with Workers-specific fetch handling.
- */
-
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import {
   StreamableHTTPClientTransport,
