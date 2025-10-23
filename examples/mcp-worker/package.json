@@ -1,10 +1,12 @@
 {
   "name": "mcp-worker",
+  "description": "The simplest way to run a stateless MCP Server on Cloudflare",
+  "author": "Matt Carey <mcarey@cloudflare.com>",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --bundle src/index.ts",
-    "deploy": "wrangler deploy --bundle src/index.ts"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
   }
 }
