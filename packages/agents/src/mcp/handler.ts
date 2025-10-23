@@ -6,18 +6,18 @@ import {
 } from "./worker-transport";
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
 
-export interface OAuthProvider {
-  validateToken(token: string): Promise<{
-    userId: string;
-    clientId: string;
-    scopes: string[];
-    props: Record<string, unknown>;
-  } | null>;
+export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
+  /**
+   * The route path that this MCP handler should respond to.
+   * If specified, the handler will only process requests that match this route.
+   * @default "/mcp"
+   */
+  route?: string;
 }
 
-export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
-  oauthProvider?: OAuthProvider;
-}
+export type OAuthExecutionContext = ExecutionContext & {
+  props?: Record<string, unknown>;
+};
 
 export function experimental_createMcpHandler(
   server: McpServer | Server,
@@ -27,50 +27,25 @@ export function experimental_createMcpHandler(
   env: unknown,
   ctx: ExecutionContext
 ) => Promise<Response> {
-  const { oauthProvider, ...transportOptions } = options;
+  const route = options.route ?? "/mcp";
 
   return async (
     request: Request,
     _env: unknown,
-    _ctx: ExecutionContext
+    ctx: ExecutionContext
   ): Promise<Response> => {
-    let authContext: McpAuthContext | undefined;
-
-    if (oauthProvider) {
-      const authHeader = request.headers.get("Authorization");
-      if (authHeader?.startsWith("Bearer ")) {
-        const token = authHeader.slice(7);
-        try {
-          const tokenInfo = await oauthProvider.validateToken(token);
-          if (tokenInfo) {
-            authContext = {
-              userId: tokenInfo.userId,
-              clientId: tokenInfo.clientId,
-              scopes: tokenInfo.scopes,
-              props: tokenInfo.props
-            };
-          }
-        } catch (error) {
-          console.error("OAuth token validation error:", error);
-        }
-      }
-
-      if (!authContext) {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: {
-              code: -32000,
-              message: "Unauthorized: Valid Bearer token required"
-            },
-            id: null
-          }),
-          { status: 401, headers: { "Content-Type": "application/json" } }
-        );
-      }
+    // Check if the request path matches the configured route
+    const url = new URL(request.url);
+    if (route && url.pathname !== route) {
+      return new Response("Not Found", { status: 404 });
     }
 
-    const transport = new WorkerTransport(transportOptions);
+    const oauthCtx = ctx as OAuthExecutionContext;
+    const authContext: McpAuthContext | undefined = oauthCtx.props
+      ? { props: oauthCtx.props }
+      : undefined;
+
+    const transport = new WorkerTransport(options);
     await server.connect(transport);
 
     const handleRequest = async () => {

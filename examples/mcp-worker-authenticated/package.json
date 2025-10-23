@@ -1,0 +1,14 @@
+{
+  "name": "authenticated-mcp-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.0.12",
+    "hono": "^4.9.9"
+  }
+}

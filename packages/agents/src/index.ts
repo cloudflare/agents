@@ -207,7 +207,7 @@ export {
   getMcpAuthContext,
   WorkerTransport,
   type CreateMcpHandlerOptions,
-  type OAuthProvider,
+  type OAuthExecutionContext,
   type McpAuthContext,
   type WorkerTransportOptions
 } from "./mcp";

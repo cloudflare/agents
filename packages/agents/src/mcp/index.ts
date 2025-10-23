@@ -454,7 +454,7 @@ export type {
 export {
   experimental_createMcpHandler,
   type CreateMcpHandlerOptions,
-  type OAuthProvider
+  type OAuthExecutionContext
 } from "./handler";
 
 // Export auth context helpers

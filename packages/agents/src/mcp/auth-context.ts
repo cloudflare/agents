@@ -1,9 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface McpAuthContext {
-  userId: string;
-  clientId: string;
-  scopes: string[];
   props: Record<string, unknown>;
 }
 
