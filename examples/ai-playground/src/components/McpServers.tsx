@@ -1,7 +1,16 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { McpComponentState } from "../app";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
-export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
+type McpServersProps = {
+  agent: {
+    stub: Record<string, (...args: any[]) => any>;
+  };
+  mcpState: McpComponentState;
+};
+
+export function McpServers({ agent, mcpState }: McpServersProps) {
   const [serverUrl, setServerUrl] = useState(() => {
     return sessionStorage.getItem("mcpServerUrl") || "";
   });
@@ -41,12 +50,12 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
   }, [mcpState?.error]);
 
   // Update isConnecting based on mcpState
+  // SDK states: "discovering" | "authenticating" | "connecting" | "ready" | "failed"
   useEffect(() => {
     if (
       mcpState?.status === "discovering" ||
       mcpState?.status === "connecting" ||
-      mcpState?.status === "authenticating" ||
-      mcpState?.status === "loading"
+      mcpState?.status === "authenticating"
     ) {
       setIsConnecting(true);
     } else {
@@ -110,9 +119,27 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
     }
   };
 
-  const handleDisconnect = () => {
-    setIsActive(false);
+  const handleDisconnect = async () => {
+    console.log(
+      "[McpServers] handleDisconnect called with serverId:",
+      mcpState.serverId
+    );
+    setIsConnecting(true);
     setError("");
+
+    try {
+      // Call the agent to actually disconnect from the MCP server
+      await agent.stub.disconnectMCPServer(mcpState.serverId);
+      console.log("[McpServers] Successfully disconnected from MCP server");
+
+      // The SDK will broadcast the updated state, which will trigger our useEffect
+      // and update isActive automatically
+    } catch (err: any) {
+      console.error("[McpServers] Disconnect error:", err);
+      setError(err.message || "Failed to disconnect from MCP server");
+    } finally {
+      setIsConnecting(false);
+    }
   };
 
   const openOAuthPopup = (authUrl: string) => {
@@ -133,6 +160,7 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
 
   // Generate status badge based on connection state
   const getStatusBadge = () => {
+    // SDK connection states: "discovering" | "authenticating" | "connecting" | "ready" | "failed"
     const states: Record<string, { colors: string; label: string }> = {
       discovering: {
         colors: "bg-blue-100 text-blue-800",
@@ -146,10 +174,6 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
         colors: "bg-yellow-100 text-yellow-800",
         label: "Connecting"
       },
-      loading: {
-        colors: "bg-orange-100 text-orange-800",
-        label: "Loading"
-      },
       ready: {
         colors: "bg-green-100 text-green-800",
         label: "Connected"
@@ -161,14 +185,10 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
       "not-connected": {
         colors: "bg-gray-100 text-gray-800",
         label: "Not Connected"
-      },
-      pending_auth: {
-        colors: "bg-purple-100 text-purple-800",
-        label: "Pending Authentication"
       }
     };
 
-    // Get the status from mcpState
+    // Get the status from mcpState (mapped from SDK's 'state' field)
     const status = mcpState?.status || "not-connected";
     const { colors, label } = states[status] || states["not-connected"];
 
@@ -470,29 +490,28 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
         {/* Display tools when connected */}
         {isActive &&
           mcpState?.tools &&
-          Object.keys(mcpState.tools).length > 0 && (
+          Array.isArray(mcpState.tools) &&
+          mcpState.tools.length > 0 && (
             <div className="mt-4 border border-green-200 rounded-md bg-green-50 p-3">
               <div className="text-sm font-medium text-green-900 mb-2">
-                Available Tools ({Object.keys(mcpState.tools).length})
+                Available Tools ({mcpState.tools.length})
               </div>
               <div className="space-y-2">
-                {Object.entries(mcpState.tools).map(
-                  ([toolName, tool]: [string, any]) => (
-                    <div
-                      key={toolName}
-                      className="bg-white rounded p-2 border border-green-200"
-                    >
-                      <div className="font-medium text-xs text-gray-900">
-                        {toolName.replace("tool_", "").replace(/_/g, " ")}
-                      </div>
-                      {tool.description && (
-                        <div className="text-xs text-gray-600 mt-1">
-                          {tool.description}
-                        </div>
-                      )}
+                {mcpState.tools.map((tool: Tool) => (
+                  <div
+                    key={tool.name}
+                    className="bg-white rounded p-2 border border-green-200"
+                  >
+                    <div className="font-medium text-xs text-gray-900">
+                      {tool.name.replace("tool_", "").replace(/_/g, " ")}
                     </div>
-                  )
-                )}
+                    {tool.description && (
+                      <div className="text-xs text-gray-600 mt-1">
+                        {tool.description}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           )}

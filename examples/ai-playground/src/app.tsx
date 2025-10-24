@@ -1,8 +1,5 @@
-/** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
-import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { useEffect, useRef, useState } from "react";
 import { useAgentChat } from "agents/ai-react";
-import { useHotkeys } from "react-hotkeys-hook";
 import TextareaAutosize from "react-textarea-autosize";
 import Footer from "./components/Footer";
 import Header from "./components/Header";
@@ -12,12 +9,25 @@ import ModelSelector from "./components/ModelSelector";
 import ViewCodeModal from "./components/ViewCodeModal";
 import { ToolCallCard } from "./components/ToolCallCard";
 import { isToolUIPart, type UIMessage } from "ai";
-import { useAgent } from "agents/react";
+import { useAgent, type MCPServersState } from "agents/react";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 export type Params = {
   model: string;
   max_tokens: number;
   stream: boolean;
+};
+
+// Transformed MCP state shape for our component
+export type McpComponentState = {
+  status: string;
+  error: string | null;
+  tools: Tool[];
+  prompts: any[];
+  resources: any[];
+  serverId?: string;
+  serverName?: string;
+  serverUrl?: string;
 };
 
 const App = () => {
@@ -34,13 +44,41 @@ const App = () => {
     stream: true
   });
 
-  const [mcp, setMcp] = useState<any>([]);
+  const [mcp, setMcp] = useState<McpComponentState>({
+    status: "not-connected",
+    error: null,
+    tools: [],
+    prompts: [],
+    resources: []
+  });
 
   const agent = useAgent({
     agent: "playground",
-    onMcpUpdate(mcpState) {
+    onMcpUpdate(mcpState: MCPServersState) {
       console.log("[App] onMcpUpdate callback triggered with state:", mcpState);
-      setMcp(mcpState);
+
+      // Transform MCPServersState to extract the first server's state
+      // The SDK returns: { servers: { [id]: { state, name, ... } }, tools, prompts, resources }
+      // We need to flatten it for the McpServers component
+      const serverIds = Object.keys(mcpState.servers || {});
+      const firstServerId = serverIds[0];
+      const firstServer = firstServerId
+        ? mcpState.servers[firstServerId]
+        : null;
+
+      const transformedState: McpComponentState = {
+        status: firstServer?.state || "not-connected", // Map SDK's 'state' to 'status'
+        error: null, // SDK doesn't expose errors in this state, but they're logged
+        tools: mcpState.tools || [],
+        prompts: mcpState.prompts || [],
+        resources: mcpState.resources || [],
+        serverId: firstServerId,
+        serverName: firstServer?.name,
+        serverUrl: firstServer?.server_url
+      };
+
+      console.log("[App] Transformed MCP state:", transformedState);
+      setMcp(transformedState);
     }
   });
 

@@ -137,6 +137,30 @@ export class Playground extends AIChatAgent<Env, State> {
     return result;
   }
 
+  @callable()
+  async disconnectMCPServer(serverId?: string) {
+    console.log(
+      "[Playground] disconnectMCPServer called with serverId:",
+      serverId
+    );
+
+    if (serverId) {
+      // Disconnect specific server
+      await this.removeMcpServer(serverId);
+      console.log("[Playground] Removed MCP server:", serverId);
+    } else {
+      // Disconnect all servers if no serverId provided
+      const mcpState = this.getMcpServers();
+      const serverIds = Object.keys(mcpState.servers);
+      console.log("[Playground] Removing all MCP servers:", serverIds);
+      for (const id of serverIds) {
+        await this.removeMcpServer(id);
+      }
+    }
+
+    // broadcastMcpServers() is called automatically by removeMcpServer
+  }
+
   // fix the the types here
   @callable()
   async getModels() {
