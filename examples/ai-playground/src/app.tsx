@@ -211,7 +211,7 @@ const App = () => {
                   <ModelSelector
                     models={models}
                     model={activeModel}
-                    onModelSelection={(model) => {
+                    onModelSelection={async (model) => {
                       const modelName = model ? model.name : defaultModel;
                       // Store selected model in sessionStorage
                       sessionStorage.setItem("selectedModel", modelName);
@@ -219,6 +219,8 @@ const App = () => {
                         ...params,
                         model: modelName
                       });
+                      // Update the agent's state on the server
+                      await agent.stub.setModel(modelName);
                     }}
                   />
                 }

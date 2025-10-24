@@ -1,4 +1,3 @@
-import { env } from "cloudflare:workers";
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import { AIChatAgent } from "agents/ai-chat-agent";
@@ -22,8 +21,6 @@ interface State {
   temperature: number;
 }
 
-const workersai = createWorkersAI({ binding: (env as Env).AI });
-
 /**
  * Chat Agent implementation that handles real-time AI chat interactions
  */
@@ -43,6 +40,13 @@ export class Playground extends AIChatAgent<Env, State> {
     // Collect all tools, including MCP tools
     const allTools = this.mcp.getAITools();
 
+    console.log({ tools: allTools });
+
+    console.log({ model: this.state.modelName });
+
+    // Create workersai instance inside the handler where env.AI is available
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         // Clean up incomplete tool calls to prevent API errors
@@ -54,6 +58,7 @@ export class Playground extends AIChatAgent<Env, State> {
 
           messages: convertToModelMessages(cleanedMessages),
           model: workersai(this.state.modelName as any),
+          // model: model,
           tools: allTools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof allTools
@@ -80,6 +85,11 @@ export class Playground extends AIChatAgent<Env, State> {
   @callable()
   async getModels() {
     return await this.env.AI.models({ per_page: 1000 });
+  }
+
+  @callable()
+  async setModel(modelName: string) {
+    this.state.modelName = modelName;
   }
 }
 
