@@ -1,0 +1,11 @@
+{
+  "author": "Matt Carey <mcarey@cloudflare.com>",
+  "keywords": [],
+  "name": "@cloudflare/agents-mcp-rpc-transport-demo",
+  "private": true,
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy"
+  },
+  "type": "module"
+}

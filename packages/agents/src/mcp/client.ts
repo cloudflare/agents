@@ -476,10 +476,11 @@ export class MCPClientManager {
       | typeof CompatibilityCallToolResultSchema,
     options?: RequestOptions
   ) {
-    const unqualifiedName = params.name.replace(`${params.serverId}.`, "");
-    return this.mcpConnections[params.serverId].client.callTool(
+    const { serverId, ...mcpParams } = params;
+    const unqualifiedName = mcpParams.name.replace(`${serverId}.`, "");
+    return this.mcpConnections[serverId].client.callTool(
       {
-        ...params,
+        ...mcpParams,
         name: unqualifiedName
       },
       resultSchema,

@@ -10,7 +10,8 @@ import {
   parseSSEData,
   expectValidToolsList,
   expectValidGreetResult,
-  expectValidPropsResult
+  expectValidPropsResult,
+  establishRPCConnection
 } from "../shared/test-utils";
 
 declare module "cloudflare:test" {
@@ -65,6 +66,18 @@ describe("MCP Protocol Core Functionality", () => {
       expectValidToolsList(result);
     });
 
+    it("should list available tools via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      const result = await connection.client.listTools();
+
+      expectValidToolsList({
+        jsonrpc: "2.0",
+        id: "tools-1",
+        result
+      });
+    });
+
     it("should invoke greet tool via streamable HTTP", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);
@@ -106,6 +119,24 @@ describe("MCP Protocol Core Functionality", () => {
       );
 
       expectValidGreetResult(result, "Test User");
+    });
+
+    it("should invoke greet tool via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      const result = await connection.client.callTool({
+        name: "greet",
+        arguments: { name: "Test User" }
+      });
+
+      expectValidGreetResult(
+        {
+          jsonrpc: "2.0",
+          id: "greet-1",
+          result
+        },
+        "Test User"
+      );
     });
   });
 
