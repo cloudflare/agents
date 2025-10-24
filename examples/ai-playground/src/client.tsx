@@ -5,17 +5,12 @@ import {
   RouterProvider
 } from "react-router-dom";
 import App from "./app";
-import OAuthCallbackPage from "./components/OAuthCallbackPage";
 import "./index.css";
 
 const router = createBrowserRouter([
   {
     element: <App />,
     path: "/"
-  },
-  {
-    element: <OAuthCallbackPage />,
-    path: "/oauth/callback"
   },
   {
     element: <Navigate to="/" replace />,

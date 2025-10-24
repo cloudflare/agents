@@ -12,7 +12,6 @@ import {
   type ToolSet
 } from "ai";
 import { cleanupMessages } from "./utils";
-import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 interface Env {
   AI: Ai;
@@ -72,10 +71,7 @@ export class Playground extends AIChatAgent<Env, State> {
 
   // fix the the types here
   @callable()
-  async addMCPServer(
-    url: string,
-    options: StreamableHTTPClientTransportOptions
-  ) {
+  async addMCPServer(url: string, options: any) {
     await this.mcp.closeAllConnections();
     await this.mcp.connect(url, options);
   }

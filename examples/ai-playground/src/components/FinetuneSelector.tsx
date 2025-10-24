@@ -1,6 +1,6 @@
 import { useSelect } from "downshift";
 import { useState } from "react";
-import type { FineTune } from "./models";
+import type { FineTune } from "../models";
 
 const FinetuneSelector = ({
   models,
@@ -11,8 +11,7 @@ const FinetuneSelector = ({
   model: string | null;
   onSelection: (model: FineTune | null) => void;
 }) => {
-  // @ts-expect-error need to fix this
-  const [selectedItem, setSelectedItem] = useState<FineTune | null>(model);
+  const [selectedItem, setSelectedItem] = useState<FineTune | null>(null);
 
   const {
     isOpen,

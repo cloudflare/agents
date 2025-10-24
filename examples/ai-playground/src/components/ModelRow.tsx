@@ -1,9 +1,9 @@
-import type { Model } from "./models";
+import type { Model } from "../models";
 
 const ModelRow = ({ model }: { model: Model }) => {
   const [_provider, _author, name] = model.name.split("/");
   const tags = model.properties
-    .map(({ property_id, value }) => {
+    .map(({ property_id, value }: any) => {
       if (property_id === "beta" && value === "true") {
         return "Beta";
       }
@@ -18,7 +18,7 @@ const ModelRow = ({ model }: { model: Model }) => {
 
       return null;
     })
-    .filter((val) => !!val);
+    .filter((val: any) => !!val);
 
   // TODO: Update label for LoRA
   return (
@@ -28,7 +28,7 @@ const ModelRow = ({ model }: { model: Model }) => {
     >
       {name}
       <div className="ml-2">
-        {tags.map((tag) => (
+        {tags.map((tag: any) => (
           <span
             key={tag}
             className={`text-xs mr-1 px-2 py-1 rounded-full ${

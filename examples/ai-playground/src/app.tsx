@@ -1,202 +1,96 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
-import { useChat } from "@ai-sdk/react";
 import type { Tool, CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { useEffect, useRef, useState } from "react";
+import { useAgentChat } from "agents/ai-react";
 import { useHotkeys } from "react-hotkeys-hook";
 import TextareaAutosize from "react-textarea-autosize";
-import FinetuneSelector from "./components/FinetuneSelector";
 import Footer from "./components/Footer";
 import Header from "./components/Header";
 import { SparkleIcon } from "./components/Icons";
 import { McpServers } from "./components/McpServers";
 import ModelSelector from "./components/ModelSelector";
-import { models } from "./models";
 import ViewCodeModal from "./components/ViewCodeModal";
-import {
-  DefaultChatTransport,
-  lastAssistantMessageIsCompleteWithToolCalls
-} from "ai";
-
-const finetuneTemplates = {
-  "cf-public-cnn-summarization": `You are given a news article below. Please summarize the article, including only its highlights.
-
-### Article: 
-
-### Summary:`,
-  "cf-public-jigsaw-classification": `You are a helpful, precise, detailed, and concise artificial intelligence assistant. You are a very intelligent and sensitive, having a keen ability to discern whether or not a text message is toxic. You can also be trusted with following the instructions given to you precisely, without deviations.
-In this task, you are asked to decide whether or not comment text is toxic.
-Toxic content harbors negativity towards a person or a group, for instance:
-  - stereotyping (especially using negative stereotypes)
-  - disparaging a person's gender -- as in "male", "female", "men", "women"
-  - derogatory language or slurs
-  - racism -- as in discriminating toward people who are "black", "white"
-  - cultural appropriation
-  - mockery or ridicule
-  - sexual objectification
-  - homophobia -- bullying people who are "homosexual", "gay", "lesbian"
-  - historical insensitivity
-  - disrespecting religion -- as in "christian", "jewish", "muslim"
-  - saying that certain groups are less worthy of respect
-  - insensitivity to health conditions -- as in "psychiatric/mental illness"
-
-Read the comment text provided and predict whether or not the comment text is toxic. If comment text is toxic according to the instructions, then the answer is "yes" (return "yes"); otherwise, the answer is "no" (return "no").
-Output the answer only as a "yes" or a "no"; do not provide explanations.
-Please, never return empty output; always return a "yes" or a "no" answer.
-You will be evaluated based on the following criteria: - The generated answer is always "yes" or "no" (never the empty string, ""). - The generated answer is correct for the comment text presented to you.
-### Comment Text: 
-### Comment Text Is Toxic (Yes/No):`
-};
+import type { UIMessage } from "ai";
+import { useAgent } from "agents/react";
 
 export type Params = {
-  model: keyof AiModels;
+  model: string;
   max_tokens: number;
   stream: boolean;
-  lora: string | null;
-};
-
-type CallableTool = Tool & {
-  callTool: (args: Record<string, any>) => Promise<CallToolResult>;
 };
 
 const App = () => {
-  const queryParams = new URLSearchParams(document.location.search);
-  const selectedModel = queryParams.get("model");
-  const selectedFinetune = queryParams.get("finetune");
-
-  const defaultModel = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-  const [params, setParams] = useState<Params>(() => {
-    // Try to get stored model from sessionStorage
-    const storedModel = sessionStorage.getItem("selectedModel");
-
-    return {
-      lora: selectedFinetune || null,
-      max_tokens: 512,
-      model: (selectedModel || storedModel || defaultModel) as keyof AiModels,
-      stream: true
-    };
-  });
-
   const [error, setError] = useState("");
   const [codeVisible, setCodeVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [systemMessage, setSystemMessage] = useState(
-    "You are a helpful assistant"
+    "You are a helpful assistant that can do various tasks using MCP tools."
   );
-  const [mcpTools, setMcpTools] = useState<CallableTool[]>([]);
-  const mcpToolsRef = useRef<CallableTool[]>([]);
+  const [models, setModels] = useState<any[]>([]);
+  const [params, setParams] = useState<Params>({
+    model: "@cf/openai/gpt-oss-120b",
+    max_tokens: 512,
+    stream: true
+  });
+
+  const agent = useAgent({
+    agent: "playground"
+  });
+
+  const [agentInput, setAgentInput] = useState("");
 
   useEffect(() => {
-    // we do this to make the latest mcpTools
-    // available to the onToolCall callback
-    // which otherwise has a stale closure
-    mcpToolsRef.current = mcpTools;
-  }, [mcpTools]);
-
-  const [input, setInput] = useState("");
-  function getBody() {
-    return {
-      lora: params.lora,
-      max_tokens: params.max_tokens,
-      model: params.model,
-      stream: params.stream,
-      system_message: systemMessage,
-      tools: mcpToolsRef.current
+    const getModels = async () => {
+      const models = await agent.stub.getModels();
+      console.log(models);
+      setModels(models);
     };
-  }
+    getModels();
+  }, []);
 
-  const handleSubmit = (e: any) => {
-    e.preventDefault();
-    sendMessage({ text: input }, { body: getBody() });
-    setInput("");
+  const handleAgentInputChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => {
+    setAgentInput(e.target.value);
   };
 
-  const { messages, status, setMessages, sendMessage, addToolResult } = useChat(
-    {
-      sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithToolCalls,
+  const handleAgentSubmit = async (
+    e: React.FormEvent,
+    extraData: Record<string, unknown> = {}
+  ) => {
+    e.preventDefault();
+    if (!agentInput.trim()) return;
 
-      transport: new DefaultChatTransport({
-        api: "/api/inference",
-        credentials: "include"
-      }),
-      async onToolCall({ toolCall }) {
-        try {
-          const mcpTool = mcpToolsRef.current.find(
-            (t) => t.name === toolCall.toolName
-          );
-          if (mcpTool) {
-            const { input } = toolCall as { input: Record<string, any> };
-            // convert any args from string to number if their schema says they should be
-            const convertedArgs = Object.fromEntries(
-              Object.entries(input).map(([key, value]) => {
-                if (
-                  (mcpTool.inputSchema.properties?.[key] as any)?.type ===
-                    "number" &&
-                  typeof value === "string"
-                ) {
-                  return [key, Number(value)];
-                }
-                return [key, value];
-              })
-            );
-            const calledTool = await mcpTool.callTool(convertedArgs);
-            if (Array.isArray(calledTool?.content)) {
-              calledTool.content.forEach((c) => {
-                if (c.type === "image") {
-                  // Extract the base64 data and mime type
-                  const { data, mimeType } = c;
-                  const binaryData = atob(data);
+    const message = agentInput;
+    setAgentInput("");
 
-                  // Create an array buffer from the binary data
-                  const arrayBuffer = new Uint8Array(binaryData.length);
-                  for (let i = 0; i < binaryData.length; i++) {
-                    arrayBuffer[i] = binaryData.charCodeAt(i);
-                  }
-
-                  // Create a blob from the array buffer
-                  const blob = new Blob([arrayBuffer], { type: mimeType });
-
-                  // Create a URL for the blob
-                  const blobUrl = URL.createObjectURL(blob);
-
-                  // Return a description of the received data
-                  addToolResult({
-                    tool: toolCall.toolName,
-                    toolCallId: toolCall.toolCallId,
-                    output: `Received image: ${mimeType}, size: ${Math.round(data.length / 1024)}KB\n[${blobUrl}]`
-                  });
-                }
-                addToolResult({
-                  tool: toolCall.toolName,
-                  toolCallId: toolCall.toolCallId,
-                  output: c.text
-                });
-              });
-            } else {
-              addToolResult({
-                tool: toolCall.toolName,
-                toolCallId: toolCall.toolCallId,
-                output: `Sorry, something went wrong. Got this response: ${JSON.stringify(calledTool)}`
-              });
-            }
-          }
-        } catch (e) {
-          console.log(e);
-          throw e;
-        }
+    // Send message to agent
+    await sendMessage(
+      {
+        role: "user",
+        parts: [{ type: "text", text: message }]
+      },
+      {
+        body: extraData
       }
-    }
-  );
+    );
+  };
+
+  const { messages, clearHistory, status, sendMessage, stop } = useAgentChat<
+    unknown,
+    UIMessage<{ createdAt: string }>
+  >({
+    agent
+  });
 
   const loading = status === "submitted";
   const streaming = status === "streaming";
 
   const messageElement = useRef<HTMLDivElement>(null);
 
-  useHotkeys("meta+enter, ctrl+enter", (e) => handleSubmit(e), {
-    enableOnFormTags: ["textarea"]
-  });
-
-  const activeModel = models.find((model) => model.name === params.model);
+  // Find the active model from models array
+  const activeModel = models.find((m) => m.name === params.model);
+  const defaultModel = "@cf/openai/gpt-oss-120b";
 
   return (
     <main className="w-full h-full bg-gray-50 md:px-6">
@@ -323,43 +217,12 @@ const App = () => {
                       sessionStorage.setItem("selectedModel", modelName);
                       setParams({
                         ...params,
-                        lora: null,
                         model: modelName
                       });
                     }}
                   />
                 }
               </div>
-
-              {activeModel?.finetunes && (
-                <div className="md:mb-4">
-                  <FinetuneSelector
-                    models={[null, ...activeModel.finetunes]}
-                    model={params.lora}
-                    onSelection={(model) => {
-                      setParams({
-                        ...params,
-                        lora: model ? model.name : null
-                      });
-                      setMessages([
-                        {
-                          parts: [
-                            {
-                              type: "text",
-                              text:
-                                finetuneTemplates[
-                                  model?.name as keyof typeof finetuneTemplates
-                                ] || ""
-                            }
-                          ],
-                          id: "0",
-                          role: "user"
-                        }
-                      ]);
-                    }}
-                  />
-                </div>
-              )}
 
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
@@ -420,11 +283,12 @@ const App = () => {
             </section>
 
             {activeModel?.properties.find(
-              (p) => p.property_id === "function_calling" && p.value === "true"
+              (p: any) =>
+                p.property_id === "function_calling" && p.value === "true"
             ) ? (
               <>
                 <div className="bg-ai h-px mx-2 mt-2 opacity-25" />
-                <McpServers onToolsUpdate={setMcpTools} />
+                <McpServers agent={agent} />
               </>
             ) : null}
           </div>
@@ -508,7 +372,7 @@ const App = () => {
                             .map((p) => p.text)
                             .join("")}
                           disabled={true}
-                          onChange={(e) => setInput(e.target.value)}
+                          readOnly
                         />
                       </div>
                     </li>
@@ -531,7 +395,7 @@ const App = () => {
                       className="rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-gray-50 pointer-events-none"
                       value="..."
                       disabled={true}
-                      onChange={(e) => setInput(e.target.value)}
+                      readOnly
                     />
                   </div>
                 </li>
@@ -554,9 +418,15 @@ const App = () => {
                     <TextareaAutosize
                       className="rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-gray-50"
                       placeholder="Enter a message..."
-                      value={input}
+                      value={agentInput}
                       disabled={loading || streaming}
-                      onChange={(e) => setInput(e.target.value)}
+                      onChange={handleAgentInputChange}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          handleAgentSubmit(e as any);
+                        }
+                      }}
                     />
                   </div>
                 </li>
@@ -577,7 +447,7 @@ const App = () => {
                 type="button"
                 onClick={() => {
                   setError("");
-                  setMessages([]);
+                  clearHistory();
                 }}
                 className={`ml-auto mr-8 text-gray-500 hover:text-violet-900 ${
                   (streaming || loading) && "pointer-events-none opacity-50"
@@ -585,19 +455,29 @@ const App = () => {
               >
                 Clear
               </button>
-              <button
-                type="button"
-                disabled={loading || streaming}
-                onClick={handleSubmit}
-                className={`bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background ${
-                  loading || streaming ? "animate-gradient-background" : ""
-                } text-white rounded-md shadow-md py-2 px-6 flex items-center`}
-              >
-                Run
-                <div className="ml-2 mt-[2px]">
-                  <SparkleIcon />
-                </div>
-              </button>
+              {loading || streaming ? (
+                <button
+                  type="button"
+                  onClick={stop}
+                  className="bg-red-500 hover:bg-red-600 text-white rounded-md shadow-md py-2 px-6 flex items-center"
+                >
+                  Stop
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={!agentInput.trim()}
+                  onClick={(e) => handleAgentSubmit(e as any)}
+                  className={`bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background ${
+                    !agentInput.trim() ? "opacity-50 cursor-not-allowed" : ""
+                  } text-white rounded-md shadow-md py-2 px-6 flex items-center`}
+                >
+                  Run
+                  <div className="ml-2 mt-[2px]">
+                    <SparkleIcon />
+                  </div>
+                </button>
+              )}
             </div>
           </div>
         </div>

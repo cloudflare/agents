@@ -1,55 +1,7 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type UseMcpResult, useMcp } from "use-mcp/react";
 
-// MCP Connection wrapper that only renders when active
-const McpConnection = memo(function McpConnection({
-  serverUrl,
-  headerKey,
-  bearerToken,
-  transportType,
-  onConnectionUpdate
-}: {
-  serverUrl: string;
-  headerKey?: string;
-  bearerToken?: string;
-  transportType: "auto" | "http" | "sse";
-  onConnectionUpdate: (data: ConnectionData) => void;
-}) {
-  // Build custom headers object
-  const customHeaders = useMemo(
-    () =>
-      headerKey && bearerToken ? { [headerKey]: `Bearer ${bearerToken}` } : {},
-    [headerKey, bearerToken]
-  );
-  // Use the MCP hook with the server URL
-  const connection = useMcp({
-    autoRetry: false,
-    customHeaders,
-    debug: true,
-    popupFeatures: "width=500,height=600,resizable=yes,scrollbars=yes",
-    transportType,
-    url: serverUrl
-  });
-
-  // Update parent component with connection data
-  useEffect(() => {
-    onConnectionUpdate(connection);
-  }, [connection, onConnectionUpdate]);
-
-  // Return null as this is just a hook wrapper
-  return null;
-});
-
-type ConnectionData = Omit<UseMcpResult, "state"> & {
-  state: "not-connected" | UseMcpResult["state"];
-};
-
-export function McpServers({
-  onToolsUpdate
-}: {
-  onToolsUpdate?: (tools: any[]) => void;
-}) {
+export function McpServers({ agent }: { agent: any }) {
   const [serverUrl, setServerUrl] = useState(() => {
     return sessionStorage.getItem("mcpServerUrl") || "";
   });
@@ -65,26 +17,9 @@ export function McpServers({
   );
   const [isActive, setIsActive] = useState(false);
   const [showSettings, setShowSettings] = useState(true);
-  const [connectionData, setConnectionData] = useState<ConnectionData>({
-    authenticate: () => Promise.resolve(undefined),
-    authUrl: undefined,
-    callTool: (_name: string, _args?: Record<string, unknown>) =>
-      Promise.resolve(undefined),
-    clearStorage: () => {},
-    disconnect: () => {},
-    error: undefined,
-    log: [],
-    retry: () => {},
-    state: "not-connected",
-    tools: [],
-    resources: [],
-    resourceTemplates: [],
-    readResource: async () => ({ contents: [] }),
-    prompts: [],
-    listPrompts: async () => {},
-    getPrompt: async () => ({ messages: [] }),
-    listResources: async () => {}
-  });
+  const [error, setError] = useState<string>("");
+  const [isConnecting, setIsConnecting] = useState(false);
+
   const logRef = useRef<HTMLDivElement>(null);
   const [showAuth, setShowAuth] = useState<boolean>(false);
   const [headerKey, setHeaderKey] = useState<string>(() => {
@@ -95,74 +30,37 @@ export function McpServers({
   });
   const [showToken, setShowToken] = useState<boolean>(false);
 
-  // Extract connection properties
-  const {
-    state,
-    tools,
-    error,
-    log,
-    authUrl,
-    retry: _retry,
-    disconnect,
-    authenticate
-  } = connectionData;
-
-  // Notify parent component when tools change
-  useEffect(() => {
-    if (onToolsUpdate && tools.length > 0) {
-      onToolsUpdate(
-        tools.map((t) => ({
-          ...t,
-          callTool: (args: Record<string, unknown>) =>
-            connectionData.callTool(t.name, args)
-        }))
-      );
-    }
-  }, [tools, onToolsUpdate, connectionData.callTool]);
-
   // Handle connection
-  const handleConnect = () => {
-    setIsActive(true);
-  };
-
-  // Handle disconnection
-  const handleDisconnect = () => {
-    disconnect();
-    setIsActive(false);
-    setConnectionData({
-      authenticate: () => Promise.resolve(undefined),
-      authUrl: undefined,
-      callTool: (_name: string, _args?: Record<string, unknown>) =>
-        Promise.resolve(undefined),
-      clearStorage: () => {},
-      disconnect: () => {},
-      error: undefined,
-      log: [],
-      retry: () => {},
-      state: "not-connected",
-      tools: [],
-      resources: [],
-      resourceTemplates: [],
-      prompts: [],
-      listResources: async () => {},
-      readResource: async () => ({ contents: [] }),
-      listPrompts: async () => {},
-      getPrompt: async () => ({ messages: [] })
-    });
-  };
-
-  const handleConnectionUpdate = useCallback((data: ConnectionData) => {
-    setConnectionData(data);
-    if (data.state === "failed") setIsActive(false);
-  }, []);
-
-  // Handle authentication if popup was blocked
-  const handleManualAuth = () => {
-    try {
-      authenticate();
-    } catch (err) {
-      console.error("Authentication error:", err);
+  const handleConnect = async () => {
+    if (!serverUrl) {
+      setError("Please enter a server URL");
+      return;
     }
+
+    setIsConnecting(true);
+    setError("");
+
+    try {
+      const options: any = {};
+      if (headerKey && bearerToken) {
+        options.headers = {
+          [headerKey]: `Bearer ${bearerToken}`
+        };
+      }
+
+      await agent.stub.addMCPServer(serverUrl, options);
+      setIsActive(true);
+    } catch (err: any) {
+      setError(err.message || "Failed to connect to MCP server");
+      setIsActive(false);
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const handleDisconnect = () => {
+    setIsActive(false);
+    setError("");
   };
 
   // Auto-scroll log to bottom
@@ -209,7 +107,7 @@ export function McpServers({
       }
     };
 
-    const { colors, label } = states[state] ?? states["not-connected"];
+    const { colors, label } = states["not-connected"];
 
     return (
       <span
@@ -346,10 +244,9 @@ export function McpServers({
               setServerUrl(newValue);
               sessionStorage.setItem("mcpServerUrl", newValue);
             }}
-            disabled={isActive && state !== "failed"}
+            disabled={isActive}
           />
-          {state === "ready" ||
-          (isActive && state !== "not-connected" && state !== "failed") ? (
+          {isActive ? (
             <button
               type="button"
               className="px-3 py-2 bg-orange-100 hover:bg-orange-200 text-orange-900 rounded-md text-sm font-medium shadow-sm"
@@ -362,9 +259,9 @@ export function McpServers({
               type="button"
               className="bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background text-white rounded-md shadow-sm py-2 px-4 text-sm"
               onClick={handleConnect}
-              disabled={isActive}
+              disabled={isActive || isConnecting}
             >
-              Connect
+              {isConnecting ? "Connecting..." : "Connect"}
             </button>
           )}
         </div>
@@ -430,7 +327,7 @@ export function McpServers({
                     setHeaderKey(newValue);
                     sessionStorage.setItem("mcpHeaderKey", newValue);
                   }}
-                  disabled={isActive && state !== "failed"}
+                  disabled={isActive}
                 />
               </div>
 
@@ -450,7 +347,7 @@ export function McpServers({
                       setBearerToken(newValue);
                       sessionStorage.setItem("mcpBearerToken", newValue);
                     }}
-                    disabled={isActive && state !== "failed"}
+                    disabled={isActive}
                   />
                   <button
                     type="button"
@@ -506,109 +403,7 @@ export function McpServers({
             </div>
           )}
         </div>
-
-        {/* Authentication Link if needed */}
-        {authUrl && (
-          <div className="mb-4 p-3 bg-orange-50 border border-orange-200 rounded-md">
-            <p className="text-sm mb-2">
-              Authentication required. Please click the link below:
-            </p>
-            <a
-              href={authUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-orange-700 hover:text-orange-800 underline"
-              onClick={handleManualAuth}
-            >
-              Authenticate in new window
-            </a>
-          </div>
-        )}
-
-        {/* Tools display when connected */}
-        {state === "ready" && tools.length > 0 && (
-          <div className="mb-4">
-            <div className="flex items-center mb-1">
-              <h3 className="font-semibold text-sm">
-                Available Tools ({tools.length})
-              </h3>
-            </div>
-            <div className="border border-gray-200 rounded-md p-2 bg-gray-50 max-h-32 overflow-y-auto">
-              {tools.map((tool, index) => (
-                <div
-                  // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
-                  key={index}
-                  className="text-sm py-1 border-b border-gray-100 last:border-b-0"
-                >
-                  <span className="font-medium">{tool.name}</span>
-                  {tool.description && (
-                    <p className="text-xs text-gray-500 mt-1">
-                      {tool.description}
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Debug Log */}
-        <div className={showSettings ? "block" : "hidden"}>
-          {/* biome-ignore lint/a11y/noLabelWithoutControl: eh */}
-          <label className="font-semibold text-sm block mb-1">Debug Log</label>
-          <div
-            ref={logRef}
-            className="border border-gray-200 rounded-md p-2 bg-gray-50 h-40 overflow-y-auto font-mono text-xs"
-          >
-            {log.length > 0 ? (
-              log.map((entry, index) => (
-                <div
-                  // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
-                  key={index}
-                  className={`py-0.5 ${
-                    entry.level === "debug"
-                      ? "text-gray-500"
-                      : entry.level === "info"
-                        ? "text-blue-600"
-                        : entry.level === "warn"
-                          ? "text-orange-600"
-                          : "text-red-600"
-                  }`}
-                >
-                  [{entry.level}] {entry.message}
-                </div>
-              ))
-            ) : (
-              <div className="text-gray-400">No log entries yet</div>
-            )}
-          </div>
-          {connectionData?.state === "not-connected" ? null : (
-            <button
-              type="button"
-              onClick={() => {
-                connectionData?.clearStorage();
-                if (isActive) {
-                  handleDisconnect();
-                }
-              }}
-              className="text-xs text-orange-600 hover:text-orange-800 hover:underline mt-1"
-            >
-              Clear stored authentication
-            </button>
-          )}
-        </div>
       </div>
-
-      {/* Only render the actual MCP connection when active */}
-      {isActive && (
-        <McpConnection
-          serverUrl={serverUrl}
-          headerKey={headerKey}
-          bearerToken={bearerToken}
-          transportType={transportType}
-          onConnectionUpdate={handleConnectionUpdate}
-        />
-      )}
     </section>
   );
 }
