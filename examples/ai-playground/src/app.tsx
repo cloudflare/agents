@@ -28,7 +28,7 @@ const App = () => {
   );
   const [models, setModels] = useState<any[]>([]);
   const [params, setParams] = useState<Params>({
-    model: "@cf/openai/gpt-oss-120b",
+    model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
     max_tokens: 512,
     stream: true
   });
