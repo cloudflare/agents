@@ -1,0 +1,14 @@
+{
+  "name": "@cloudflare/agents-mcp-client-example",
+  "type": "module",
+  "private": true,
+  "author": "",
+  "scripts": {
+    "deploy": "vite build && wrangler deploy",
+    "start": "vite dev"
+  },
+  "dependencies": {
+    "nanoid": "^5.1.6"
+  },
+  "keywords": []
+}
