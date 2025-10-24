@@ -1,5 +1,5 @@
 {
-  "name": "mcp-worker",
+  "name": "@cloudflare/mcp-worker",
   "description": "The simplest way to run a stateless MCP Server on Cloudflare",
   "author": "Matt Carey <mcarey@cloudflare.com>",
   "version": "0.0.1",
