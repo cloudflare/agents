@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.2.15
+
+### Patch Changes
+
+- [#582](https://github.com/cloudflare/agents/pull/582) [`a215bb2`](https://github.com/cloudflare/agents/commit/a215bb2f926d532e19773e76b7f2c00757e6a656) Thanks [@mattzcarey](https://github.com/mattzcarey)! - chore: remove main field from agents package.json
+
+- [#576](https://github.com/cloudflare/agents/pull/576) [`026696f`](https://github.com/cloudflare/agents/commit/026696f0d6c05e6f81ff6036f9aacf0f8510b9a1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - createMcpHandler for stateless MCP Worker
+
 ## 0.2.14
 
 ### Patch Changes
