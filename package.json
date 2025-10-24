@@ -77,7 +77,7 @@
     "packages/*",
     "guides/*",
     "openai-sdk/*",
-    "site/agents/*"
+    "site/*"
   ],
   "overrides": {
     "esbuild": "^0.25.1"
