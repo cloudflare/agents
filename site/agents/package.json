@@ -1,0 +1,36 @@
+{
+  "name": "agents",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "dev:worker": "wrangler dev --port 8771",
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy"
+  },
+  "dependencies": {
+    "@gsap/react": "^2.1.2",
+    "@use-it/interval": "^1.0.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.4.10",
+    "gsap": "^3.12.7",
+    "next": "15.2.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-wrap-balancer": "^1.1.1",
+    "shiki": "^3.2.1"
+  },
+  "devDependencies": {
+    "@opennextjs/cloudflare": "^1.8.4",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "wrangler": "^4.38.0"
+  }
+}
