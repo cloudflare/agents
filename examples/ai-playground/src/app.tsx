@@ -14,7 +14,6 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 export type Params = {
   model: string;
-  max_tokens: number;
   stream: boolean;
 };
 
@@ -38,9 +37,9 @@ const App = () => {
     "You are a helpful assistant that can do various tasks using MCP tools."
   );
   const [models, setModels] = useState<any[]>([]);
+  const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<Params>({
     model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
-    max_tokens: 512,
     stream: true
   });
 
@@ -86,9 +85,13 @@ const App = () => {
 
   useEffect(() => {
     const getModels = async () => {
-      const models = await agent.stub.getModels();
-      console.log(models);
-      setModels(models);
+      try {
+        const models = await agent.stub.getModels();
+        console.log(models);
+        setModels(models);
+      } finally {
+        setIsLoadingModels(false);
+      }
     };
     getModels();
   }, []);
@@ -256,6 +259,7 @@ const App = () => {
                   <ModelSelector
                     models={models}
                     model={activeModel}
+                    isLoading={isLoadingModels}
                     onModelSelection={async (model) => {
                       const modelName = model ? model.name : defaultModel;
                       // Store selected model in sessionStorage
@@ -286,32 +290,6 @@ const App = () => {
                   value={systemMessage}
                   onChange={(e) => setSystemMessage(e.target.value)}
                 />
-              </div>
-              <div
-                className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
-              >
-                {/* biome-ignore lint/a11y/noLabelWithoutControl: eh */}
-                <label className="font-semibold text-sm block mb-1">
-                  Maximum Output Length (Tokens)
-                </label>
-                <div className="flex items-center p-2 border border-gray-200 rounded-md ">
-                  <input
-                    className="w-full appearance-none cursor-pointer bg-ai rounded-full h-2 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_#901475]"
-                    type="range"
-                    min={1}
-                    max={2048}
-                    value={params.max_tokens}
-                    onChange={(e) =>
-                      setParams({
-                        ...params,
-                        max_tokens: Number.parseInt(e.target.value, 10)
-                      })
-                    }
-                  />
-                  <span className="ml-3 text-md text-gray-800 w-12 text-right">
-                    {params.max_tokens}
-                  </span>
-                </div>
               </div>
 
               <div className="mb-4 hidden">

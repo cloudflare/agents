@@ -7,7 +7,6 @@ const createMessageString = (
   params: Params
 ) => `const stream = await env.AI.run("${params.model}", {
   stream: true,
-  max_tokens: ${params.max_tokens},
   messages: [\n${messages
     .map(
       (message) =>

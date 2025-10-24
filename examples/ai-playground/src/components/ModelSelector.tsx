@@ -11,10 +11,12 @@ type FilterState = {
 const ModelSelector = ({
   models,
   model,
+  isLoading,
   onModelSelection
 }: {
   models: Model[];
   model: Model | undefined;
+  isLoading?: boolean;
   onModelSelection: (model: Model | null) => void;
 }) => {
   const [inputItems, setInputItems] = useState(models);
@@ -203,43 +205,78 @@ const ModelSelector = ({
           <label {...getLabelProps()} className="font-semibold text-sm">
             Model
           </label>
-          <div className="flex space-x-1">
-            {Object.keys(filterState).map((tag) => (
-              <button
-                type="button"
-                key={tag}
-                onClick={(e) => toggleFilter(tag, e)}
-                className={`text-[10px] px-2 py-1 rounded-full border ${
-                  filterState[tag] === "show"
-                    ? "bg-green-100 border-green-400"
-                    : filterState[tag] === "hide"
-                      ? "bg-red-100 border-red-400"
-                      : "bg-transparent border-transparent text-gray-400"
-                }`}
-              >
-                {tag}
-                {filterState[tag] === "show" && " ✓"}
-                {filterState[tag] === "hide" && " ✗"}
-              </button>
-            ))}
+          {/* Always render the container to maintain layout height */}
+          <div className="flex space-x-1 min-h-[26px]">
+            {!isLoading &&
+              Object.keys(filterState).map((tag) => (
+                <button
+                  type="button"
+                  key={tag}
+                  onClick={(e) => toggleFilter(tag, e)}
+                  className={`text-[10px] px-2 py-1 rounded-full border ${
+                    filterState[tag] === "show"
+                      ? "bg-green-100 border-green-400"
+                      : filterState[tag] === "hide"
+                        ? "bg-red-100 border-red-400"
+                        : "bg-transparent border-transparent text-gray-400"
+                  }`}
+                >
+                  {tag}
+                  {filterState[tag] === "show" && " ✓"}
+                  {filterState[tag] === "hide" && " ✗"}
+                </button>
+              ))}
           </div>
         </div>
       </div>
-      <div className="bg-white flex justify-between cursor-pointer w-full border border-gray-200 p-3 rounded-md relative">
+      <div className="bg-white flex items-center justify-between cursor-pointer w-full border border-gray-200 p-3 rounded-md relative">
         <input
           className="absolute left-3 top-3 right-3 bg-transparent outline-none"
+          placeholder={isLoading ? "Fetching models..." : ""}
           {...getInputProps({ ref: inputRef })}
           onBlur={() => {
             setInputValue("");
           }}
+          disabled={isLoading}
         />
-        {inputValue || !selectedItem ? (
-          <span />
-        ) : (
-          <ModelRow model={selectedItem} />
-        )}
-        <span className="px-2" {...getToggleButtonProps()}>
-          {isOpen ? <>&#8593;</> : <>&#8595;</>}
+        {/* Always render this div to maintain consistent height */}
+        <div className="flex-1 min-h-[24px]">
+          {!isLoading && !inputValue && selectedItem && (
+            <ModelRow model={selectedItem} />
+          )}
+        </div>
+        <span
+          className="shrink-0 px-2"
+          {...(isLoading ? {} : getToggleButtonProps())}
+        >
+          {isLoading ? (
+            <svg
+              className="animate-spin h-5 w-5 text-gray-400"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              aria-label="Loading models"
+            >
+              <title>Loading models</title>
+              <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+              />
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              />
+            </svg>
+          ) : isOpen ? (
+            <>&#8593;</>
+          ) : (
+            <>&#8595;</>
+          )}
         </span>
       </div>
       {selectedItem && !isOpen && (
