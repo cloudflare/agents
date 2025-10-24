@@ -10,7 +10,8 @@ import { SparkleIcon } from "./components/Icons";
 import { McpServers } from "./components/McpServers";
 import ModelSelector from "./components/ModelSelector";
 import ViewCodeModal from "./components/ViewCodeModal";
-import type { UIMessage } from "ai";
+import { ToolCallCard } from "./components/ToolCallCard";
+import { isToolUIPart, type UIMessage } from "ai";
 import { useAgent } from "agents/react";
 
 export type Params = {
@@ -33,8 +34,13 @@ const App = () => {
     stream: true
   });
 
+  const [mcp, setMcp] = useState<any>([]);
+
   const agent = useAgent({
-    agent: "playground"
+    agent: "playground",
+    onMcpUpdate(mcpState) {
+      setMcp(mcpState);
+    }
   });
 
   const [agentInput, setAgentInput] = useState("");
@@ -290,7 +296,7 @@ const App = () => {
             ) ? (
               <>
                 <div className="bg-ai h-px mx-2 mt-2 opacity-25" />
-                <McpServers agent={agent} />
+                <McpServers agent={agent} mcpState={mcp} />
               </>
             ) : null}
           </div>
@@ -303,82 +309,75 @@ const App = () => {
             <ul className="pb-6 px-6 pt-6">
               {messages.map((message) => (
                 <div key={message.id}>
-                  {!message.parts.some((p) => p.type !== "text") ? null : (
-                    <li className="mb-3 flex flex-col items-start border-b border-b-gray-100 w-full pb-3">
-                      {message.parts.map((part, i) =>
-                        part.type === "file" ? (
-                          part.mediaType.startsWith("image/") ? (
-                            <img
-                              // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
-                              key={i}
-                              className="max-w-md mx-auto"
-                              src={part.url}
-                              // biome-ignore lint/a11y/noRedundantAlt: it's fine
-                              alt="Image from tool call response"
-                            />
-                          ) : null
-                        ) : part.type.startsWith("tool-") &&
-                          /* let's assert this to tell typescript it's a tool call*/ "input" in
-                            part ? (
-                          // biome-ignore lint/suspicious/noArrayIndexKey: <expla nation>
-                          <div key={i}>
-                            <div className="w-full text-center italic text-xs text-gray-400 font-mono max-h-20 overflow-auto break-all px-2 whitespace-pre-line">
-                              [tool] {part.type}({JSON.stringify(part.input)})
-                              =&gt;&nbsp;
-                              {part.state === "input-available" &&
-                              status === "ready"
-                                ? "awaiting confirmation..."
-                                : part.state === "input-available"
-                                  ? "pending..."
-                                  : part.state === "output-available"
-                                    ? (part.output as string)
-                                    : null}
-                            </div>
-                            {part.state === "output-available" &&
-                            (part.output as string).match(/\[blob:.*]/) ? (
-                              <img
-                                className="block max-w-md mx-auto mt-3"
-                                src={
-                                  (part.output as string).match(
-                                    /\[(blob:.*)]/
-                                  )![1]
-                                }
-                                // biome-ignore lint/a11y/noRedundantAlt: it's fine
-                                alt="Image from tool call response"
-                              />
-                            ) : null}
-                          </div>
-                        ) : null
-                      )}
-                    </li>
-                  )}
-                  {message.parts.some((p) => p.type === "text") ? (
-                    <li className="mb-3 flex items-start border-b border-b-gray-100 w-full py-2">
-                      <div className="mr-3 w-[80px]">
-                        <button
-                          type="button"
-                          className={`px-3 py-2 bg-orange-100 hover:bg-orange-200 rounded-lg text-sm capitalize cursor-pointer ${
-                            (streaming || loading) && "pointer-events-none"
-                          }`}
+                  {message.parts.map((part, i) => {
+                    // Render text messages
+                    if (part.type === "text") {
+                      return (
+                        <li
+                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          key={i}
+                          className="mb-3 flex items-start border-b border-b-gray-100 w-full py-2"
                         >
-                          {message.role}
-                        </button>
-                      </div>
-                      <div className="relative grow">
-                        <TextareaAutosize
-                          className={`rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-gray-50 ${
-                            (streaming || loading) && "pointer-events-none"
-                          }`}
-                          value={message.parts
-                            .filter((p) => p.type === "text")
-                            .map((p) => p.text)
-                            .join("")}
-                          disabled={true}
-                          readOnly
-                        />
-                      </div>
-                    </li>
-                  ) : null}
+                          <div className="mr-3 w-[80px]">
+                            <button
+                              type="button"
+                              className={`px-3 py-2 bg-orange-100 hover:bg-orange-200 rounded-lg text-sm capitalize cursor-pointer ${
+                                (streaming || loading) && "pointer-events-none"
+                              }`}
+                            >
+                              {message.role}
+                            </button>
+                          </div>
+                          <div className="relative grow">
+                            <TextareaAutosize
+                              className={`rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-gray-50 ${
+                                (streaming || loading) && "pointer-events-none"
+                              }`}
+                              value={part.text}
+                              disabled={true}
+                              readOnly
+                            />
+                          </div>
+                        </li>
+                      );
+                    }
+
+                    // Render tool calls
+                    if (isToolUIPart(part)) {
+                      return (
+                        <li
+                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          key={i}
+                          className="mb-3 w-full"
+                        >
+                          <ToolCallCard part={part} />
+                        </li>
+                      );
+                    }
+
+                    // Render file messages (images)
+                    if (
+                      part.type === "file" &&
+                      part.mediaType.startsWith("image/")
+                    ) {
+                      return (
+                        <li
+                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          key={i}
+                          className="mb-3 w-full"
+                        >
+                          <img
+                            className="max-w-md mx-auto rounded-lg"
+                            src={part.url}
+                            // biome-ignore lint/a11y/noRedundantAlt: it's fine
+                            alt="Image from tool call response"
+                          />
+                        </li>
+                      );
+                    }
+
+                    return null;
+                  })}
                 </div>
               ))}
 

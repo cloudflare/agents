@@ -1,7 +1,7 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-export function McpServers({ agent }: { agent: any }) {
+export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
   const [serverUrl, setServerUrl] = useState(() => {
     return sessionStorage.getItem("mcpServerUrl") || "";
   });
@@ -16,9 +16,42 @@ export function McpServers({ agent }: { agent: any }) {
     }
   );
   const [isActive, setIsActive] = useState(false);
+
+  // Update isActive based on mcpState
+  useEffect(() => {
+    if (mcpState?.status === "ready") {
+      setIsActive(true);
+    } else if (
+      mcpState?.status === "failed" ||
+      mcpState?.status === "not-connected"
+    ) {
+      setIsActive(false);
+    }
+  }, [mcpState?.status]);
   const [showSettings, setShowSettings] = useState(true);
   const [error, setError] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
+
+  // Update error from mcpState
+  useEffect(() => {
+    if (mcpState?.error) {
+      setError(mcpState.error);
+    }
+  }, [mcpState?.error]);
+
+  // Update isConnecting based on mcpState
+  useEffect(() => {
+    if (
+      mcpState?.status === "discovering" ||
+      mcpState?.status === "connecting" ||
+      mcpState?.status === "authenticating" ||
+      mcpState?.status === "loading"
+    ) {
+      setIsConnecting(true);
+    } else {
+      setIsConnecting(false);
+    }
+  }, [mcpState?.status]);
 
   const logRef = useRef<HTMLDivElement>(null);
   const [showAuth, setShowAuth] = useState<boolean>(false);
@@ -72,7 +105,7 @@ export function McpServers({ agent }: { agent: any }) {
 
   // Generate status badge based on connection state
   const getStatusBadge = () => {
-    const states = {
+    const states: Record<string, { colors: string; label: string }> = {
       discovering: {
         colors: "bg-blue-100 text-blue-800",
         label: "Discovering"
@@ -107,7 +140,9 @@ export function McpServers({ agent }: { agent: any }) {
       }
     };
 
-    const { colors, label } = states["not-connected"];
+    // Get the status from mcpState
+    const status = mcpState?.status || "not-connected";
+    const { colors, label } = states[status] || states["not-connected"];
 
     return (
       <span
@@ -403,6 +438,36 @@ export function McpServers({ agent }: { agent: any }) {
             </div>
           )}
         </div>
+
+        {/* Display tools when connected */}
+        {isActive &&
+          mcpState?.tools &&
+          Object.keys(mcpState.tools).length > 0 && (
+            <div className="mt-4 border border-green-200 rounded-md bg-green-50 p-3">
+              <div className="text-sm font-medium text-green-900 mb-2">
+                Available Tools ({Object.keys(mcpState.tools).length})
+              </div>
+              <div className="space-y-2">
+                {Object.entries(mcpState.tools).map(
+                  ([toolName, tool]: [string, any]) => (
+                    <div
+                      key={toolName}
+                      className="bg-white rounded p-2 border border-green-200"
+                    >
+                      <div className="font-medium text-xs text-gray-900">
+                        {toolName.replace("tool_", "").replace(/_/g, " ")}
+                      </div>
+                      {tool.description && (
+                        <div className="text-xs text-gray-600 mt-1">
+                          {tool.description}
+                        </div>
+                      )}
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          )}
       </div>
     </section>
   );
