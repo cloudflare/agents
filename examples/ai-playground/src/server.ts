@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { openai } from "@ai-sdk/openai";
+import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import { AIChatAgent } from "agents/ai-chat-agent";
 import {
@@ -14,16 +14,26 @@ import {
 import { cleanupMessages } from "./utils";
 import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const model = openai("gpt-4o-2024-11-20");
+interface Env {
+  AI: Ai;
+}
 
 interface State {
-  openaiApiKey?: string;
+  modelName: string;
+  temperature: number;
 }
+
+const workersai = createWorkersAI({ binding: (env as Env).AI });
 
 /**
  * Chat Agent implementation that handles real-time AI chat interactions
  */
 export class Playground extends AIChatAgent<Env, State> {
+  initialState = {
+    modelName: "@cf/openai/gpt-oss-120b",
+    temperature: 1
+  };
+
   /**
    * Handles incoming chat messages and manages the response stream
    */
@@ -33,12 +43,6 @@ export class Playground extends AIChatAgent<Env, State> {
   ) {
     // Collect all tools, including MCP tools
     const allTools = this.mcp.getAITools();
-
-    if (!this.state.openaiApiKey) {
-      console.error(
-        "OPENAI_API_KEY is not set, don't forget to set it locally in .dev.vars, and use `wrangler secret bulk .dev.vars` to upload it to production"
-      );
-    }
 
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
@@ -50,11 +54,12 @@ export class Playground extends AIChatAgent<Env, State> {
             "You are a helpful assistant that can do various tasks using MCP tools.",
 
           messages: convertToModelMessages(cleanedMessages),
-          model,
+          model: workersai(this.state.modelName as any),
           tools: allTools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof allTools
           >,
+          temperature: this.state.temperature,
           stopWhen: stepCountIs(10)
         });
 
@@ -75,11 +80,10 @@ export class Playground extends AIChatAgent<Env, State> {
     await this.mcp.connect(url, options);
   }
 
+  // fix the the types here
   @callable()
-  async addApiKey(key: string) {
-    this.setState({
-      openaiApiKey: key
-    });
+  async getModels() {
+    return await this.env.AI.models({ per_page: 1000 });
   }
 }
 
