@@ -34,7 +34,7 @@ npm run deploy
 ## How It Works
 
 1. **OAuth Provider** handles authentication endpoints
-2. **API Handler** wraps your MCP server with `experimental_createMcpHandler`
+2. **API Handler** wraps your MCP server with `createMcpHandler`
 3. **OAuth Provider** validates tokens and sets `ctx.props`
 4. **MCP Tools** access user data via `getMcpAuthContext()`
 
