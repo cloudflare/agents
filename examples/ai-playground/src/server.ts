@@ -68,14 +68,8 @@ export class Playground extends AIChatAgent<Env, State> {
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     _options?: { abortSignal?: AbortSignal }
   ) {
-    // Collect all tools, including MCP tools
-    const allTools = this.mcp.getAITools();
+    const tools = this.mcp.getAITools();
 
-    console.log({ tools: allTools });
-
-    console.log({ model: this.state.modelName });
-
-    // Create workersai instance inside the handler where env.AI is available
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     await this.ensureDestroy();
@@ -90,10 +84,9 @@ export class Playground extends AIChatAgent<Env, State> {
 
           messages: convertToModelMessages(cleanedMessages),
           model: workersai(this.state.modelName as any),
-          // model: model,
-          tools: allTools,
+          tools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
-            typeof allTools
+            typeof tools
           >,
           temperature: this.state.temperature,
           stopWhen: stepCountIs(10)
@@ -118,32 +111,33 @@ export class Playground extends AIChatAgent<Env, State> {
     await this.schedule(60 * 15, "destroy");
   }
 
-  // fix the the types here
   @callable()
-  async connectMCPServer(url: string, options: any) {
-    console.log(
-      "[Playground] connectMCPServer called with url:",
-      url,
-      "options:",
-      options
-    );
+  async connectMCPServer(url: string, headers?: Record<string, string>) {
     await this.mcp.closeAllConnections();
-    console.log(
-      "[Playground] Closed all connections, attempting to connect..."
-    );
-    // Call the base class addMcpServer method - returns { id, authURL }
-    const result = await this.addMcpServer("mcp-server", url, this.env.HOST);
-    console.log("[Playground] MCP connect result:", result);
+
+    let result: { id: string; authUrl: string | undefined };
+    if (!headers) {
+      result = await this.addMcpServer("mcp-server", url, this.env.HOST);
+    } else {
+      result = await this.addMcpServer(
+        "mcp-server",
+        url,
+        this.env.HOST,
+        "agents",
+        {
+          transport: {
+            type: "auto",
+            headers
+          }
+        }
+      );
+    }
+
     return result;
   }
 
   @callable()
   async disconnectMCPServer(serverId?: string) {
-    console.log(
-      "[Playground] disconnectMCPServer called with serverId:",
-      serverId
-    );
-
     if (serverId) {
       // Disconnect specific server
       await this.removeMcpServer(serverId);
@@ -157,19 +151,11 @@ export class Playground extends AIChatAgent<Env, State> {
         await this.removeMcpServer(id);
       }
     }
-
-    // broadcastMcpServers() is called automatically by removeMcpServer
   }
 
-  // fix the the types here
   @callable()
   async getModels() {
     return await this.env.AI.models({ per_page: 1000 });
-  }
-
-  @callable()
-  async setModel(modelName: string) {
-    this.state.modelName = modelName;
   }
 }
 

@@ -78,6 +78,10 @@ const App = () => {
     resources: []
   });
 
+  const [mcpLogs, setMcpLogs] = useState<
+    Array<{ timestamp: number; status: string; serverUrl?: string }>
+  >([]);
+
   const [sessionId, setSessionId] = useState<string>(() =>
     getOrCreateSessionId()
   );
@@ -85,6 +89,9 @@ const App = () => {
   const agent = useAgent({
     agent: "playground",
     name: sessionId,
+    onError(event) {
+      console.error("[App] onError callback triggered with event:", event);
+    },
     onMcpUpdate(mcpState: MCPServersState) {
       console.log("[App] onMcpUpdate callback triggered with state:", mcpState);
 
@@ -110,6 +117,17 @@ const App = () => {
 
       console.log("[App] Transformed MCP state:", transformedState);
       setMcp(transformedState);
+
+      if (firstServer?.state) {
+        setMcpLogs((prev) => [
+          ...prev,
+          {
+            timestamp: Date.now(),
+            status: firstServer.state,
+            serverUrl: firstServer.server_url
+          }
+        ]);
+      }
     }
   });
 
@@ -365,7 +383,7 @@ const App = () => {
             ) ? (
               <>
                 <div className="bg-ai h-px mx-2 mt-2 opacity-25" />
-                <McpServers agent={agent} mcpState={mcp} />
+                <McpServers agent={agent} mcpState={mcp} mcpLogs={mcpLogs} />
               </>
             ) : null}
           </div>
