@@ -12,7 +12,6 @@
   "dependencies": {
     "@cloudflare/vite-plugin": "^1.13.12",
     "@vitejs/plugin-react": "^5.0.4",
-    "agents": "^0.2.11",
     "chess.js": "^1.4.0",
     "react": "^19.2.0",
     "react-chessboard": "^5.6.2",
