@@ -11,6 +11,7 @@ import { ToolCallCard } from "./components/ToolCallCard";
 import { isToolUIPart, type UIMessage } from "ai";
 import { useAgent, type MCPServersState } from "agents/react";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { nanoid } from "nanoid";
 
 export type Params = {
   model: string;
@@ -28,6 +29,32 @@ export type McpComponentState = {
   serverName?: string;
   serverUrl?: string;
 };
+
+const STORAGE_KEY = "playground_session_id";
+
+/**
+ * Get or create a session ID for this user.
+ * The session ID is stored in localStorage and persists across browser sessions.
+ */
+function getOrCreateSessionId(): string {
+  let sessionId = localStorage.getItem(STORAGE_KEY);
+
+  if (!sessionId) {
+    sessionId = nanoid();
+    localStorage.setItem(STORAGE_KEY, sessionId);
+  }
+
+  return sessionId;
+}
+
+/**
+ * Generate a new session ID and store it in localStorage.
+ */
+function generateNewSessionId(): string {
+  const newSessionId = nanoid();
+  localStorage.setItem(STORAGE_KEY, newSessionId);
+  return newSessionId;
+}
 
 const App = () => {
   const [error, setError] = useState("");
@@ -51,8 +78,13 @@ const App = () => {
     resources: []
   });
 
+  const [sessionId, setSessionId] = useState<string>(() =>
+    getOrCreateSessionId()
+  );
+
   const agent = useAgent({
     agent: "playground",
+    name: sessionId,
     onMcpUpdate(mcpState: MCPServersState) {
       console.log("[App] onMcpUpdate callback triggered with state:", mcpState);
 
@@ -134,6 +166,17 @@ const App = () => {
   const loading = status === "submitted";
   const streaming = status === "streaming";
 
+  const handleReset = () => {
+    // Generate and store new session ID
+    const newSessionId = generateNewSessionId();
+
+    // Clear conversation history
+    clearHistory();
+
+    // Update session ID state (triggers reconnection with new ID)
+    setSessionId(newSessionId);
+  };
+
   const messageElement = useRef<HTMLDivElement>(null);
 
   // Find the active model from models array
@@ -159,7 +202,7 @@ const App = () => {
           <div className="md:w-1/3 w-full h-full md:overflow-auto bg-white md:rounded-md shadow-md md:block z-10">
             <div className="bg-ai h-[3px]" />
             <section className="rounded-lg bg-white p-4">
-              <div className="flex align-middle">
+              <div className="flex align-middle items-center">
                 <span className="text-lg font-semibold">
                   Workers AI LLM Playground
                 </span>
@@ -226,7 +269,14 @@ const App = () => {
                 </div>
                 <button
                   type="button"
-                  className="ml-auto rounded-md border border-gray-200 px-2 py-1 -mt-1 md:hidden"
+                  className="ml-auto rounded-md border border-gray-200 px-3 py-1.5 text-sm hover:bg-gray-50 transition-colors"
+                  onClick={handleReset}
+                >
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  className="ml-2 rounded-md border border-gray-200 px-2 py-1 -mt-1 md:hidden"
                   onClick={() => setSettingsVisible(!settingsVisible)}
                 >
                   <svg
