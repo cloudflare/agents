@@ -132,12 +132,7 @@ export class Playground extends AIChatAgent<Env, State> {
       "[Playground] Closed all connections, attempting to connect..."
     );
     // Call the base class addMcpServer method - returns { id, authURL }
-    const result = await this.addMcpServer(
-      "mcp-server",
-      url,
-      this.env.HOST,
-      options
-    );
+    const result = await this.addMcpServer("mcp-server", url, this.env.HOST);
     console.log("[Playground] MCP connect result:", result);
     return result;
   }

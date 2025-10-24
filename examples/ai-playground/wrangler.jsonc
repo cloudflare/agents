@@ -1,7 +1,7 @@
 {
   "name": "ai-playground",
   "main": "src/server.ts",
-  "compatibility_date": "2025-03-14",
+  "compatibility_date": "2025-10-08",
   "compatibility_flags": ["nodejs_compat"],
 
   "assets": {
