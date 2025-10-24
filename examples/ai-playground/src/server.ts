@@ -157,6 +157,10 @@ export class Playground extends AIChatAgent<Env, State> {
   async getModels() {
     return await this.env.AI.models({ per_page: 1000 });
   }
+
+  onStateUpdate() {
+    console.log("[Playground] State updated:", this.state);
+  }
 }
 
 /**
