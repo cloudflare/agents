@@ -39,6 +39,7 @@ const App = () => {
   const agent = useAgent({
     agent: "playground",
     onMcpUpdate(mcpState) {
+      console.log("[App] onMcpUpdate callback triggered with state:", mcpState);
       setMcp(mcpState);
     }
   });
@@ -226,7 +227,9 @@ const App = () => {
                         model: modelName
                       });
                       // Update the agent's state on the server
-                      await agent.stub.setModel(modelName);
+                      await agent.setState({
+                        modelName
+                      });
                     }}
                   />
                 }

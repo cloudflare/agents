@@ -19,6 +19,7 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
 
   // Update isActive based on mcpState
   useEffect(() => {
+    console.log("[McpServers] mcpState updated:", mcpState);
     if (mcpState?.status === "ready") {
       setIsActive(true);
     } else if (
@@ -70,6 +71,7 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
       return;
     }
 
+    console.log("[McpServers] handleConnect called with URL:", serverUrl);
     setIsConnecting(true);
     setError("");
 
@@ -81,9 +83,26 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
         };
       }
 
-      await agent.stub.addMCPServer(serverUrl, options);
-      setIsActive(true);
+      console.log(
+        "[McpServers] Calling connectMCPServer with options:",
+        options
+      );
+      const result = await agent.stub.connectMCPServer(serverUrl, options);
+      console.log("[McpServers] connectMCPServer result:", result);
+
+      // If authUrl is returned, open the OAuth popup immediately
+      if (result?.authUrl) {
+        console.log(
+          "[McpServers] Auth required, opening popup with URL:",
+          result.authUrl
+        );
+        openOAuthPopup(result.authUrl);
+      } else {
+        console.log("[McpServers] No auth required, connection successful");
+        setIsActive(true);
+      }
     } catch (err: any) {
+      console.error("[McpServers] Connection error:", err);
       setError(err.message || "Failed to connect to MCP server");
       setIsActive(false);
     } finally {
@@ -94,6 +113,15 @@ export function McpServers({ agent, mcpState }: { agent: any; mcpState: any }) {
   const handleDisconnect = () => {
     setIsActive(false);
     setError("");
+  };
+
+  const openOAuthPopup = (authUrl: string) => {
+    console.log("[McpServers] Opening OAuth popup with URL:", authUrl);
+    window.open(
+      authUrl,
+      "mcpOAuthWindow",
+      "width=600,height=800,resizable=yes,scrollbars=yes,toolbar=yes,menubar=no,location=no,directories=no,status=yes"
+    );
   };
 
   // Auto-scroll log to bottom

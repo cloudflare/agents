@@ -1,6 +1,7 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import { AIChatAgent } from "agents/ai-chat-agent";
+import type { MCPClientOAuthResult } from "agents/mcp";
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -14,6 +15,7 @@ import { cleanupMessages } from "./utils";
 
 interface Env {
   AI: Ai;
+  HOST?: string;
 }
 
 interface State {
@@ -29,6 +31,35 @@ export class Playground extends AIChatAgent<Env, State> {
     modelName: "@cf/openai/gpt-oss-120b",
     temperature: 1
   };
+
+  onStart() {
+    console.log("[Playground] onStart called - configuring OAuth callback");
+    // Configure OAuth callback to close popup window after authentication
+    this.mcp.configureOAuthCallback({
+      customHandler: (result: MCPClientOAuthResult) => {
+        console.log("[Playground] OAuth callback triggered:", result);
+        if (result.authSuccess) {
+          console.log("[Playground] OAuth authentication successful");
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" },
+            status: 200
+          });
+        } else {
+          console.log(
+            "[Playground] OAuth authentication failed:",
+            result.authError
+          );
+          return new Response(
+            `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
+            {
+              headers: { "content-type": "text/html" },
+              status: 200
+            }
+          );
+        }
+      }
+    });
+  }
 
   /**
    * Handles incoming chat messages and manages the response stream
@@ -89,9 +120,26 @@ export class Playground extends AIChatAgent<Env, State> {
 
   // fix the the types here
   @callable()
-  async addMCPServer(url: string, options: any) {
+  async connectMCPServer(url: string, options: any) {
+    console.log(
+      "[Playground] connectMCPServer called with url:",
+      url,
+      "options:",
+      options
+    );
     await this.mcp.closeAllConnections();
-    await this.mcp.connect(url, options);
+    console.log(
+      "[Playground] Closed all connections, attempting to connect..."
+    );
+    // Call the base class addMcpServer method - returns { id, authURL }
+    const result = await this.addMcpServer(
+      "mcp-server",
+      url,
+      this.env.HOST,
+      options
+    );
+    console.log("[Playground] MCP connect result:", result);
+    return result;
   }
 
   // fix the the types here
