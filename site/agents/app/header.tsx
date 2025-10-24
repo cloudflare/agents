@@ -58,7 +58,7 @@ export function Header() {
   const [showLinks, setShowLinks] = useState(false);
   const { scrollY } = useScroll();
 
-  useMotionValueEvent(scrollY, "change", (v) => {
+  useMotionValueEvent(scrollY, "change", (v: number) => {
     setIsSticking(v > 24);
     setShowLinks(v > 400);
   });

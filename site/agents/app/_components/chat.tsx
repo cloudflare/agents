@@ -63,7 +63,7 @@ export function useSequencedMotionValues(
     });
   }, [length]);
   const gap = 1 / length;
-  useMotionValueEvent(progress, "change", (scrollProgress) => {
+  useMotionValueEvent(progress, "change", (scrollProgress: number) => {
     /**
      * The 0 -> 1 should be split based on the # of messages
      */
@@ -90,11 +90,11 @@ export function ControlledChat({
   const [index, setIndex] = useState(0);
 
   const indexReal = useTransform(progress, [0, 1], [0, messages.length]);
-  const indexRounded = useTransform(indexReal, (i) => {
+  const indexRounded = useTransform(indexReal, (i: number) => {
     if (i <= 0) return -1;
     return Math.round(i);
   });
-  useMotionValueEvent(indexRounded, "change", (v) =>
+  useMotionValueEvent(indexRounded, "change", (v: number) =>
     queueMicrotask(() => setIndex(v))
   );
 
@@ -245,8 +245,10 @@ export function useControlledTypedMessage(
   progress: MotionValue<number>
 ) {
   const indexReal = useTransform(progress, [0, 1], [0, message.length]);
-  const index = useTransform(indexReal, (i) => Math.round(i));
-  const visibleMessage = useTransform(index, (i) => message.slice(0, i));
+  const index = useTransform(indexReal, (i: number) => Math.round(i));
+  const visibleMessage = useTransform(index, (i: number) =>
+    message.slice(0, i)
+  );
   return visibleMessage;
 }
 
@@ -265,7 +267,7 @@ export function ControlledTypedMessage({
   const [done, setDone] = useState(false);
   const msg = useControlledTypedMessage(message, progress);
 
-  useMotionValueEvent(progress, "change", (v) => {
+  useMotionValueEvent(progress, "change", (v: number) => {
     queueMicrotask(() => {
       setActive(v > 0);
       setDone(v >= 0.9);

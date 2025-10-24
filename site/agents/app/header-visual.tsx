@@ -45,7 +45,7 @@ export function HeaderVisual() {
   const { scrollY } = useScroll({
     target: ref
   });
-  const progress = useTransform(scrollY, (v) => {
+  const progress = useTransform(scrollY, (v: number) => {
     if (!scrollBounds) return 0;
     return transform(
       v,
@@ -57,7 +57,7 @@ export function HeaderVisual() {
     );
   });
 
-  useMotionValueEvent(progress, "change", (v) => {
+  useMotionValueEvent(progress, "change", (v: number) => {
     queueMicrotask(() => setShowBubbles(v > 0.7));
   });
 

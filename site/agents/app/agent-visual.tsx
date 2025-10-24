@@ -21,7 +21,7 @@ export function AgentVisual({ progress }: { progress: MotionValue<number> }) {
   const values = useSequencedMotionValues(3, progress);
   const [issueProgress, codeProgress, gitProgress] = values;
 
-  useMotionValueEvent(progress, "change", (v) => {
+  useMotionValueEvent(progress, "change", (v: number) => {
     queueMicrotask(() => setActive(v > 0));
   });
 
@@ -75,7 +75,7 @@ function PullRequest({ progress }: { progress: MotionValue<number> }) {
   const triggeredRef = useRef(false);
   const controls = useAnimationControls();
   const [active, setActive] = useState(false);
-  useMotionValueEvent(progress, "change", (v) => {
+  useMotionValueEvent(progress, "change", (v: number) => {
     queueMicrotask(() => setActive(v > 0));
   });
   const values = useSequencedMotionValues(
@@ -83,7 +83,7 @@ function PullRequest({ progress }: { progress: MotionValue<number> }) {
     useTransform(progress, [0, 0.75], [0, 1])
   );
 
-  useMotionValueEvent(progress, "change", (v) => {
+  useMotionValueEvent(progress, "change", (v: number) => {
     if (v > 0.75) {
       if (triggeredRef.current) return;
       triggeredRef.current = true;
@@ -144,7 +144,7 @@ const LINES = 8;
 function Code({ progress }: { progress: MotionValue<number> }) {
   const [active, setActive] = useState(false);
 
-  useMotionValueEvent(progress, "change", (v) => {
+  useMotionValueEvent(progress, "change", (v: number) => {
     queueMicrotask(() => setActive(v > 0 && v < 1));
   });
   const values = useSequencedMotionValues(
@@ -198,7 +198,7 @@ function Issues({ progress }: { progress: MotionValue<number> }) {
   const [active, setActive] = useState(false);
   const [index, setIndex] = useState(0);
 
-  useMotionValueEvent(progress, "change", (v) => {
+  useMotionValueEvent(progress, "change", (v: number) => {
     queueMicrotask(() => {
       setActive(v < 1);
       if (v < 0.25) setIndex(0);
