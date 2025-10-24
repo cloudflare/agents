@@ -1,6 +1,6 @@
 # Authenticated MCP Server Example
 
-This example demonstrates using `experimental_createMcpHandler` to create an authenticated MCP server by wrapping it with [`OAuthProvider`](https://github.com/cloudflare/workers-oauth-provider) from `@cloudflare/workers-oauth-provider`.
+This example demonstrates using `createMcpHandler` to create an authenticated MCP server by wrapping it with [`OAuthProvider`](https://github.com/cloudflare/workers-oauth-provider) from `@cloudflare/workers-oauth-provider`.
 
 This is the simplest way to deploy an authenticated MCP server on Cloudflare Workers.
 
