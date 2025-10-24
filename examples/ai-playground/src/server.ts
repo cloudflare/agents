@@ -47,6 +47,7 @@ export class Playground extends AIChatAgent<Env, State> {
     // Create workersai instance inside the handler where env.AI is available
     const workersai = createWorkersAI({ binding: this.env.AI });
 
+    await this.ensureDestroy();
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         // Clean up incomplete tool calls to prevent API errors
@@ -72,6 +73,18 @@ export class Playground extends AIChatAgent<Env, State> {
     });
 
     return createUIMessageStreamResponse({ stream });
+  }
+
+  async ensureDestroy() {
+    const schedules = this.getSchedules();
+    if (schedules.length > 0) {
+      // Cancel previously set destroy schedules
+      for (const s of schedules) {
+        await this.cancelSchedule(s.id);
+      }
+    }
+    // Destroy after 15 minutes of inactivity
+    await this.schedule(60 * 15, "destroy");
   }
 
   // fix the the types here
