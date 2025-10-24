@@ -12,6 +12,7 @@ import {
   type ToolSet
 } from "ai";
 import { cleanupMessages } from "./utils";
+import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const model = openai("gpt-4o-2024-11-20");
 
@@ -66,7 +67,10 @@ export class Playground extends AIChatAgent<Env, State> {
 
   // fix the the types here
   @callable()
-  async addMCPServer(url: string, options: unknown) {
+  async addMCPServer(
+    url: string,
+    options: StreamableHTTPClientTransportOptions
+  ) {
     await this.mcp.closeAllConnections();
     await this.mcp.connect(url, options);
   }
