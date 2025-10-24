@@ -201,17 +201,6 @@ function getNextCronTime(cron: string) {
 
 export type { TransportType } from "./mcp/types";
 
-// Export stateless MCP handler for simple fetch exports
-export {
-  experimental_createMcpHandler,
-  getMcpAuthContext,
-  WorkerTransport,
-  type CreateMcpHandlerOptions,
-  type OAuthExecutionContext,
-  type McpAuthContext,
-  type WorkerTransportOptions
-} from "./mcp";
-
 /**
  * MCP Server state update message from server -> Client
  */

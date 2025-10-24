@@ -75,7 +75,6 @@ function ChatRoom({ roomId }: ChatProps) {
               {m.parts
                 ?.filter((part) => part.type === "text")
                 .map((part, i) => (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: vibes
                   <div key={i} className="message-content">
                     {part.text}
                   </div>
