@@ -923,7 +923,6 @@ export class Agent<
   override onError(error: unknown): void | Promise<void>;
   override onError(connectionOrError: Connection | unknown, error?: unknown) {
     let theError: unknown;
-    // Check if this is a two-argument call (websocket connection error)
     if (connectionOrError && error) {
       theError = error;
       // this is a websocket connection error
