@@ -11,15 +11,15 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "MyAgent",
-        "name": "MyAgent"
+        "class_name": "Playground",
+        "name": "Playground"
       }
     ]
   },
 
   "migrations": [
     {
-      "new_sqlite_classes": ["MyAgent"],
+      "new_sqlite_classes": ["Playground"],
       "tag": "v1"
     }
   ],

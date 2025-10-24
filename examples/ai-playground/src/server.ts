@@ -1,51 +1,91 @@
-import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
-import type { MCPClientOAuthResult } from "agents/mcp";
+import { env } from "cloudflare:workers";
+import { openai } from "@ai-sdk/openai";
+import { callable, routeAgentRequest } from "agents";
+import { AIChatAgent } from "agents/ai-chat-agent";
+import {
+  convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
+  type StreamTextOnFinishCallback,
+  stepCountIs,
+  streamText,
+  type ToolSet
+} from "ai";
+import { cleanupMessages } from "./utils";
 
-type Env = {
-  MyAgent: AgentNamespace<MyAgent>;
-  HOST?: string; // Optional - will be derived from request if not provided
-};
+const model = openai("gpt-4o-2024-11-20");
 
-export class MyAgent extends Agent<Env, never> {
-  onStart() {
-    // Optionally configure OAuth callback. Here we use popup-closing behavior since we're opening a window on the client
-    this.mcp.configureOAuthCallback({
-      customHandler: (result: MCPClientOAuthResult) => {
-        if (result.authSuccess) {
-          return new Response("<script>window.close();</script>", {
-            headers: { "content-type": "text/html" },
-            status: 200
-          });
-        } else {
-          return new Response(
-            `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
-            {
-              headers: { "content-type": "text/html" },
-              status: 200
-            }
-          );
-        }
-      }
-    });
-  }
+interface State {
+  openaiApiKey?: string;
+}
 
-  async onRequest(request: Request): Promise<Response> {
-    const reqUrl = new URL(request.url);
-    if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {
-      const mcpServer = (await request.json()) as { url: string; name: string };
-      // Use HOST if provided, otherwise it will be derived from the request
-      await this.addMcpServer(mcpServer.name, mcpServer.url, this.env.HOST);
-      return new Response("Ok", { status: 200 });
+/**
+ * Chat Agent implementation that handles real-time AI chat interactions
+ */
+export class Playground extends AIChatAgent<Env, State> {
+  /**
+   * Handles incoming chat messages and manages the response stream
+   */
+  async onChatMessage(
+    onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _options?: { abortSignal?: AbortSignal }
+  ) {
+    // Collect all tools, including MCP tools
+    const allTools = this.mcp.getAITools();
+
+    if (!this.state.openaiApiKey) {
+      console.error(
+        "OPENAI_API_KEY is not set, don't forget to set it locally in .dev.vars, and use `wrangler secret bulk .dev.vars` to upload it to production"
+      );
     }
 
-    return new Response("Not found", { status: 404 });
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        // Clean up incomplete tool calls to prevent API errors
+        const cleanedMessages = cleanupMessages(this.messages);
+
+        const result = streamText({
+          system:
+            "You are a helpful assistant that can do various tasks using MCP tools.",
+
+          messages: convertToModelMessages(cleanedMessages),
+          model,
+          tools: allTools,
+          onFinish: onFinish as unknown as StreamTextOnFinishCallback<
+            typeof allTools
+          >,
+          stopWhen: stepCountIs(10)
+        });
+
+        writer.merge(result.toUIMessageStream());
+      }
+    });
+
+    return createUIMessageStreamResponse({ stream });
+  }
+
+  // fix the the types here
+  @callable()
+  async addMCPServer(url: string, options: unknown) {
+    await this.mcp.closeAllConnections();
+    await this.mcp.connect(url, options);
+  }
+
+  @callable()
+  async addApiKey(key: string) {
+    this.setState({
+      openaiApiKey: key
+    });
   }
 }
 
+/**
+ * Worker entry point that routes incoming requests to the appropriate handler
+ */
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
     return (
-      (await routeAgentRequest(request, env, { cors: true })) ||
+      (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
   }
