@@ -66,7 +66,7 @@ const App = () => {
   const [models, setModels] = useState<any[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<Params>({
-    model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+    model: "@cf/meta/llama-4-scout-17b-16e-instruct",
     stream: true
   });
 
@@ -181,7 +181,7 @@ const App = () => {
 
   // Find the active model from models array
   const activeModel = models.find((m) => m.name === params.model);
-  const defaultModel = "@cf/openai/gpt-oss-120b";
+  const defaultModel = "@cf/meta/llama-4-scout-17b-16e-instruct";
 
   return (
     <main className="w-full h-full bg-gray-50 md:px-6">

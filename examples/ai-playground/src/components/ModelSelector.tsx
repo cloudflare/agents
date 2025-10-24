@@ -36,7 +36,7 @@ const ModelSelector = ({
     return {
       Beta: null,
       LoRA: null,
-      MCP: null
+      MCP: "show"
     };
   });
 

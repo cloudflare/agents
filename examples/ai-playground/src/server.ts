@@ -28,7 +28,7 @@ interface State {
  */
 export class Playground extends AIChatAgent<Env, State> {
   initialState = {
-    modelName: "@cf/openai/gpt-oss-120b",
+    modelName: "@cf/meta/llama-4-scout-17b-16e-instruct",
     temperature: 1
   };
 
