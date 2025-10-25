@@ -291,6 +291,11 @@ export class TestOAuthAgent extends Agent<Env> {
   hasMcpConnection(serverId: string): boolean {
     return !!this.mcp.mcpConnections[serverId];
   }
+
+  resetMcpStateRestoredFlag(): void {
+    // @ts-expect-error - accessing private property for testing
+    this._mcpStateRestored = false;
+  }
 }
 
 export class TestChatAgent extends AIChatAgent<Env> {

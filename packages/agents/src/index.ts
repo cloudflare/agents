@@ -23,6 +23,7 @@ import {
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import { MCPClientConnection } from "./mcp/client-connection";
 import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
@@ -319,6 +320,7 @@ export class Agent<
 > extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
+  private _mcpStateRestored = false;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -493,11 +495,24 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          // Check if this is an OAuth callback and restore state if needed
-          const callbackResult =
-            await this._handlePotentialOAuthCallback(request);
-          if (callbackResult) {
-            return callbackResult;
+          await this._ensureMcpStateRestored();
+
+          if (this.mcp.isCallbackRequest(request)) {
+            const result = await this.mcp.handleCallbackRequest(request);
+            this.broadcastMcpServers();
+
+            if (result.authSuccess) {
+              this.mcp
+                .establishConnection(result.serverId)
+                .catch((error) => {
+                  console.error("Background connection failed:", error);
+                })
+                .finally(() => {
+                  this.broadcastMcpServers();
+                });
+            }
+
+            return this.handleOAuthCallbackResponse(result, request);
           }
 
           return this._tryCatch(() => _onRequest(request));
@@ -645,52 +660,9 @@ export class Agent<
           email: undefined
         },
         async () => {
-          await this._tryCatch(() => {
-            const servers = this.sql<MCPServerRow>`
-            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-          `;
-
+          await this._tryCatch(async () => {
+            await this._ensureMcpStateRestored();
             this.broadcastMcpServers();
-
-            // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-            if (servers && Array.isArray(servers) && servers.length > 0) {
-              // Restore callback URLs for OAuth-enabled servers
-              servers.forEach((server) => {
-                if (server.callback_url) {
-                  // Register the full redirect URL including serverId to avoid ambiguous matches
-                  this.mcp.registerCallbackUrl(
-                    `${server.callback_url}/${server.id}`
-                  );
-                }
-              });
-
-              servers.forEach((server) => {
-                this._connectToMcpServerInternal(
-                  server.name,
-                  server.server_url,
-                  server.callback_url,
-                  server.server_options
-                    ? JSON.parse(server.server_options)
-                    : undefined,
-                  {
-                    id: server.id,
-                    oauthClientId: server.client_id ?? undefined
-                  }
-                )
-                  .then(() => {
-                    // Broadcast updated MCP servers state after each server connects
-                    this.broadcastMcpServers();
-                  })
-                  .catch((error) => {
-                    console.error(
-                      `Error connecting to MCP server: ${server.name} (${server.server_url})`,
-                      error
-                    );
-                    // Still broadcast even if connection fails, so clients know about the failure
-                    this.broadcastMcpServers();
-                  });
-              });
-            }
             return _onStart(props);
           });
         }
@@ -1404,6 +1376,85 @@ export class Agent<
     return callableMetadata.has(this[method as keyof this] as Function);
   }
 
+  private async _ensureMcpStateRestored() {
+    if (this._mcpStateRestored) {
+      return;
+    }
+
+    this._mcpStateRestored = true;
+
+    const servers = this.sql<MCPServerRow>`
+        SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
+        FROM cf_agents_mcp_servers
+      `;
+
+    if (!servers || !Array.isArray(servers) || servers.length === 0) {
+      return;
+    }
+
+    for (const server of servers) {
+      if (server.callback_url) {
+        this.mcp.registerCallbackUrl(`${server.callback_url}/${server.id}`);
+      }
+    }
+
+    for (const server of servers) {
+      const needsOAuth = !!server.auth_url;
+
+      if (needsOAuth) {
+        const authProvider = new DurableObjectOAuthClientProvider(
+          this.ctx.storage,
+          this.name,
+          server.callback_url
+        );
+        authProvider.serverId = server.id;
+        if (server.client_id) {
+          authProvider.clientId = server.client_id;
+        }
+
+        const parsedOptions = server.server_options
+          ? JSON.parse(server.server_options)
+          : undefined;
+
+        const conn = new MCPClientConnection(
+          new URL(server.server_url),
+          {
+            name: this.name,
+            version: "1.0.0"
+          },
+          {
+            client: parsedOptions?.client ?? {},
+            transport: {
+              ...(parsedOptions?.transport ?? {}),
+              type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
+              authProvider
+            }
+          }
+        );
+
+        conn.connectionState = "authenticating";
+        this.mcp.mcpConnections[server.id] = conn;
+      } else {
+        const parsedOptions = server.server_options
+          ? JSON.parse(server.server_options)
+          : undefined;
+
+        this._connectToMcpServerInternal(
+          server.name,
+          server.server_url,
+          server.callback_url,
+          parsedOptions,
+          {
+            id: server.id,
+            oauthClientId: server.client_id ?? undefined
+          }
+        ).catch((error) => {
+          console.error(`Error restoring ${server.id}:`, error);
+        });
+      }
+    }
+  }
+
   /**
    * Connect to a new MCP Server
    *
@@ -1444,180 +1495,30 @@ export class Agent<
 
     const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
-    // Generate a serverId upfront
-    const serverId = nanoid(8);
+    const result = await this._connectToMcpServerInternal(
+      serverName,
+      url,
+      callbackUrl,
+      options
+    );
 
-    // Persist to database BEFORE starting OAuth flow to survive DO hibernation
     this.sql`
-        INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+        INSERT
+        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (
-        ${serverId},
+        ${result.id},
         ${serverName},
         ${url},
-        ${null},
-        ${null},
+        ${result.clientId ?? null},
+        ${result.authUrl ?? null},
         ${callbackUrl},
         ${options ? JSON.stringify(options) : null}
         );
     `;
 
-    // _connectToMcpServerInternal will call mcp.connect which registers the callback URL
-    const result = await this._connectToMcpServerInternal(
-      serverName,
-      url,
-      callbackUrl,
-      options,
-      { id: serverId }
-    );
-
-    // Update database with OAuth client info if auth is required
-    if (result.clientId || result.authUrl) {
-      this.sql`
-        UPDATE cf_agents_mcp_servers
-        SET client_id = ${result.clientId ?? null}, auth_url = ${result.authUrl ?? null}
-        WHERE id = ${serverId}
-      `;
-    }
-
     this.broadcastMcpServers();
 
     return result;
-  }
-
-  /**
-   * Handle potential OAuth callback requests after DO hibernation.
-   * Detects OAuth callbacks, restores state from database, and processes the callback.
-   * Returns a Response if this was an OAuth callback, otherwise returns undefined.
-   */
-  private async _handlePotentialOAuthCallback(
-    request: Request
-  ): Promise<Response | undefined> {
-    // Quick check: must be GET with callback pattern and code parameter
-    if (request.method !== "GET") {
-      return undefined;
-    }
-
-    const url = new URL(request.url);
-    const hasCallbackPattern =
-      url.pathname.includes("/callback/") && url.searchParams.has("code");
-
-    if (!hasCallbackPattern) {
-      return undefined;
-    }
-
-    // Extract serverId from callback URL
-    const pathParts = url.pathname.split("/");
-    const callbackIndex = pathParts.indexOf("callback");
-    const serverId = callbackIndex !== -1 ? pathParts[callbackIndex + 1] : null;
-
-    if (!serverId) {
-      return new Response("Invalid callback URL: missing serverId", {
-        status: 400
-      });
-    }
-
-    // Check if callback is already registered AND connection exists (not hibernated)
-    if (
-      this.mcp.isCallbackRequest(request) &&
-      this.mcp.mcpConnections[serverId]
-    ) {
-      // State already restored, handle normally
-      return this._processOAuthCallback(request);
-    }
-
-    // Need to restore from database after hibernation
-    try {
-      const server = this.sql<MCPServerRow>`
-        SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
-        FROM cf_agents_mcp_servers
-        WHERE id = ${serverId}
-      `.find((s) => s.id === serverId);
-
-      if (!server) {
-        return new Response(
-          `OAuth callback failed: Server ${serverId} not found in database`,
-          { status: 404 }
-        );
-      }
-
-      // Register callback URL (restores it after hibernation)
-      if (!server.callback_url) {
-        return new Response(
-          `OAuth callback failed: No callback URL stored for server ${serverId}`,
-          { status: 500 }
-        );
-      }
-
-      this.mcp.registerCallbackUrl(`${server.callback_url}/${server.id}`);
-
-      // Restore connection if not in memory
-      if (!this.mcp.mcpConnections[serverId]) {
-        let parsedOptions:
-          | {
-              client?: ConstructorParameters<typeof Client>[1];
-              transport?: {
-                headers?: HeadersInit;
-                type?: TransportType;
-              };
-            }
-          | undefined;
-        try {
-          parsedOptions = server.server_options
-            ? JSON.parse(server.server_options)
-            : undefined;
-        } catch {
-          return new Response(
-            `OAuth callback failed: Invalid server options in database for ${serverId}`,
-            { status: 500 }
-          );
-        }
-
-        await this._connectToMcpServerInternal(
-          server.name,
-          server.server_url,
-          server.callback_url,
-          parsedOptions,
-          {
-            id: server.id,
-            oauthClientId: server.client_id ?? undefined
-          }
-        );
-      }
-
-      // Now process the OAuth callback
-      return this._processOAuthCallback(request);
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      console.error(`Failed to restore MCP state for ${serverId}:`, error);
-      return new Response(
-        `OAuth callback failed during state restoration: ${errorMsg}`,
-        { status: 500 }
-      );
-    }
-  }
-
-  /**
-   * Process an OAuth callback request (assumes state is already restored)
-   */
-  private async _processOAuthCallback(request: Request): Promise<Response> {
-    const result = await this.mcp.handleCallbackRequest(request);
-    this.broadcastMcpServers();
-
-    if (result.authSuccess) {
-      // Start background connection if auth was successful
-      this.mcp
-        .establishConnection(result.serverId)
-        .catch((error) => {
-          console.error("Background connection failed:", error);
-        })
-        .finally(() => {
-          // Broadcast after background connection resolves (success/failure)
-          this.broadcastMcpServers();
-        });
-    }
-
-    // Handle OAuth callback response using MCPClientManager configuration
-    return this.handleOAuthCallbackResponse(result, request);
   }
 
   private async _connectToMcpServerInternal(
