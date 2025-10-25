@@ -33,30 +33,22 @@ export class Playground extends AIChatAgent<Env, State> {
   };
 
   onStart() {
-    console.log("[Playground] onStart called - configuring OAuth callback");
     // Configure OAuth callback to close popup window after authentication
     this.mcp.configureOAuthCallback({
       customHandler: (result: MCPClientOAuthResult) => {
-        console.log("[Playground] OAuth callback triggered:", result);
         if (result.authSuccess) {
-          console.log("[Playground] OAuth authentication successful");
           return new Response("<script>window.close();</script>", {
             headers: { "content-type": "text/html" },
             status: 200
           });
-        } else {
-          console.log(
-            "[Playground] OAuth authentication failed:",
-            result.authError
-          );
-          return new Response(
-            `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
-            {
-              headers: { "content-type": "text/html" },
-              status: 200
-            }
-          );
         }
+        return new Response(
+          `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
+          {
+            headers: { "content-type": "text/html" },
+            status: 200
+          }
+        );
       }
     });
   }
@@ -141,13 +133,10 @@ export class Playground extends AIChatAgent<Env, State> {
     if (serverId) {
       // Disconnect specific server
       await this.removeMcpServer(serverId);
-      console.log("[Playground] Removed MCP server:", serverId);
     } else {
       // Disconnect all servers if no serverId provided
       const mcpState = this.getMcpServers();
-      const serverIds = Object.keys(mcpState.servers);
-      console.log("[Playground] Removing all MCP servers:", serverIds);
-      for (const id of serverIds) {
+      for (const id of Object.keys(mcpState.servers)) {
         await this.removeMcpServer(id);
       }
     }
@@ -158,9 +147,7 @@ export class Playground extends AIChatAgent<Env, State> {
     return await this.env.AI.models({ per_page: 1000 });
   }
 
-  onStateUpdate() {
-    console.log("[Playground] State updated:", this.state);
-  }
+  onStateUpdate() {}
 }
 
 /**

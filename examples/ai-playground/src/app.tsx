@@ -140,7 +140,6 @@ const App = () => {
     const getModels = async () => {
       try {
         const models = await agent.stub.getModels();
-        console.log(models);
         setModels(models);
 
         // Initialize agent state with model and temperature
