@@ -1,7 +1,7 @@
 import { BackgroundDots } from "./_components/background";
 import { InstallCommand } from "./_components/install-command";
 
-const codeExampleChat = `import { Agent, unstable_callable as callable } from 'agents';
+const codeExampleChat = `import { Agent, callable } from 'agents';
 import { searchMenusByAgent, chooseWinners } from '../utils';
 
 export class LunchAgent extends Agent<Env, LunchState> {
