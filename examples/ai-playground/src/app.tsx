@@ -137,6 +137,7 @@ const App = () => {
 
   const [agentInput, setAgentInput] = useState("");
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Only run once on mount
   useEffect(() => {
     const getModels = async () => {
       try {
@@ -153,7 +154,7 @@ const App = () => {
       }
     };
     getModels();
-  }, [agent.setState, agent.stub.getModels, params.model, params.temperature]);
+  }, []);
 
   const handleAgentInputChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
