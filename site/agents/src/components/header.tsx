@@ -108,7 +108,7 @@ export function Header() {
           )}
         </div>
       </nav>
-      <article className="relative bg-white px-6 flex flex-col justify-center text-center space-y-8 h-[520px] -mt-4">
+      <article className="relative bg-white px-6 flex flex-col justify-center text-center space-y-8 h-[520px] -mt-4 border-b border-orange-400">
         <h2 className="text-[clamp(56px,11vw,88px)] font-semibold leading-[0.9]">
           <Balancer>
             The Platform For <em>Building</em> Agents.
