@@ -78,6 +78,21 @@ function App() {
     });
   };
 
+  const handleDisconnect = async (serverId: string) => {
+    await agentFetch(
+      {
+        agent: "my-agent",
+        host: agent.host,
+        name: sessionId!,
+        path: "disconnect-mcp"
+      },
+      {
+        body: JSON.stringify({ serverId }),
+        method: "POST"
+      }
+    );
+  };
+
   return (
     <div className="container">
       <div className="status-indicator">
@@ -116,14 +131,19 @@ function App() {
                 {server.state} (id: {id})
               </div>
             </div>
-            {server.state === "authenticating" && server.auth_url && (
-              <button
-                type="button"
-                onClick={() => openPopup(server.auth_url as string)}
-              >
-                Authorize
+            <div style={{ display: "flex", gap: "8px" }}>
+              {server.state === "authenticating" && server.auth_url && (
+                <button
+                  type="button"
+                  onClick={() => openPopup(server.auth_url as string)}
+                >
+                  Authorize
+                </button>
+              )}
+              <button type="button" onClick={() => handleDisconnect(id)}>
+                Disconnect
               </button>
-            )}
+            </div>
           </div>
         ))}
       </div>

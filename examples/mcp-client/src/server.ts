@@ -38,6 +38,15 @@ export class MyAgent extends Agent<Env, never> {
       return new Response("Ok", { status: 200 });
     }
 
+    if (
+      reqUrl.pathname.endsWith("disconnect-mcp") &&
+      request.method === "POST"
+    ) {
+      const { serverId } = (await request.json()) as { serverId: string };
+      await this.removeMcpServer(serverId);
+      return new Response("Ok", { status: 200 });
+    }
+
     return new Response("Not found", { status: 404 });
   }
 }
