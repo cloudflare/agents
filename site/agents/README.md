@@ -2,30 +2,41 @@
 
 This is the microsite for the Agents project, showcasing features, usage examples etc.
 
+Built with **Astro** and deployed to Cloudflare Workers.
+
 ## Getting Started
 
 First, install dependencies:
 
 ```bash
-pnpm install
+npm install #run this in the root of the repo
 ```
 
 Then run the development server:
 
 ```bash
-pnpm dev
+npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:4321](http://localhost:4321) with your browser to see the result.
 
 ## Cloudflare Deployment
 
-The site is deployed to Cloudflare Pages using OpenNext for Cloudflare:
+The site is built with Astro and deployed to Cloudflare Workers:
 
 ```bash
-# Preview the deployment locally
-pnpm preview
+# Build the site
+npm run build
 
 # Deploy to Cloudflare
-pnpm deploy
+npm run deploy
 ```
+
+## Tech Stack
+
+- **Astro** - Modern web framework
+- **React** - For interactive components with partial hydration
+- **Tailwind CSS** - Utility-first CSS framework
+- **Framer Motion** - Animation library
+- **GSAP** - Advanced animations
+- **Cloudflare Workers** - Deployment platform

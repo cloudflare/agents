@@ -1,10 +1,8 @@
-"use client";
-
 import {
   createContext,
   Fragment,
-  ReactNode,
-  RefObject,
+  type ReactNode,
+  type RefObject,
   useContext,
   useEffect,
   useRef,

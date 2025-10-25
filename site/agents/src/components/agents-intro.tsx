@@ -1,6 +1,10 @@
-"use client";
-
-import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState
+} from "react";
 import { motion, useInView } from "framer-motion";
 import { BackgroundDots, BackgroundLinesOnly } from "./_components/background";
 import { useTypedMessage } from "./_components/chat";

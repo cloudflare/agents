@@ -1,10 +1,8 @@
-"use client";
-
 import { useState } from "react";
 import { Logo } from "./logo";
 import { useMotionValueEvent, useScroll, motion } from "framer-motion";
 import clsx from "clsx";
-import Balancer from "react-wrap-balancer";
+import { Balancer } from "react-wrap-balancer";
 import { AGENTS_DOCS_HREF, DASHBOARD_HREF } from "./links";
 
 function Copy() {

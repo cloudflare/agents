@@ -3,38 +3,32 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build",
-    "start": "next start",
-    "lint": "next lint",
-    "dev:worker": "wrangler dev --port 8771",
-    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy"
+    "dev": "astro dev",
+    "build": "astro build",
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@astrojs/cloudflare": "^12.6.10",
+    "@astrojs/react": "^4.4.0",
     "@gsap/react": "^2.1.2",
     "@use-it/interval": "^1.0.0",
+    "astro": "^5.15.1",
     "clsx": "^2.1.1",
     "framer-motion": "^12.23.24",
     "gsap": "^3.13.0",
-    "next": "15.2.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-wrap-balancer": "^1.1.1",
-    "shiki": "^3.13.0"
+    "shiki": "^3.13.0",
+    "tailwindcss": "^4.1.16"
   },
   "devDependencies": {
-    "@opennextjs/cloudflare": "^1.11.0",
     "@tailwindcss/postcss": "^4",
+    "@tailwindcss/vite": "^4",
     "@types/node": "^24.9.1",
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
-    "tailwindcss": "^4",
     "typescript": "^5.9.3",
     "wrangler": "^4.45.0"
-  },
-  "optionalDependencies": {
-    "lightningcss-darwin-arm64": "1.30.2",
-    "lightningcss-linux-x64-gnu": "1.30.2"
   }
 }

@@ -1,8 +1,6 @@
-"use client";
-
 import { motion } from "framer-motion";
 import { BackgroundDots, BackgroundLinesOnly } from "./_components/background";
-import { ReactNode, useState } from "react";
+import { type ReactNode, useState } from "react";
 import clsx from "clsx";
 import { AiLogo, WorkersLogo } from "./_components/icons";
 

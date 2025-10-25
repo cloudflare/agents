@@ -12,7 +12,7 @@ import {
   TypedMessage,
   useSequencedMotionValues
 } from "./_components/chat";
-import { ReactNode, useMemo, useRef, useState } from "react";
+import { type ReactNode, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 
 export function AgentVisual({ progress }: { progress: MotionValue<number> }) {

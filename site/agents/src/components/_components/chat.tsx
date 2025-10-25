@@ -1,7 +1,7 @@
 import {
   Children,
   createContext,
-  ReactNode,
+  type ReactNode,
   useCallback,
   useContext,
   useEffect,
@@ -17,9 +17,11 @@ import {
   useMotionValueEvent,
   useTransform
 } from "framer-motion";
-import useInterval from "@use-it/interval";
 import { ChatArrow } from "./chat-bubble";
 import clsx from "clsx";
+
+import { useRef } from "react";
+import useInterval from "../use-interval";
 
 const ChatContext = createContext<{
   next: () => void;

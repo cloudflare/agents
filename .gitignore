@@ -141,3 +141,5 @@ dist
 
 # macOS
 .DS_Store
+
+.astro

@@ -1,4 +1,3 @@
-import { codeToHtml } from "shiki";
 import { BackgroundDots } from "./_components/background";
 import { InstallCommand } from "./_components/install-command";
 
@@ -90,17 +89,10 @@ export type LunchState = {
 	restaurants: Restaurant[];
 };`;
 
-export async function DevInstructions() {
-  const chatExample = await codeToHtml(codeExampleChat, {
-    lang: "js",
-    theme: "gruvbox-light-medium",
-    colorReplacements: {
-      "#fbf1c7": "#fff",
-      "#076678": "oklch(.408 .123 38.172)",
-      "#3c3836": "var(--color-orange-700)",
-      "#B57614": "var(--color-orange-600)"
-    }
-  });
+export function DevInstructions() {
+  // Note: In production, this should be pre-rendered at build time
+  // For now, we'll use a simple pre element with syntax highlighting
+  const chatExample = codeExampleChat;
   return (
     <>
       <div className="pt-24">
@@ -138,10 +130,9 @@ export async function DevInstructions() {
               </h3>
               <p>An agent that helps pick lunch for coworkers in an office.</p>
             </header>
-            <pre
-              className="text-sm leading-normal pl-6 pr-3 py-5 overflow-x-auto"
-              dangerouslySetInnerHTML={{ __html: chatExample }}
-            />
+            <pre className="text-sm leading-normal pl-6 pr-3 py-5 overflow-x-auto">
+              <code>{chatExample}</code>
+            </pre>
           </div>
         </div>
       </div>

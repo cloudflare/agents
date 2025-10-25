@@ -1,10 +1,7 @@
 {
-  "main": ".open-next/worker.js",
   "name": "agents-site",
-  "compatibility_date": "2024-09-23",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_date": "2025-10-25",
   "assets": {
-    "directory": ".open-next/assets",
-    "binding": "ASSETS"
+    "directory": "dist"
   }
 }

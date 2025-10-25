@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 export function ChatBubble({
   children,

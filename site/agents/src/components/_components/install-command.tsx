@@ -1,5 +1,3 @@
-"use client";
-
 import { useEffect, useRef, useState } from "react";
 import { useTypedMessage } from "./chat";
 import { useInView } from "framer-motion";
