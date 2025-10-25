@@ -59,8 +59,8 @@ export abstract class DeepAgent<
   protected abstract _systemPrompt: string;
   protected abstract defaultMiddleware: AgentMiddleware[];
   protected abstract extraTools: Record<string, ToolHandler>;
-  protected store: Store;
   private _agentType?: string;
+  store: Store;
   observability = undefined;
 
   constructor(ctx: AgentContext, env: Env) {
@@ -93,7 +93,11 @@ export abstract class DeepAgent<
     if (this.agentType && this.subagents.has(this.agentType)) {
       const specificTools = this.subagents.get(this.agentType)?.tools;
       tools = Object.fromEntries(
-        (specificTools ?? []).map((t) => [getToolMeta(t)?.name, t])
+        (specificTools ?? []).map((t) => {
+          const key = getToolMeta(t)?.name ?? (t.name || "").trim();
+          if (!key) throw new Error("Tool missing name: use defineTool(...)");
+          return [key, t];
+        })
       );
     }
 
@@ -120,7 +124,6 @@ export abstract class DeepAgent<
   get mwContext(): MWContext {
     return {
       agent: this,
-      store: this.store,
       provider: this.provider
     };
   }
@@ -135,7 +138,12 @@ export abstract class DeepAgent<
 
   get isDone(): boolean {
     const last = this.lastAssistant();
-    return !!last && (!("toolCalls" in last) || last.toolCalls?.length === 0);
+    return (
+      !!last &&
+      (!("toolCalls" in last) || last.toolCalls?.length === 0) &&
+      "content" in last &&
+      last.content.trim().length > 0
+    );
   }
 
   emit(type: AgentEventType, data: unknown) {
@@ -159,6 +167,7 @@ export abstract class DeepAgent<
   // callback exposed by Agent class
   async onRequest(req: Request) {
     const url = new URL(req.url);
+    // TODO: Should MWs be able to define handlers?
     switch (url.pathname) {
       case "/invoke":
         return this.invoke(req);
@@ -265,7 +274,7 @@ export abstract class DeepAgent<
   }
 
   async approve(req: Request) {
-    const body = (await req.json()) as ApproveBody;
+    const body = await req.json<ApproveBody>();
     const { runState } = this.store;
     if (!runState) return new Response("no run", { status: 400 });
 
@@ -275,7 +284,7 @@ export abstract class DeepAgent<
       return new Response("no pending tool calls", { status: 400 });
 
     const decided = body.modifiedToolCalls ?? pending;
-    this.store.setPendingToolCalls(decided as ToolCall[]);
+    this.store.setPendingToolCalls(decided);
 
     // Resume run
     runState.status = "running";
@@ -287,6 +296,9 @@ export abstract class DeepAgent<
     this.emit(AgentEventType.RUN_RESUMED, {
       runId: runState.runId
     });
+
+    const ctx = this.mwContext;
+    for (const m of this.middleware) m.onResume?.(ctx, "hitl", body);
 
     this.store.upsertRun(runState);
     await this.ensureScheduled();
@@ -430,7 +442,6 @@ export abstract class DeepAgent<
 
           const out = await tools[call.name](call.args, {
             agent: this,
-            store: this.store,
             env: this.env,
             callId: call.id
           });
@@ -529,6 +540,8 @@ export abstract class DeepAgent<
           this.env.DEEP_AGENT,
           parent.threadId
         );
+        const final = last && "content" in last ? last.content : "";
+        await this.onDone({ agent: this, final });
         await parentAgent.fetch(
           new Request("http://do/child_result", {
             method: "POST",
@@ -536,7 +549,7 @@ export abstract class DeepAgent<
             body: JSON.stringify({
               token: parent.token,
               childThreadId: this.store.threadId || this.ctx.id.toString(),
-              report: last && "content" in last ? last.content : ""
+              report: final
             })
           })
         );
@@ -604,6 +617,8 @@ export abstract class DeepAgent<
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
   }
+
+  abstract onDone(ctx: { agent: DeepAgent; final: string }): Promise<void>;
 }
 
 /**
@@ -617,12 +632,17 @@ export const createDeepAgent = (options: {
   model?: string;
   tools?: ToolHandler[];
   subagents?: SubagentDescriptor[];
+  onDone?: (ctx: { agent: DeepAgent; final: string }) => Promise<void>;
 }): typeof Agent<unknown> => {
   // Build configuration maps from subagent descriptors
   const subagentDescriptorMap = new Map<string, SubagentDescriptor>();
 
   const extraTools = Object.fromEntries(
-    (options.tools ?? []).map((t) => [getToolMeta(t)?.name, t])
+    (options.tools ?? []).map((t) => {
+      const key = getToolMeta(t)?.name ?? (t.name || "").trim();
+      if (!key) throw new Error("Tool missing name: use defineTool(...)");
+      return [key, t];
+    })
   );
 
   for (const desc of options.subagents ?? []) {
@@ -668,5 +688,9 @@ export const createDeepAgent = (options: {
         return out;
       }
     };
+
+    async onDone(ctx: { agent: DeepAgent; final: string }) {
+      await options.onDone?.(ctx);
+    }
   };
 };

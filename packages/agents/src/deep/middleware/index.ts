@@ -37,7 +37,7 @@ const write_todos = defineTool(
     parameters: WriteTodosSchema
   },
   async (p: { todos: Todo[] }, ctx) => {
-    const sql = ctx.store.sql;
+    const sql = ctx.agent.store.sql;
     const clean = (p.todos ?? []).map((t) => ({
       content: String(t.content ?? "").slice(0, 2000),
       status:
@@ -65,7 +65,7 @@ export function planning(): AgentMiddleware {
     name: "planning",
     tools: { write_todos },
     async onInit(ctx) {
-      ctx.store.sql.exec(`
+      ctx.agent.store.sql.exec(`
 CREATE TABLE IF NOT EXISTS todos (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   content TEXT NOT NULL,
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS todos (
 `);
     },
     state: (ctx) => {
-      const rows = ctx.store.sql.exec(
+      const rows = ctx.agent.store.sql.exec(
         "SELECT content, status FROM todos ORDER BY pos ASC, id ASC"
       );
       const todos: Todo[] = [];
@@ -103,7 +103,7 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
       description: LIST_FILES_TOOL_DESCRIPTION,
       parameters: ListFilesSchema
     },
-    async (_: {}, ctx) => Object.keys(ctx.store.listFiles())
+    async (_: {}, ctx) => Object.keys(ctx.agent.store.listFiles())
   );
 
   const read_file = defineTool(
@@ -114,15 +114,15 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
     },
     async (p: { path: string; offset?: number; limit?: number }, ctx) => {
       const path = String(p.path ?? "");
-      const raw = ctx.store.readFile(path);
+      const raw = ctx.agent.store.readFile(path);
       if (raw === undefined || raw === null)
         return `Error: File '${path}' not found`;
 
-      ctx.store.kv.put(
+      ctx.agent.store.kv.put(
         "lastReadPaths",
         Array.from(
           new Set([
-            ...(ctx.store.kv.get<string[]>("lastReadPaths") ?? []),
+            ...(ctx.agent.store.kv.get<string[]>("lastReadPaths") ?? []),
             path
           ])
         )
@@ -158,7 +158,7 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
     async (p: { path: string; content: string }, ctx) => {
       const path = String(p.path ?? "");
       const content = String(p.content ?? "");
-      ctx.store.writeFile(path, content);
+      ctx.agent.store.writeFile(path, content);
       return `Updated file ${path}`;
     }
   );
@@ -179,18 +179,18 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
       ctx
     ) => {
       const path = String(p.path ?? "");
-      const files = ctx.store.listFiles();
+      const files = ctx.agent.store.listFiles();
       if (!(path in files)) return `Error: File '${path}' not found`;
 
       // must read first at least once
       const readSet = new Set(
-        ctx.store.kv.get<string[]>("lastReadPaths") ?? []
+        ctx.agent.store.kv.get<string[]>("lastReadPaths") ?? []
       );
       if (!readSet.has(path)) {
         return `Error: You must read '${path}' before editing it`;
       }
 
-      const { replaced } = ctx.store.editFile(
+      const { replaced } = ctx.agent.store.editFile(
         path,
         p.oldString,
         p.newString,
@@ -219,14 +219,14 @@ export function filesystem(_opts?: { useR2: boolean }): AgentMiddleware {
       plan.addSystemPrompt(FILESYSTEM_SYSTEM_PROMPT);
     },
     async onInit(ctx) {
-      ctx.store.sql.exec(`CREATE TABLE IF NOT EXISTS files (
+      ctx.agent.store.sql.exec(`CREATE TABLE IF NOT EXISTS files (
         path TEXT PRIMARY KEY,
         content BLOB,
         updated_at INTEGER NOT NULL
     )`);
     },
     state: (ctx) => {
-      const rows = ctx.store.sql.exec(
+      const rows = ctx.agent.store.sql.exec(
         "SELECT path, content FROM files ORDER BY path ASC"
       );
       const files: Record<string, string> = {};
@@ -289,7 +289,7 @@ export function subagents(
             threadId: childId,
             messages: [{ role: "user", content: String(description ?? "") }],
             agentType: subagentType,
-            parent: { threadId: ctx.store.threadId, token }
+            parent: { threadId: ctx.agent.store.threadId, token }
           })
         })
       );
@@ -304,17 +304,20 @@ export function subagents(
         childThreadId: childId,
         toolCallId: ctx.callId
       };
-      ctx.store.pushWaitingSubagent(w);
+      ctx.agent.store.pushWaitingSubagent(w);
 
-      if (ctx.store.runState && ctx.store.runState.status === "running") {
+      if (
+        ctx.agent.store.runState &&
+        ctx.agent.store.runState.status === "running"
+      ) {
         const rs = {
-          ...ctx.store.runState,
+          ...ctx.agent.store.runState,
           status: "paused" as const,
           reason: "subagent"
         };
-        ctx.store.upsertRun(rs);
+        ctx.agent.store.upsertRun(rs);
         ctx.agent.emit(AgentEventType.RUN_PAUSED, {
-          runId: ctx.store.runState.runId,
+          runId: ctx.agent.store.runState.runId,
           reason: "subagent"
         });
       }
@@ -345,13 +348,13 @@ export function hitl(opts: { interceptTools: string[] }): AgentMiddleware {
         opts.interceptTools.includes(c.name)
       );
       if (risky) {
-        ctx.store.upsertRun({
-          ...ctx.store.runState!,
+        ctx.agent.store.upsertRun({
+          ...ctx.agent.store.runState!,
           status: "paused",
           reason: "hitl"
         });
         ctx.agent.emit(AgentEventType.RUN_PAUSED, {
-          runId: ctx.store.runState!.runId,
+          runId: ctx.agent.store.runState!.runId,
           reason: "hitl"
         });
       }

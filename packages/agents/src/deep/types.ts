@@ -1,6 +1,5 @@
 import type { env } from "cloudflare:workers";
 import type { ModelPlanBuilder } from "./middleware/plan";
-import type { Store } from "./agent/store";
 import type { DeepAgent } from "./agent";
 import type { Provider } from "./providers";
 
@@ -32,7 +31,7 @@ export type AgentState = {
 
 export interface ApproveBody {
   approved: boolean;
-  modifiedToolCalls?: Array<{ toolName: string; args: unknown }>;
+  modifiedToolCalls?: ToolCall[];
 }
 
 export type Todo = {
@@ -125,9 +124,6 @@ export type SubagentDescriptor = {
 
 export type MWContext = {
   provider: Provider;
-  // snapshotted, read-only view if you want one
-  store: Store;
-  // the good stuff
   agent: DeepAgent;
   // TODO: tool registry for dynamic additions, prolly mcp
   // registerTool: (name: string, handler: ToolHandler) => void;
@@ -172,7 +168,6 @@ export type ToolHandler = ((
 
 export type ToolContext = {
   agent: DeepAgent;
-  store: Store;
   env: typeof env;
   callId: string;
 };

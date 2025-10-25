@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
   <meta charset="utf-8" />
   <title>Agent Dashboard</title>
@@ -94,6 +94,19 @@
       gap: 8px;
       align-items: center;
     }
+    .thread-row {
+      display: block;
+    }
+    .thread-row.expanded > .thread-children {
+      display: block;
+    }
+
+    .thread-children {
+      display: none;
+      margin-left: 8px;
+      padding-left: 10px;
+      border-left: 1px dashed var(--border);
+    }
 
     .threads-list {
       flex: 1;
@@ -105,6 +118,7 @@
     }
 
     .thread-item {
+      width: 100%;
       display: flex;
       flex-direction: column;
       align-items: flex-start;
@@ -121,6 +135,14 @@
         background 0.2s ease,
         border 0.2s ease,
         transform 0.2s;
+      padding-left: calc(12px + (var(--depth, 0) * 16px));
+      font-size: calc(14px - (var(--depth, 0) * 0.5px));
+      transform-origin: left center;
+    }
+
+    .thread-item[data-depth]:not([data-depth="0"]) {
+      transform: scale(0.98);
+      opacity: 0.95;
     }
 
     .thread-item:hover {
@@ -138,9 +160,21 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 14px;
-      font-weight: 600;
-      word-break: break-all;
+    }
+
+    .thread-caret {
+      display: inline-flex;
+      width: 16px;
+      height: 16px;
+      align-items: center;
+      justify-content: center;
+      margin-right: 2px;
+      opacity: 0.85;
+      border-radius: 3px;
+      user-select: none;
+    }
+    .thread-item.has-children .thread-caret {
+      cursor: pointer;
     }
 
     .thread-meta {
@@ -991,6 +1025,47 @@
     .notification.info {
       background: var(--info);
     }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px dashed var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .status-pill.s-running {
+      color: var(--accent);
+      border-color: var(--border-strong);
+      background: var(--accent-soft);
+    }
+    .status-pill.s-completed {
+      color: var(--ok);
+      border-color: rgba(34, 197, 94, 0.35);
+      background: rgba(34, 197, 94, 0.18);
+    }
+    .status-pill.s-paused {
+      color: var(--pause);
+      border-color: rgba(251, 146, 60, 0.35);
+      background: rgba(251, 146, 60, 0.15);
+    }
+    .status-pill.s-error {
+      color: var(--err);
+      border-color: rgba(239, 68, 68, 0.4);
+      background: rgba(239, 68, 68, 0.18);
+    }
+    .status-pill.s-listening {
+      color: var(--info);
+      border-color: rgba(96, 165, 250, 0.35);
+      background: rgba(96, 165, 250, 0.16);
+    }
+    .status-pill.s-offline {
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.02);
+    }
 
     @media (max-width: 1280px) {
       .dashboard {
@@ -1272,6 +1347,7 @@
       let selectedThreadId = "";
       let latestThreads = [];
       const extraThreads = new Map();
+      const expandedThreads = new Set();
       let stateRefreshTimer = null;
       let stateRefreshInFlight = false;
       const REFRESH_DEBOUNCE_MS = 220;
@@ -2570,28 +2646,14 @@
 
       function renderThreadList(threads = [], activeId) {
         const combined = new Map();
-
-        for (const meta of threads ?? []) {
-          if (!meta?.id) continue;
-          combined.set(meta.id, { ...meta, source: "root" });
-        }
-
-        for (const meta of extraThreads.values()) {
-          if (!meta?.id) continue;
-          if (!combined.has(meta.id)) combined.set(meta.id, meta);
-        }
-
-        const list = Array.from(combined.values());
-
-        threadsListEl.innerHTML = "";
-        if (!list.length) {
-          threadsListEl.innerHTML =
-            '<div class="threads-empty">No threads yet. Create one to get started.</div>';
-          return;
-        }
+        for (const meta of threads ?? [])
+          if (meta?.id) combined.set(meta.id, { ...meta, source: "root" });
+        for (const meta of extraThreads.values())
+          if (meta?.id && !combined.has(meta.id))
+            combined.set(meta.id, { ...meta });
 
         const nodeMap = new Map();
-        for (const meta of list) {
+        for (const meta of combined.values()) {
           updateLaneMeta(meta.id, {
             title:
               meta.agentName ||
@@ -2605,129 +2667,143 @@
           });
           nodeMap.set(meta.id, { meta: { ...meta }, children: [] });
         }
-
-        for (const node of nodeMap.values()) {
-          const parentId = node.meta.parent?.threadId;
-          if (parentId && nodeMap.has(parentId)) {
-            nodeMap.get(parentId).children.push(node);
-          }
+        for (const n of nodeMap.values()) {
+          const pid = n.meta.parent?.threadId;
+          if (pid && nodeMap.has(pid)) nodeMap.get(pid).children.push(n);
         }
-
         const roots = [];
-        for (const node of nodeMap.values()) {
-          const parentId = node.meta.parent?.threadId;
-          if (!parentId || !nodeMap.has(parentId)) {
-            roots.push(node);
-          }
+        for (const n of nodeMap.values()) {
+          const pid = n.meta.parent?.threadId;
+          if (!pid || !nodeMap.has(pid)) roots.push(n);
         }
 
-        const compareNodes = (a, b) => {
-          const ta = Date.parse(a.meta.createdAt ?? "");
-          const tb = Date.parse(b.meta.createdAt ?? "");
+        const cmp = (a, b) => {
+          const ta = Date.parse(a.meta.createdAt ?? ""),
+            tb = Date.parse(b.meta.createdAt ?? "");
           if (Number.isNaN(ta) && Number.isNaN(tb)) return 0;
           if (Number.isNaN(ta)) return 1;
           if (Number.isNaN(tb)) return -1;
           return tb - ta;
         };
-
         const sortBranch = (arr) => {
-          arr.sort(compareNodes);
-          for (const node of arr) {
-            if (node.children.length) sortBranch(node.children);
-          }
+          arr.sort(cmp);
+          for (const n of arr) if (n.children.length) sortBranch(n.children);
         };
-
         sortBranch(roots);
+
+        if (activeId && nodeMap.has(activeId)) {
+          let p = nodeMap.get(activeId).meta.parent?.threadId;
+          while (p) {
+            expandedThreads.add(p);
+            p = nodeMap.get(p)?.meta.parent?.threadId;
+          }
+        }
+
+        threadsListEl.innerHTML = "";
+        if (!nodeMap.size) {
+          threadsListEl.innerHTML =
+            '<div class="threads-empty">No threads yet. Create one to get started.</div>';
+          return;
+        }
 
         const frag = document.createDocumentFragment();
 
-        const buildButton = (meta, depth, connector) => {
+        const buildRow = (node, depth) => {
+          const { meta, children } = node;
+          const isActive = meta.id === activeId;
+          const hasChildren = children.length > 0;
+          const expanded = expandedThreads.has(meta.id);
+
+          const row = document.createElement("div");
+          row.className = "thread-row" + (expanded ? " expanded" : "");
+
           const btn = document.createElement("button");
           btn.type = "button";
-          const isActive = meta.id === activeId;
-          btn.className = "thread-item" + (isActive ? " active" : "");
+          btn.className =
+            "thread-item" +
+            (isActive ? " active" : "") +
+            (hasChildren ? " has-children" : "");
           btn.dataset.depth = String(depth);
           btn.style.setProperty("--depth", String(depth));
 
           const titleWrap = document.createElement("div");
           titleWrap.className = "thread-title";
 
-          if (depth === 0) {
-            if (meta.parent?.threadId) {
-              const prefix = document.createElement("span");
-              prefix.className = "thread-prefix";
-              prefix.textContent = "↳ ";
-              titleWrap.appendChild(prefix);
-            } else {
-              const dot = document.createElement("span");
-              dot.className = "thread-root-dot";
-              dot.textContent = "●";
-              titleWrap.appendChild(dot);
-            }
-          } else if (connector) {
-            const prefix = document.createElement("span");
-            prefix.className = "thread-prefix";
-            prefix.textContent = connector;
-            titleWrap.appendChild(prefix);
+          // caret / spacer
+          const caret = document.createElement("span");
+          caret.className = "thread-caret";
+          caret.textContent = hasChildren ? (expanded ? "▾" : "▸") : " ";
+          if (hasChildren) {
+            caret.title = expanded ? "Collapse" : "Expand";
+            caret.onclick = (e) => {
+              e.stopPropagation();
+              if (expanded) expandedThreads.delete(meta.id);
+              else expandedThreads.add(meta.id);
+              renderThreadList(latestThreads, activeId ?? selectedThreadId);
+            };
+          }
+          titleWrap.appendChild(caret);
+
+          // 8-char id
+          const idShort = document.createElement("span");
+          idShort.className = "thread-id-short";
+          idShort.textContent = short8(meta.id);
+          titleWrap.appendChild(idShort);
+
+          // status pill (no "Status:" text)
+          if (meta.status) {
+            const pill = document.createElement("span");
+            pill.className = "status-pill " + statusClass(meta.status);
+            pill.textContent = statusLabel(meta.status);
+            titleWrap.appendChild(pill);
           }
 
-          const titleText = document.createElement("span");
-          titleText.textContent = meta.id;
-          titleWrap.appendChild(titleText);
           btn.appendChild(titleWrap);
 
+          // tiny time only (keep it sparse)
           const metaWrap = document.createElement("div");
           metaWrap.className = "thread-meta";
-          const metaBits = [];
-          if (meta.createdAt) metaBits.push(formatRelativeTime(meta.createdAt));
-          if (meta.parent?.threadId) {
-            metaBits.push("Subagent");
-            if (depth === 0) {
-              metaBits.push("Parent: " + short(meta.parent.threadId));
-            }
-          } else {
-            metaBits.push("Root");
-          }
-          if (meta.agentType) metaBits.push("Agent: " + meta.agentType);
-          if (meta.status) metaBits.push("Status: " + meta.status);
-          const city = meta.request?.cf?.city;
-          if (city) metaBits.push(city);
-          metaWrap.textContent = metaBits.filter(Boolean).join(" • ");
+          const t = formatTinyTime(meta.createdAt);
+          metaWrap.textContent = t ? t : "";
           btn.appendChild(metaWrap);
 
-          const tooltip = [];
-          if (meta.request?.userAgent) tooltip.push(meta.request.userAgent);
-          if (meta.report) tooltip.push("Report: " + meta.report);
-          if (meta.parent?.threadId && depth > 0)
-            tooltip.push("Parent: " + meta.parent.threadId);
-          if (tooltip.length) btn.title = tooltip.join("\n\n");
+          // Tooltip: full, crowded info — but NO report
+          const tooltip = [
+            `ID: ${meta.id}`,
+            meta.parent?.threadId
+              ? `Parent: ${meta.parent.threadId}`
+              : "Root thread",
+            meta.agentName ? `Name: ${meta.agentName}` : null,
+            meta.agentType ? `Agent: ${meta.agentType}` : null,
+            meta.status ? `Status: ${statusLabel(meta.status)}` : null,
+            meta.createdAt
+              ? `Created: ${new Date(meta.createdAt).toLocaleString()}`
+              : null,
+            meta.request?.cf?.city ? `City: ${meta.request.cf.city}` : null,
+            meta.request?.userAgent ? `UA: ${meta.request.userAgent}` : null
+          ].filter(Boolean);
+          btn.title = tooltip.join("\n"); // intentionally excluding meta.report
 
           btn.onclick = () => selectThread(meta.id);
-          return btn;
-        };
 
-        const renderBranch = (nodes, depth, prefix) => {
-          for (let i = 0; i < nodes.length; i++) {
-            const node = nodes[i];
-            const isLast = i === nodes.length - 1;
-            const connector =
-              depth === 0 ? "" : prefix + (isLast ? "└─ " : "├─ ");
-            frag.appendChild(buildButton(node.meta, depth, connector));
-            const nextPrefix =
-              depth === 0
-                ? isLast
-                  ? "   "
-                  : "│  "
-                : prefix + (isLast ? "   " : "│  ");
-            if (node.children.length) {
-              renderBranch(node.children, depth + 1, nextPrefix);
-            }
+          row.appendChild(btn);
+
+          if (hasChildren) {
+            const childWrap = document.createElement("div");
+            childWrap.className = "thread-children";
+            childWrap.style.display = expanded ? "block" : "none";
+            for (const c of children)
+              childWrap.appendChild(buildRow(c, depth + 1));
+            row.appendChild(childWrap);
           }
+
+          return row;
         };
 
-        renderBranch(roots, 0, "");
+        for (const n of roots) frag.appendChild(buildRow(n, 0));
         threadsListEl.appendChild(frag);
       }
+
       // ---- Todos ----
 
       function renderTodos(state) {
@@ -2833,6 +2909,36 @@
           .replaceAll(">", "&gt;")
           .replaceAll('"', "&quot;")
           .replaceAll("'", "&#039;");
+      }
+      function short8(id) {
+        return (id || "").slice(0, 8);
+      }
+
+      function formatTinyTime(iso) {
+        if (!iso) return "";
+        const ts = Date.parse(iso);
+        if (Number.isNaN(ts)) return "";
+        const diff = Date.now() - ts;
+        const m = 60_000,
+          h = 60 * m,
+          d = 24 * h;
+        if (Math.abs(diff) < m) return "Just now";
+        if (Math.abs(diff) < h) return Math.round(Math.abs(diff) / m) + "m ago";
+        if (Math.abs(diff) < d) return Math.round(Math.abs(diff) / h) + "h ago";
+        return new Date(ts).toLocaleDateString();
+      }
+
+      function statusClass(s) {
+        return (
+          "s-" +
+          String(s || "")
+            .toLowerCase()
+            .replace(/\s+/g, "_")
+        );
+      }
+
+      function statusLabel(s) {
+        return String(s || "").replace(/_/g, " ");
       }
     </script>
   </body>

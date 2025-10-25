@@ -22,11 +22,11 @@ export async function step(
   for (const m of mws) await m.onModelResult?.(ctx, res);
 
   // Should we set this before or after the MWs?
-  ctx.store.appendMessages([res.message]);
+  ctx.agent.store.appendMessages([res.message]);
 
   const newToolCalls =
     res.message && "toolCalls" in res.message && res.message.toolCalls
       ? res.message.toolCalls
       : [];
-  ctx.store.setPendingToolCalls(newToolCalls);
+  ctx.agent.store.setPendingToolCalls(newToolCalls);
 }
