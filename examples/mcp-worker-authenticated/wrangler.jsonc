@@ -6,8 +6,7 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "your-kv-namespace-id",
-      "preview_id": "your-preview-kv-namespace-id"
+      "id": "your-kv-namespace-id"
     }
   ]
 }

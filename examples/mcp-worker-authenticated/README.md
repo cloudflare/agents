@@ -9,7 +9,7 @@ This is the simplest way to deploy an authenticated MCP server on Cloudflare Wor
 ### 1. Create KV Namespace
 
 ```bash
-wrangler kv:namespace create OAUTH_KV
+wrangler kv namespace create OAUTH_KV
 ```
 
 ### 2. Update wrangler.jsonc
