@@ -28,8 +28,8 @@ interface State {
  */
 export class Playground extends AIChatAgent<Env, State> {
   initialState = {
-    modelName: "@cf/meta/llama-4-scout-17b-16e-instruct",
-    temperature: 1
+    modelName: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+    temperature: 0
   };
 
   onStart() {

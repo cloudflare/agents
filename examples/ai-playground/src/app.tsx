@@ -9,13 +9,15 @@ import ModelSelector from "./components/ModelSelector";
 import ViewCodeModal from "./components/ViewCodeModal";
 import { ToolCallCard } from "./components/ToolCallCard";
 import { isToolUIPart, type UIMessage } from "ai";
-import { useAgent, type MCPServersState } from "agents/react";
+import { useAgent } from "agents/react";
+import type { MCPServersState } from "agents";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { nanoid } from "nanoid";
 
 export type Params = {
   model: string;
   stream: boolean;
+  temperature: number;
 };
 
 // Transformed MCP state shape for our component
@@ -66,8 +68,9 @@ const App = () => {
   const [models, setModels] = useState<any[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<Params>({
-    model: "@cf/meta/llama-4-scout-17b-16e-instruct",
-    stream: true
+    model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+    stream: true,
+    temperature: 0
   });
 
   const [mcp, setMcp] = useState<McpComponentState>({
@@ -139,6 +142,12 @@ const App = () => {
         const models = await agent.stub.getModels();
         console.log(models);
         setModels(models);
+
+        // Initialize agent state with model and temperature
+        await agent.setState({
+          modelName: params.model,
+          temperature: params.temperature
+        });
       } finally {
         setIsLoadingModels(false);
       }
@@ -161,6 +170,7 @@ const App = () => {
 
     const message = agentInput;
     setAgentInput("");
+    setError(""); // Clear any previous errors
 
     // Send message to agent
     await sendMessage(
@@ -199,7 +209,7 @@ const App = () => {
 
   // Find the active model from models array
   const activeModel = models.find((m) => m.name === params.model);
-  const defaultModel = "@cf/meta/llama-4-scout-17b-16e-instruct";
+  const defaultModel = "@hf/nousresearch/hermes-2-pro-mistral-7b";
 
   return (
     <main className="w-full h-full bg-gray-50 md:px-6">
@@ -336,9 +346,10 @@ const App = () => {
                         ...params,
                         model: modelName
                       });
-                      // Update the agent's state on the server
+                      // Update the agent's state on the server with both model and temperature
                       await agent.setState({
-                        modelName
+                        modelName,
+                        temperature: params.temperature
                       });
                     }}
                   />
@@ -358,6 +369,40 @@ const App = () => {
                   value={systemMessage}
                   onChange={(e) => setSystemMessage(e.target.value)}
                 />
+              </div>
+
+              <div
+                className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
+              >
+                {/* biome-ignore lint/a11y/noLabelWithoutControl: eh */}
+                <label className="font-semibold text-sm block mb-1">
+                  Temperature
+                </label>
+                <div className="flex items-center p-2 border border-gray-200 rounded-md">
+                  <input
+                    className="w-full appearance-none cursor-pointer bg-ai rounded-full h-2 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_#901475]"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.1}
+                    value={params.temperature}
+                    onChange={async (e) => {
+                      const temperature = Number.parseFloat(e.target.value);
+                      setParams({
+                        ...params,
+                        temperature
+                      });
+                      // Update the agent's state on the server with both model and temperature
+                      await agent.setState({
+                        modelName: params.model,
+                        temperature
+                      });
+                    }}
+                  />
+                  <span className="ml-3 text-md text-gray-800 w-12 text-right">
+                    {params.temperature.toFixed(1)}
+                  </span>
+                </div>
               </div>
 
               <div className="mb-4 hidden">
