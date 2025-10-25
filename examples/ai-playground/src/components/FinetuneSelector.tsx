@@ -4,7 +4,6 @@ import type { FineTune } from "../models";
 
 const FinetuneSelector = ({
   models,
-  model,
   onSelection
 }: {
   models: (FineTune | null)[];

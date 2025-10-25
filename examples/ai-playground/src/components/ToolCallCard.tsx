@@ -1,7 +1,12 @@
 import { useState } from "react";
 
 interface ToolCallCardProps {
-  part: any;
+  part: {
+    type: string;
+    state?: string;
+    input: unknown;
+    output?: unknown;
+  };
 }
 
 export const ToolCallCard = ({ part }: ToolCallCardProps) => {
@@ -30,6 +35,7 @@ export const ToolCallCard = ({ part }: ToolCallCardProps) => {
           stroke="currentColor"
           viewBox="0 0 24 24"
         >
+          <title>Expand/collapse</title>
           <path
             strokeLinecap="round"
             strokeLinejoin="round"

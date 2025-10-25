@@ -37,12 +37,10 @@ const ViewCodeModal = ({
   if (!visible) return null;
 
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: it's fine
     <div
       onClick={handleHide}
       className="fixed top-0 left-0 bottom-0 right-0 bg-[rgba(255,255,255,0.5)] backdrop-blur-sm z-20 flex md:items-center md:justify-center items-end md:p-16"
     >
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: it's fine */}
       <div
         onClick={(e) => {
           e.stopPropagation();
@@ -51,7 +49,6 @@ const ViewCodeModal = ({
       >
         <h2 className="font-semibold text-xl flex items-center">
           View code{" "}
-          {/* biome-ignore lint/a11y/useKeyWithClickEvents: it's fine */}
           <div
             onClick={handleHide}
             className="ml-auto text-4xl text-gray-400 font-thin cursor-pointer"

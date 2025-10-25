@@ -1,11 +1,11 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { McpComponentState } from "../app";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 
 type McpServersProps = {
   agent: {
-    stub: Record<string, (...args: any[]) => any>;
+    stub: Record<string, (...args: unknown[]) => unknown>;
   };
   mcpState: McpComponentState;
   mcpLogs: Array<{ timestamp: number; status: string; serverUrl?: string }>;
@@ -15,7 +15,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   const [serverUrl, setServerUrl] = useState(() => {
     return sessionStorage.getItem("mcpServerUrl") || "";
   });
-  const [transportType, _setTransportType] = useState<"auto" | "http" | "sse">(
+  const [_transportType, _setTransportType] = useState<"auto" | "http" | "sse">(
     () => {
       return (
         (sessionStorage.getItem("mcpTransportType") as
@@ -39,7 +39,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
     ) {
       setIsActive(false);
     }
-  }, [mcpState?.status]);
+  }, [mcpState?.status, mcpState]);
   const [error, setError] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
 
@@ -87,7 +87,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
 
     try {
       // Build headers object to send to server
-      let headers: Record<string, string> | undefined = undefined;
+      let headers: Record<string, string> | undefined;
       if (headerKey && bearerToken) {
         headers = {
           [headerKey]: `Bearer ${bearerToken}`
@@ -98,7 +98,9 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         "[McpServers] Calling connectMCPServer with headers:",
         headers
       );
-      const result = await agent.stub.connectMCPServer(serverUrl, headers);
+      const result = (await agent.stub.connectMCPServer(serverUrl, headers)) as
+        | { authUrl?: string }
+        | undefined;
       console.log("[McpServers] connectMCPServer result:", result);
 
       // If authUrl is returned, open the OAuth popup immediately
@@ -112,9 +114,11 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         console.log("[McpServers] No auth required, connection successful");
         setIsActive(true);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("[McpServers] Connection error:", err);
-      setError(err.message || "Failed to connect to MCP server");
+      setError(
+        err instanceof Error ? err.message : "Failed to connect to MCP server"
+      );
       setIsActive(false);
     } finally {
       setIsConnecting(false);
@@ -136,9 +140,13 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
 
       // The SDK will broadcast the updated state, which will trigger our useEffect
       // and update isActive automatically
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error("[McpServers] Disconnect error:", err);
-      setError(err.message || "Failed to disconnect from MCP server");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to disconnect from MCP server"
+      );
     } finally {
       setIsConnecting(false);
     }
@@ -158,7 +166,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
     if (logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
-  }, [mcpLogs]);
+  }, []);
 
   // Generate status badge based on connection state
   const getStatusBadge = () => {
@@ -492,14 +500,12 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         {/* Debug Log - show MCP state transitions */}
         {showSettings && mcpLogs.length > 0 && (
           <div className="mt-4">
-            <label className="font-semibold text-sm block mb-1">
-              Debug Log
-            </label>
+            <div className="font-semibold text-sm block mb-1">Debug Log</div>
             <div
               ref={logRef}
               className="border border-gray-200 rounded-md p-2 bg-gray-50 h-40 overflow-y-auto font-mono text-xs"
             >
-              {mcpLogs.map((log, index) => {
+              {mcpLogs.map((log) => {
                 // Determine log level from status
                 const level =
                   log.status === "failed"
@@ -520,15 +526,13 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
 
                 return (
                   <div
-                    key={index}
+                    key={log.timestamp}
                     className={`py-0.5 ${
                       level === "debug"
                         ? "text-gray-500"
                         : level === "info"
                           ? "text-blue-600"
-                          : level === "warn"
-                            ? "text-orange-600"
-                            : "text-red-600"
+                          : "text-red-600"
                     }`}
                   >
                     [{level}] {message}

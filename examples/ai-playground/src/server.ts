@@ -75,7 +75,9 @@ export class Playground extends AIChatAgent<Env, State> {
             "You are a helpful assistant that can do various tasks using MCP tools.",
 
           messages: convertToModelMessages(cleanedMessages),
-          model: workersai(this.state.modelName as any),
+          model: workersai(
+            this.state.modelName as Parameters<typeof workersai>[0]
+          ),
           tools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof tools

@@ -13,6 +13,7 @@ import { useAgent } from "agents/react";
 import type { MCPServersState } from "agents";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { nanoid } from "nanoid";
+import type { Model } from "./models";
 
 export type Params = {
   model: string;
@@ -25,8 +26,8 @@ export type McpComponentState = {
   status: string;
   error: string | null;
   tools: Tool[];
-  prompts: any[];
-  resources: any[];
+  prompts: unknown[];
+  resources: unknown[];
   serverId?: string;
   serverName?: string;
   serverUrl?: string;
@@ -65,7 +66,7 @@ const App = () => {
   const [systemMessage, setSystemMessage] = useState(
     "You are a helpful assistant that can do various tasks using MCP tools."
   );
-  const [models, setModels] = useState<any[]>([]);
+  const [models, setModels] = useState<Model[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<Params>({
     model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
@@ -152,7 +153,7 @@ const App = () => {
       }
     };
     getModels();
-  }, []);
+  }, [agent.setState, agent.stub.getModels, params.model, params.temperature]);
 
   const handleAgentInputChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
@@ -161,7 +162,7 @@ const App = () => {
   };
 
   const handleAgentSubmit = async (
-    e: React.FormEvent,
+    e: React.FormEvent | React.KeyboardEvent | React.MouseEvent,
     extraData: Record<string, unknown> = {}
   ) => {
     e.preventDefault();
@@ -422,7 +423,7 @@ const App = () => {
             </section>
 
             {activeModel?.properties.find(
-              (p: any) =>
+              (p: { property_id: string; value: string }) =>
                 p.property_id === "function_calling" && p.value === "true"
             ) ? (
               <>
@@ -556,7 +557,7 @@ const App = () => {
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
-                          handleAgentSubmit(e as any);
+                          handleAgentSubmit(e);
                         }
                       }}
                     />
@@ -599,7 +600,7 @@ const App = () => {
                 <button
                   type="button"
                   disabled={!agentInput.trim()}
-                  onClick={(e) => handleAgentSubmit(e as any)}
+                  onClick={(e) => handleAgentSubmit(e)}
                   className={`bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background ${
                     !agentInput.trim() ? "opacity-50 cursor-not-allowed" : ""
                   } text-white rounded-md shadow-md py-2 px-6 flex items-center`}
