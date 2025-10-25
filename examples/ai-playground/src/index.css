@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.bg-ai {
+  background-image: linear-gradient(75deg, #901475, #ce2f55, #ff6633);
+}
+
+.bg-ai-loop {
+  background-image: linear-gradient(
+    75deg,
+    #901475,
+    #ce2f55,
+    #ff6633,
+    #ce2f55,
+    #901475
+  );
+}
+
+button {
+  cursor: pointer;
+}

@@ -1,0 +1,2 @@
+# Optional: Override the auto-detected host (defaults to request origin)
+# HOST=http://localhost:5173
