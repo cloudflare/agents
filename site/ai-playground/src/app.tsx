@@ -17,6 +17,13 @@ import type { Model } from "./models";
 import type { McpComponentState } from "./components/McpServers";
 
 const STORAGE_KEY = "playground_session_id";
+const DEFAULT_PARAMS = {
+  model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+  temperature: 0,
+  stream: true,
+  system:
+    "You are a helpful assistant that can do various tasks using MCP tools."
+};
 
 /**
  * Get or create a session ID for this user.
@@ -48,13 +55,7 @@ const App = () => {
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
-  const [params, setParams] = useState<PlaygroundState>({
-    model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
-    stream: true,
-    temperature: 0,
-    system:
-      "You are a helpful assistant that can do various tasks using MCP tools."
-  });
+  const [params, setParams] = useState<PlaygroundState>(DEFAULT_PARAMS);
 
   const [mcp, setMcp] = useState<McpComponentState>({
     state: "not-connected",
@@ -186,9 +187,8 @@ const App = () => {
 
   const messageElement = useRef<HTMLDivElement>(null);
 
-  // Find the active model from models array
-  const activeModel = models.find((m) => m.name === params.model);
-  const defaultModel = "@hf/nousresearch/hermes-2-pro-mistral-7b";
+  const activeModelName = params.model ?? DEFAULT_PARAMS.model;
+  const activeModel = models.find((model) => model.name === activeModelName);
 
   return (
     <main className="w-full h-full bg-gray-50 md:px-6">
@@ -318,10 +318,8 @@ const App = () => {
                     model={activeModel}
                     isLoading={isLoadingModels}
                     onModelSelection={async (model) => {
-                      const modelName = model ? model.name : defaultModel;
-                      // Update the agent's state on the server with both model and temperature
                       agent.setState({
-                        model: modelName,
+                        model: model ? model.name : DEFAULT_PARAMS.model,
                         temperature: params.temperature,
                         stream: params.stream,
                         system: params.system
