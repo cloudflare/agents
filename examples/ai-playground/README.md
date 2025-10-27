@@ -1,55 +1,60 @@
-# MCP Client Demo Using Agents
+# Workers AI Playground
 
-A minimal example showing an `Agent` as an MCP client with support for both SSE and HTTP Streamable transports.
+Welcome to the Workers AI Playground! This project is designed to provide a user-friendly interface for interacting with AI models and exploring their capabilities. The playground allows you to connect to Model Context Protocol (MCP) servers, see available tools, and run Workers AI models with ease.
 
-## Transport Options
+[![Deploy to Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/agents/tree/main/site/ai-playground)
 
-The MCP client supports two transport types:
+## Features
 
-- **HTTP Streamable** (recommended): Uses HTTP POST + SSE for better performance and reliability
-- **SSE (Server-Sent Events)**
+- **Connect to MCP Servers**: Easily connect to MCP servers to access additional AI capabilities.
+- **Dynamic UI**: The interface is built using React and Tailwind CSS, providing a responsive and modern user experience.
+- **Tool Management**: View and manage available AI tools when connected to an MCP server.
+- **Authentication**: Supports authentication for secure access to MCP servers.
+- **Interactive Messaging**: Send messages and receive AI-generated responses in real-time.
 
-## Instructions
+## Getting Started
 
-First, start an MCP server. A simple example can be found in `examples/mcp`, which already has a valid binding setup.
+### Prerequisites
 
-Then, follow the steps below to setup the client:
+- Node.js and npm installed on your machine.
 
-1. This example uses a pre-built version of the agents package. Run `npm run build` in the root of this repo to build it.
-2. Copy the `.dev.vars.example` file in this directory to a new file called `.dev.vars`.
-3. Run `npm install` from this directory.
-4. Run `npm start` from this directory.
+### Installation
 
-Tap "O + enter" to open the front end. It should list out all the tools, prompts, and resources available for each server added.
+1. Clone the repository and install dependencies:
 
-## Transport Configuration
+   ```bash
+   git clone https://github.com/cloudflare/agents.git
+   npm i
+   ```
 
-The MCP client defaults to HTTP Streamable transport for better performance. You can specify transport type explicitly:
+2. Start the development server:
 
-```typescript
-// Using MCPClientManager directly
-const mcpClient = new MCPClientManager("my-app", "1.0.0");
+   ```bash
+   cd site/ai-playground && npm start
+   ```
 
-// HTTP Streamable transport (default, recommended)
-await mcpClient.connect(serverUrl, {
-  transport: {
-    type: "streamable-http",
-    authProvider: myAuthProvider
-  }
-});
+3. Open your browser and navigate to `http://localhost:5173` to access the playground.
 
-// SSE transport (legacy compatibility)
-await mcpClient.connect(serverUrl, {
-  transport: {
-    type: "sse",
-    authProvider: myAuthProvider
-  }
-});
+## Configuration
 
-// Or using Agent.addMcpServer() (as shown in the example)
-export class MyAgent extends Agent<Env, never> {
-  async addServer(name: string, url: string, callbackHost: string) {
-    await this.addMcpServer(name, url, callbackHost);
-  }
-}
-```
+The project uses Tailwind CSS for styling. You can customize the theme and other configurations in the `tailwind.config.ts` file.
+
+## Usage
+
+- **Connect to a Server**: Enter the MCP server URL and click "Connect" to establish a connection.
+- **Manage Tools**: Once connected, view and interact with available AI tools.
+- **Send Messages**: Use the input field to send messages and receive AI responses.
+
+## Contributing
+
+Contributions are welcome! Please fork the repository and submit a pull request with your changes.
+
+## License
+
+This project is licensed under the MIT License.
+
+## Acknowledgments
+
+- Thanks to the contributors and the open-source community for their support and collaboration.
+
+Enjoy exploring the capabilities of AI with the Workers AI Playground!
