@@ -5,6 +5,7 @@ import type { Prompt } from "@modelcontextprotocol/sdk/types.js";
 import type { Resource } from "@modelcontextprotocol/sdk/types.js";
 import type { Playground, PlaygroundState } from "../server";
 import type { useAgent } from "agents/react";
+import LocalhostWarningModal from "./LocalhostWarningModal";
 
 export type McpComponentState = {
   id?: string;
@@ -38,6 +39,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   );
   const [isActive, setIsActive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showLocalhostWarning, setShowLocalhostWarning] = useState(false);
 
   // Update isActive based on mcpState
   useEffect(() => {
@@ -90,6 +92,23 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
     if (!serverUrl) {
       setError("Please enter a server URL");
       return;
+    }
+
+    // Check if URL contains localhost or 127.0.0.1
+    try {
+      const url = new URL(serverUrl);
+      const hostname = url.hostname.toLowerCase();
+      if (
+        hostname === "localhost" ||
+        hostname === "127.0.0.1" ||
+        hostname === "0.0.0.0" ||
+        hostname === "::1"
+      ) {
+        setShowLocalhostWarning(true);
+        return;
+      }
+    } catch (err) {
+      // Invalid URL, let the server handle it
     }
 
     console.log("[McpServers] handleConnect called with URL:", serverUrl);
@@ -583,6 +602,11 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
             </div>
           )}
       </div>
+
+      <LocalhostWarningModal
+        visible={showLocalhostWarning}
+        handleHide={() => setShowLocalhostWarning(false)}
+      />
     </section>
   );
 }
