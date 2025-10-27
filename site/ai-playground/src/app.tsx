@@ -54,7 +54,9 @@ const App = () => {
   const [params, setParams] = useState<PlaygroundState>({
     model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
     stream: true,
-    temperature: 0
+    temperature: 0,
+    system:
+      "You are a helpful assistant that can do various tasks using MCP tools."
   });
 
   const [mcp, setMcp] = useState<McpComponentState>({
@@ -83,8 +85,10 @@ const App = () => {
         ...prev,
         model: state.model,
         temperature: state.temperature,
-        stream: state.stream
+        stream: state.stream,
+        system: state.system
       }));
+      setSystemMessage(state.system);
     },
     onMcpUpdate(mcpState: MCPServersState) {
       // The SDK returns: { servers: { [id]: { state, name, ... } }, tools, prompts, resources }
@@ -323,7 +327,8 @@ const App = () => {
                       agent.setState({
                         model: modelName,
                         temperature: params.temperature,
-                        stream: params.stream
+                        stream: params.stream,
+                        system: params.system
                       });
                     }}
                   />
@@ -341,7 +346,16 @@ const App = () => {
                   className="w-full p-2 border border-gray-200 rounded-md resize-none hover:bg-gray-50"
                   minRows={4}
                   value={systemMessage}
-                  onChange={(e) => setSystemMessage(e.target.value)}
+                  onChange={(e) => {
+                    const newSystem = e.target.value;
+                    setSystemMessage(newSystem);
+                    agent.setState({
+                      model: params.model,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: newSystem
+                    });
+                  }}
                 />
               </div>
 
@@ -365,7 +379,8 @@ const App = () => {
                       agent.setState({
                         model: params.model,
                         temperature,
-                        stream: params.stream
+                        stream: params.stream,
+                        system: params.system
                       });
                     }}
                   />
@@ -388,7 +403,8 @@ const App = () => {
                       agent.setState({
                         model: params.model,
                         temperature: params.temperature,
-                        stream: e.target.checked
+                        stream: e.target.checked,
+                        system: params.system
                       });
                     }}
                   />
