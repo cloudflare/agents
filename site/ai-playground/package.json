@@ -6,7 +6,7 @@
   "scripts": {
     "start": "vite dev",
     "clean": "rm -rf .wrangler node_modules/.vite dist",
-    "deploy": "npm run clean && vite build && wrangler deploy",
+    "deploy": "npm run clean && vite build && wrangler deploy --minify",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

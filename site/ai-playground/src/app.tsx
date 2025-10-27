@@ -46,9 +46,6 @@ const App = () => {
   const [error, setError] = useState("");
   const [codeVisible, setCodeVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
-  const [systemMessage, setSystemMessage] = useState(
-    "You are a helpful assistant that can do various tasks using MCP tools."
-  );
   const [models, setModels] = useState<Model[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<PlaygroundState>({
@@ -88,7 +85,6 @@ const App = () => {
         stream: state.stream,
         system: state.system
       }));
-      setSystemMessage(state.system);
     },
     onMcpUpdate(mcpState: MCPServersState) {
       // The SDK returns: { servers: { [id]: { state, name, ... } }, tools, prompts, resources }
@@ -345,10 +341,9 @@ const App = () => {
                 <TextareaAutosize
                   className="w-full p-2 border border-gray-200 rounded-md resize-none hover:bg-gray-50"
                   minRows={4}
-                  value={systemMessage}
+                  value={params.system}
                   onChange={(e) => {
                     const newSystem = e.target.value;
-                    setSystemMessage(newSystem);
                     agent.setState({
                       model: params.model,
                       temperature: params.temperature,
