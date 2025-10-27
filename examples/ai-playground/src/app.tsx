@@ -13,6 +13,7 @@ import { useAgent } from "agents/react";
 import type { MCPServersState } from "agents";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { nanoid } from "nanoid";
+import type { Playground, PlaygroundState } from "./server";
 import type { Model } from "./models";
 
 export type Params = {
@@ -90,7 +91,7 @@ const App = () => {
     getOrCreateSessionId()
   );
 
-  const agent = useAgent({
+  const agent = useAgent<Playground, PlaygroundState>({
     agent: "playground",
     name: sessionId,
     onError(event) {
@@ -142,10 +143,10 @@ const App = () => {
     const getModels = async () => {
       try {
         const models = await agent.stub.getModels();
-        setModels(models);
+        setModels(models as Model[]);
 
         // Initialize agent state with model and temperature
-        await agent.setState({
+        agent.setState({
           modelName: params.model,
           temperature: params.temperature
         });
@@ -186,7 +187,7 @@ const App = () => {
   };
 
   const { messages, clearHistory, status, sendMessage, stop } = useAgentChat<
-    unknown,
+    PlaygroundState,
     UIMessage<{ createdAt: string }>
   >({
     agent
@@ -348,7 +349,7 @@ const App = () => {
                         model: modelName
                       });
                       // Update the agent's state on the server with both model and temperature
-                      await agent.setState({
+                      agent.setState({
                         modelName,
                         temperature: params.temperature
                       });
@@ -394,7 +395,7 @@ const App = () => {
                         temperature
                       });
                       // Update the agent's state on the server with both model and temperature
-                      await agent.setState({
+                      agent.setState({
                         modelName: params.model,
                         temperature
                       });

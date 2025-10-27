@@ -2,11 +2,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { McpComponentState } from "../app";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Playground, PlaygroundState } from "../server";
+import type { useAgent } from "agents/react";
 
 type McpServersProps = {
-  agent: {
-    stub: Record<string, (...args: unknown[]) => unknown>;
-  };
+  agent: ReturnType<typeof useAgent<Playground, PlaygroundState>>;
   mcpState: McpComponentState;
   mcpLogs: Array<{ timestamp: number; status: string; serverUrl?: string }>;
 };

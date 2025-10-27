@@ -1,19 +1,6 @@
-export type Model = {
-  id: string;
-  source: number;
-  name: keyof AiModels;
-  description: string;
-  task: {
-    id: string;
-    name: string;
-    description: string;
-  };
-  created_at: string;
-  tags: string[];
-  properties: {
-    property_id: string;
-    value: string;
-  }[];
+// these fields exist on the AiModelsSearchObject type, but are not typed in the workers-types package. We should fix it there, but for now we'll add them here.
+export type Model = AiModelsSearchObject & {
+  created_at: number;
   finetunes?: FineTune[];
 };
 

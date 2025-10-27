@@ -1,10 +1,10 @@
 {
-  "name": "@cloudflare/ai-playground-new",
+  "name": "@cloudflare/ai-playground",
   "type": "module",
   "private": true,
-  "author": "",
+  "author": "AI Agents Team <1800-agents@cloudflare.com>",
   "scripts": {
-    "start": "rm -rf node_modules/.vite && vite dev",
+    "start": "vite dev",
     "clean": "rm -rf .wrangler node_modules/.vite dist",
     "deploy": "npm run clean && vite build && wrangler deploy",
     "type-check": "tsc --noEmit"

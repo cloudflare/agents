@@ -18,7 +18,7 @@ interface Env {
   HOST?: string;
 }
 
-interface State {
+export interface PlaygroundState {
   modelName: string;
   temperature: number;
 }
@@ -26,7 +26,7 @@ interface State {
 /**
  * Chat Agent implementation that handles real-time AI chat interactions
  */
-export class Playground extends AIChatAgent<Env, State> {
+export class Playground extends AIChatAgent<Env, PlaygroundState> {
   initialState = {
     modelName: "@hf/nousresearch/hermes-2-pro-mistral-7b",
     temperature: 0
