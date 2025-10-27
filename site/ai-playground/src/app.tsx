@@ -11,28 +11,10 @@ import { ToolCallCard } from "./components/ToolCallCard";
 import { isToolUIPart, type UIMessage } from "ai";
 import { useAgent } from "agents/react";
 import type { MCPServersState } from "agents";
-import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { nanoid } from "nanoid";
 import type { Playground, PlaygroundState } from "./server";
 import type { Model } from "./models";
-
-export type Params = {
-  model: string;
-  stream: boolean;
-  temperature: number;
-};
-
-// Transformed MCP state shape for our component
-export type McpComponentState = {
-  status: string;
-  error: string | null;
-  tools: Tool[];
-  prompts: unknown[];
-  resources: unknown[];
-  serverId?: string;
-  serverName?: string;
-  serverUrl?: string;
-};
+import type { McpComponentState } from "./components/McpServers";
 
 const STORAGE_KEY = "playground_session_id";
 
@@ -69,15 +51,14 @@ const App = () => {
   );
   const [models, setModels] = useState<Model[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
-  const [params, setParams] = useState<Params>({
+  const [params, setParams] = useState<PlaygroundState>({
     model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
     stream: true,
     temperature: 0
   });
 
   const [mcp, setMcp] = useState<McpComponentState>({
-    status: "not-connected",
-    error: null,
+    state: "not-connected",
     tools: [],
     prompts: [],
     resources: []
@@ -97,10 +78,15 @@ const App = () => {
     onError(event) {
       console.error("[App] onError callback triggered with event:", event);
     },
+    onStateUpdate(state: PlaygroundState) {
+      setParams((prev) => ({
+        ...prev,
+        model: state.model,
+        temperature: state.temperature,
+        stream: state.stream
+      }));
+    },
     onMcpUpdate(mcpState: MCPServersState) {
-      console.log("[App] onMcpUpdate callback triggered with state:", mcpState);
-
-      // Transform MCPServersState to extract the first server's state
       // The SDK returns: { servers: { [id]: { state, name, ... } }, tools, prompts, resources }
       // We need to flatten it for the McpServers component
       const serverIds = Object.keys(mcpState.servers || {});
@@ -110,26 +96,23 @@ const App = () => {
         : null;
 
       const transformedState: McpComponentState = {
-        status: firstServer?.state || "not-connected", // Map SDK's 'state' to 'status'
-        error: null, // SDK doesn't expose errors in this state, but they're logged
+        state: firstServer?.state || "not-connected", // Map SDK's 'state' to 'status'
         tools: mcpState.tools || [],
         prompts: mcpState.prompts || [],
         resources: mcpState.resources || [],
-        serverId: firstServerId,
-        serverName: firstServer?.name,
-        serverUrl: firstServer?.server_url
+        id: firstServerId,
+        name: firstServer?.name,
+        url: firstServer?.server_url
       };
 
-      console.log("[App] Transformed MCP state:", transformedState);
       setMcp(transformedState);
-
       if (firstServer?.state) {
         setMcpLogs((prev) => [
           ...prev,
           {
             timestamp: Date.now(),
-            status: firstServer.state,
-            serverUrl: firstServer.server_url
+            status: Object.values(mcpState.servers)[0].state,
+            serverUrl: Object.values(mcpState.servers)[0].server_url
           }
         ]);
       }
@@ -144,12 +127,6 @@ const App = () => {
       try {
         const models = await agent.stub.getModels();
         setModels(models as Model[]);
-
-        // Initialize agent state with model and temperature
-        agent.setState({
-          modelName: params.model,
-          temperature: params.temperature
-        });
       } finally {
         setIsLoadingModels(false);
       }
@@ -342,16 +319,11 @@ const App = () => {
                     isLoading={isLoadingModels}
                     onModelSelection={async (model) => {
                       const modelName = model ? model.name : defaultModel;
-                      // Store selected model in sessionStorage
-                      sessionStorage.setItem("selectedModel", modelName);
-                      setParams({
-                        ...params,
-                        model: modelName
-                      });
                       // Update the agent's state on the server with both model and temperature
                       agent.setState({
-                        modelName,
-                        temperature: params.temperature
+                        model: modelName,
+                        temperature: params.temperature,
+                        stream: params.stream
                       });
                     }}
                   />
@@ -390,14 +362,10 @@ const App = () => {
                     value={params.temperature}
                     onChange={async (e) => {
                       const temperature = Number.parseFloat(e.target.value);
-                      setParams({
-                        ...params,
-                        temperature
-                      });
-                      // Update the agent's state on the server with both model and temperature
                       agent.setState({
-                        modelName: params.model,
-                        temperature
+                        model: params.model,
+                        temperature,
+                        stream: params.stream
                       });
                     }}
                   />
@@ -416,9 +384,13 @@ const App = () => {
                   <input
                     type="checkbox"
                     checked={params.stream}
-                    onChange={(e) =>
-                      setParams({ ...params, stream: e.target.checked })
-                    }
+                    onChange={(e) => {
+                      agent.setState({
+                        model: params.model,
+                        temperature: params.temperature,
+                        stream: e.target.checked
+                      });
+                    }}
                   />
                 </div>
               </div>

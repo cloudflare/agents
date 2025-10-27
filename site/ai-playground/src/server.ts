@@ -19,8 +19,9 @@ interface Env {
 }
 
 export interface PlaygroundState {
-  modelName: string;
+  model: string;
   temperature: number;
+  stream: boolean;
 }
 
 /**
@@ -28,8 +29,9 @@ export interface PlaygroundState {
  */
 export class Playground extends AIChatAgent<Env, PlaygroundState> {
   initialState = {
-    modelName: "@hf/nousresearch/hermes-2-pro-mistral-7b",
-    temperature: 0
+    model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+    temperature: 0,
+    stream: true
   };
 
   onStart() {
@@ -75,9 +77,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
             "You are a helpful assistant that can do various tasks using MCP tools.",
 
           messages: convertToModelMessages(cleanedMessages),
-          model: workersai(
-            this.state.modelName as Parameters<typeof workersai>[0]
-          ),
+          model: workersai(this.state.model as Parameters<typeof workersai>[0]),
           tools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof tools

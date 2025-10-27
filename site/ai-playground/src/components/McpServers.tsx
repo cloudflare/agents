@@ -1,9 +1,20 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
 import { useEffect, useRef, useState } from "react";
-import type { McpComponentState } from "../app";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Prompt } from "@modelcontextprotocol/sdk/types.js";
+import type { Resource } from "@modelcontextprotocol/sdk/types.js";
 import type { Playground, PlaygroundState } from "../server";
 import type { useAgent } from "agents/react";
+
+export type McpComponentState = {
+  id?: string;
+  name?: string;
+  state: string;
+  url?: string;
+  tools: Tool[];
+  prompts: Prompt[];
+  resources: Resource[];
+};
 
 type McpServersProps = {
   agent: ReturnType<typeof useAgent<Playground, PlaygroundState>>;
@@ -31,38 +42,38 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   // Update isActive based on mcpState
   useEffect(() => {
     console.log("[McpServers] mcpState updated:", mcpState);
-    if (mcpState?.status === "ready") {
+    if (mcpState?.state === "ready") {
       setIsActive(true);
     } else if (
-      mcpState?.status === "failed" ||
-      mcpState?.status === "not-connected"
+      mcpState?.state === "failed" ||
+      mcpState?.state === "not-connected"
     ) {
       setIsActive(false);
     }
-  }, [mcpState?.status, mcpState]);
+  }, [mcpState?.state, mcpState]);
   const [error, setError] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
 
   // Clear error when connection succeeds
   useEffect(() => {
-    if (mcpState?.status === "ready") {
+    if (mcpState?.state === "ready") {
       setError("");
     }
-  }, [mcpState?.status]);
+  }, [mcpState?.state]);
 
   // Update isConnecting based on mcpState
   // SDK states: "discovering" | "authenticating" | "connecting" | "ready" | "failed"
   useEffect(() => {
     if (
-      mcpState?.status === "discovering" ||
-      mcpState?.status === "connecting" ||
-      mcpState?.status === "authenticating"
+      mcpState?.state === "discovering" ||
+      mcpState?.state === "connecting" ||
+      mcpState?.state === "authenticating"
     ) {
       setIsConnecting(true);
     } else {
       setIsConnecting(false);
     }
-  }, [mcpState?.status]);
+  }, [mcpState?.state]);
 
   const logRef = useRef<HTMLDivElement>(null);
   const [showAuth, setShowAuth] = useState<boolean>(false);
@@ -128,14 +139,14 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   const handleDisconnect = async () => {
     console.log(
       "[McpServers] handleDisconnect called with serverId:",
-      mcpState.serverId
+      mcpState.id
     );
     setIsConnecting(true);
     setError("");
 
     try {
       // Call the agent to actually disconnect from the MCP server
-      await agent.stub.disconnectMCPServer(mcpState.serverId);
+      await agent.stub.disconnectMCPServer(mcpState.id);
       console.log("[McpServers] Successfully disconnected from MCP server");
 
       // The SDK will broadcast the updated state, which will trigger our useEffect
@@ -199,7 +210,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
     };
 
     // Get the status from mcpState (mapped from SDK's 'state' field)
-    const status = mcpState?.status || "not-connected";
+    const status = mcpState?.state || "not-connected";
     const { colors, label } = states[status] || states["not-connected"];
 
     return (

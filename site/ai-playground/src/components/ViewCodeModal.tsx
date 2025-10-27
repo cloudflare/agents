@@ -1,10 +1,10 @@
 /** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
 import type { UIMessage } from "ai";
-import type { Params } from "../app";
+import type { PlaygroundState } from "../server";
 
 const createMessageString = (
   messages: UIMessage[],
-  params: Params
+  params: PlaygroundState
 ) => `const stream = await env.AI.run("${params.model}", {
   stream: true,
   messages: [\n${messages
@@ -31,7 +31,7 @@ const ViewCodeModal = ({
 }: {
   visible: boolean;
   handleHide: (e: React.MouseEvent<HTMLDivElement>) => void;
-  params: Params;
+  params: PlaygroundState;
   messages: UIMessage[];
 }) => {
   if (!visible) return null;
