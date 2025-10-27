@@ -6,7 +6,8 @@ const createMessageString = (
   messages: UIMessage[],
   params: PlaygroundState
 ) => `const stream = await env.AI.run("${params.model}", {
-  stream: true,
+  stream: ${params.stream},
+  temperature: ${params.temperature},
   messages: [\n${messages
     .map(
       (message) =>
