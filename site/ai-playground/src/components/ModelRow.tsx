@@ -31,15 +31,15 @@ const ModelRow = ({ model }: { model: Model }) => {
   // TODO: Update label for LoRA
   return (
     <div
-      className="w-full whitespace-nowrap items-center flex"
+      className="w-full items-center flex flex-wrap gap-1"
       title={model.description}
     >
-      {name}
-      <div className="ml-2">
+      <span className="truncate">{name}</span>
+      <div className="flex flex-wrap gap-1">
         {tags.map((tag: string) => (
           <span
             key={tag}
-            className={`text-xs mr-1 px-2 py-1 rounded-full ${
+            className={`text-xs px-2 py-1 rounded-full whitespace-nowrap ${
               tag === "Beta"
                 ? "bg-orange-200 border-orange-300"
                 : tag === "MCP"
