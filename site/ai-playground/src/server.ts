@@ -146,6 +146,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
 
   @callable()
   async getModels() {
+    // TODO: get finetunes when the binding supports finetunes.public.list endpoint
     return await this.env.AI.models({ per_page: 1000 });
   }
 
