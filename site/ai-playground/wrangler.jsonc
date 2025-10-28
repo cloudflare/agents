@@ -1,0 +1,39 @@
+{
+  "name": "ai-playground",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-10-08",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/agents/*"]
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "Playground",
+        "name": "Playground"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "new_sqlite_classes": ["Playground"],
+      "tag": "v1"
+    }
+  ],
+
+  "observability": {
+    "logs": {
+      "enabled": true
+    }
+  }
+  // Optional: Override the auto-detected host
+  // "vars": {
+  //   "HOST": "<DEPLOYED_HOSTNAME>"
+  // }
+}
