@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-Drop the experimental_ prefix on createMcpHandler
+Drop the experimental\_ prefix on createMcpHandler
