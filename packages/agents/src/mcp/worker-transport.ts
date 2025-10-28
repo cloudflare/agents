@@ -146,7 +146,10 @@ export class WorkerTransport implements Transport {
     return undefined;
   }
 
-  private getHeaders(forPreflight = false): Record<string, string> {
+  private getHeaders({ forPreflight }: { forPreflight?: boolean } = {}): Record<
+    string,
+    string
+  > {
     const defaults: CORSOptions = {
       origin: "*",
       headers:
@@ -563,7 +566,7 @@ export class WorkerTransport implements Transport {
   private handleOptionsRequest(_request: Request): Response {
     return new Response(null, {
       status: 200,
-      headers: { ...this.getHeaders(true) }
+      headers: { ...this.getHeaders({ forPreflight: true }) }
     });
   }
 
