@@ -25,7 +25,13 @@ declare module "cloudflare:test" {
 
 describe("McpAgent jurisdiction option", () => {
   describe("serve() with jurisdiction", () => {
-    let getAgentByNameSpy: ReturnType<typeof vi.spyOn>;
+    let getAgentByNameSpy: ReturnType<
+      typeof vi.spyOn<
+        typeof indexModule,
+        // @ts-expect-error - getAgentByName is not a method of the indexModule
+        "getAgentByName"
+      >
+    >;
     let originalGetAgentByName: typeof indexModule.getAgentByName;
 
     beforeEach(() => {
