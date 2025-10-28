@@ -27,6 +27,10 @@
       {
         "class_name": "TestOAuthAgent",
         "name": "TestOAuthAgent"
+      },
+      {
+        "class_name": "TestMcpJurisdiction",
+        "name": "TEST_MCP_JURISDICTION"
       }
     ]
   },
@@ -40,7 +44,8 @@
         "TestUserNotificationAgent",
         "TestRaceAgent",
         "TestChatAgent",
-        "TestOAuthAgent"
+        "TestOAuthAgent",
+        "TestMcpJurisdiction"
       ],
       "tag": "v1"
     }

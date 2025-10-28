@@ -29,6 +29,7 @@ export type Env = {
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
+  TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
 };
 
 type State = unknown;
@@ -356,6 +357,25 @@ export class TestChatAgent extends AIChatAgent<Env> {
     };
     await this.persistMessages([messageWithToolOutput]);
     return messageWithToolOutput;
+  }
+}
+
+// Test MCP Agent for jurisdiction feature
+export class TestMcpJurisdiction extends McpAgent<Env> {
+  server = new McpServer(
+    { name: "test-jurisdiction-server", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+
+  async init() {
+    this.server.tool(
+      "test-tool",
+      "A test tool",
+      { message: z.string().describe("Test message") },
+      async ({ message }): Promise<CallToolResult> => ({
+        content: [{ text: `Echo: ${message}`, type: "text" }]
+      })
+    );
   }
 }
 
