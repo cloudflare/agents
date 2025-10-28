@@ -1,7 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import { WorkerTransport } from "../../mcp/worker-transport";
+import {
+  WorkerTransport,
+  type WorkerTransportOptions
+} from "../../mcp/worker-transport";
 import { z } from "zod";
 
 /**
@@ -28,7 +31,7 @@ describe("WorkerTransport", () => {
 
   const setupTransport = async (
     server: McpServer,
-    options?: Parameters<typeof WorkerTransport>[0]
+    options?: WorkerTransportOptions
   ) => {
     const transport = new WorkerTransport(options);
     // server.connect() will call transport.start() internally
@@ -396,7 +399,9 @@ describe("WorkerTransport", () => {
 
       // Should require header for version > 2025-03-26
       expect(response.status).toBe(400);
-      const body = await response.json();
+      const body = (await response.json()) as {
+        error: { message: string };
+      };
       expect(body.error.message).toContain("MCP-Protocol-Version");
       expect(body.error.message).toContain("required");
     });
@@ -493,7 +498,9 @@ describe("WorkerTransport", () => {
       const response = await transport.handleRequest(followupRequest);
 
       expect(response.status).toBe(400);
-      const body = await response.json();
+      const body = (await response.json()) as {
+        error: { message: string };
+      };
       expect(body.error.message).toContain("Unsupported");
       expect(body.error.message).toContain("MCP-Protocol-Version");
     });
@@ -543,7 +550,9 @@ describe("WorkerTransport", () => {
       const response = await transport.handleRequest(followupRequest);
 
       expect(response.status).toBe(400);
-      const body = await response.json();
+      const body = (await response.json()) as {
+        error: { message: string };
+      };
       expect(body.error.message).toContain("mismatch");
       expect(body.error.message).toContain("Expected: 2025-06-18");
       expect(body.error.message).toContain("Got: 2025-03-26");
@@ -590,7 +599,9 @@ describe("WorkerTransport", () => {
       const response = await transport.handleRequest(getRequest);
 
       expect(response.status).toBe(400);
-      const body = await response.json();
+      const body = (await response.json()) as {
+        error: { message: string };
+      };
       expect(body.error.message).toContain("MCP-Protocol-Version");
     });
   });
@@ -634,7 +645,9 @@ describe("WorkerTransport", () => {
       const response = await transport.handleRequest(deleteRequest);
 
       expect(response.status).toBe(400);
-      const body = await response.json();
+      const body = (await response.json()) as {
+        error: { message: string };
+      };
       expect(body.error.message).toContain("MCP-Protocol-Version");
     });
   });
