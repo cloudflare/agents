@@ -37,6 +37,7 @@ export type Env = {
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
+  TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
 };
 
 type State = unknown;
@@ -649,6 +650,80 @@ export class TestMcpJurisdiction extends McpAgent<Env> {
         return { content: [{ text: `Echo: ${message}`, type: "text" }] };
       }
     );
+  }
+}
+
+// Test Agent for readonly connections feature
+export class TestReadonlyAgent extends Agent<Env, { count: number }> {
+  initialState = { count: 0 };
+  static options = { hibernate: true };
+
+  // Track state update attempts for testing
+  stateUpdateAttempts: Array<{
+    source: string;
+    count: number;
+    allowed: boolean;
+  }> = [];
+
+  shouldConnectionBeReadonly(
+    connection: Connection,
+    ctx: import("../index").ConnectionContext
+  ): boolean {
+    // Check query parameter to determine readonly status
+    const url = new URL(ctx.request.url);
+    return url.searchParams.get("readonly") === "true";
+  }
+
+  onStateUpdate(state: { count: number }, source: Connection | "server"): void {
+    this.stateUpdateAttempts.push({
+      source: source === "server" ? "server" : source.id,
+      count: state.count,
+      allowed: true
+    });
+  }
+
+  @callable()
+  async incrementCount() {
+    this.setState({ count: this.state.count + 1 });
+    return this.state.count;
+  }
+
+  @callable()
+  async getState() {
+    return this.state;
+  }
+
+  @callable()
+  async checkReadonly(connectionId: string) {
+    const conn = Array.from(this.getConnections()).find(
+      (c) => c.id === connectionId
+    );
+    return conn ? this.isConnectionReadonly(conn) : null;
+  }
+
+  @callable()
+  async setReadonly(connectionId: string, readonly: boolean) {
+    const conn = Array.from(this.getConnections()).find(
+      (c) => c.id === connectionId
+    );
+    if (conn) {
+      this.setConnectionReadonly(conn, readonly);
+      return { success: true, readonly };
+    }
+    return { success: false };
+  }
+
+  @callable()
+  async getReadonlyFromDb() {
+    const rows = this.sql<{ connection_id: string }>`
+      SELECT connection_id FROM cf_agents_readonly_connections
+    `;
+    return rows.map((r) => r.connection_id);
+  }
+
+  @callable()
+  async getStateUpdateAttempts() {
+    return this.stateUpdateAttempts;
   }
 }
 
