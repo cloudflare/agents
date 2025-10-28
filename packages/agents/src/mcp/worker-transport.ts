@@ -5,7 +5,8 @@
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   JSONRPCMessage,
-  RequestId
+  RequestId,
+  InitializeRequest
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   isInitializeRequest,
@@ -14,6 +15,14 @@ import {
   isJSONRPCResponse,
   JSONRPCMessageSchema
 } from "@modelcontextprotocol/sdk/types.js";
+import type { CORSOptions } from "./types";
+
+// MCP Protocol Version constants
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-03-26", "2025-06-18"] as const;
+const DEFAULT_PROTOCOL_VERSION = "2025-03-26"; // For backwards compatibility
+const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
+
+type ProtocolVersion = (typeof SUPPORTED_PROTOCOL_VERSIONS)[number];
 
 interface StreamMapping {
   writer?: WritableStreamDefaultWriter<Uint8Array>;
@@ -26,6 +35,7 @@ export interface WorkerTransportOptions {
   sessionIdGenerator?: () => string;
   enableJsonResponse?: boolean;
   onsessioninitialized?: (sessionId: string) => void;
+  corsOptions?: CORSOptions;
 }
 
 export class WorkerTransport implements Transport {
@@ -38,6 +48,8 @@ export class WorkerTransport implements Transport {
   private streamMapping = new Map<string, StreamMapping>();
   private requestToStreamMapping = new Map<RequestId, string>();
   private requestResponseMap = new Map<RequestId, JSONRPCMessage>();
+  private corsOptions?: CORSOptions;
+  private protocolVersion?: ProtocolVersion;
 
   sessionId?: string;
   onclose?: () => void;
@@ -48,6 +60,7 @@ export class WorkerTransport implements Transport {
     this.sessionIdGenerator = options?.sessionIdGenerator;
     this.enableJsonResponse = options?.enableJsonResponse ?? false;
     this.onsessioninitialized = options?.onsessioninitialized;
+    this.corsOptions = options?.corsOptions;
   }
 
   async start(): Promise<void> {
@@ -55,6 +68,111 @@ export class WorkerTransport implements Transport {
       throw new Error("Transport already started");
     }
     this.started = true;
+  }
+
+  private validateProtocolVersion(request: Request): Response | undefined {
+    const versionHeader = request.headers.get(MCP_PROTOCOL_VERSION_HEADER);
+
+    if (!versionHeader) {
+      if (
+        !this.protocolVersion ||
+        this.protocolVersion === DEFAULT_PROTOCOL_VERSION
+      ) {
+        return undefined;
+      }
+      // If we negotiated a different version, the client MUST send the header
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: {
+            code: -32000,
+            message: `Bad Request: ${MCP_PROTOCOL_VERSION_HEADER} header is required`
+          },
+          id: null
+        }),
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
+      );
+    }
+
+    if (
+      !SUPPORTED_PROTOCOL_VERSIONS.includes(versionHeader as ProtocolVersion)
+    ) {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: {
+            code: -32000,
+            message: `Bad Request: Unsupported ${MCP_PROTOCOL_VERSION_HEADER}: ${versionHeader}. Supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")}`
+          },
+          id: null
+        }),
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
+      );
+    }
+
+    // Check if it matches the negotiated version
+    if (this.protocolVersion && versionHeader !== this.protocolVersion) {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: {
+            code: -32000,
+            message: `Bad Request: ${MCP_PROTOCOL_VERSION_HEADER} mismatch. Expected: ${this.protocolVersion}, Got: ${versionHeader}`
+          },
+          id: null
+        }),
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
+      );
+    }
+
+    return undefined;
+  }
+
+  private getHeaders(forPreflight = false): Record<string, string> {
+    const defaults: CORSOptions = {
+      origin: "*",
+      headers:
+        "Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version",
+      methods: "GET, POST, DELETE, OPTIONS",
+      exposeHeaders: "mcp-session-id",
+      maxAge: 86400
+    };
+
+    const options = { ...defaults, ...this.corsOptions };
+
+    // For OPTIONS preflight, return all CORS headers
+    if (forPreflight) {
+      return {
+        "Access-Control-Allow-Origin": options.origin!,
+        "Access-Control-Allow-Headers": options.headers!,
+        "Access-Control-Allow-Methods": options.methods!,
+        "Access-Control-Max-Age": options.maxAge!.toString()
+      };
+    }
+
+    // For actual requests, only return origin and expose headers
+    return {
+      "Access-Control-Allow-Origin": options.origin!,
+      "Access-Control-Expose-Headers": options.exposeHeaders!
+    };
   }
 
   async handleRequest(
@@ -87,13 +205,25 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 406, headers: { "Content-Type": "application/json" } }
+        {
+          status: 406,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
-    const sessionValid = this.validateSession(request);
-    if (sessionValid !== true) {
-      return sessionValid;
+    const sessionError = this.validateSession(request);
+    if (sessionError) {
+      return sessionError;
+    }
+
+    // Validate protocol version on subsequent requests
+    const versionError = this.validateProtocolVersion(request);
+    if (versionError) {
+      return versionError;
     }
 
     const streamId = this.standaloneSseStreamId;
@@ -108,7 +238,13 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 409, headers: { "Content-Type": "application/json" } }
+        {
+          status: 409,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
@@ -120,8 +256,7 @@ export class WorkerTransport implements Transport {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Expose-Headers": "mcp-session-id"
+      ...this.getHeaders()
     });
 
     if (this.sessionId !== undefined) {
@@ -168,7 +303,13 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 406, headers: { "Content-Type": "application/json" } }
+        {
+          status: 406,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
@@ -184,7 +325,13 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 415, headers: { "Content-Type": "application/json" } }
+        {
+          status: 415,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
@@ -202,7 +349,13 @@ export class WorkerTransport implements Transport {
             },
             id: null
           }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
+          {
+            status: 400,
+            headers: {
+              "Content-Type": "application/json",
+              ...this.getHeaders()
+            }
+          }
         );
       }
     }
@@ -224,7 +377,13 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
@@ -241,7 +400,13 @@ export class WorkerTransport implements Transport {
             },
             id: null
           }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
+          {
+            status: 400,
+            headers: {
+              "Content-Type": "application/json",
+              ...this.getHeaders()
+            }
+          }
         );
       }
 
@@ -256,8 +421,31 @@ export class WorkerTransport implements Transport {
             },
             id: null
           }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
+          {
+            status: 400,
+            headers: {
+              "Content-Type": "application/json",
+              ...this.getHeaders()
+            }
+          }
         );
+      }
+
+      // Capture protocol version from initialization request
+      const initRequest = messages.find(isInitializeRequest) as
+        | InitializeRequest
+        | undefined;
+      if (initRequest?.params) {
+        const version = initRequest.params.protocolVersion;
+        if (
+          version &&
+          SUPPORTED_PROTOCOL_VERSIONS.includes(version as ProtocolVersion)
+        ) {
+          this.protocolVersion = version as ProtocolVersion;
+        } else {
+          // Default to 2025-03-26 if not specified or unsupported
+          this.protocolVersion = DEFAULT_PROTOCOL_VERSION;
+        }
       }
 
       this.sessionId = this.sessionIdGenerator?.();
@@ -269,9 +457,15 @@ export class WorkerTransport implements Transport {
     }
 
     if (!isInitializationRequest) {
-      const sessionValid = this.validateSession(request);
-      if (sessionValid !== true) {
-        return sessionValid;
+      const sessionError = this.validateSession(request);
+      if (sessionError) {
+        return sessionError;
+      }
+
+      // Validate protocol version on subsequent requests
+      const versionError = this.validateProtocolVersion(request);
+      if (versionError) {
+        return versionError;
       }
     }
 
@@ -283,9 +477,7 @@ export class WorkerTransport implements Transport {
       }
       return new Response(null, {
         status: 202,
-        headers: {
-          "Access-Control-Allow-Origin": "*"
-        }
+        headers: { ...this.getHeaders() }
       });
     }
 
@@ -320,8 +512,7 @@ export class WorkerTransport implements Transport {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Expose-Headers": "mcp-session-id"
+      ...this.getHeaders()
     });
 
     if (this.sessionId !== undefined) {
@@ -351,30 +542,29 @@ export class WorkerTransport implements Transport {
   }
 
   private async handleDeleteRequest(request: Request): Promise<Response> {
-    const sessionValid = this.validateSession(request);
-    if (sessionValid !== true) {
-      return sessionValid;
+    const sessionError = this.validateSession(request);
+    if (sessionError) {
+      return sessionError;
+    }
+
+    // Validate protocol version on subsequent requests
+    const versionError = this.validateProtocolVersion(request);
+    if (versionError) {
+      return versionError;
     }
 
     await this.close();
     return new Response(null, {
       status: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*"
-      }
+      headers: { ...this.getHeaders() }
     });
   }
 
   private handleOptionsRequest(_request: Request): Response {
-    const headers = new Headers({
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Content-Type, Accept, Authorization, mcp-session-id",
-      "Access-Control-Max-Age": "86400"
+    return new Response(null, {
+      status: 200,
+      headers: { ...this.getHeaders(true) }
     });
-
-    return new Response(null, { status: 204, headers });
   }
 
   private handleUnsupportedRequest(): Response {
@@ -397,9 +587,9 @@ export class WorkerTransport implements Transport {
     );
   }
 
-  private validateSession(request: Request): true | Response {
+  private validateSession(request: Request): Response | undefined {
     if (this.sessionIdGenerator === undefined) {
-      return true;
+      return undefined;
     }
 
     if (!this.initialized) {
@@ -412,7 +602,13 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
@@ -428,7 +624,13 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
+        {
+          status: 400,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
@@ -442,11 +644,17 @@ export class WorkerTransport implements Transport {
           },
           id: null
         }),
-        { status: 404, headers: { "Content-Type": "application/json" } }
+        {
+          status: 404,
+          headers: {
+            "Content-Type": "application/json",
+            ...this.getHeaders()
+          }
+        }
       );
     }
 
-    return true;
+    return undefined;
   }
 
   async close(): Promise<void> {
@@ -525,8 +733,7 @@ export class WorkerTransport implements Transport {
 
           const headers = new Headers({
             "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Expose-Headers": "mcp-session-id"
+            ...this.getHeaders()
           });
 
           if (this.sessionId !== undefined) {
