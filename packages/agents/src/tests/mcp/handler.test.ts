@@ -2,7 +2,7 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import { experimental_createMcpHandler } from "../../mcp/handler";
+import { createMcpHandler } from "../../mcp/handler";
 import { z } from "zod";
 
 declare module "cloudflare:test" {
@@ -10,11 +10,11 @@ declare module "cloudflare:test" {
 }
 
 /**
- * Tests for experimental_createMcpHandler
+ * Tests for createMcpHandler
  * The handler primarily passes options to WorkerTransport and handles routing
  * Detailed CORS and protocol version behavior is tested in worker-transport.test.ts
  */
-describe("experimental_createMcpHandler", () => {
+describe("createMcpHandler", () => {
   const createTestServer = () => {
     const server = new McpServer(
       { name: "test-server", version: "1.0.0" },
@@ -36,7 +36,7 @@ describe("experimental_createMcpHandler", () => {
   describe("Route matching", () => {
     it("should only handle requests matching the configured route", async () => {
       const server = createTestServer();
-      const handler = experimental_createMcpHandler(server, {
+      const handler = createMcpHandler(server, {
         route: "/custom-mcp"
       });
 
@@ -59,7 +59,7 @@ describe("experimental_createMcpHandler", () => {
 
     it("should use default route /mcp when not specified", async () => {
       const server = createTestServer();
-      const handler = experimental_createMcpHandler(server);
+      const handler = createMcpHandler(server);
 
       const ctx = createExecutionContext();
       const request = new Request("http://example.com/mcp", {
@@ -75,7 +75,7 @@ describe("experimental_createMcpHandler", () => {
   describe("Options passing - verification via behavior", () => {
     it("should apply custom CORS options", async () => {
       const server = createTestServer();
-      const handler = experimental_createMcpHandler(server, {
+      const handler = createMcpHandler(server, {
         route: "/mcp",
         corsOptions: {
           origin: "https://example.com",
@@ -103,7 +103,7 @@ describe("experimental_createMcpHandler", () => {
   describe("Integration - Basic functionality", () => {
     it("should handle initialization request end-to-end", async () => {
       const server = createTestServer();
-      const handler = experimental_createMcpHandler(server, {
+      const handler = createMcpHandler(server, {
         route: "/mcp"
       });
 
