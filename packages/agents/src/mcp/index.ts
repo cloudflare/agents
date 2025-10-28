@@ -358,7 +358,8 @@ export abstract class McpAgent<
     {
       binding = "MCP_OBJECT",
       corsOptions,
-      transport = "streamable-http"
+      transport = "streamable-http",
+      jurisdiction
     }: ServeOptions = {}
   ) {
     return {
@@ -399,17 +400,16 @@ export abstract class McpAgent<
             const handleStreamableHttp = createStreamingHttpHandler(
               path,
               namespace,
-              corsOptions
+              { corsOptions, jurisdiction }
             );
             return handleStreamableHttp(request, ctx);
           }
           case "sse": {
             // Legacy SSE transport handling
-            const handleLegacySse = createLegacySseHandler(
-              path,
-              namespace,
-              corsOptions
-            );
+            const handleLegacySse = createLegacySseHandler(path, namespace, {
+              corsOptions,
+              jurisdiction
+            });
             return handleLegacySse(request, ctx);
           }
           default:

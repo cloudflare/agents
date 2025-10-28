@@ -269,6 +269,49 @@ The auth flow prompts us for the password.
 ![model calls all 3 tools after authorization](https://github.com/user-attachments/assets/07e22fef-93de-47c2-af7e-9c361e460186)
 Once we've authenticated ourselves we can use all the tools!
 
+## Data Jurisdiction for Compliance
+
+`McpAgent` supports specifying a data jurisdiction for your MCP server, which is particularly useful for satisfying GDPR and other data residency regulations. By setting the `jurisdiction` option, you can ensure that your Durable Object instances (and their data) are created in a specific geographic region.
+
+### Using the EU Jurisdiction for GDPR
+
+To comply with GDPR requirements, you can specify the `"eu"` jurisdiction to ensure that all data processed by your MCP server remains within the European Union:
+
+```typescript
+export default TinyMcp.serve("/", {
+  jurisdiction: "eu"
+});
+```
+
+Or with the OAuth-protected example:
+
+```typescript
+export default new OAuthProvider({
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+  apiHandlers: {
+    "/mcp": StorageMcp.serve("/mcp", { jurisdiction: "eu" })
+  },
+  defaultHandler
+});
+```
+
+When you specify `jurisdiction: "eu"`, Cloudflare will create the Durable Object instances in EU data centers, ensuring that:
+
+- All MCP session data stays within the EU
+- User data processed by your tools remains in the EU
+- State stored in the Durable Object's storage API stays in the EU
+
+This helps you comply with GDPR's data localization requirements without any additional configuration.
+
+### Available Jurisdictions
+
+The `jurisdiction` option accepts any value supported by [Cloudflare's Durable Objects jurisdiction API](https://developers.cloudflare.com/durable-objects/reference/data-location/), including:
+
+- `"eu"` - European Union
+- `"fedramp"` - FedRAMP compliant locations
+
 ### Read more
 
 To find out how to use your favorite providers for your authorization flow and more complex examples, have a look at the demos [here](https://github.com/cloudflare/ai/tree/main/demos).

@@ -30,7 +30,10 @@ const MAXIMUM_MESSAGE_SIZE_BYTES = 4 * 1024 * 1024; // 4MB
 export const createStreamingHttpHandler = (
   basePath: string,
   namespace: DurableObjectNamespace<McpAgent>,
-  corsOptions?: CORSOptions
+  options: {
+    corsOptions?: CORSOptions;
+    jurisdiction?: DurableObjectJurisdiction;
+  } = {}
 ) => {
   let pathname = basePath;
   if (basePath === "/") pathname = "/*";
@@ -191,7 +194,10 @@ export const createStreamingHttpHandler = (
         const agent = await getAgentByName(
           namespace,
           `streamable-http:${sessionId}`,
-          { props: ctx.props as Record<string, unknown> | undefined }
+          {
+            props: ctx.props as Record<string, unknown> | undefined,
+            jurisdiction: options.jurisdiction
+          }
         );
         const isInitialized = await agent.getInitializeRequest();
 
@@ -314,7 +320,7 @@ export const createStreamingHttpHandler = (
           ws.close();
 
           return new Response(null, {
-            headers: corsHeaders(request, corsOptions),
+            headers: corsHeaders(request, options.corsOptions),
             status: 202
           });
         }
@@ -327,7 +333,7 @@ export const createStreamingHttpHandler = (
             Connection: "keep-alive",
             "Content-Type": "text/event-stream",
             "mcp-session-id": sessionId,
-            ...corsHeaders(request, corsOptions)
+            ...corsHeaders(request, options.corsOptions)
           },
           status: 200
         });
@@ -370,7 +376,10 @@ export const createStreamingHttpHandler = (
         const agent = await getAgentByName(
           namespace,
           `streamable-http:${sessionId}`,
-          { props: ctx.props as Record<string, unknown> | undefined }
+          {
+            props: ctx.props as Record<string, unknown> | undefined,
+            jurisdiction: options.jurisdiction
+          }
         );
         const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
@@ -444,7 +453,7 @@ export const createStreamingHttpHandler = (
             Connection: "keep-alive",
             "Content-Type": "text/event-stream",
             "mcp-session-id": sessionId,
-            ...corsHeaders(request, corsOptions)
+            ...corsHeaders(request, options.corsOptions)
           },
           status: 200
         });
@@ -460,12 +469,13 @@ export const createStreamingHttpHandler = (
               },
               id: null
             }),
-            { status: 400, headers: corsHeaders(request, corsOptions) }
+            { status: 400, headers: corsHeaders(request, options.corsOptions) }
           );
         }
         const agent = await getAgentByName(
           namespace,
-          `streamable-http:${sessionId}`
+          `streamable-http:${sessionId}`,
+          { jurisdiction: options.jurisdiction }
         );
         const isInitialized = await agent.getInitializeRequest();
         if (!isInitialized) {
@@ -475,7 +485,7 @@ export const createStreamingHttpHandler = (
               error: { code: -32001, message: "Session not found" },
               id: null
             }),
-            { status: 404, headers: corsHeaders(request, corsOptions) }
+            { status: 404, headers: corsHeaders(request, options.corsOptions) }
           );
         }
         // .destroy() passes an uncatchable Error, so we make sure we first return
@@ -487,7 +497,7 @@ export const createStreamingHttpHandler = (
         );
         return new Response(null, {
           status: 204,
-          headers: corsHeaders(request, corsOptions)
+          headers: corsHeaders(request, options.corsOptions)
         });
       }
     }
@@ -508,7 +518,10 @@ export const createStreamingHttpHandler = (
 export const createLegacySseHandler = (
   basePath: string,
   namespace: DurableObjectNamespace<McpAgent>,
-  corsOptions?: CORSOptions
+  options: {
+    corsOptions?: CORSOptions;
+    jurisdiction?: DurableObjectJurisdiction;
+  } = {}
 ) => {
   let pathname = basePath;
   if (basePath === "/") pathname = "/*";
@@ -540,7 +553,8 @@ export const createLegacySseHandler = (
 
       // Get the Durable Object
       const agent = await getAgentByName(namespace, `sse:${sessionId}`, {
-        props: ctx.props as Record<string, unknown> | undefined
+        props: ctx.props as Record<string, unknown> | undefined,
+        jurisdiction: options.jurisdiction
       });
 
       // Connect to the Durable Object via WebSocket
@@ -626,7 +640,7 @@ export const createLegacySseHandler = (
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
           "Content-Type": "text/event-stream",
-          ...corsHeaders(request, corsOptions)
+          ...corsHeaders(request, options.corsOptions)
         }
       });
     }
@@ -663,7 +677,8 @@ export const createLegacySseHandler = (
 
       // Get the Durable Object
       const agent = await getAgentByName(namespace, `sse:${sessionId}`, {
-        props: ctx.props as Record<string, unknown> | undefined
+        props: ctx.props as Record<string, unknown> | undefined,
+        jurisdiction: options.jurisdiction
       });
 
       const messageBody = await request.json();
@@ -675,7 +690,7 @@ export const createLegacySseHandler = (
             "Cache-Control": "no-cache",
             Connection: "keep-alive",
             "Content-Type": "text/event-stream",
-            ...corsHeaders(request, corsOptions)
+            ...corsHeaders(request, options.corsOptions)
           },
           status: 400
         });
@@ -686,7 +701,7 @@ export const createLegacySseHandler = (
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
           "Content-Type": "text/event-stream",
-          ...corsHeaders(request, corsOptions)
+          ...corsHeaders(request, options.corsOptions)
         },
         status: 202
       });
