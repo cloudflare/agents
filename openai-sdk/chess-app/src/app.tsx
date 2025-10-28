@@ -21,9 +21,11 @@ function usePlayerId() {
   return pid;
 }
 
-type JoinReply =
-  | { ok: true; role: "w" | "b"; state: ServerState }
-  | { ok: true; role: "spectator"; state: ServerState };
+type JoinReply = {
+  ok: true;
+  role: "w" | "b" | "spectator";
+  state: ServerState;
+};
 
 function describeGameStatus(state: ServerState | null): string {
   if (!state) return "Connecting to game...";
@@ -132,7 +134,7 @@ function App() {
   const activeGameName = gameId ?? "__lobby__";
 
   const { stub } = useAgent<ServerState>({
-    host: "https://chess-app.agents-b8a.workers.dev",
+    host: "https://chess-app.agents-b8a.workers.dev", // replace with your own url
     name: activeGameName,
     agent: "chess",
     onStateUpdate: (s) => {
