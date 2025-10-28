@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.2.19
+
+### Patch Changes
+
+- [#607](https://github.com/cloudflare/agents/pull/607) [`c9b76cd`](https://github.com/cloudflare/agents/commit/c9b76cd50d82f3016395fa1d55a3ca7017bf3501) Thanks [@threepointone](https://github.com/threepointone)! - Add jurisdiction support to MCP agent and handlers
+
+  Introduces a `jurisdiction` option to MCP agent server and streaming/SSE handlers, allowing Durable Object instances to be created in specific geographic regions for compliance (e.g., GDPR). Documentation updated to explain usage and available jurisdictions.
+
 ## 0.2.18
 
 ### Patch Changes
