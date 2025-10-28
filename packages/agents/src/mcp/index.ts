@@ -448,6 +448,7 @@ export type {
 } from "./client";
 
 export {
+  createMcpHandler,
   experimental_createMcpHandler,
   type CreateMcpHandlerOptions,
   type OAuthExecutionContext

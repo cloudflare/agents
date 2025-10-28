@@ -19,7 +19,7 @@ export type OAuthExecutionContext = ExecutionContext & {
   props?: Record<string, unknown>;
 };
 
-export function experimental_createMcpHandler(
+export function createMcpHandler(
   server: McpServer | Server,
   options: CreateMcpHandlerOptions = {}
 ): (
@@ -79,4 +79,26 @@ export function experimental_createMcpHandler(
       );
     }
   };
+}
+
+let didWarnAboutExperimentalCreateMcpHandler = false;
+
+/**
+ * @deprecated This has been renamed to createMcpHandler, and experimental_createMcpHandler will be removed in the next major version
+ */
+export function experimental_createMcpHandler(
+  server: McpServer | Server,
+  options: CreateMcpHandlerOptions = {}
+): (
+  request: Request,
+  env: unknown,
+  ctx: ExecutionContext
+) => Promise<Response> {
+  if (!didWarnAboutExperimentalCreateMcpHandler) {
+    didWarnAboutExperimentalCreateMcpHandler = true;
+    console.warn(
+      "experimental_createMcpHandler is deprecated, use createMcpHandler instead. experimental_createMcpHandler will be removed in the next major version."
+    );
+  }
+  return createMcpHandler(server, options);
 }

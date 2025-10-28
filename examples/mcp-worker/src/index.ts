@@ -1,4 +1,4 @@
-import { experimental_createMcpHandler as createMcpHandler } from "agents/mcp";
+import { createMcpHandler } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 

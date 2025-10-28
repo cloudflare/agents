@@ -1,6 +1,6 @@
 # MCP Worker Example
 
-This example demonstrates how to use `experimental_createMcpHandler` to create an unauthenticated stateless MCP server.
+This example demonstrates how to use `createMcpHandler` to create an unauthenticated stateless MCP server.
 
 This is THE simplest way to get started with MCP on Cloudflare.
 

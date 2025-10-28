@@ -1,7 +1,4 @@
-import {
-  experimental_createMcpHandler as createMcpHandler,
-  getMcpAuthContext
-} from "agents/mcp";
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
