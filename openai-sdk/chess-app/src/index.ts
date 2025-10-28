@@ -1,4 +1,4 @@
-import { experimental_createMcpHandler as createMcpHandler } from "agents/mcp";
+import { createMcpHandler } from "agents/mcp";
 import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { env } from "cloudflare:workers";
