@@ -5,6 +5,8 @@ import {
   type WorkerTransportOptions
 } from "./worker-transport";
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
+import { handleCORS, corsHeaders } from "./utils";
+import type { CORSOptions } from "./types";
 
 export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
   /**
@@ -13,6 +15,12 @@ export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
    * @default "/mcp"
    */
   route?: string;
+  /**
+   * CORS configuration options for handling cross-origin requests.
+   * If provided, the handler will add appropriate CORS headers to responses
+   * and handle OPTIONS preflight requests.
+   */
+  corsOptions?: CORSOptions;
 }
 
 export type OAuthExecutionContext = ExecutionContext & {
@@ -40,6 +48,19 @@ export function experimental_createMcpHandler(
       return new Response("Not Found", { status: 404 });
     }
 
+    // Handle CORS preflight
+    if (request.method === "OPTIONS") {
+      if (options.corsOptions) {
+        const corsResponse = handleCORS(request, options.corsOptions);
+        if (corsResponse) {
+          return corsResponse;
+        }
+      } else {
+        // No CORS configured, return a plain OPTIONS response without CORS headers
+        return new Response(null, { status: 204 });
+      }
+    }
+
     const oauthCtx = ctx as OAuthExecutionContext;
     const authContext: McpAuthContext | undefined = oauthCtx.props
       ? { props: oauthCtx.props }
@@ -61,9 +82,30 @@ export function experimental_createMcpHandler(
         response = await handleRequest();
       }
 
+      // Add CORS headers if configured
+      if (options.corsOptions) {
+        const headers = new Headers(response.headers);
+        const cors = corsHeaders(request, options.corsOptions);
+        for (const [key, value] of Object.entries(cors)) {
+          headers.set(key, value);
+        }
+        response = new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers
+        });
+      }
+
       return response;
     } catch (error) {
       console.error("MCP handler error:", error);
+
+      const errorHeaders: HeadersInit = { "Content-Type": "application/json" };
+
+      // Add CORS headers to error response if configured
+      if (options.corsOptions) {
+        Object.assign(errorHeaders, corsHeaders(request, options.corsOptions));
+      }
 
       return new Response(
         JSON.stringify({
@@ -75,7 +117,7 @@ export function experimental_createMcpHandler(
           },
           id: null
         }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
+        { status: 500, headers: errorHeaders }
       );
     }
   };

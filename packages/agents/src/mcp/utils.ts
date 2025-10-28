@@ -697,7 +697,7 @@ export const createLegacySseHandler = (
 };
 
 // CORS helper functions
-function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
+export function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
   const origin = "*";
   return {
     "Access-Control-Allow-Headers":
