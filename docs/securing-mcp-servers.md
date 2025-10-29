@@ -1,14 +1,14 @@
 # Securing MCP Servers
 
-Over the last few months the Model Context Protocol has adopted the Oauth2.1 standard for authentication between MCP clients and servers.
+Model Context Protocol servers, like every other web application, need to be secured so they can be used by trusted users without abuse. The MCP spec uses the Oauth 2.1 standard for authentication between MCP clients and servers.
 
-Cloudflare introduced the `workers-oauth-provider` which allows you to correctly secure your MCP Server (or any application) running on a Cloudflare Worker conforming to the Oauth2.1 standard. The provider handles token management, client registration, and access token validation automatically.
+Cloudflare's `workers-oauth-provider` lets you secure your MCP Server (or any application) running on a Cloudflare Worker conforming to the Oauth2.1 standard. The provider handles token management, client registration, and access token validation automatically.
 
 ```typescript
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 
-// Your MCP server with tools
+// A Worker that exposes an MCP server
 const apiHandler = {
   async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
     return createMcpHandler(server)(request, env, ctx);
@@ -30,15 +30,15 @@ export default new OAuthProvider({
 
 However, most MCP servers aren't just servers, they can actually be OAuth clients too. Your MCP server might sit between Claude Desktop and a third-party API like GitHub or Google. To Claude, you're a server. To GitHub, you're a client. This allows your users to authenticate and use their GitHub credentials to access your MCP server. We call this a proxy server.
 
-There are a few security footguns to securely building a proxy server. The rest of this document aims to outline best practises.
+There are a few security footguns to securely building a proxy server. The rest of this document aims to outline best practises to securing an MCP server.
 
-## redirect_uri validation
+## `redirect_uri` validation
 
-The `workers-oauth-provider` handles this automatically. It validates that the redirect_uri in the authorization request matches one of the registered redirect URIs for the client. This prevents attackers from redirecting authorization codes to their own endpoints.
+The `workers-oauth-provider` package handles this automatically. It validates that the `redirect_uri` in the authorization request matches one of the registered redirect URIs for the client. This prevents attackers from redirecting authorization codes to their own endpoints.
 
 ## Consent dialog
 
-When your MCP server acts as an OAuth proxy to third-party providers (like Google, GitHub, etc.), you must implement your own consent dialog before forwarding users to the upstream authorization server. This prevents the "confused deputy" problem where attackers could exploit cached consent from the third-party provider to gain unauthorized access. Your consent dialog should clearly identify the requesting MCP client by name and display the specific scopes being requested. Implementing this consent flow requires thinking about a few security concerns.
+When your MCP server acts as an OAuth proxy to third-party providers (like Google, GitHub, etc.), you must implement your own consent dialog before forwarding users to the upstream authorization server. This prevents the ["confused deputy"](https://en.wikipedia.org/wiki/Confused_deputy_problem) problem where attackers could exploit cached consent from the third-party provider to gain unauthorized access. Your consent dialog should clearly identify the requesting MCP client by name and display the specific scopes being requested. Implementing this consent flow requires thinking about a few security concerns.
 
 ### CSRF Protection
 
@@ -64,8 +64,7 @@ app.post("/authorize", async (c) => {
   // Validate CSRF token exists and matches cookie
   const { clearCookie } = validateCSRFToken(formData, c.req.raw);
 
-  // Proceed with authorization flow...
-  // Redirect to upstream provider and clear the CSRF with the clearCookie header
+  // Then redirect to upstream provider and clear the CSRF with the clearCookie header
 });
 
 // Helper functions
@@ -236,10 +235,6 @@ The `__Host-` prefix is a security feature that prevents subdomain attacks. When
 - It **must not** have a `Domain` attribute
 
 This means the cookie is locked to the exact domain that set it. Without `__Host-`, an attacker controlling `evil.workers.dev` could set cookies for your `mcp-server.workers.dev` domain and potentially inject malicious CSRF tokens or approved client lists. The `__Host-` prefix prevents this by ensuring only your specific domain can set and read these cookies.
-
-### Multiple OAuth clients on the same host
-
-If you're running multiple OAuth flows on the same domain (e.g., GitHub OAuth and Google OAuth on the same worker), namespace your cookies to prevent collisions. Instead of `__Host-CSRF_TOKEN`, use `__Host-CSRF_TOKEN_GITHUB` and `__Host-CSRF_TOKEN_GOOGLE`. Same applies for approved clients: `__Host-APPROVED_CLIENTS_GITHUB` vs `__Host-APPROVED_CLIENTS_GOOGLE`. This ensures each OAuth flow maintains isolated state.
 
 # More info
 
