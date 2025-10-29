@@ -2,7 +2,7 @@
 
 Model Context Protocol servers, like every other web application, need to be secured so they can be used by trusted users without abuse. The MCP spec uses the OAuth 2.1 standard for authentication between MCP clients and servers.
 
-Cloudflare's `workers-oauth-provider` lets you secure your MCP Server (or any application) running on a Cloudflare Worker conforming to the Oauth2.1 standard. The provider handles token management, client registration, and access token validation automatically.
+Cloudflare's `workers-oauth-provider` lets you secure your MCP Server (or any application) running on a Cloudflare Worker. The provider handles token management, client registration, and access token validation automatically.
 
 ```typescript
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
