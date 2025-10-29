@@ -238,5 +238,5 @@ This means the cookie is locked to the exact domain that set it. Without `__Host
 
 # More info
 
-[Security Best Practices](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)
-[Protecting Redirect Based Flows](https://www.rfc-editor.org/rfc/rfc9700#name-protecting-redirect-based-f)
+[MCP Security Best Practices](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)
+[RFC 9700 - Protecting Redirect Based Flows](https://www.rfc-editor.org/rfc/rfc9700#name-protecting-redirect-based-f)
