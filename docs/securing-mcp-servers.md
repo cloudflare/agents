@@ -32,6 +32,10 @@ However in most MCP Servers, the MCP Server will actually act as both a server t
 
 There are a few footguns to securely building a proxy MCP Server. The rest of this document aims to outline the best practises.
 
+## redirect_uri validation
+
+The `workers-oauth-provider` handles this automatically. It validates that the redirect_uri in the authorization request matches one of the registered redirect URIs for the client. This prevents attackers from redirecting authorization codes to their own endpoints.
+
 ## Consent dialog
 
 When your MCP server acts as an OAuth proxy to third-party providers (like Google, GitHub, etc.), you must implement your own consent dialog before forwarding users to the upstream authorization server. This prevents the "confused deputy" problem where attackers could exploit cached consent from the third-party provider to gain unauthorized access. Your consent dialog should clearly identify the requesting MCP client by name and display the specific scopes being requested. Implementing this consent flow requires thinking about a few security concerns.
@@ -99,13 +103,44 @@ Include the token as a hidden field in your consent form:
 <input type="hidden" name="csrf_token" value="${csrfToken}" />
 ```
 
-### redirect_uri validation
-
-The `workers-oauth-provider` handles this automatically. It validates that the redirect_uri in the authorization request matches one of the registered redirect URIs for the client. This prevents attackers from redirecting authorization codes to their own endpoints.
-
 ### XSS protection
 
-User-controlled content (client names, logos, URIs) in your approval dialog can execute malicious scripts if not sanitized. Always escape HTML and validate URLs.
+User-controlled content (client names, logos, URIs) in your approval dialog can execute malicious scripts if not sanitized. Client registration is dynamic, so you must treat all client metadata as untrusted input.
+
+**Required protections:**
+
+- **Client names/descriptions**: HTML-escape all text before rendering (escape `<`, `>`, `&`, `"`, `'`)
+- **Logo URLs**: Validate URL scheme (allow only `http:` and `https:`), reject `javascript:`, `data:`, `file:` schemes
+- **Client URIs**: Same as logo URLs - whitelist http/https only
+- **Scopes**: Treat as text, HTML-escape before display
+
+```typescript
+function sanitizeText(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function sanitizeUrl(url: string): string {
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return ""; // Reject dangerous schemes
+    }
+    return url;
+  } catch {
+    return ""; // Invalid URL
+  }
+}
+
+// Always sanitize before rendering
+const clientName = sanitizeText(client.clientName);
+const logoUrl = sanitizeText(sanitizeUrl(client.logoUri));
+```
 
 ### Clickjacking protection
 
@@ -201,6 +236,10 @@ The `__Host-` prefix is a security feature that prevents subdomain attacks. When
 - It **must not** have a `Domain` attribute
 
 This means the cookie is locked to the exact domain that set it. Without `__Host-`, an attacker controlling `evil.workers.dev` could set cookies for your `mcp-server.workers.dev` domain and potentially inject malicious CSRF tokens or approved client lists. The `__Host-` prefix prevents this by ensuring only your specific domain can set and read these cookies.
+
+### Multiple OAuth clients on the same host
+
+If you're running multiple OAuth flows on the same domain (e.g., GitHub OAuth and Google OAuth on the same worker), namespace your cookies to prevent collisions. Instead of `__Host-CSRF_TOKEN`, use `__Host-CSRF_TOKEN_GITHUB` and `__Host-CSRF_TOKEN_GOOGLE`. Same applies for approved clients: `__Host-APPROVED_CLIENTS_GITHUB` vs `__Host-APPROVED_CLIENTS_GOOGLE`. This ensures each OAuth flow maintains isolated state.
 
 # More info
 
