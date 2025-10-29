@@ -3,6 +3,15 @@ import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { env } from "cloudflare:workers";
 
+const getWidgetHtml = async () => {
+  let html = await (await env.ASSETS.fetch("http://localhost/")).text();
+  html = html.replace(
+    "<!--RUNTIME_CONFIG-->",
+    `<script>window.HOST = \`${env.HOST}\`;</script>`
+  );
+  return html;
+};
+
 const server = new McpServer({ name: "Chess", version: "v1.0.0" });
 
 // register a UI resource
@@ -10,15 +19,17 @@ server.registerResource(
   "chess",
   "ui://widget/index.html",
   {},
-  async (_uri, _extra) => ({
-    contents: [
-      {
-        uri: "ui://widget/index.html",
-        mimeType: "text/html+skybridge",
-        text: await (await env.ASSETS.fetch("http://localhost/")).text()
-      }
-    ]
-  })
+  async (_uri, _extra) => {
+    return {
+      contents: [
+        {
+          uri: "ui://widget/index.html",
+          mimeType: "text/html+skybridge",
+          text: await getWidgetHtml()
+        }
+      ]
+    };
+  }
 );
 
 // register the tool to render the UI resource

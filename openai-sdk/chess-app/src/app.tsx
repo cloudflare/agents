@@ -132,9 +132,10 @@ function App() {
   }
 
   const activeGameName = gameId ?? "__lobby__";
+  const host = window.HOST ?? "http://localhost:5174/";
 
   const { stub } = useAgent<ServerState>({
-    host: "https://chess-app.agents-b8a.workers.dev", // replace with your own url
+    host,
     name: activeGameName,
     agent: "chess",
     onStateUpdate: (s) => {

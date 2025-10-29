@@ -9,6 +9,7 @@ export type UnknownObject = Record<string, unknown>;
 declare global {
   interface Window {
     openai: API<UnknownObject> & OpenAiGlobals;
+    HOST: string;
   }
 
   interface WindowEventMap {
