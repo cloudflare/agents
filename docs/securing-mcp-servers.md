@@ -1,8 +1,8 @@
 # Securing MCP Servers
 
-The Model Context Protocol is still in it's early stages. Over the last few months it has adopted the Oauth2.1 standard for authentication between MCP clients and servers.
+Over the last few months the Model Context Protocol has adopted the Oauth2.1 standard for authentication between MCP clients and servers.
 
-Cloudflare introduced the `workers-oauth-provider` which allows you to secure your MCP Server (or any application) running on a Cloudflare Worker. The provider handles token management, client registration, and access token validation automatically.
+Cloudflare introduced the `workers-oauth-provider` which allows you to correctly secure your MCP Server (or any application) running on a Cloudflare Worker conforming to the Oauth2.1 standard. The provider handles token management, client registration, and access token validation automatically.
 
 ```typescript
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
@@ -28,9 +28,9 @@ export default new OAuthProvider({
 });
 ```
 
-However in most MCP Servers, the MCP Server will actually act as both a server to the MCP client, like Claude Desktop, and as an Oauth2 client to a 3rd party authentication provider such as Google, Github, etc. We call this a proxy server as it act as both a server and a client.
+However, most MCP servers aren't just servers, they can actually be OAuth clients too. Your MCP server might sit between Claude Desktop and a third-party API like GitHub or Google. To Claude, you're a server. To GitHub, you're a client. This allows your users to authenticate and use their GitHub credentials to access your MCP server. We call this a proxy server.
 
-There are a few footguns to securely building a proxy MCP Server. The rest of this document aims to outline the best practises.
+There are a few security footguns to securely building a proxy server. The rest of this document aims to outline best practises.
 
 ## redirect_uri validation
 
