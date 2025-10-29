@@ -222,7 +222,7 @@ export async function addApprovedClient(
 
 When reading the cookie in GET /authorize (before showing the consent dialog), verify the signature before trusting the data. If the signature doesn't match or the client isn't in the list, show the consent dialog. If the client is approved, skip the dialog and proceed directly to creating the OAuth state.
 
-## Misc
+## Cookies
 
 ### Why `__Host-` prefix?
 
@@ -235,6 +235,12 @@ The `__Host-` prefix is a security feature that prevents subdomain attacks. When
 - It **must not** have a `Domain` attribute
 
 This means the cookie is locked to the exact domain that set it. Without `__Host-`, an attacker controlling `evil.workers.dev` could set cookies for your `mcp-server.workers.dev` domain and potentially inject malicious CSRF tokens or approved client lists. The `__Host-` prefix prevents this by ensuring only your specific domain can set and read these cookies.
+
+### Multiple OAuth clients on the same host
+
+If you're running multiple OAuth flows on the same domain (e.g., GitHub OAuth and Google OAuth on the same worker), namespace your cookies to prevent collisions.
+
+Instead of `__Host-CSRF_TOKEN`, use `__Host-CSRF_TOKEN_GITHUB` and `__Host-CSRF_TOKEN_GOOGLE`. Same applies for approved clients: `__Host-APPROVED_CLIENTS_GITHUB` vs `__Host-APPROVED_CLIENTS_GOOGLE`. This ensures each OAuth flow maintains isolated state.
 
 # More info
 
