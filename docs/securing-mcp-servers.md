@@ -163,7 +163,7 @@ Alternatively, you can store a SHA-256 hash of the state in a `__Host-CONSENTED_
 
 ## Approved client
 
-MCP proxy servers must maintain a registry of approved client IDs per user and check this registry before initiating the third-party authorization flow. This prevents attackers from exploiting the confused deputy problem by forcing users through repeated authorization flows. Store approved clients in a secure, cryptographically signed cookie with HMAC-SHA256.
+MCP proxy servers must maintain a registry of approved client IDs per user and check this registry before initiating the third-party authorization flow. Store approved clients in a secure, cryptographically signed cookie with HMAC-SHA256.
 
 ```typescript
 // Use in POST /authorize - after user approves, add client to approved list
