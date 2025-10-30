@@ -86,6 +86,20 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
     return sessionStorage.getItem("mcpBearerToken") || "";
   });
   const [showToken, setShowToken] = useState<boolean>(false);
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+
+  // Toggle tool expansion
+  const toggleToolExpansion = (toolName: string) => {
+    setExpandedTools((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(toolName)) {
+        newSet.delete(toolName);
+      } else {
+        newSet.add(toolName);
+      }
+      return newSet;
+    });
+  };
 
   // Handle connection
   const handleConnect = async () => {
@@ -583,21 +597,48 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                 Available Tools ({mcpState.tools.length})
               </div>
               <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
-                {mcpState.tools.map((tool: Tool) => (
-                  <div
-                    key={tool.name}
-                    className="bg-white rounded p-2 border border-green-200"
-                  >
-                    <div className="font-medium text-xs text-gray-900">
-                      {tool.name.replace("tool_", "").replace(/_/g, " ")}
+                {mcpState.tools.map((tool: Tool) => {
+                  const isExpanded = expandedTools.has(tool.name);
+                  return (
+                    <div
+                      key={tool.name}
+                      className="bg-white rounded border border-green-200"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => toggleToolExpansion(tool.name)}
+                        className="w-full flex items-center justify-between p-2 text-left hover:bg-gray-50 rounded transition-colors"
+                      >
+                        <div className="font-medium text-xs text-gray-900">
+                          {tool.name.replace("tool_", "").replace(/_/g, " ")}
+                        </div>
+                        {tool.description && (
+                          <svg
+                            className={`w-3 h-3 text-gray-500 flex-shrink-0 ml-2 transform transition-transform ${
+                              isExpanded ? "rotate-180" : ""
+                            }`}
+                            fill="none"
+                            stroke="currentColor"
+                            viewBox="0 0 24 24"
+                          >
+                            <title>expand</title>
+                            <path
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              strokeWidth={2}
+                              d="M19 9l-7 7-7-7"
+                            />
+                          </svg>
+                        )}
+                      </button>
+                      {tool.description && isExpanded && (
+                        <div className="px-2 pb-2 text-xs text-gray-600 border-t border-gray-100 pt-2">
+                          {tool.description}
+                        </div>
+                      )}
                     </div>
-                    {tool.description && (
-                      <div className="text-xs text-gray-600 mt-1">
-                        {tool.description}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

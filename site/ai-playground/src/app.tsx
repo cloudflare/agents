@@ -427,6 +427,11 @@ const App = () => {
                   {message.parts.map((part, i) => {
                     // Render text messages
                     if (part.type === "text") {
+                      // Skip empty text parts (e.g., when message only contains tool calls)
+                      if (!part.text || part.text.trim() === "") {
+                        return null;
+                      }
+
                       return (
                         <li
                           // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
@@ -496,7 +501,9 @@ const App = () => {
                 </div>
               ))}
 
-              {!loading ? null : (
+              {(loading || streaming) &&
+              (messages[messages.length - 1].role !== "assistant" ||
+                messages[messages.length - 1].parts.length === 0) ? (
                 <li className="mb-3 flex items-start border-b border-b-gray-100 w-full py-2">
                   <div className="mr-3 w-[80px]">
                     <button
@@ -515,7 +522,7 @@ const App = () => {
                     />
                   </div>
                 </li>
-              )}
+              ) : null}
 
               {/*{messages.map((message, idx) =>*/}
               {/*  message.role === 'system' ? null : (*/}
