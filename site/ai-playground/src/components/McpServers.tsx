@@ -528,7 +528,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         </div>
 
         {/* Debug Log - show MCP state transitions */}
-        {showSettings && mcpLogs.length > 0 && (
+        {showSettings && (
           <div className="mt-4">
             <div className="font-semibold text-sm block mb-1">Debug Log</div>
             <div
