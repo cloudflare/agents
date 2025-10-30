@@ -200,6 +200,8 @@ return new Response(htmlContent, {
 - **Data attributes** store user-controlled data (like URLs) separately from JavaScript code, ensuring they're always treated as strings, never as executable code
 - **Nonces** combined with the correct CSP headers (shown above) allow your specific inline script to execute while blocking any injected scripts
 
+Note: Frameworks such as Vite will automatically handle nonce generation and insertion for you. See their docs on [Content Security Policy](https://vite.dev/guide/features.html#content-security-policy-csp) for more information.
+
 ## Managing State in KV
 
 Between the consent dialog and the callback there is a gap where the user could do something nasty. We need to make sure it is the same user that hits authorize and then reaches back to our callback. Use a random state token stored server-side in KV with a short expiration time.
