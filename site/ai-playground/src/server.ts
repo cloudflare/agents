@@ -31,7 +31,7 @@ export interface PlaygroundState {
 export class Playground extends AIChatAgent<Env, PlaygroundState> {
   initialState = {
     model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
-    temperature: 0,
+    temperature: 1,
     stream: true,
     system:
       "You are a helpful assistant that can do various tasks using MCP tools."

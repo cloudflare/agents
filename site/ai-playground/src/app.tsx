@@ -24,6 +24,12 @@ const DEFAULT_PARAMS = {
   system:
     "You are a helpful assistant that can do various tasks using MCP tools."
 };
+const DEFAULT_MCP_STATUS = {
+  state: "not-connected",
+  tools: [],
+  prompts: [],
+  resources: []
+};
 
 /**
  * Get or create a session ID for this user.
@@ -57,12 +63,7 @@ const App = () => {
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<PlaygroundState>(DEFAULT_PARAMS);
 
-  const [mcp, setMcp] = useState<McpComponentState>({
-    state: "not-connected",
-    tools: [],
-    prompts: [],
-    resources: []
-  });
+  const [mcp, setMcp] = useState<McpComponentState>(DEFAULT_MCP_STATUS);
 
   const [mcpLogs, setMcpLogs] = useState<
     Array<{ timestamp: number; status: string; serverUrl?: string }>
@@ -183,6 +184,8 @@ const App = () => {
 
     // Update session ID state (triggers reconnection with new ID)
     setSessionId(newSessionId);
+    setMcp(DEFAULT_MCP_STATUS);
+    setMcpLogs([]);
   };
 
   const messageElement = useRef<HTMLDivElement>(null);
