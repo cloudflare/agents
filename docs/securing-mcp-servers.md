@@ -202,12 +202,13 @@ return new Response(htmlContent, {
 
 Note: Frameworks such as Vite will automatically handle nonce generation and insertion for you. See their docs on [Content Security Policy](https://vite.dev/guide/features.html#content-security-policy-csp) for more information.
 
-## Managing State in KV
+## Handling State
 
 Between the consent dialog and the callback there is a gap where the user could do something nasty. We need to make sure it is the same user that hits authorize and then reaches back to our callback. Use a random state token stored server-side in KV with a short expiration time.
 
 ```typescript
 // Use in POST /authorize - after CSRF validation, before redirecting to upstream provider
+// Firstly create a state token in KV
 async function createOAuthState(
   oauthReqInfo: AuthRequest,
   kv: KVNamespace
@@ -219,27 +220,89 @@ async function createOAuthState(
   return { stateToken };
 }
 
-// Use in GET /callback - validate state from query params before exchanging code
+// Bind state to browser session
+async function bindStateToSession(
+  stateToken: string
+): Promise<{ setCookie: string }> {
+  const consentedStateCookieName = "__Host-CONSENTED_STATE";
+
+  // Hash the state token to create a derived parameter
+  const encoder = new TextEncoder();
+  const data = encoder.encode(stateToken);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  const setCookie = `${consentedStateCookieName}=${hashHex}; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=600`;
+  return { setCookie };
+}
+
+// In the GET /callback - validate state from query params against both the KV and the session cookie before exchanging code
 async function validateOAuthState(
   request: Request,
   kv: KVNamespace
-): Promise<{ oauthReqInfo: AuthRequest }> {
-  const stateFromQuery = new URL(request.url).searchParams.get("state");
+): Promise<{ oauthReqInfo: AuthRequest; clearCookie: string }> {
+  const consentedStateCookieName = "__Host-CONSENTED_STATE";
+  const url = new URL(request.url);
+  const stateFromQuery = url.searchParams.get("state");
+
   if (!stateFromQuery) {
     throw new OAuthError("invalid_request", "Missing state parameter", 400);
   }
 
+  // Check 1: Validate state exists in KV
   const storedDataJson = await kv.get(`oauth:state:${stateFromQuery}`);
   if (!storedDataJson) {
     throw new OAuthError("invalid_request", "Invalid or expired state", 400);
   }
 
-  await kv.delete(`oauth:state:${stateFromQuery}`); // One-time use
-  return { oauthReqInfo: JSON.parse(storedDataJson) };
+  // Check 2: Validate state matches session cookie
+  const cookieHeader = request.headers.get("Cookie") || "";
+  const cookies = cookieHeader.split(";").map((c) => c.trim());
+  const consentedStateCookie = cookies.find((c) =>
+    c.startsWith(`${consentedStateCookieName}=`)
+  );
+  const consentedStateHash = consentedStateCookie
+    ? consentedStateCookie.substring(consentedStateCookieName.length + 1)
+    : null;
+
+  if (!consentedStateHash) {
+    throw new OAuthError(
+      "invalid_request",
+      "Missing session binding cookie - authorization flow must be restarted",
+      400
+    );
+  }
+
+  // Hash the state from query and compare with cookie
+  const encoder = new TextEncoder();
+  const data = encoder.encode(stateFromQuery);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const stateHash = hashArray
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  if (stateHash !== consentedStateHash) {
+    throw new OAuthError(
+      "invalid_request",
+      "State token does not match session - possible CSRF attack detected",
+      400
+    );
+  }
+
+  // Both checks passed - clean up KV and return the clear cookie header
+  await kv.delete(`oauth:state:${stateFromQuery}`);
+  const clearCookie = `${consentedStateCookieName}=; HttpOnly; Secure; Path=/; SameSite=Lax; Max-Age=0`;
+
+  return {
+    oauthReqInfo: JSON.parse(storedDataJson),
+    clearCookie
+  };
 }
 ```
-
-Alternatively, you can store a SHA-256 hash of the state in a `__Host-CONSENTED_STATE` cookie if you want to avoid KV, but since most MCP servers will be using the `OAuthProvider` class from `workers-oauth-provider` we can plug into the same `env.OAUTH_KV` binding for state management.
 
 ## Approved client
 
