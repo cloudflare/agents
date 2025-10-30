@@ -49,7 +49,7 @@ Without CSRF protection, an attacker can trick users into approving malicious OA
 app.get("/authorize", async (c) => {
   const { token: csrfToken, setCookie } = generateCSRFProtection();
 
-  return renderApprovalDialog(c.req.raw, {
+  return renderConsentDialog(c.req.raw, {
     client: await c.env.OAUTH_PROVIDER.lookupClient(clientId),
     csrfToken, // Pass to form as hidden field
     setCookie // Set the cookie
@@ -102,9 +102,9 @@ Include the token as a hidden field in your consent form:
 <input type="hidden" name="csrf_token" value="${csrfToken}" />
 ```
 
-### XSS protection
+### Input sanitization
 
-User-controlled content (client names, logos, URIs) in your approval dialog can execute malicious scripts if not sanitized. Client registration is dynamic, so you must treat all client metadata as untrusted input.
+User-controlled content (client names, logos, URIs) in your consent dialog can execute malicious scripts if not sanitized. Client registration is dynamic, so you must treat all client metadata as untrusted input.
 
 **Required protections:**
 
@@ -141,20 +141,64 @@ const clientName = sanitizeText(client.clientName);
 const logoUrl = sanitizeText(sanitizeUrl(client.logoUri));
 ```
 
-### Clickjacking protection
+### Content Security Policy (CSP)
 
-Attackers can embed your approval dialog in an invisible iframe and trick users into clicking. Prevent this with Content Security Policy headers.
+CSP headers instruct browsers to block dangerous content and behaviors. They provide defence in depth from multiple attack vectors.
 
 ```typescript
-return new Response(htmlContent, {
-  headers: {
-    "Content-Security-Policy": "frame-ancestors 'none'",
-    "X-Frame-Options": "DENY", // Legacy browser support
+function buildSecurityHeaders(setCookie: string, nonce?: string): HeadersInit {
+  const cspDirectives = [
+    "default-src 'none'", // Deny everything by default
+    "script-src 'self'" + (nonce ? ` 'nonce-${nonce}'` : ""), // Allow scripts from same origin (+ nonce if using inline JS)
+    "style-src 'self' 'unsafe-inline'", // Allow inline styles for rendering
+    "img-src 'self' https:", // Allow client logos from HTTPS URLs
+    "font-src 'self'", // Allow web fonts from same origin
+    "form-action 'self'", // Only allow form submissions to same origin
+    "frame-ancestors 'none'", // Prevent clickjacking - block ALL iframe embedding
+    "base-uri 'self'", // Prevent base tag injection attacks
+    "connect-src 'self'" // Restrict fetch/XHR to same origin
+  ].join("; ");
+
+  return {
+    "Content-Security-Policy": cspDirectives,
+    "X-Frame-Options": "DENY", // Legacy clickjacking protection for older browsers
+    "X-Content-Type-Options": "nosniff", // Prevent MIME sniffing attacks
     "Content-Type": "text/html; charset=utf-8",
     "Set-Cookie": setCookie
-  }
+  };
+}
+```
+
+### Inline JavaScript
+
+If your consent dialog needs inline JavaScript, use data attributes and nonces to prevent XSS attacks.
+
+```typescript
+// Generate a unique nonce per request
+const nonce = crypto.randomUUID();
+
+const htmlContent = `
+  <!DOCTYPE html>
+  <html>
+    <body>
+      <p>Authorization approved! Redirecting...</p>
+      <script nonce="${nonce}" data-redirect-url="${sanitizeUrl(redirectUrl)}">
+        setTimeout(() => {
+          const script = document.querySelector('script[data-redirect-url]');
+          window.location.href = script.dataset.redirectUrl;
+        }, 2000);
+      </script>
+    </body>
+  </html>
+`;
+
+return new Response(htmlContent, {
+  headers: buildSecurityHeaders(setCookie, nonce) // Pass nonce to include in CSP
 });
 ```
+
+- **Data attributes** store user-controlled data (like URLs) separately from JavaScript code, ensuring they're always treated as strings, never as executable code
+- **Nonces** combined with the correct CSP headers (shown above) allow your specific inline script to execute while blocking any injected scripts
 
 ## Managing State in KV
 
@@ -244,5 +288,7 @@ Instead of `__Host-CSRF_TOKEN`, use `__Host-CSRF_TOKEN_GITHUB` and `__Host-CSRF_
 
 # More info
 
-[MCP Security Best Practices](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)
-[RFC 9700 - Protecting Redirect Based Flows](https://www.rfc-editor.org/rfc/rfc9700#name-protecting-redirect-based-f)
+- [MCP Authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
+- [MCP Security Best Practices](https://modelcontextprotocol.io/specification/draft/basic/security_best_practices)
+- [RFC 9700 - Protecting Redirect Based Flows](https://www.rfc-editor.org/rfc/rfc9700#name-protecting-redirect-based-f)
+- [RFC 9700 - Best Practices](https://www.rfc-editor.org/rfc/rfc9700#name-best-practices)
