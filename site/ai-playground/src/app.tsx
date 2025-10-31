@@ -506,7 +506,8 @@ const App = () => {
 
               {(loading || streaming) &&
               (messages[messages.length - 1].role !== "assistant" ||
-                messages[messages.length - 1].parts.length === 0) ? (
+                (messages[messages.length - 1].parts ?? []).slice(-1)[0]
+                  ?.type !== "text") ? (
                 <li className="mb-3 flex items-start border-b border-b-gray-100 w-full py-2">
                   <div className="mr-3 w-[80px]">
                     <button
