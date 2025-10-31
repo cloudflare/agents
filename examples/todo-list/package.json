@@ -1,0 +1,20 @@
+{
+  "author": "",
+  "description": "A Todo list app demonstrating real-time state synchronization using Cloudflare Agents sync layer",
+  "keywords": [
+    "agents",
+    "sync",
+    "state-management",
+    "todo",
+    "real-time"
+  ],
+  "license": "ISC",
+  "name": "@cloudflare/agents-todo-list",
+  "private": true,
+  "scripts": {
+    "start": "vite dev",
+    "test": "vitest run"
+  },
+  "type": "module",
+  "version": "0.0.0"
+}
