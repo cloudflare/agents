@@ -510,7 +510,7 @@ export class WorkerTransport implements Transport {
         }
 
         for (const message of messages) {
-          this.onmessage?.(message, { authInfo, requestInfo });
+          this.onmessage?.(message, { requestInfo });
         }
       });
     }
