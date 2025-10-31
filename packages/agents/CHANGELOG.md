@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.20
+
+### Patch Changes
+
+- [#619](https://github.com/cloudflare/agents/pull/619) [`e7d0d4d`](https://github.com/cloudflare/agents/commit/e7d0d4d847debe828d93f0d78cf18b60fecc2b24) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Adds request info to the extra argument in onmessage. Adds a url parm which we will try push upstream to the MCP SDK as it is useful with OpenAI Apps SDK
+
 ## 0.2.19
 
 ### Patch Changes
