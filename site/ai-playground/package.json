@@ -11,6 +11,7 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "ai": "^5.0.82",
     "downshift": "^9.0.10",
     "nanoid": "^5.1.6",
     "react": "^19.2.0",
