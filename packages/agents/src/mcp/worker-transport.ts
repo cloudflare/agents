@@ -17,9 +17,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CORSOptions } from "./types";
 
-// MCP Protocol Version constants
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-03-26", "2025-06-18"] as const;
-const DEFAULT_PROTOCOL_VERSION = "2025-03-26"; // For backwards compatibility
+const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
 const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
 
 type ProtocolVersion = (typeof SUPPORTED_PROTOCOL_VERSIONS)[number];
@@ -39,7 +38,7 @@ export interface WorkerTransportOptions {
 }
 
 export class WorkerTransport implements Transport {
-  private started = false;
+  started = false;
   private initialized = false;
   private sessionIdGenerator?: () => string;
   private enableJsonResponse = false;
