@@ -162,7 +162,7 @@ const Header = ({ onSetCodeVisible }: HeaderProps) => {
       </a>
       <a
         className="hover:bg-gray-50 text-sm cursor-pointer font-sm px-3 py-2 bg-white border border-gray-200 rounded-md shadow-sm flex items-center"
-        href="https://github.com/cloudflare/agents/tree/main/examples/ai-playground"
+        href="https://github.com/cloudflare/agents/tree/main/site/ai-playground"
         target="_blank"
         rel="noreferrer"
       >
