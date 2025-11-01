@@ -29,11 +29,17 @@ export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
    * Provided options will overwrite the defaults.
    */
   corsOptions?: CORSOptions;
+  /**
+   * An optional auth info to use for handling MCP requests.
+   * If not provided, the handler will look for props in the execution context.
+   */
+  authContext?: McpAuthContext;
+  /**
+   * An optional transport to use for handling MCP requests.
+   * If not provided, a new WorkerTransport will be created. Note if you override this you should set your
+   */
+  transport?: WorkerTransport;
 }
-
-export type OAuthExecutionContext = ExecutionContext & {
-  props?: Record<string, unknown>;
-};
 
 export function createMcpHandler(
   server: McpServer | Server,
@@ -50,23 +56,36 @@ export function createMcpHandler(
     _env: unknown,
     ctx: ExecutionContext
   ): Promise<Response> => {
-    // Check if the request path matches the configured route
     const url = new URL(request.url);
     if (route && url.pathname !== route) {
       return new Response("Not Found", { status: 404 });
     }
 
-    const oauthCtx = ctx as OAuthExecutionContext;
-    const authContext: McpAuthContext | undefined = oauthCtx.props
-      ? { props: oauthCtx.props }
-      : undefined;
+    const transport = options.transport ?? new WorkerTransport();
 
-    const transport = new WorkerTransport(options);
-    await server.connect(transport);
+    const buildAuthContext = () => {
+      if (options.authContext) {
+        return options.authContext;
+      }
+
+      if (ctx.props && Object.keys(ctx.props).length > 0) {
+        return {
+          props: ctx.props as Record<string, unknown>
+        };
+      }
+
+      return undefined;
+    };
 
     const handleRequest = async () => {
       return await transport.handleRequest(request);
     };
+
+    const authContext = buildAuthContext();
+
+    if (!transport.started) {
+      await server.connect(transport);
+    }
 
     try {
       if (authContext) {
