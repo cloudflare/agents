@@ -392,10 +392,8 @@ export class WorkerTransport implements Transport {
       );
     }
 
-    // TODO: push this upstream to the mcp sdk asap
-    const requestInfo: RequestInfo & { url?: string } = {
-      headers: Object.fromEntries(request.headers.entries()),
-      url: request.url
+    const requestInfo: RequestInfo = {
+      headers: Object.fromEntries(request.headers.entries())
     };
 
     const isInitializationRequest = messages.some(isInitializeRequest);
