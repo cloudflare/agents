@@ -14,6 +14,7 @@
     "nanoid": "^5.1.6",
     "partyserver": "^0.0.75",
     "partysocket": "1.1.6",
+    "yargs": "^18.0.0",
     "zod": "^3.25.76",
     "zod-to-ts": "^1.2.0"
   },
@@ -23,6 +24,7 @@
   "description": "A home for your AI agents",
   "devDependencies": {
     "@cloudflare/workers-oauth-provider": "^0.0.12",
+    "@types/yargs": "^17.0.34",
     "react": "*",
     "vitest-browser-react": "^1.0.1"
   },
@@ -123,13 +125,18 @@
     "type": "git",
     "url": "git+https://github.com/cloudflare/agents.git"
   },
+  "bin": {
+    "agents": "dist/cli.js"
+  },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "check:test": "npm run check:test:workers && npm run check:test:react",
+    "check:test": "npm run check:test:workers && npm run check:test:react && npm run check:test:cli",
+    "check:test:cli": "vitest -r src/cli-tests --watch false",
     "check:test:react": "vitest -r src/react-tests --watch false",
     "check:test:workers": "vitest -r src/tests --watch false",
     "evals": "(cd evals; evalite)",
-    "test": "npm run test:workers && npm run test:react",
+    "test": "npm run test:workers && npm run test:react && npm run test:cli",
+    "test:cli": "vitest -r src/cli-tests",
     "test:react": "vitest -r src/react-tests",
     "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent",
     "test:workers": "vitest -r src/tests"
