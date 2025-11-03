@@ -1,7 +1,4 @@
 {
-  "assets": {
-    "directory": "dist/client"
-  },
   "compatibility_date": "2025-03-14",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
@@ -9,17 +6,13 @@
       {
         "class_name": "MyAgent",
         "name": "MyAgent"
-      },
-      {
-        "class_name": "McpServerAgent",
-        "name": "McpServerAgent"
       }
     ]
   },
-  "main": "src/server.ts",
+  "main": "src/index.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["MyAgent", "McpServerAgent"],
+      "new_sqlite_classes": ["MyAgent"],
       "tag": "v1"
     }
   ],
@@ -28,8 +21,5 @@
     "logs": {
       "enabled": true
     }
-  },
-  "vars": {
-    "HOST": "<DEPLOYED_HOSTNAME>"
   }
 }

@@ -1,6 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler, WorkerTransport } from "agents/mcp";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker";
 import * as z from "zod";
 import { Agent, getAgentByName } from "agents";
 
@@ -9,15 +8,10 @@ type Env = {
 };
 
 export class MyAgent extends Agent {
-  server = new McpServer(
-    {
-      name: "test",
-      version: "1.0.0"
-    },
-    {
-      jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
-    }
-  );
+  server = new McpServer({
+    name: "test",
+    version: "1.0.0"
+  });
 
   transport = new WorkerTransport({
     sessionIdGenerator: () => this.name

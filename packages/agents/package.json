@@ -5,6 +5,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "2.0.53",
+    "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/sdk": "^1.20.2",
     "ai": "5.0.78",
     "cron-schedule": "^5.0.4",
