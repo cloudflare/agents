@@ -58,6 +58,22 @@ describe("agents CLI", () => {
       expect(exitCode).toBe(0);
     });
 
+    it("should execute create alias command", async () => {
+      const cli = createCli(["node", "cli.js", "create"]).exitProcess(false);
+      try {
+        await cli.parse();
+      } catch (error) {
+        // process.exit throws, which is expected
+        if ((error as Error).message === "process.exit(0)") {
+          // This is expected, continue
+        } else {
+          throw error;
+        }
+      }
+      expect(consoleOutput).toContain("agents init: not implemented yet");
+      expect(exitCode).toBe(0);
+    });
+
     it("should show init in help", async () => {
       const cli = createCli(["node", "cli.js", "init", "--help"]);
       try {
@@ -68,6 +84,66 @@ describe("agents CLI", () => {
       }
       const allOutput = [...consoleOutput, ...consoleError].join("\n");
       expect(allOutput).toContain("Initialize an agents project");
+    });
+  });
+
+  describe("dev command", () => {
+    it("should execute dev command", async () => {
+      const cli = createCli(["node", "cli.js", "dev"]).exitProcess(false);
+      try {
+        await cli.parse();
+      } catch (error) {
+        // process.exit throws, which is expected
+        if ((error as Error).message === "process.exit(0)") {
+          // This is expected, continue
+        } else {
+          throw error;
+        }
+      }
+      expect(consoleOutput).toContain("agents dev: not implemented yet");
+      expect(exitCode).toBe(0);
+    });
+
+    it("should show dev in help", async () => {
+      const cli = createCli(["node", "cli.js", "dev", "--help"]);
+      try {
+        await cli.parse();
+      } catch (error) {
+        // process.exit throws, which is expected for help
+        expect((error as Error).message).toBe("process.exit(0)");
+      }
+      const allOutput = [...consoleOutput, ...consoleError].join("\n");
+      expect(allOutput).toContain("Start development server");
+    });
+  });
+
+  describe("deploy command", () => {
+    it("should execute deploy command", async () => {
+      const cli = createCli(["node", "cli.js", "deploy"]).exitProcess(false);
+      try {
+        await cli.parse();
+      } catch (error) {
+        // process.exit throws, which is expected
+        if ((error as Error).message === "process.exit(0)") {
+          // This is expected, continue
+        } else {
+          throw error;
+        }
+      }
+      expect(consoleOutput).toContain("agents deploy: not implemented yet");
+      expect(exitCode).toBe(0);
+    });
+
+    it("should show deploy in help", async () => {
+      const cli = createCli(["node", "cli.js", "deploy", "--help"]);
+      try {
+        await cli.parse();
+      } catch (error) {
+        // process.exit throws, which is expected for help
+        expect((error as Error).message).toBe("process.exit(0)");
+      }
+      const allOutput = [...consoleOutput, ...consoleError].join("\n");
+      expect(allOutput).toContain("Deploy agents to Cloudflare");
     });
   });
 
@@ -114,6 +190,8 @@ describe("agents CLI", () => {
       expect(allOutput).toContain("agents");
       expect(allOutput).toContain("Commands:");
       expect(allOutput).toContain("init");
+      expect(allOutput).toContain("dev");
+      expect(allOutput).toContain("deploy");
       expect(allOutput).toContain("mcp");
     });
 
