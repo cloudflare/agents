@@ -26,9 +26,7 @@ server.registerResource(
         {
           uri: "ui://widget/index.html",
           mimeType: "text/html+skybridge",
-          text: await getWidgetHtml(
-            extra.requestInfo?.headers["host"] as string
-          )
+          text: await getWidgetHtml(extra.requestInfo?.headers.host as string)
         }
       ]
     };
