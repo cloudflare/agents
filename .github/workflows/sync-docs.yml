@@ -63,7 +63,7 @@ jobs:
         if: steps.get-diffs.outputs.skip != 'true'
         id: create-prompt
         run: |
-          cat > /tmp/claude_prompt.md << 'EOF'
+          cat > /tmp/claude_prompt.md << EOF
           # Intelligent Documentation Sync Task
 
           ## Context
@@ -117,6 +117,12 @@ jobs:
                * Link to original PR: https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}
                * Summary of what documentation changes were made
                * Note that it should be reviewed alongside the source PR
+          8. Post a comment on the original PR (${{ github.repository }}#${{ github.event.pull_request.number }}) using gh CLI:
+             - Use: `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "<message>"`
+             - Message should include:
+               * Notification that documentation sync PR was created
+               * Link to the cloudflare-docs PR
+               * Brief summary of what was documented
 
           **Step 3: Provide Clear Output**
 
