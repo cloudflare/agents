@@ -290,4 +290,92 @@ describe("OAuth2 MCP Client", () => {
       expect(response.status).toBeGreaterThanOrEqual(400);
     });
   });
+
+  describe("OAuth Redirect Behavior", () => {
+    async function setupOAuthTest(config: {
+      successRedirect?: string;
+      errorRedirect?: string;
+      origin?: string;
+    }) {
+      const agentId = env.TestOAuthAgent.newUniqueId();
+      const agentStub = env.TestOAuthAgent.get(agentId);
+      await agentStub.setName("default");
+      await agentStub.onStart();
+      await agentStub.configureOAuthForTest(config);
+
+      const serverId = nanoid(8);
+      const origin = config.origin || "http://example.com";
+      const callbackBaseUrl = `${origin}/agents/oauth/${agentId.toString()}/callback`;
+
+      agentStub.sql`
+        INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+        VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackBaseUrl}, ${null})
+      `;
+
+      await agentStub.setupMockMcpConnection(
+        serverId,
+        "test",
+        "http://example.com/mcp",
+        callbackBaseUrl
+      );
+      await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
+
+      return { agentStub, serverId, callbackBaseUrl };
+    }
+
+    it("should return 302 redirect with Location header on successful OAuth callback", async () => {
+      const { agentStub, serverId, callbackBaseUrl } = await setupOAuthTest({
+        successRedirect: "/dashboard"
+      });
+
+      const response = await agentStub.fetch(
+        new Request(
+          `${callbackBaseUrl}/${serverId}?code=test-code&state=test-state`,
+          { method: "GET", redirect: "manual" }
+        )
+      );
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe(
+        "http://example.com/dashboard"
+      );
+    });
+
+    it("should handle relative URLs in successRedirect", async () => {
+      const { agentStub, serverId, callbackBaseUrl } = await setupOAuthTest({
+        successRedirect: "/success",
+        origin: "http://test.local"
+      });
+
+      const response = await agentStub.fetch(
+        new Request(
+          `${callbackBaseUrl}/${serverId}?code=test-code&state=test-state`,
+          { method: "GET", redirect: "manual" }
+        )
+      );
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe(
+        "http://test.local/success"
+      );
+    });
+
+    it("should redirect to errorRedirect with error parameter on OAuth failure", async () => {
+      const { agentStub, serverId, callbackBaseUrl } = await setupOAuthTest({
+        errorRedirect: "/error"
+      });
+
+      const response = await agentStub.fetch(
+        new Request(
+          `${callbackBaseUrl}/${serverId}?error=access_denied&state=test-state`,
+          { method: "GET", redirect: "manual" }
+        )
+      );
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toMatch(
+        /^http:\/\/example\.com\/error\?error=/
+      );
+    });
+  });
 });

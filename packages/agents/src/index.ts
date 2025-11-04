@@ -1669,17 +1669,31 @@ export class Agent<
 
     // Redirect to success URL if configured
     if (config?.successRedirect && result.authSuccess) {
-      return Response.redirect(
-        new URL(config.successRedirect, baseOrigin).href
-      );
+      try {
+        return Response.redirect(
+          new URL(config.successRedirect, baseOrigin).href
+        );
+      } catch (e) {
+        console.error(
+          "Invalid successRedirect URL:",
+          config.successRedirect,
+          e
+        );
+        return Response.redirect(baseOrigin);
+      }
     }
 
     // Redirect to error URL if configured
     if (config?.errorRedirect && !result.authSuccess) {
-      const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
-        result.authError || "Unknown error"
-      )}`;
-      return Response.redirect(new URL(errorUrl, baseOrigin).href);
+      try {
+        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
+          result.authError || "Unknown error"
+        )}`;
+        return Response.redirect(new URL(errorUrl, baseOrigin).href);
+      } catch (e) {
+        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
+        return Response.redirect(baseOrigin);
+      }
     }
 
     // Default: redirect to base URL

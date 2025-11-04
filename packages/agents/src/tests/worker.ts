@@ -191,6 +191,14 @@ export class TestOAuthAgent extends Agent<Env> {
     return new Response("Test OAuth Agent");
   }
 
+  // Allow tests to configure OAuth callback behavior
+  configureOAuthForTest(config: {
+    successRedirect?: string;
+    errorRedirect?: string;
+  }): void {
+    this.mcp.configureOAuthCallback(config);
+  }
+
   async setupMockMcpConnection(
     serverId: string,
     _serverName: string,
