@@ -7,6 +7,10 @@ on:
 jobs:
   sync-docs:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
     steps:
       - name: Checkout source repository
         uses: actions/checkout@v4
