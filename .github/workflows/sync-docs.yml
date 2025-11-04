@@ -1,4 +1,4 @@
-name: Intelligent Documentation Sync with Claude Code
+name: Documentation Sync with Claude Code
 
 on:
   pull_request:
@@ -150,5 +150,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
+          show_full_output: true
+          claude_args: "--allowed-tools Bash"
         env:
           GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
