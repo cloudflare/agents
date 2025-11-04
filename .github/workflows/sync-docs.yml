@@ -28,14 +28,14 @@ jobs:
         run: |
           mkdir -p /tmp/diffs
           touch /tmp/diffs/changes.txt
-          
+
           # Capture all changed files and their diffs
           while IFS= read -r file; do
             echo "=== $file ===" >> /tmp/diffs/changes.txt
             git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> /tmp/diffs/changes.txt
             echo -e "\n\n" >> /tmp/diffs/changes.txt
           done < changed_files.txt
-          
+
           # Always run - let Claude decide if docs are needed
           echo "skip=false" >> $GITHUB_OUTPUT
 
@@ -80,7 +80,7 @@ jobs:
           **Step 1: Evaluate if Documentation Sync is Needed**
 
           Please review the changes in this PR and determine if they require documentation updates in cloudflare-docs:
-          
+
           - **DO sync if:**
             - Documentation files in docs/ were directly changed
             - New public API features or functions were added
@@ -88,7 +88,7 @@ jobs:
             - New configuration options or environment variables
             - New examples or usage patterns that should be documented
             - Bug fixes that clarify documented behavior
-          
+
           - **DO NOT sync if:**
             - Only internal code refactoring with no behavior changes
             - Test-only changes
