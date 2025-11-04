@@ -1,0 +1,122 @@
+name: Sync Docs to Cloudflare-Docs with Claude Code
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited]
+
+jobs:
+  sync-docs:
+    # Only run if PR title contains [docs], docs, or Docs (case-insensitive)
+    if: |
+      startsWith(github.event.pull_request.title, '[docs]') ||
+      startsWith(github.event.pull_request.title, '[Docs]') ||
+      startsWith(github.event.pull_request.title, 'docs') ||
+      startsWith(github.event.pull_request.title, 'Docs')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Get changed files
+        id: changed-files
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt
+          grep '^docs/.*\.md$' changed_files.txt > docs_changed.txt || echo "No docs changed"
+
+      - name: Get file contents and diffs
+        id: get-diffs
+        run: |
+          mkdir -p /tmp/diffs
+          touch /tmp/diffs/changes.txt
+          while IFS= read -r file; do
+            if [[ $file == docs/*.md ]]; then
+              echo "=== $file ===" >> /tmp/diffs/changes.txt
+              git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> /tmp/diffs/changes.txt
+              echo -e "\n\n" >> /tmp/diffs/changes.txt
+            fi
+          done < changed_files.txt
+
+          # Check if any docs were actually changed
+          if [ ! -s /tmp/diffs/changes.txt ]; then
+            echo "No documentation files were changed, skipping sync"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout cloudflare-docs repository
+        if: steps.get-diffs.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: cloudflare/cloudflare-docs
+          token: ${{ secrets.CLOUDFLARE_DOCS_PAT }}
+          path: cloudflare-docs
+
+      - name: Create branch in cloudflare-docs
+        if: steps.get-diffs.outputs.skip != 'true'
+        run: |
+          cd cloudflare-docs
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b sync-docs-pr-${{ github.event.pull_request.number }}
+
+      - name: Create prompt for Claude Code
+        if: steps.get-diffs.outputs.skip != 'true'
+        run: |
+          cat > /tmp/claude_prompt.md << EOF
+          # Documentation Sync Task
+
+          I need you to adapt documentation changes from our main repository to the cloudflare-docs repository.
+
+          ## Context
+          - **Source Repository:** ${{ github.repository }}
+          - **Original PR:** #${{ github.event.pull_request.number }}
+          - **PR Title:** ${{ github.event.pull_request.title }}
+          - **PR Description:**
+          ${{ github.event.pull_request.body }}
+
+          ## Changed Files and Diffs
+          $(cat /tmp/diffs/changes.txt)
+
+          ## Your Task
+          You have access to two repositories:
+          1. The current directory (our main repo)
+          2. ./cloudflare-docs (the target repo for syncing)
+
+          Please:
+          1. Review the documentation changes above from our repo
+          2. Navigate to the ./cloudflare-docs directory
+          3. The branch sync-docs-pr-${{ github.event.pull_request.number }} has already been created and checked out
+          4. Adapt these changes for the cloudflare-docs repository structure and style
+          5. Create or update the appropriate markdown files in cloudflare-docs
+          6. Ensure the content follows cloudflare-docs conventions and formatting
+          7. Commit the changes with message: "Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+          8. Push the branch to origin
+          9. Create a PR in cloudflare-docs using gh CLI with:
+             - Title: "📚 Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+             - Body should explain this is an AI-adapted sync from our repo, include the original PR link, and note it should be reviewed alongside the source PR
+
+          ## Important Notes
+          - The cloudflare-docs repository may have a different structure than our docs/ folder
+          - Adapt paths, links, and references as needed
+          - Follow any existing patterns you see in the cloudflare-docs repository
+          - If there are cloudflare-specific conventions, follow them
+          - Use the GH_TOKEN environment variable for authentication with gh CLI
+
+          Please complete this entire workflow to create the synced PR.
+          EOF
+
+      - name: Run Claude Code to create adapted PR
+        if: steps.get-diffs.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.CLOUDFLARE_DOCS_PAT }}
+        run: |
+          # Run Claude Code with the prompt - it will handle everything
+          claude code -p "$(cat /tmp/claude_prompt.md)"
