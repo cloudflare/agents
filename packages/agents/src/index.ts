@@ -1757,7 +1757,8 @@ export async function routeAgentRequest<Env>(
   if (
     response &&
     corsHeaders &&
-    request.headers.get("upgrade")?.toLowerCase() !== "websocket"
+    request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
+    request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
   ) {
     const newHeaders = new Headers(response.headers);
 
