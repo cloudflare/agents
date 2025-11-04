@@ -6,10 +6,6 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "MCP_OBJECT",
-        "class_name": "McpWidgetAgent"
-      },
-      {
         "name": "CHESS",
         "class_name": "ChessGame"
       }
@@ -18,15 +14,16 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["McpWidgetAgent"]
-    },
-    {
-      "tag": "v2",
       "new_sqlite_classes": ["ChessGame"]
     }
   ],
   "assets": {
     "directory": "dist",
     "binding": "ASSETS"
+  },
+  "observability": {
+    "logs": {
+      "enabled": false
+    }
   }
 }

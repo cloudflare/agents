@@ -1,4 +1,4 @@
-![chess-app-screenshot](https://github.com/user-attachments/assets/bc3c3ff1-4841-42bc-8ae8-04bf880b0fd7)
+![chess-app-screenshot](https://github.com/user-attachments/assets/8b2a36b7-5e2d-4645-95ad-16c81709a4e9)
 [Reference](https://developers.openai.com/apps-sdk/)
 
 # Multi-player Chess ChatGPT App

@@ -4,12 +4,6 @@ import { Rpc } from "./agents/rpc";
 import { Scheduler } from "./agents/scheduler";
 import { Stateful } from "./agents/stateful";
 
-export type Env = {
-  Scheduler: DurableObjectNamespace<Scheduler>;
-  Stateful: DurableObjectNamespace<Stateful>;
-  OPENAI_API_KEY: string;
-};
-
 export { Scheduler, Stateful, Chat, Rpc };
 
 export default {

@@ -11,6 +11,7 @@
   "private": true,
   "scripts": {
     "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
     "start": "vite dev"
   },
   "type": "module",
