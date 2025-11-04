@@ -21,7 +21,9 @@
     "directory": "dist",
     "binding": "ASSETS"
   },
-  "vars": {
-    "HOST": "http://localhost:5174/" // replace with the hostname of your deployed worker
+  "observability": {
+    "logs": {
+      "enabled": false
+    }
   }
 }

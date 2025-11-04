@@ -3,11 +3,11 @@ import { routeAgentRequest } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { env } from "cloudflare:workers";
 
-const getWidgetHtml = async () => {
+const getWidgetHtml = async (host: string) => {
   let html = await (await env.ASSETS.fetch("http://localhost/")).text();
   html = html.replace(
     "<!--RUNTIME_CONFIG-->",
-    `<script>window.HOST = \`${env.HOST}\`;</script>`
+    `<script>window.HOST = \`${host}\`;</script>`
   );
   return html;
 };
@@ -19,13 +19,16 @@ server.registerResource(
   "chess",
   "ui://widget/index.html",
   {},
-  async (_uri, _extra) => {
+  async (_uri, extra) => {
+    console.log("HEADERS", extra.requestInfo?.headers);
     return {
       contents: [
         {
           uri: "ui://widget/index.html",
           mimeType: "text/html+skybridge",
-          text: await getWidgetHtml()
+          text: await getWidgetHtml(
+            extra.requestInfo?.headers["host"] as string
+          )
         }
       ]
     };
