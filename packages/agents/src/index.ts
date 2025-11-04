@@ -2042,6 +2042,33 @@ export async function getAgentByName<
 }
 
 /**
+ * Check if an agent is currently active and has active connections
+ * @template Env Environment type containing bindings
+ * @param agent The agent instance to check
+ * @returns Object containing connection status information
+ * @example
+ * ```typescript
+ * const agent = await getAgentByName(env.MY_AGENT, "user-123");
+ * const status = getAgentStatus(agent);
+ * console.log(`Active connections: ${status.connectionCount}`);
+ * ```
+ */
+export function getAgentStatus<Env, T extends Agent<Env>>(
+  agent: T
+): {
+  connectionCount: number;
+  isActive: boolean;
+  agentId: string | undefined;
+} {
+  const connections = Array.from(agent.getConnections?.() ?? []);
+  return {
+    connectionCount: connections.length,
+    isActive: connections.length > 0,
+    agentId: (agent as any).id
+  };
+}
+
+/**
  * A wrapper for streaming responses in callable methods
  */
 export class StreamingResponse {
