@@ -1665,20 +1665,25 @@ export class Agent<
       return config.customHandler(result);
     }
 
-    // Use redirect URLs if configured
-    if (config?.successRedirect && result.authSuccess) {
-      return Response.redirect(config.successRedirect);
-    }
+    const baseOrigin = new URL(request.url).origin;
 
-    if (config?.errorRedirect && !result.authSuccess) {
+    // Redirect to success URL if configured
+    if (config?.successRedirect && result.authSuccess) {
       return Response.redirect(
-        `${config.errorRedirect}?error=${encodeURIComponent(result.authError || "Unknown error")}`
+        new URL(config.successRedirect, baseOrigin).href
       );
     }
 
-    // Default behavior - redirect to base URL
-    const baseUrl = new URL(request.url).origin;
-    return Response.redirect(baseUrl);
+    // Redirect to error URL if configured
+    if (config?.errorRedirect && !result.authSuccess) {
+      const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
+        result.authError || "Unknown error"
+      )}`;
+      return Response.redirect(new URL(errorUrl, baseOrigin).href);
+    }
+
+    // Default: redirect to base URL
+    return Response.redirect(baseOrigin);
   }
 }
 
@@ -1752,14 +1757,19 @@ export async function routeAgentRequest<Env>(
   if (
     response &&
     corsHeaders &&
-    request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
-    request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+    request.headers.get("upgrade")?.toLowerCase() !== "websocket"
   ) {
+    const newHeaders = new Headers(response.headers);
+
+    // Add CORS headers
+    for (const [key, value] of Object.entries(corsHeaders)) {
+      newHeaders.set(key, value);
+    }
+
     response = new Response(response.body, {
-      headers: {
-        ...response.headers,
-        ...corsHeaders
-      }
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders
     });
   }
   return response;
