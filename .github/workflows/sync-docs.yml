@@ -61,8 +61,9 @@ jobs:
 
       - name: Create prompt for Claude Code
         if: steps.get-diffs.outputs.skip != 'true'
+        id: create-prompt
         run: |
-          cat > /tmp/claude_prompt.md << EOF
+          cat > /tmp/claude_prompt.md << 'EOF'
           # Intelligent Documentation Sync Task
 
           ## Context
@@ -132,12 +133,16 @@ jobs:
           Begin your evaluation now.
           EOF
 
+          echo "prompt<<PROMPT_EOF" >> $GITHUB_OUTPUT
+          cat /tmp/claude_prompt.md >> $GITHUB_OUTPUT
+          echo "PROMPT_EOF" >> $GITHUB_OUTPUT
+
       - name: Run Claude Code to create adapted PR
         if: steps.get-diffs.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          prompt_file: /tmp/claude_prompt.md
+          prompt: ${{ steps.create-prompt.outputs.prompt }}
         env:
           GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
