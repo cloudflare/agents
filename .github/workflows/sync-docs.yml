@@ -1,4 +1,4 @@
-name: Sync Docs to Cloudflare-Docs with Claude Code
+name: Intelligent Documentation Sync with Claude Code
 
 on:
   pull_request:
@@ -6,12 +6,6 @@ on:
 
 jobs:
   sync-docs:
-    # Only run if PR title contains [docs], docs, or Docs (case-insensitive)
-    if: |
-      startsWith(github.event.pull_request.title, '[docs]') ||
-      startsWith(github.event.pull_request.title, '[Docs]') ||
-      startsWith(github.event.pull_request.title, 'docs') ||
-      startsWith(github.event.pull_request.title, 'Docs')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source repository
@@ -34,28 +28,23 @@ jobs:
         run: |
           mkdir -p /tmp/diffs
           touch /tmp/diffs/changes.txt
+          
+          # Capture all changed files and their diffs
           while IFS= read -r file; do
-            if [[ $file == docs/*.md ]]; then
-              echo "=== $file ===" >> /tmp/diffs/changes.txt
-              git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> /tmp/diffs/changes.txt
-              echo -e "\n\n" >> /tmp/diffs/changes.txt
-            fi
+            echo "=== $file ===" >> /tmp/diffs/changes.txt
+            git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> /tmp/diffs/changes.txt
+            echo -e "\n\n" >> /tmp/diffs/changes.txt
           done < changed_files.txt
-
-          # Check if any docs were actually changed
-          if [ ! -s /tmp/diffs/changes.txt ]; then
-            echo "No documentation files were changed, skipping sync"
-            echo "skip=true" >> $GITHUB_OUTPUT
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
+          
+          # Always run - let Claude decide if docs are needed
+          echo "skip=false" >> $GITHUB_OUTPUT
 
       - name: Checkout cloudflare-docs repository
         if: steps.get-diffs.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: cloudflare/cloudflare-docs
-          token: ${{ secrets.CLOUDFLARE_DOCS_PAT }}
+          token: ${{ secrets.AGENTS_GITHUB_TOKEN }}
           path: cloudflare-docs
 
       - name: Create branch in cloudflare-docs
@@ -70,9 +59,7 @@ jobs:
         if: steps.get-diffs.outputs.skip != 'true'
         run: |
           cat > /tmp/claude_prompt.md << EOF
-          # Documentation Sync Task
-
-          I need you to adapt documentation changes from our main repository to the cloudflare-docs repository.
+          # Intelligent Documentation Sync Task
 
           ## Context
           - **Source Repository:** ${{ github.repository }}
@@ -84,32 +71,61 @@ jobs:
           ## Changed Files and Diffs
           $(cat /tmp/diffs/changes.txt)
 
-          ## Your Task
-          You have access to two repositories:
-          1. The current directory (our main repo)
-          2. ./cloudflare-docs (the target repo for syncing)
+          ## Your Task: Evaluate and Act
 
-          Please:
-          1. Review the documentation changes above from our repo
-          2. Navigate to the ./cloudflare-docs directory
-          3. The branch sync-docs-pr-${{ github.event.pull_request.number }} has already been created and checked out
-          4. Adapt these changes for the cloudflare-docs repository structure and style
-          5. Create or update the appropriate markdown files in cloudflare-docs
-          6. Ensure the content follows cloudflare-docs conventions and formatting
-          7. Commit the changes with message: "Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
-          8. Push the branch to origin
-          9. Create a PR in cloudflare-docs using gh CLI with:
-             - Title: "📚 Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
-             - Body should explain this is an AI-adapted sync from our repo, include the original PR link, and note it should be reviewed alongside the source PR
+          You have access to two repositories:
+          1. The current directory (our main repo at ${{ github.repository }})
+          2. ./cloudflare-docs (already cloned with branch sync-docs-pr-${{ github.event.pull_request.number }} checked out)
+
+          **Step 1: Evaluate if Documentation Sync is Needed**
+
+          Please review the changes in this PR and determine if they require documentation updates in cloudflare-docs:
+          
+          - **DO sync if:**
+            - Documentation files in docs/ were directly changed
+            - New public API features or functions were added
+            - Breaking changes that affect user-facing behavior
+            - New configuration options or environment variables
+            - New examples or usage patterns that should be documented
+            - Bug fixes that clarify documented behavior
+          
+          - **DO NOT sync if:**
+            - Only internal code refactoring with no behavior changes
+            - Test-only changes
+            - CI/workflow changes
+            - Minor typo fixes in code comments
+            - Internal dependency updates with no API changes
+
+          **Step 2: If Documentation Sync is Needed**
+
+          If you determine documentation updates are required, please:
+          1. Navigate to the ./cloudflare-docs directory
+          2. Adapt the relevant changes for the cloudflare-docs repository structure and style
+          3. Create or update the appropriate markdown files
+          4. Ensure content follows cloudflare-docs conventions and formatting
+          5. Commit with message: "Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+          6. Push the branch to origin
+          7. Create a PR in cloudflare-docs using gh CLI:
+             - Title: "📚 Sync docs from ${{ github.repository }}#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+             - Body should include:
+               * Explanation this is AI-adapted documentation sync
+               * Link to original PR: https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+               * Summary of what documentation changes were made
+               * Note that it should be reviewed alongside the source PR
+
+          **Step 3: Provide Clear Output**
+
+          Clearly state your decision:
+          - If syncing: Explain what documentation changes you're making and why
+          - If not syncing: Explain why documentation updates aren't needed for this PR
 
           ## Important Notes
-          - The cloudflare-docs repository may have a different structure than our docs/ folder
-          - Adapt paths, links, and references as needed
-          - Follow any existing patterns you see in the cloudflare-docs repository
-          - If there are cloudflare-specific conventions, follow them
           - Use the GH_TOKEN environment variable for authentication with gh CLI
+          - Adapt paths, links, and references as needed for cloudflare-docs structure
+          - Follow existing patterns in the cloudflare-docs repository
+          - Be conservative but thorough - when in doubt, create the sync PR for human review
 
-          Please complete this entire workflow to create the synced PR.
+          Begin your evaluation now.
           EOF
 
       - name: Run Claude Code to create adapted PR
@@ -119,4 +135,4 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt_file: /tmp/claude_prompt.md
         env:
-          GH_TOKEN: ${{ secrets.CLOUDFLARE_DOCS_PAT }}
+          GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
