@@ -124,6 +124,32 @@ jobs:
 
           ⚠️ THE TASK IS NOT COMPLETE UNTIL ALL 8 STEPS ARE DONE. Do not stop after editing files.
 
+          ## Documentation Writing Guidelines (Diátaxis Framework)
+
+          When writing the documentation content, adapt your approach based on what changed:
+
+          **For a single function/method:**
+          - **Reference**: Technical description - signature, parameters, return types, behavior
+          - **Example**: Concise code snippet showing usage in context
+          - **Use cases**: Brief bullets on when/why to use it (if not obvious)
+          - **DO NOT** create separate "how-to" sections - integrate examples into the reference
+
+          **For new features/workflows (multiple related functions):**
+          - **Reference**: Complete API docs for all functions
+          - **How-to guide**: Step-by-step guide for real-world tasks
+          - **Explanation**: Architecture, design decisions, alternatives
+
+          **For breaking changes:**
+          - **Reference**: Updated API documentation
+          - **How-to**: Migration guide (before/after)
+          - **Explanation**: Why changed, implications
+
+          **Key principles:**
+          - Single functions = reference + example (concise)
+          - Multi-step workflows = separate how-to guides
+          - Keep reference neutral and factual
+          - Don't overexplain simple functions
+
           **Step 3: Provide Clear Output**
 
           Clearly state your decision:
@@ -150,7 +176,6 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
-          show_full_output: true
           claude_args: "--allowed-tools Bash,Edit"
         env:
           GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
