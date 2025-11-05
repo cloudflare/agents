@@ -119,8 +119,24 @@ jobs:
           7. **CRITICAL - Create PR in cloudflare-docs:**
              Run: `gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${{ github.event.pull_request.number }} --title "📚 Sync docs from ${{ github.repository }}#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" --body "🤖 Automated sync from https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"`
 
-          8. **CRITICAL - Comment on original PR:**
-             Run: `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "📚 Documentation sync PR created in cloudflare-docs"`
+          8. **CRITICAL - Comment on original PR (or edit existing comment):**
+             Get the docs PR URL, then create or update comment:
+             ```bash
+             DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${{ github.event.pull_request.number }} --json url --jq '.[0].url')
+             
+             # Check if bot comment already exists (look for comments from github-actions bot containing "Documentation sync")
+             EXISTING_COMMENT_ID=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json comments --jq '.comments[] | select(.author.login == "github-actions" and (.body | contains("Documentation sync"))) | .id' | head -1)
+             
+             COMMENT_BODY="📚 **Documentation sync PR:** $DOCS_PR_URL\n\n_This comment will be updated as the PR changes._"
+             
+             if [ -n "$EXISTING_COMMENT_ID" ]; then
+               # Edit existing comment
+               gh api --method PATCH /repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
+             else
+               # Create new comment
+               gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "$COMMENT_BODY"
+             fi
+             ```
 
           ⚠️ THE TASK IS NOT COMPLETE UNTIL ALL 8 STEPS ARE DONE. Do not stop after editing files.
 
