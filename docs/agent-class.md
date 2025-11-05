@@ -28,7 +28,7 @@ The Workers runtime always calls the constructor to handle things internally. Th
 
 ### RPC
 
-By writing a Durable Object class which inherits from the built-in type `DurableObject`, public methods areexposed as RPC methods, which developers can call using a [DurableObjectStub from a Worker](https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/#invoking-methods-on-a-durable-object).
+By writing a Durable Object class which inherits from the built-in type `DurableObject`, public methods are exposed as RPC methods, which developers can call using a [DurableObjectStub from a Worker](https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/#invoking-methods-on-a-durable-object).
 
 ```ts
 // This instance could've been active, hibernated,
