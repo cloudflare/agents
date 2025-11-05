@@ -7,7 +7,7 @@ This document tries to bridge that gap, empowering any developer aiming to get s
 # What is the Agent?
 
 The `Agent` class is an extension of `DurableObject`. That is to say, they _are_ **Durable Objects**. If you're not familiar with Durable Objects, it is highly recommended that you read ["What are Durable Objects"](https://developers.cloudflare.com/durable-objects/) but at their core, Durable Objects are globally addressable (each instance has a unique ID) single-threaded compute instances with long term storage (KV/SQLite).  
-That being said, `Agent` does **not** extend `DurableObject` directly but instead `Server`. `Server` is a class provided by [partykit](https://github.com/cloudflare/partykit/tree/main/packages/partyserver).
+That being said, `Agent` does **not** extend `DurableObject` directly but instead `Server`. `Server` is a class provided by [PartyKit](https://github.com/cloudflare/partykit/tree/main/packages/partyserver).
 
 You can visualize the logic as a Matryoshka doll: **DurableObject** -> **Server** -> **Agent**.
 
@@ -24,11 +24,11 @@ constructor(ctx: DurableObjectState, env: Env) {}
 The Workers runtime always calls the constructor to handle things internally. This means 2 things:
 
 1. While the constructor is called every time the DO is initalized, the signature is fixed. Developers **can't add or update parameters from the constructor**.
-2. Insted of instantiating the class manually, developers must use the binding APIs and do it through [Worker Bindings](https://developers.cloudflare.com/durable-objects/api/stub/).
+2. Insted of instantiating the class manually, developers must use the binding APIs and do it through the [DurableObjectNamespace](https://developers.cloudflare.com/durable-objects/api/namespace/).
 
 ### RPC
 
-> By writing a Durable Object class which inherits from the built-in type DurableObject, public methods on the Durable Objects class are exposed as RPC methods, which developers can call using a DurableObjectStub from a Worker.
+By writing a Durable Object class which inherits from the built-in type DurableObject, public methods on the Durable Objects class are exposed as RPC methods, which developers can call using a DurableObjectStub from a Worker.
 
 ```ts
 // This instance could've been active, hibernated,
@@ -42,7 +42,7 @@ await stub.bar();
 
 ### `fetch()`
 
-Durable Objects can take a `Request` from a Worker and send a `Response` back, this can **only** be done through the [`fetch`](https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/#invoking-the-fetch-handler) method that DOs expose.
+Durable Objects can take a `Request` from a Worker and send a `Response` back. This can **only** be done through the [`fetch`](https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/#invoking-the-fetch-handler) method (which the developer must implement).
 
 ### WebSockets
 
