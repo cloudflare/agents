@@ -1,5 +1,25 @@
 # @cloudflare/agents
 
+## 0.2.21
+
+### Patch Changes
+
+- [#631](https://github.com/cloudflare/agents/pull/631) [`6ddabb7`](https://github.com/cloudflare/agents/commit/6ddabb71a2b1df9bb270ad632fc6714c41b931e4) Thanks [@ghostwriternr](https://github.com/ghostwriternr)! - Handle OAuth errors and validate redirect URLs
+
+- [#626](https://github.com/cloudflare/agents/pull/626) [`cec3cca`](https://github.com/cloudflare/agents/commit/cec3cca32076cc314937f4894556ac2a3a4e7ee9) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove url field from RequestExtra in WorkerTransport. It is non standard and goes against the MCP spec types.
+
+- [#630](https://github.com/cloudflare/agents/pull/630) [`636aaf9`](https://github.com/cloudflare/agents/commit/636aaf99f8ecd7a6f4d445efe9a59f698cdb963e) Thanks [@ghostwriternr](https://github.com/ghostwriternr)! - Fix OAuth redirect handling in MCP clients
+
+- [#624](https://github.com/cloudflare/agents/pull/624) [`3bb54bf`](https://github.com/cloudflare/agents/commit/3bb54bfbdea9cba5928e233b03680dfc6993fc40) Thanks [@threepointone](https://github.com/threepointone)! - Add CLI entry point and tests for agents package
+
+  Introduces a new CLI for the agents package using yargs with the following commands (currently stubs, not yet implemented):
+  - `init` / `create` - Initialize an agents project
+  - `dev` - Start development server
+  - `deploy` - Deploy agents to Cloudflare
+  - `mcp` - The agents mcp server
+
+  Adds CLI test suite with comprehensive coverage for all commands and configurations. Updates package.json to register the CLI binary, adds test scripts for CLI testing, and includes yargs dependencies.
+
 ## 0.2.20
 
 ### Patch Changes
