@@ -151,6 +151,6 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
           show_full_output: true
-          claude_args: "--allowed-tools Bash"
+          claude_args: "--allowed-tools Bash,Edit"
         env:
           GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
