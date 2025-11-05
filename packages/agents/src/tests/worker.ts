@@ -199,22 +199,20 @@ export class TestOAuthAgent extends Agent<Env> {
     this.mcp.configureOAuthCallback(config);
   }
 
-  async setupMockMcpConnection(
+  private createMockMcpConnection(
     serverId: string,
-    _serverName: string,
     serverUrl: string,
-    callbackUrl: string
-  ): Promise<void> {
-    // Register callback URL (simulates non-hibernated state)
-    this.mcp.registerCallbackUrl(`${callbackUrl}/${serverId}`);
-
-    // Prevents _handlePotentialOAuthCallback from trying to restore the connection
-    this.mcp.mcpConnections[serverId] = {
+    connectionState: "ready" | "authenticating" | "connecting" = "ready"
+  ): MCPClientConnection {
+    return {
       url: new URL(serverUrl),
-      connectionState: "ready",
+      connectionState,
       tools: [],
       resources: [],
       prompts: [],
+      resourceTemplates: [],
+      serverCapabilities: undefined,
+      lastConnectedTransport: undefined,
       options: {
         transport: {
           authProvider: {
@@ -232,15 +230,26 @@ export class TestOAuthAgent extends Agent<Env> {
     } as unknown as MCPClientConnection;
   }
 
+  async setupMockMcpConnection(
+    serverId: string,
+    _serverName: string,
+    serverUrl: string,
+    callbackUrl: string
+  ): Promise<void> {
+    this.mcp.registerCallbackUrl(`${callbackUrl}/${serverId}`);
+    this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
+      serverId,
+      serverUrl,
+      "ready"
+    );
+  }
+
   async setupMockOAuthState(
     serverId: string,
     _code: string,
     _state: string,
     options?: { createConnection?: boolean }
   ): Promise<void> {
-    // Set up connection in authenticating state so OAuth callback can be processed
-
-    // Needed for non-hibernation tests where the connection already exists
     if (options?.createConnection) {
       const server = this.getMcpServerFromDb(serverId);
       if (!server) {
@@ -249,35 +258,18 @@ export class TestOAuthAgent extends Agent<Env> {
         );
       }
 
-      this.mcp.mcpConnections[serverId] = {
-        url: new URL(server.server_url),
-        connectionState: "authenticating",
-        tools: [],
-        resources: [],
-        prompts: [],
-        options: {
-          transport: {
-            authProvider: {
-              clientId: "test-client-id",
-              authUrl: "http://example.com/oauth/authorize"
-            }
-          }
-        },
-        completeAuthorization: async (_code: string) => {
-          this.mcp.mcpConnections[serverId].connectionState = "ready";
-        },
-        establishConnection: async () => {
-          this.mcp.mcpConnections[serverId].connectionState = "ready";
-        }
-      } as unknown as MCPClientConnection;
+      this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
+        serverId,
+        server.server_url,
+        "authenticating"
+      );
     } else if (this.mcp.mcpConnections[serverId]) {
-      this.mcp.mcpConnections[serverId].connectionState = "authenticating";
-      this.mcp.mcpConnections[serverId].completeAuthorization = async (
-        _code: string
-      ) => {
+      const conn = this.mcp.mcpConnections[serverId];
+      conn.connectionState = "authenticating";
+      conn.completeAuthorization = async (_code: string) => {
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       };
-      this.mcp.mcpConnections[serverId].establishConnection = async () => {
+      conn.establishConnection = async () => {
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       };
     }
