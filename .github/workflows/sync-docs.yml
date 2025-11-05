@@ -103,26 +103,26 @@ jobs:
 
           **Step 2: If Documentation Sync is Needed**
 
-          If you determine documentation updates are required, please:
-          1. Navigate to the ./cloudflare-docs directory
-          2. Adapt the relevant changes for the cloudflare-docs repository structure and style
+          If you determine documentation updates are required, YOU MUST COMPLETE ALL STEPS:
+
+          1. Navigate to ./cloudflare-docs (already cloned, branch sync-docs-pr-${{ github.event.pull_request.number }} checked out)
+          2. Adapt changes for cloudflare-docs repository structure and style
           3. Create or update the appropriate markdown files
-          4. Ensure content follows cloudflare-docs conventions and formatting
-          5. Commit with message: "Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
-          6. Push the branch to origin
-          7. Create a PR in cloudflare-docs using gh CLI:
-             - Title: "📚 Sync docs from ${{ github.repository }}#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
-             - Body should include:
-               * Explanation this is AI-adapted documentation sync
-               * Link to original PR: https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}
-               * Summary of what documentation changes were made
-               * Note that it should be reviewed alongside the source PR
-          8. Post a comment on the original PR (${{ github.repository }}#${{ github.event.pull_request.number }}) using gh CLI:
-             - Use: `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "<message>"`
-             - Message should include:
-               * Notification that documentation sync PR was created
-               * Link to the cloudflare-docs PR
-               * Brief summary of what was documented
+          4. Ensure content follows cloudflare-docs conventions
+
+          5. **CRITICAL - Commit changes:**
+             Run: `cd cloudflare-docs && git add . && git commit -m "Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"`
+
+          6. **CRITICAL - Push to remote:**
+             Run: `cd cloudflare-docs && git push origin sync-docs-pr-${{ github.event.pull_request.number }}`
+
+          7. **CRITICAL - Create PR in cloudflare-docs:**
+             Run: `gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${{ github.event.pull_request.number }} --title "📚 Sync docs from ${{ github.repository }}#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" --body "🤖 Automated sync from https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"`
+
+          8. **CRITICAL - Comment on original PR:**
+             Run: `gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "📚 Documentation sync PR created in cloudflare-docs"`
+
+          ⚠️ THE TASK IS NOT COMPLETE UNTIL ALL 8 STEPS ARE DONE. Do not stop after editing files.
 
           **Step 3: Provide Clear Output**
 
