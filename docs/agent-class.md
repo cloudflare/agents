@@ -75,7 +75,7 @@ export class MyDurableObject extends DurableObject {
 
 ### `alarm()`
 
-HTTP and RPC requests are not the only entrypoints for a DO. Alarms allow developers to schedule tasks to run at a later time. Whenever the runtime knows an alarm is due, it will call the `alarm()` method, which is left to the developer to implement.
+HTTP and RPC requests are not the only entrypoints for a DO. Alarms allow developers to schedule an event to trigger at a later time. Whenever the next alarm is due, the runtime will call the `alarm()` method, which is left to the developer to implement.
 
 To schedule an alarm, you can use the `this.ctx.storage.setAlarm()` method. For more information, check [the documentation](https://developers.cloudflare.com/durable-objects/api/alarms/).
 
@@ -106,7 +106,7 @@ Lastly, it's worth mentioning that the DO also has the Worker `Env` in `this.env
 
 Now that you've seen what Durable Objects come with out-of-the-box, what [PartyKit](https://github.com/cloudflare/partykit)'s `Server` (package `partyserver`) implements will be clearer. It's an **opinionated `DurableObject` wrapper that improves DX by hiding away DO primitives in favor of more developer friendly callbacks**.
 
-An important note is that `Server` **does NOT make use any of the DO storage** so you will not see extra operations.
+An important note is that `Server` **does NOT persist to the DO storage** so you will not see extra storage operations by using it.
 
 ### Addressing
 
@@ -240,7 +240,7 @@ class MyAgent extends Agent {
 
 ### RPC and Callable Methods
 
-`agents` take Durable Objects RPC one step forward by implementing RPC through WebSockets, so clients can also call methods on the Agent directly. To make a method callable, developers can use the `@callable` decorator. Methods can return a serializable value or a stream (when using `@callable({ stream: true })`).
+`agents` take Durable Objects RPC one step forward by implementing RPC through WebSockets, so clients can also call methods on the Agent directly. To make a method callable through WS, developers can use the `@callable` decorator. Methods can return a serializable value or a stream (when using `@callable({ stream: true })`).
 
 ```ts
 class MyAgent extends Agent {
@@ -292,6 +292,8 @@ Tasks are stored in the `cf_agents_queues` SQL table and are automatically flush
 ### `this.schedule` and friends
 
 Agents support scheduled execution of methods by wrapping the Durable Object's `alarm()`. The available methods are `this.schedule`, `this.getSchedule`, `this.getSchedules`, `this.cancelSchedule`. Schedules can be one-time, delayed, or recurring (using cron expressions).
+
+Since DOs only allow one alarm at a time, the `Agent` class works around this by managing multiple schedules in SQL and using a single alarm.
 
 ```ts
 class MyAgent extends Agent {
@@ -421,7 +423,7 @@ class MyAgent extends Agent {
 
 ### `this.destroy`
 
-**`destroy()`**: Drops all tables, deletes alarms, clears storage, and aborts the context. The `this.abort` method that is called by `this.destroy` comes from `DurableObject` and ensures that the Agent is fully evicted. In order to do so, it throws an uncatchable error that will show up in your logs (read more [here](https://developers.cloudflare.com/durable-objects/api/state/#abort)).
+`this.destroy()` drops all tables, deletes alarms, clears storage, and aborts the context. To ensure that the DO is fully evicted, `this.ctx.abort()` is called, which throws an uncatchable error that will show up in your logs (read more about it [here](https://developers.cloudflare.com/durable-objects/api/state/#abort)).
 
 ```ts
 class MyAgent extends Agent {
