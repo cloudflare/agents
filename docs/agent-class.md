@@ -2,7 +2,7 @@
 
 The core of the `agents` library is the exported `Agent` class. Following the pattern from [Durable Objects](https://developers.cloudflare.com/durable-objects/api/), the main API for developers is to extend the `Agent` so those classes inherit all the built-in features. While this effectively is a supercharged primitive that allows developers to only write the logic they need in their agents, it obscures the inner workings.
 
-This document tries to bridge that gap, empowering any developer aiming to get started writing agents to get the full picture and avoid common pitfalls. The snippets shown here are primarily illustrative and don't necessarily represent best practices.
+This document tries to bridge that gap, empowering any developer aiming to get started writing agents to get the full picture and avoid common pitfalls. The snippets shown here are primarily illustrative and don't necessarily represent best practices. For a more in-depth look at the inner workings of the `Agent` class, check out the [API reference](https://developers.cloudflare.com/agents/api-reference/) and the [source code](https://github.com/cloudflare/agents/blob/main/packages/agents/src/index.ts).
 
 # What is the Agent?
 
