@@ -1,6 +1,6 @@
 # Demystifying the Agent class
 
-The core of the `agents` library is the exported `Agent` class. Following the pattern from Durable Objects, the main API for developers is to extend the `Agent` so those classes inherit all the built-in features. While this effectively is a supercharged primitive that allows developers to only write the logic they need in their agents, it obscures the inner workings.
+The core of the `agents` library is the exported `Agent` class. Following the pattern from [Durable Objects](https://developers.cloudflare.com/durable-objects/api/), the main API for developers is to extend the `Agent` so those classes inherit all the built-in features. While this effectively is a supercharged primitive that allows developers to only write the logic they need in their agents, it obscures the inner workings.
 
 This document tries to bridge that gap, empowering any developer aiming to get started writing agents to get the full picture and avoid common pitfalls. The snippets shown here are primarily illustrative and don't necessarily represent best practices.
 
@@ -28,7 +28,7 @@ The Workers runtime always calls the constructor to handle things internally. Th
 
 ### RPC
 
-By writing a Durable Object class which inherits from the built-in type DurableObject, public methods on the Durable Objects class are exposed as RPC methods, which developers can call using a DurableObjectStub from a Worker.
+By writing a Durable Object class which inherits from the built-in type `DurableObject`, public methods areexposed as RPC methods, which developers can call using a [DurableObjectStub from a Worker](https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/#invoking-methods-on-a-durable-object).
 
 ```ts
 // This instance could've been active, hibernated,
@@ -48,7 +48,7 @@ Durable Objects can take a `Request` from a Worker and send a `Response` back. T
 
 Durable Objects include first-class support for [WebSockets](https://developers.cloudflare.com/durable-objects/best-practices/websockets/). A DO can accept a WebSocket it receives from a `Request` in `fetch` and forget about it. The base class provides methods that developers can implement that are called as callbacks. They effectively replace the need for event listeners.
 
-The base class provides `webSocketMessage(ws, message)`, `webSocketClose(ws, code, reason, wasClean)` and `webSocketError(ws , error)`.
+The base class provides `webSocketMessage(ws, message)`, `webSocketClose(ws, code, reason, wasClean)` and `webSocketError(ws , error)` ([API](https://developers.cloudflare.com/workers/runtime-apis/websockets)).
 
 ```ts
 export class MyDurableObject extends DurableObject {
@@ -100,7 +100,7 @@ const token = kv.get("someToken");
 
 ### `this.ctx.env`
 
-Lastly, it's worth mentioning that the DO also has the Worker `Env` in `this.env`.
+Lastly, it's worth mentioning that the DO also has the Worker `Env` in `this.env`. Read more [here](https://developers.cloudflare.com/workers/runtime-apis/bindings).
 
 ## Layer 1: Partykit `Server`
 
@@ -193,7 +193,7 @@ Now finally, the `Agent` class. `Agent` extends `Server` and provides opinionate
 
 One of the core features of `Agent` is **automatic state persistence**. Developers define the shape of their state via the generic parameter and `initialState` (which is only used if no state exists in storage), and the Agent handles loading, saving, and broadcasting state changes (check `Server`'s `this.broadcast()` above).
 
-`this.state` is a getter that lazily loads state from storage (SQL). **State is persisted across DO evictions** when it's updated with `this.setState()`, which automatically writes back to storage.  
+`this.state` is a getter that lazily loads state from storage (SQL). **State is persisted across DO evictions** when it's updated with `this.setState()`, which automatically serializes the state and writes it back to storage.  
 There's also `this.onStateUpdate` that you can override to react to state changes.
 
 ```ts
@@ -210,7 +210,7 @@ class MyAgent extends Agent<Env, { count: number }> {
 }
 ```
 
-State is stored in the `cf_agents_state` SQL table. State messages are sent with `type: "cf_agent_state"` (both from the client and the server). Since the `agents` provides JS and React clients, real-time state updates are available out of the box.
+State is stored in the `cf_agents_state` SQL table. State messages are sent with `type: "cf_agent_state"` (both from the client and the server). Since the `agents` provides [JS and React clients](https://developers.cloudflare.com/agents/api-reference/store-and-sync-state/#synchronizing-state), real-time state updates are available out of the box.
 
 ### `this.sql`
 
@@ -240,7 +240,7 @@ class MyAgent extends Agent {
 
 ### RPC and Callable Methods
 
-`agents` take Durable Objects RPC one step forward by implementing RPC through WebSockets, so clients can also call methods on the Agent directly. To make a method callable, developers can use the `@callable` decorator. Methods can return a value or a stream.
+`agents` take Durable Objects RPC one step forward by implementing RPC through WebSockets, so clients can also call methods on the Agent directly. To make a method callable, developers can use the `@callable` decorator. Methods can return a serializable value or a stream (when using `@callable({ stream: true })`).
 
 ```ts
 class MyAgent extends Agent {
@@ -326,7 +326,7 @@ Schedules are stored in the `cf_agents_schedules` SQL table. Cron schedules auto
 
 ### `this.mcp` and friends
 
-`Agent` includes a multi-server MCP client. This enables your Agent to interact with external services that expose MCP interfaces. The MCP client is properly documented [here].
+`Agent` includes a multi-server MCP client. This enables your Agent to interact with external services that expose MCP interfaces. The MCP client is properly documented [here](https://developers.cloudflare.com/agents/model-context-protocol/mcp-client-api/).
 
 ```ts
 class MyAgent extends Agent {
@@ -344,7 +344,7 @@ class MyAgent extends Agent {
 
 ### Email Handling
 
-Agents can receive and reply to emails using Cloudflare's Email Routing.
+Agents can receive and reply to emails using Cloudflare's [Email Routing](https://developers.cloudflare.com/email-routing/email-workers/).
 
 ```ts
 class MyAgent extends Agent {
@@ -380,7 +380,7 @@ export default {
 
 ### Context Management
 
-`agents` wraps all your methods with an `AsyncLocalStorage` to maintain context throughout the request lifecycle. This allows you to access the current agent, connection, request, or email from anywhere in your code:
+`agents` wraps all your methods with an `AsyncLocalStorage` to maintain context throughout the request lifecycle. This allows you to access the current agent, connection, request, or email (depending of what event is being handled) from anywhere in your code:
 
 ```ts
 import { getCurrentAgent } from "agents";
@@ -421,7 +421,7 @@ class MyAgent extends Agent {
 
 ### `this.destroy`
 
-**`destroy()`**: Drops all tables, deletes alarms, clears storage, and aborts the context. The `this.abort` method that is called by `this.destroy` comes from `DurableObject` and ensures that the Agent is fully evicted. In order to do so, it throws an uncatchable error that will show up in your logs (and that's OK).
+**`destroy()`**: Drops all tables, deletes alarms, clears storage, and aborts the context. The `this.abort` method that is called by `this.destroy` comes from `DurableObject` and ensures that the Agent is fully evicted. In order to do so, it throws an uncatchable error that will show up in your logs (read more [here](https://developers.cloudflare.com/durable-objects/api/state/#abort)).
 
 ```ts
 class MyAgent extends Agent {
