@@ -63,13 +63,23 @@ jobs:
         if: steps.get-diffs.outputs.skip != 'true'
         id: create-prompt
         run: |
+          # Store PR metadata in environment variables to avoid shell escaping issues
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+
           cat > /tmp/claude_prompt.md << EOF
           # Intelligent Documentation Sync Task
 
+          ⚠️ **CRITICAL INSTRUCTION**: All PR metadata is provided in the Context section below. 
+          DO NOT run \`gh pr view\`, \`gh api\`, or any other command to fetch PR information from GitHub.
+          The PR number, title, and URL below are the ONLY source of truth. Use them EXACTLY as written.
+
           ## Context
           - **Source Repository:** ${{ github.repository }}
-          - **Original PR:** #${{ github.event.pull_request.number }}
-          - **PR Title:** ${{ github.event.pull_request.title }}
+          - **Original PR Number:** ${PR_NUMBER}
+          - **Original PR Title:** ${PR_TITLE}
+          - **Original PR URL:** ${PR_URL}
           - **PR Description:**
           ${{ github.event.pull_request.body }}
 
@@ -107,38 +117,52 @@ jobs:
 
           If you determine documentation updates are required, YOU MUST COMPLETE ALL STEPS:
 
-          1. Navigate to ./cloudflare-docs (already cloned, branch sync-docs-pr-${{ github.event.pull_request.number }} checked out)
+          1. Navigate to ./cloudflare-docs (already cloned, branch sync-docs-pr-${PR_NUMBER} checked out)
           2. Adapt changes for cloudflare-docs repository structure and style
           3. Create or update the appropriate markdown files
           4. Ensure content follows cloudflare-docs conventions
 
           5. **CRITICAL - Commit changes:**
-             Run: `cd cloudflare-docs && git add . && git commit -m "Sync docs from PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"`
+             Run exactly: `cd cloudflare-docs && git add . && git commit -m "Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}"`
 
           6. **CRITICAL - Push to remote:**
-             Run: `cd cloudflare-docs && git push origin sync-docs-pr-${{ github.event.pull_request.number }}`
+             Run exactly: `cd cloudflare-docs && git push origin sync-docs-pr-${PR_NUMBER}`
 
           7. **CRITICAL - Create PR in cloudflare-docs:**
-             Run: `gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${{ github.event.pull_request.number }} --title "📚 Sync docs from ${{ github.repository }}#${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" --body "🤖 Automated sync from https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"`
+             ⚠️ **DO NOT fetch PR data from GitHub**. Use the PR_NUMBER, PR_TITLE, and PR_URL from the Context section.
+             Run this EXACT command without modification:
+             ```bash
+             gh pr create --repo cloudflare/cloudflare-docs \
+               --base main \
+               --head sync-docs-pr-${PR_NUMBER} \
+               --title "📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}" \
+               --body "🤖 **Automated documentation sync**
+             
+             Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**
+             
+             🤖 _Generated with [Claude Code](https://claude.com/claude-code)_
+             
+             Co-Authored-By: Claude <noreply@anthropic.com>"
+             ```
 
           8. **CRITICAL - Comment on original PR (or edit existing comment):**
-             Get the docs PR URL, then create or update comment:
+             Get the docs PR URL, then create or update comment using PR_NUMBER from context:
              ```bash
-             DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${{ github.event.pull_request.number }} --json url --jq '.[0].url')
+             DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json url --jq '.[0].url')
              
              # Check if bot comment already exists (look for unique marker in comment body)
-             EXISTING_COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments --jq '.[] | select(.body | contains("<!-- docs-sync-comment -->")) | .id' | head -1)
+             EXISTING_COMMENT_ID=$(gh api repos/cloudflare/agents/issues/${PR_NUMBER}/comments --jq '.[] | select(.body | contains("<!-- docs-sync-comment -->")) | .id' | head -1)
              
              COMMENT_BODY="<!-- docs-sync-comment -->\n📚 **Documentation sync PR:** $DOCS_PR_URL\n\n_This comment will be updated as the PR changes._"
              
              if [ -n "$EXISTING_COMMENT_ID" ]; then
                # Edit existing comment
                echo "Updating existing comment ID: $EXISTING_COMMENT_ID"
-               gh api --method PATCH /repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
+               gh api --method PATCH /repos/cloudflare/agents/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
              else
                # Create new comment
                echo "Creating new comment"
-               gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "$COMMENT_BODY"
+               gh pr comment ${PR_NUMBER} --repo cloudflare/agents --body "$COMMENT_BODY"
              fi
              ```
 
