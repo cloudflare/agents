@@ -124,16 +124,18 @@ jobs:
              ```bash
              DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${{ github.event.pull_request.number }} --json url --jq '.[0].url')
              
-             # Check if bot comment already exists (look for comments from github-actions bot containing "Documentation sync")
-             EXISTING_COMMENT_ID=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json comments --jq '.comments[] | select(.author.login == "github-actions" and (.body | contains("Documentation sync"))) | .id' | head -1)
+             # Check if bot comment already exists (look for unique marker in comment body)
+             EXISTING_COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments --jq '.[] | select(.body | contains("<!-- docs-sync-comment -->")) | .id' | head -1)
              
-             COMMENT_BODY="📚 **Documentation sync PR:** $DOCS_PR_URL\n\n_This comment will be updated as the PR changes._"
+             COMMENT_BODY="<!-- docs-sync-comment -->\n📚 **Documentation sync PR:** $DOCS_PR_URL\n\n_This comment will be updated as the PR changes._"
              
              if [ -n "$EXISTING_COMMENT_ID" ]; then
                # Edit existing comment
+               echo "Updating existing comment ID: $EXISTING_COMMENT_ID"
                gh api --method PATCH /repos/${{ github.repository }}/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
              else
                # Create new comment
+               echo "Creating new comment"
                gh pr comment ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --body "$COMMENT_BODY"
              fi
              ```
