@@ -128,18 +128,32 @@ jobs:
           6. **CRITICAL - Push to remote:**
              Run exactly: `cd cloudflare-docs && git push origin sync-docs-pr-${PR_NUMBER}`
 
-          7. **CRITICAL - Create PR in cloudflare-docs:**
+          7. **CRITICAL - Create or update PR in cloudflare-docs:**
              ⚠️ **CRITICAL**: 
-             - DO NOT fetch PR data from GitHub API
+             - DO NOT fetch PR data from GitHub API to get title/description
              - DO NOT add your own description or summary
              - Use ONLY the PR_NUMBER, PR_TITLE, and PR_URL from the Context section above
-             - Copy and run this EXACT command with NO modifications:
              
+             First check if PR already exists, then create or update:
              ```bash
-             gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${PR_NUMBER} --title "📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}" --body "Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+             # Check if PR already exists
+             EXISTING_PR=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json number --jq '.[0].number')
+             
+             PR_TITLE_TEXT="📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}"
+             PR_BODY_TEXT="Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+             
+             if [ -n "$EXISTING_PR" ]; then
+               # Update existing PR
+               echo "Updating existing PR #$EXISTING_PR"
+               gh pr edit $EXISTING_PR --repo cloudflare/cloudflare-docs --title "$PR_TITLE_TEXT" --body "$PR_BODY_TEXT"
+             else
+               # Create new PR
+               echo "Creating new PR"
+               gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${PR_NUMBER} --title "$PR_TITLE_TEXT" --body "$PR_BODY_TEXT"
+             fi
              ```
              
-             DO NOT modify the --body parameter or add additional description.
+             DO NOT modify the PR_TITLE_TEXT or PR_BODY_TEXT variables.
 
           8. **CRITICAL - Comment on original PR (or edit existing comment):**
              Get the docs PR URL, then create or update comment using PR_NUMBER from context:
