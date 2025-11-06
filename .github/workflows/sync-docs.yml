@@ -129,21 +129,17 @@ jobs:
              Run exactly: `cd cloudflare-docs && git push origin sync-docs-pr-${PR_NUMBER}`
 
           7. **CRITICAL - Create PR in cloudflare-docs:**
-             ⚠️ **DO NOT fetch PR data from GitHub**. Use the PR_NUMBER, PR_TITLE, and PR_URL from the Context section.
-             Run this EXACT command without modification:
+             ⚠️ **CRITICAL**: 
+             - DO NOT fetch PR data from GitHub API
+             - DO NOT add your own description or summary
+             - Use ONLY the PR_NUMBER, PR_TITLE, and PR_URL from the Context section above
+             - Copy and run this EXACT command with NO modifications:
+             
              ```bash
-             gh pr create --repo cloudflare/cloudflare-docs \
-               --base main \
-               --head sync-docs-pr-${PR_NUMBER} \
-               --title "📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}" \
-               --body "🤖 **Automated documentation sync**
-             
-             Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**
-             
-             🤖 _Generated with [Claude Code](https://claude.com/claude-code)_
-             
-             Co-Authored-By: Claude <noreply@anthropic.com>"
+             gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${PR_NUMBER} --title "📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}" --body "Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
              ```
+             
+             DO NOT modify the --body parameter or add additional description.
 
           8. **CRITICAL - Comment on original PR (or edit existing comment):**
              Get the docs PR URL, then create or update comment using PR_NUMBER from context:
