@@ -196,6 +196,6 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
-          claude_args: "--allowed-tools Bash,Edit"
+          claude_args: "--allowed-tools Bash,Edit,Write"
         env:
           GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
