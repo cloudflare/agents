@@ -86,20 +86,22 @@ jobs:
 
           Please review the changes in this PR and determine if they require documentation updates in cloudflare-docs:
 
-          - **DO sync if:**
-            - Documentation files in docs/ were directly changed
+          - **ALWAYS sync if ANY of these are true:**
+            - Documentation files in docs/ were directly changed (even if other non-doc files also changed)
             - New public API features or functions were added
             - Breaking changes that affect user-facing behavior
             - New configuration options or environment variables
             - New examples or usage patterns that should be documented
             - Bug fixes that clarify documented behavior
 
-          - **DO NOT sync if:**
+          - **DO NOT sync ONLY if ALL changes are:**
             - Only internal code refactoring with no behavior changes
             - Test-only changes
-            - CI/workflow changes
+            - CI/workflow changes (UNLESS docs/ files also changed)
             - Minor typo fixes in code comments
             - Internal dependency updates with no API changes
+
+          **IMPORTANT**: If this PR includes ANY changes to files in the docs/ directory, you MUST proceed with the sync, even if the PR also includes other types of changes like workflow updates.
 
           **Step 2: If Documentation Sync is Needed**
 
@@ -178,7 +180,7 @@ jobs:
           - Use the GH_TOKEN environment variable for authentication with gh CLI
           - Adapt paths, links, and references as needed for cloudflare-docs structure
           - Follow existing patterns in the cloudflare-docs repository
-          - Be conservative but thorough - when in doubt, create the sync PR for human review
+          - **DEFAULT TO SYNCING**: When in doubt about whether changes warrant a sync, ALWAYS create the sync PR for human review. It's better to create an unnecessary PR than to miss important documentation updates.
 
           Begin your evaluation now.
           EOF
