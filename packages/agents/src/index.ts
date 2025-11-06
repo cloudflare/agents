@@ -2055,18 +2055,8 @@ export class StreamingResponse {
   }
 
   /**
-   * Send a chunk of data to the client during a streaming RPC response
-   * @param chunk The data to send (will be serialized as JSON)
-   * @example
-   * ```typescript
-   * async streamData(stream: StreamingResponse) {
-   *   for (let i = 0; i < 10; i++) {
-   *     stream.send({ progress: i * 10 });
-   *     await new Promise(r => setTimeout(r, 100));
-   *   }
-   *   stream.end({ complete: true });
-   * }
-   * ```
+   * Send a chunk of data to the client
+   * @param chunk The data to send
    */
   send(chunk: unknown) {
     if (this._closed) {
