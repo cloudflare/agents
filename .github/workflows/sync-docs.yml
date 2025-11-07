@@ -140,7 +140,7 @@ jobs:
              EXISTING_PR=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json number --jq '.[0].number')
              
              PR_TITLE_TEXT="📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}"
-             PR_BODY_TEXT="Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
+             PR_BODY_TEXT="Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**"
              
              if [ -n "$EXISTING_PR" ]; then
                # Update existing PR
