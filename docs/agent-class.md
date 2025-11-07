@@ -297,7 +297,7 @@ Since DOs only allow one alarm at a time, the `Agent` class works around this by
 
 ```ts
 class MyAgent extends Agent {
-  async onStart() {
+  async foo() {
     // Schedule at a specific time
     await this.schedule(new Date("2025-12-25T00:00:00Z"), "sendGreeting", {
       message: "Merry Christmas!"
