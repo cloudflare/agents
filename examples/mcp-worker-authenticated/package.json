@@ -10,6 +10,6 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "hono": "^4.10.3"
+    "hono": "^4.10.4"
   }
 }

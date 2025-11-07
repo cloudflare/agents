@@ -1,12 +1,32 @@
 {
+  "name": "agents",
+  "description": "A home for your AI agents",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "ai",
+    "llm",
+    "durable objects"
+  ],
+  "type": "module",
+  "version": "0.2.21",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/agents",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bin": {
+    "agents": "dist/cli.js"
+  },
   "author": "Cloudflare Inc.",
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.53",
-    "@modelcontextprotocol/sdk": "^1.20.2",
-    "ai": "5.0.78",
+    "@ai-sdk/openai": "2.0.64",
+    "@modelcontextprotocol/sdk": "^1.21.0",
+    "ai": "5.0.89",
     "cron-schedule": "^5.0.4",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
@@ -16,18 +36,29 @@
     "partysocket": "1.1.6",
     "yargs": "^18.0.0",
     "zod": "^3.25.76",
-    "zod-to-ts": "^1.2.0"
+    "zod-to-ts": "^2.0.0"
   },
-  "publishConfig": {
-    "access": "public"
-  },
-  "description": "A home for your AI agents",
   "devDependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.0.12",
+    "@cloudflare/workers-oauth-provider": "^0.1.0",
     "@types/yargs": "^17.0.34",
     "react": "*",
-    "vitest-browser-react": "^1.0.1"
+    "vitest-browser-react": "^1.0.1",
+    "x402": "^0.7.1"
   },
+  "peerDependencies": {
+    "react": "*",
+    "viem": ">=2.0.0",
+    "x402": "^0.7.1"
+  },
+  "peerDependenciesMeta": {
+    "x402": {
+      "optional": true
+    },
+    "viem": {
+      "optional": true
+    }
+  },
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -100,34 +131,13 @@
       "require": "./dist/mcp/x402.js"
     }
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "README.md"
   ],
-  "keywords": [],
-  "license": "MIT",
-  "name": "agents",
-  "peerDependencies": {
-    "react": "*",
-    "viem": ">=2.0.0",
-    "x402": "^0.6.5"
-  },
-  "peerDependenciesMeta": {
-    "x402": {
-      "optional": true
-    },
-    "viem": {
-      "optional": true
-    }
-  },
-  "repository": {
-    "directory": "packages/agents",
-    "type": "git",
-    "url": "git+https://github.com/cloudflare/agents.git"
-  },
-  "bin": {
-    "agents": "dist/cli.js"
-  },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "check:test": "npm run check:test:workers && npm run check:test:react && npm run check:test:cli",
@@ -140,8 +150,5 @@
     "test:react": "vitest -r src/react-tests",
     "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent",
     "test:workers": "vitest -r src/tests"
-  },
-  "type": "module",
-  "types": "dist/index.d.ts",
-  "version": "0.2.21"
+  }
 }
