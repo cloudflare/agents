@@ -40,8 +40,6 @@
   },
   "devDependencies": {
     "@cloudflare/workers-oauth-provider": "^0.1.0",
-    "@testing-library/react": "^16.3.0",
-    "@testing-library/react-hooks": "^8.0.1",
     "@types/yargs": "^17.0.34",
     "msw": "^2.11.3",
     "react": "*",
