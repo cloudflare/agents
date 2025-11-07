@@ -1,0 +1,75 @@
+---
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  author: CollectionEntry<'authors'>;
+  size?: 'small' | 'medium' | 'large';
+}
+
+const { author, size = 'medium' } = Astro.props;
+const { name, bio, avatar, social } = author.data;
+
+const sizeClasses = {
+  small: 'w-12 h-12',
+  medium: 'w-16 h-16',
+  large: 'w-24 h-24',
+};
+---
+
+<div class="flex gap-4 items-start p-4 border border-orange-400 bg-orange-50 rounded">
+  <img
+    src={avatar}
+    alt={`${name} profile picture`}
+    class={`${sizeClasses[size]} rounded-full object-cover border-2 border-orange-400 flex-shrink-0`}
+    loading="lazy"
+  />
+  <div class="flex-1 min-w-0">
+    <h4 class="text-lg font-semibold text-orange-700 mb-1">{name}</h4>
+    <p class="text-sm text-orange-600 mb-2">{bio}</p>
+    {social && (
+      <div class="flex gap-3 flex-wrap">
+        {social.twitter && (
+          <a
+            href={social.twitter}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-orange-600 hover:text-orange-700 text-xs"
+          >
+            Twitter ↗
+          </a>
+        )}
+        {social.github && (
+          <a
+            href={social.github}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-orange-600 hover:text-orange-700 text-xs"
+          >
+            GitHub ↗
+          </a>
+        )}
+        {social.linkedin && (
+          <a
+            href={social.linkedin}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-orange-600 hover:text-orange-700 text-xs"
+          >
+            LinkedIn ↗
+          </a>
+        )}
+        {social.website && (
+          <a
+            href={social.website}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="text-orange-600 hover:text-orange-700 text-xs"
+          >
+            Website ↗
+          </a>
+        )}
+      </div>
+    )}
+  </div>
+</div>
+

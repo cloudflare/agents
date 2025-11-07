@@ -1,0 +1,72 @@
+---
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  author: CollectionEntry<'authors'>;
+}
+
+const { author } = Astro.props;
+const { name, bio, avatar, social } = author.data;
+---
+
+<div class="p-6 border border-orange-400 bg-white hover:bg-orange-50 transition-colors">
+  <div class="flex flex-col md:flex-row gap-6">
+    <div class="flex-shrink-0">
+      <img
+        src={avatar}
+        alt={`${name} profile picture`}
+        class="w-24 h-24 rounded-full object-cover border-2 border-orange-400"
+        loading="lazy"
+      />
+    </div>
+    <div class="flex-1">
+      <h3 class="text-2xl font-semibold text-orange-700 mb-2">{name}</h3>
+      <p class="text-orange-600 mb-4">{bio}</p>
+      {social && (
+        <div class="flex gap-4 flex-wrap">
+          {social.twitter && (
+            <a
+              href={social.twitter}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-orange-600 hover:text-orange-700 underline underline-offset-2 text-sm"
+            >
+              Twitter ↗
+            </a>
+          )}
+          {social.github && (
+            <a
+              href={social.github}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-orange-600 hover:text-orange-700 underline underline-offset-2 text-sm"
+            >
+              GitHub ↗
+            </a>
+          )}
+          {social.linkedin && (
+            <a
+              href={social.linkedin}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-orange-600 hover:text-orange-700 underline underline-offset-2 text-sm"
+            >
+              LinkedIn ↗
+            </a>
+          )}
+          {social.website && (
+            <a
+              href={social.website}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="text-orange-600 hover:text-orange-700 underline underline-offset-2 text-sm"
+            >
+              Website ↗
+            </a>
+          )}
+        </div>
+      )}
+    </div>
+  </div>
+</div>
+

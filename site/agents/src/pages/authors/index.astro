@@ -1,0 +1,28 @@
+---
+import BlogLayout from '../../components/blog/BlogLayout.astro';
+import AuthorCard from '../../components/blog/AuthorCard.astro';
+import { getAllAuthors } from '../../utils/authors';
+
+const authors = await getAllAuthors();
+const sortedAuthors = authors.sort((a, b) => 
+  a.data.name.localeCompare(b.data.name)
+);
+---
+
+<BlogLayout>
+  <div class="p-6">
+    <div class="mb-8">
+      <h1 class="text-5xl lg:text-6xl font-semibold mb-4">Authors</h1>
+      <p class="text-xl text-orange-600 max-w-2xl">
+        Meet the team behind the Cloudflare Agents blog.
+      </p>
+    </div>
+    
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      {sortedAuthors.map((author) => (
+        <AuthorCard author={author} />
+      ))}
+    </div>
+  </div>
+</BlogLayout>
+

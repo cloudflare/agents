@@ -1,0 +1,48 @@
+---
+import BlogLayout from '../../components/blog/BlogLayout.astro';
+import PostCard from '../../components/blog/PostCard.astro';
+import { getCollection } from 'astro:content';
+import { getAuthorsByNames } from '../../utils/authors';
+
+const blogPosts = await getCollection('blog');
+const sortedPosts = blogPosts.sort((a, b) => 
+  b.data.pubDate.getTime() - a.data.pubDate.getTime()
+);
+
+// Fetch author data for all posts
+const postsWithAuthors = await Promise.all(
+  sortedPosts.map(async (post) => {
+    const authorNames = Array.isArray(post.data.author) 
+      ? post.data.author 
+      : [post.data.author];
+    const authorData = await getAuthorsByNames(authorNames);
+    return { post, authorData };
+  })
+);
+---
+
+<BlogLayout>
+  <div class="p-6">
+    <div class="mb-8">
+      <h1 class="text-5xl lg:text-6xl font-semibold mb-4">Blog</h1>
+      <p class="text-xl text-orange-600 max-w-2xl">
+        Learn about building agents on Cloudflare, best practices, and updates from our team.
+      </p>
+    </div>
+    
+    <div class="space-y-0">
+      {postsWithAuthors.map(({ post, authorData }) => (
+        <PostCard
+          title={post.data.title}
+          description={post.data.description}
+          pubDate={post.data.pubDate}
+          author={post.data.author}
+          authorData={authorData}
+          slug={post.slug}
+          tags={post.data.tags}
+        />
+      ))}
+    </div>
+  </div>
+</BlogLayout>
+

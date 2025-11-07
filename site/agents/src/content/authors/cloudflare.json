@@ -1,0 +1,9 @@
+{
+  "name": "Cloudflare",
+  "bio": "The Cloudflare Agents team, building the future of AI agents on the edge.",
+  "avatar": "/images/authors/cloudflare.jpg",
+  "social": {
+    "twitter": "https://twitter.com/cloudflare",
+    "website": "https://www.cloudflare.com"
+  }
+}

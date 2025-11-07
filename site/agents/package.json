@@ -9,7 +9,9 @@
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.10",
+    "@astrojs/mdx": "^4.3.10",
     "@astrojs/react": "^4.4.2",
+    "@astrojs/rss": "^4.0.13",
     "@gsap/react": "^2.1.2",
     "@use-it/interval": "^1.0.0",
     "astro": "^5.15.4",

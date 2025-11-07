@@ -1,0 +1,10 @@
+{
+  "name": "Jane Doe",
+  "bio": "Senior Engineer at Cloudflare, passionate about building scalable agent systems and developer tools.",
+  "avatar": "/images/authors/jane-doe.jpg",
+  "social": {
+    "twitter": "https://twitter.com/janedoe",
+    "github": "https://github.com/janedoe",
+    "linkedin": "https://linkedin.com/in/janedoe"
+  }
+}

@@ -1,0 +1,47 @@
+---
+title: "Building Interactive Agents with MDX"
+description: "Learn how to use MDX to create rich, interactive blog posts with React components."
+pubDate: 2024-01-20
+author: ["Jane Doe", "John Smith"]
+tags: ["mdx", "react", "interactive"]
+---
+
+import { Logo } from "../../components/logo";
+
+This is a sample blog post written in **MDX**, which allows you to use React components directly in your content!
+
+## Using React Components
+
+You can embed React components like this Cloudflare logo:
+
+<div style={{ display: "flex", justifyContent: "center", padding: "2rem" }}>
+  <Logo size={100} />
+</div>
+
+## Author Profiles in Posts
+
+You can include author profiles in your posts using the `AuthorProfile` component. Note: In MDX files, you'll need to fetch author data in the page component and pass it as props, or use the component directly with author data.
+
+## Code Examples
+
+Here's some example code:
+
+```typescript
+import { Agent } from "agents";
+
+const myAgent = new Agent({
+  name: "My Agent"
+  // ... configuration
+});
+```
+
+## Benefits of MDX
+
+- **Interactive Content**: Embed React components
+- **Type Safety**: Full TypeScript support
+- **Reusable Components**: Share components across posts
+- **Rich Formatting**: All Markdown features plus JSX
+
+## Conclusion
+
+MDX gives you the power of React components within your blog posts, making it perfect for technical documentation and interactive content!

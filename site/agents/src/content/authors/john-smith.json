@@ -1,0 +1,10 @@
+{
+  "name": "John Smith",
+  "bio": "Product Manager focused on making AI agents accessible to developers everywhere.",
+  "avatar": "/images/authors/john-smith.jpg",
+  "social": {
+    "twitter": "https://twitter.com/johnsmith",
+    "github": "https://github.com/johnsmith",
+    "website": "https://johnsmith.dev"
+  }
+}

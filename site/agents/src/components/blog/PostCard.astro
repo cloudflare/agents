@@ -1,0 +1,69 @@
+---
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  title: string;
+  description: string;
+  pubDate: Date;
+  author: string | string[];
+  authorData?: (CollectionEntry<'authors'> | undefined)[];
+  slug: string;
+  tags?: string[];
+}
+
+const { title, description, pubDate, author, authorData, slug, tags } = Astro.props;
+
+const formattedDate = new Intl.DateTimeFormat('en-US', {
+  year: 'numeric',
+  month: 'long',
+  day: 'numeric',
+}).format(pubDate);
+
+const authors = Array.isArray(author) ? author : [author];
+const authorDisplay = authors.length === 1 
+  ? authors[0] 
+  : authors.length === 2 
+    ? `${authors[0]} and ${authors[1]}`
+    : `${authors.slice(0, -1).join(', ')}, and ${authors[authors.length - 1]}`;
+
+// Get first author's avatar if available
+const firstAuthorData = authorData && authorData.length > 0 ? authorData[0] : undefined;
+---
+
+<a
+  href={`/blog/${slug}`}
+  class="block p-6 border-b border-orange-400 hover:bg-orange-50 transition-colors"
+>
+  <article>
+    <h2 class="text-2xl font-semibold mb-2">{title}</h2>
+    <p class="text-orange-600 mb-4">{description}</p>
+    <div class="flex items-center gap-4 text-sm text-orange-500 flex-wrap">
+      <time datetime={pubDate.toISOString()}>{formattedDate}</time>
+      <span>•</span>
+      <div class="flex items-center gap-2">
+        {firstAuthorData && (
+          <img
+            src={firstAuthorData.data.avatar}
+            alt={`${firstAuthorData.data.name} avatar`}
+            class="w-6 h-6 rounded-full object-cover border border-orange-400"
+            loading="lazy"
+          />
+        )}
+        <span>{authorDisplay}</span>
+      </div>
+      {tags && tags.length > 0 && (
+        <>
+          <span>•</span>
+          <div class="flex gap-2 flex-wrap">
+            {tags.map((tag) => (
+              <span class="px-2 py-1 bg-orange-100 text-orange-700 rounded text-xs">
+                {tag}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  </article>
+</a>
+

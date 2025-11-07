@@ -1,0 +1,27 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { BackgroundDots } from '../_components/background';
+import { BlogHeader } from './BlogHeader';
+import BlogFooter from './BlogFooter.astro';
+---
+
+<Layout>
+  <div class="p-2 lg:p-6 min-h-screen flex flex-col relative max-w-[1400px] mx-auto">
+    <!-- Background -->
+    <div class="fixed inset-0 text-orange-100 pointer-events-none">
+      <BackgroundDots client:load />
+    </div>
+    <div class="absolute top-0 bottom-0 border-r border-orange-400 border-dashed"></div>
+    <div class="absolute top-0 bottom-0 right-2 lg:right-6 border-l border-orange-400 border-dashed"></div>
+    <div class="absolute left-0 right-0 border-b border-orange-400 border-dashed"></div>
+    <div class="absolute left-0 right-0 bottom-2 lg:bottom-6 border-b border-orange-400 border-dashed"></div>
+
+    <!-- Main Content -->
+    <main class="grow border border-orange-400 text-orange-700 divide-y divide-orange-400 bg-white relative">
+      <BlogHeader client:load />
+      <slot />
+      <BlogFooter />
+    </main>
+  </div>
+</Layout>
+

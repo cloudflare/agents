@@ -84,6 +84,20 @@ export function Header() {
                 animate={{ x: 0, opacity: 1 }}
                 initial={{ x: 8, opacity: 0 }}
                 className="hover:underline underline-offset-2 text-orange-600"
+                href="/blog"
+              >
+                Blog
+              </motion.a>
+              <motion.a
+                transition={{
+                  type: "spring",
+                  stiffness: 800,
+                  damping: 80,
+                  mass: 4
+                }}
+                animate={{ x: 0, opacity: 1 }}
+                initial={{ x: 8, opacity: 0 }}
+                className="hover:underline underline-offset-2 text-orange-600"
                 href={AGENTS_DOCS_HREF}
                 target="_blank"
               >

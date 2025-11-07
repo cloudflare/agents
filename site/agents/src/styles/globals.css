@@ -42,3 +42,111 @@ body {
     opacity: 1;
   }
 }
+
+/* Blog content styling */
+.prose-content {
+  line-height: 1.75;
+}
+
+.prose-content h1 {
+  font-size: 2.25em;
+  font-weight: 600;
+  margin-top: 0;
+  margin-bottom: 0.8888889em;
+  line-height: 1.1111111;
+}
+
+.prose-content h2 {
+  font-size: 1.5em;
+  font-weight: 600;
+  margin-top: 2em;
+  margin-bottom: 1em;
+  line-height: 1.3333333;
+}
+
+.prose-content h3 {
+  font-size: 1.25em;
+  font-weight: 600;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+  line-height: 1.6;
+}
+
+.prose-content p {
+  margin-top: 1.25em;
+  margin-bottom: 1.25em;
+}
+
+.prose-content a {
+  color: rgb(234 88 12);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose-content a:hover {
+  color: rgb(194 65 12);
+}
+
+.prose-content code {
+  font-size: 0.875em;
+  font-weight: 600;
+  background-color: rgb(255 237 213);
+  padding: 0.125em 0.375em;
+  border-radius: 0.25rem;
+}
+
+.prose-content pre {
+  background-color: rgb(17 24 39);
+  color: rgb(243 244 246);
+  overflow-x: auto;
+  font-weight: 400;
+  font-size: 0.875em;
+  line-height: 1.7142857;
+  margin-top: 1.7142857em;
+  margin-bottom: 1.7142857em;
+  border-radius: 0.375rem;
+  padding-top: 0.8571429em;
+  padding-right: 1.1428571em;
+  padding-bottom: 0.8571429em;
+  padding-left: 1.1428571em;
+}
+
+.prose-content pre code {
+  background-color: transparent;
+  border-width: 0;
+  border-radius: 0;
+  padding: 0;
+  font-weight: inherit;
+  color: inherit;
+  font-size: inherit;
+  font-family: inherit;
+  line-height: inherit;
+}
+
+.prose-content ul,
+.prose-content ol {
+  margin-top: 1.25em;
+  margin-bottom: 1.25em;
+  padding-left: 1.625em;
+}
+
+.prose-content li {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose-content blockquote {
+  font-weight: 500;
+  font-style: italic;
+  color: rgb(17 24 39);
+  border-left-width: 0.25rem;
+  border-left-color: rgb(234 88 12);
+  quotes: "\201C" "\201D" "\2018" "\2019";
+  margin-top: 1.6em;
+  margin-bottom: 1.6em;
+  padding-left: 1em;
+}
+
+.prose-content strong {
+  font-weight: 600;
+}

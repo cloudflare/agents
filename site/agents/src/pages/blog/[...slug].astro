@@ -1,0 +1,56 @@
+---
+import BlogLayout from '../../components/blog/BlogLayout.astro';
+import PostHeader from '../../components/blog/PostHeader.astro';
+import { getCollection } from 'astro:content';
+import { getAuthorsByNames } from '../../utils/authors';
+
+export async function getStaticPaths() {
+  const blogPosts = await getCollection('blog');
+  return Promise.all(
+    blogPosts.map(async (post) => {
+      const authorNames = Array.isArray(post.data.author) 
+        ? post.data.author 
+        : [post.data.author];
+      const authorData = await getAuthorsByNames(authorNames);
+      return {
+        params: { slug: post.slug },
+        props: { post, authorData },
+      };
+    })
+  );
+}
+
+interface Props {
+  post: Awaited<ReturnType<typeof getCollection>>[number];
+  authorData: Awaited<ReturnType<typeof getAuthorsByNames>>;
+}
+
+const { post, authorData } = Astro.props;
+const { Content } = await post.render();
+---
+
+<BlogLayout>
+  <PostHeader
+    title={post.data.title}
+    pubDate={post.data.pubDate}
+    author={post.data.author}
+    authorData={authorData}
+    tags={post.data.tags}
+  />
+  
+  <article class="p-6 max-w-3xl mx-auto">
+    <div class="prose-content text-orange-700">
+      <Content />
+    </div>
+  </article>
+  
+  <div class="p-6 border-t border-orange-400">
+    <a
+      href="/blog"
+      class="text-orange-600 hover:text-orange-700 underline underline-offset-2"
+    >
+      ← Back to Blog
+    </a>
+  </div>
+</BlogLayout>
+
