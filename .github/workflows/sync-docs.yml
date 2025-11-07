@@ -160,18 +160,19 @@ jobs:
              ```bash
              DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json url --jq '.[0].url')
              
-             # Check if bot comment already exists (look for unique marker in comment body)
-             EXISTING_COMMENT_ID=$(gh api repos/cloudflare/agents/issues/${PR_NUMBER}/comments --jq '.[] | select(.body | contains("<!-- docs-sync-comment -->")) | .id' | head -1)
+             # Check if bot comment already exists (look for unique marker)
+             EXISTING_COMMENT_ID=$(gh api repos/cloudflare/agents/issues/${PR_NUMBER}/comments --jq '.[] | select(.body | contains("docs-sync-bot-comment-marker")) | .id' | head -1)
              
-             COMMENT_BODY="<!-- docs-sync-comment -->\n📚 **Documentation sync PR:** $DOCS_PR_URL\n\n_This comment will be updated as the PR changes._"
+             # Create comment body with proper newlines using printf
+             COMMENT_BODY=$(printf '<!-- docs-sync-bot-comment-marker -->\n\n📚 **Documentation sync PR:** %s\n\n_This comment will be updated as the PR changes._' "$DOCS_PR_URL")
              
              if [ -n "$EXISTING_COMMENT_ID" ]; then
-               # Edit existing comment
+               # Update existing comment
                echo "Updating existing comment ID: $EXISTING_COMMENT_ID"
                gh api --method PATCH /repos/cloudflare/agents/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
              else
                # Create new comment
-               echo "Creating new comment"
+               echo "Creating new comment on PR #${PR_NUMBER}"
                gh pr comment ${PR_NUMBER} --repo cloudflare/agents --body "$COMMENT_BODY"
              fi
              ```
