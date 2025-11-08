@@ -28,13 +28,18 @@ const chunker = await RecursiveChunker.create({
   minCharactersPerChunk: MIN_CHARS_PER_CHUNK
 });
 
-const fetchWithRetry = (url: string, useAuth = true) =>
+const fetchWithRetry = (url: string) =>
   Effect.tryPromise({
     try: async () => {
       const headers: Record<string, string> = {
         "User-Agent": "Cloudflare-Agents-MCP/1.0",
         Accept: "application/vnd.github+json"
       };
+
+      const githubToken = env.GITHUB_TOKEN;
+      if (githubToken) {
+        headers["Authorization"] = `Bearer ${githubToken}`;
+      }
 
       const response = await fetch(url, { headers });
 

@@ -36,6 +36,10 @@ https://agents.mcp.cloudflare.com/mcp
 
 It pulls the docs from Github, chunks them with a recursive chunker, and indexes them with Orama. The index is cached in KV for 1 day. Search is BM25 with stemming enabled for better results. This allows "hibernation" to match with "hibernate" allowing for more natural language queries.
 
+### Ratelimiting
+
+To avoid ratelimiting by GitHub, you can set the `GITHUB_TOKEN` environment variable with `wrangler secret put GITHUB_TOKEN`
+
 ## Development
 
 To run this server locally, you can use the following command:
@@ -49,4 +53,12 @@ You can test this server with the MCP Inspector.
 
 ```bash
 npx @modelcontextprotocol/inspector
+```
+
+## Deployment
+
+To deploy this server to Cloudflare Workers, you can use the following command:
+
+```bash
+npm run deploy
 ```
