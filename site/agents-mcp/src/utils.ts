@@ -20,6 +20,13 @@ const KV_KEY = "docs-v0";
 const DOCS_REPO_API =
   "https://api.github.com/repos/cloudflare/agents/git/trees/main?recursive=1";
 const TTL_SECONDS = 24 * 60 * 60; // 1 day
+const CHUNK_SIZE = 2000;
+const MIN_CHARS_PER_CHUNK = 500;
+
+const chunker = await RecursiveChunker.create({
+  chunkSize: CHUNK_SIZE,
+  minCharactersPerChunk: MIN_CHARS_PER_CHUNK
+});
 
 const fetchWithRetry = (url: string, useAuth = true) =>
   Effect.tryPromise({
@@ -57,8 +64,8 @@ const fetchWithRetry = (url: string, useAuth = true) =>
     )
   );
 
-const fetchDocsFromGitHub = async (): Promise<Document[]> => {
-  const treeEffect = fetchWithRetry(DOCS_REPO_API).pipe(
+const fetchDocsFromGitHub = Effect.gen(function* () {
+  const treeData = yield* fetchWithRetry(DOCS_REPO_API).pipe(
     Effect.flatMap((response) =>
       Effect.tryPromise({
         try: async () => {
@@ -73,89 +80,90 @@ const fetchDocsFromGitHub = async (): Promise<Document[]> => {
     )
   );
 
-  const treeData = await Effect.runPromise(treeEffect);
-
   const docFiles = treeData.tree.filter(
     (item: GitHubTreeItem) =>
       item.path.startsWith("docs/") && item.path.endsWith(".md")
   );
 
   const docs: Document[] = [];
-  const chunker = await RecursiveChunker.create({
-    chunkSize: 800
-  });
 
   for (const file of docFiles) {
     const contentUrl = `https://raw.githubusercontent.com/cloudflare/agents/main/${file.path}`;
 
-    const contentEffect = fetchWithRetry(contentUrl).pipe(
+    const contentResult = yield* fetchWithRetry(contentUrl).pipe(
       Effect.flatMap((response) =>
         Effect.tryPromise({
           try: () => response.text(),
           catch: (error) => error as Error
         })
-      )
+      ),
+      Effect.flatMap((content) => Effect.promise(() => chunker.chunk(content))),
+      Effect.catchAll((error) => {
+        console.error(`Failed to fetch/chunk ${file.path}:`, error);
+        return Effect.succeed([]);
+      })
     );
 
-    try {
-      const content = await Effect.runPromise(contentEffect);
-      const chunks = await chunker.chunk(content);
-
-      for (const chunk of chunks) {
-        docs.push({
-          fileName: file.path,
-          content: chunk.text,
-          url: contentUrl
-        });
-      }
-    } catch (error) {
-      console.error(`Failed to fetch/chunk ${file.path}:`, error);
+    for (const chunk of contentResult) {
+      docs.push({
+        fileName: file.path,
+        content: chunk.text,
+        url: contentUrl
+      });
     }
   }
 
   return docs;
-};
+});
 
-const getCachedDocs = async (): Promise<Document[] | null> => {
-  const cached = await env.DOCS_KV.get(KV_KEY, "json");
+const getCachedDocs = Effect.tryPromise({
+  try: () => env.DOCS_KV.get(KV_KEY, "json") as Promise<Document[] | null>,
+  catch: (error) => error as Error
+});
+
+const cacheDocs = (docs: Document[]) =>
+  Effect.tryPromise({
+    try: () =>
+      env.DOCS_KV.put(KV_KEY, JSON.stringify(docs), {
+        expirationTtl: TTL_SECONDS
+      }),
+    catch: (error) => error as Error
+  });
+
+export const fetchAndBuildIndex = Effect.gen(function* () {
+  const cached = yield* getCachedDocs;
+
+  let docs: Document[];
 
   if (!cached) {
-    return null;
+    docs = yield* fetchDocsFromGitHub;
+    yield* cacheDocs(docs);
+  } else {
+    docs = cached;
   }
 
-  return cached as Document[];
-};
-
-const cacheDocs = async (docs: Document[]): Promise<void> => {
-  await env.DOCS_KV.put(KV_KEY, JSON.stringify(docs), {
-    expirationTtl: TTL_SECONDS
-  });
-};
-
-export const fetchAndBuildIndex = async () => {
-  let docs = await getCachedDocs();
-
-  if (!docs) {
-    // If not cached, fetch from GitHub, chunk, and cache to KV
-    docs = await fetchDocsFromGitHub();
-    await cacheDocs(docs);
-  }
-
-  // Build the search index from docs
-  const docsDb = create({
-    schema: {
-      fileName: "string",
-      content: "string",
-      url: "string"
-    } as const
-  });
+  const docsDb = yield* Effect.sync(() =>
+    create({
+      schema: {
+        fileName: "string",
+        content: "string",
+        url: "string"
+      } as const,
+      components: {
+        tokenizer: {
+          stemming: true,
+          language: "english"
+        }
+      }
+    })
+  );
 
   for (const doc of docs) {
-    await insert(docsDb, doc);
+    yield* Effect.sync(() => insert(docsDb, doc));
   }
 
   return docsDb;
-};
+});
 
 export const formatResults = (
   results: Awaited<ReturnType<typeof search>>,
@@ -167,7 +175,13 @@ export const formatResults = (
 
   let output = `**Search Results**\n\n`;
   output += `Found ${hitCount} result${hitCount !== 1 ? "s" : ""} for "${query}" (${elapsed})\n\n`;
-  output += `Showing top ${k} result${k !== 1 ? "s" : ""}:\n\n`;
+
+  if (hitCount === 0) {
+    output += `No results found. Try using different keywords or modify the spelling.`;
+    return output;
+  }
+
+  output += `Showing top ${Math.min(k, hitCount)} result${Math.min(k, hitCount) !== 1 ? "s" : ""}:\n\n`;
   output += `---\n\n`;
 
   for (const hit of results.hits) {

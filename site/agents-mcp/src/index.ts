@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createMcpHandler } from "agents/mcp";
 import { fetchAndBuildIndex, formatResults } from "./utils";
 import { search } from "@orama/orama";
+import { Effect } from "effect";
 
 // TODO: instrument this server for observability
 const mcpServer = new McpServer(
@@ -18,8 +19,12 @@ const mcpServer = new McpServer(
 );
 
 const inputSchema = {
-  query: z.string(),
-  k: z.number().optional().default(10)
+  query: z
+    .string()
+    .describe(
+      "query string to search for eg. 'agent hibernate', 'schedule tasks'"
+    ),
+  k: z.number().optional().default(5).describe("number of results to return")
 };
 
 mcpServer.registerTool(
@@ -28,37 +33,45 @@ mcpServer.registerTool(
     inputSchema
   },
   async ({ query, k }) => {
-    try {
+    const searchEffect = Effect.gen(function* () {
       console.log({ query, k });
-      const docsDb = await fetchAndBuildIndex();
-      const results = await search(docsDb, {
-        term: query,
-        limit: k
-      });
+      const term = query.trim();
+
+      const docsDb = yield* fetchAndBuildIndex;
+
+      const result = search(docsDb, { term, limit: k });
+      const searchResult = yield* result instanceof Promise
+        ? Effect.promise(() => result)
+        : Effect.succeed(result);
+
       return {
         content: [
           {
-            type: "text",
-            text: formatResults(results, query, k)
+            type: "text" as const,
+            text: formatResults(searchResult, term, k)
           }
         ]
       };
-    } catch (error) {
-      console.error(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `There was an error with the search tool. Please try again later.`
-          }
-        ]
-      };
-    }
+    }).pipe(
+      Effect.catchAll((error) => {
+        console.error(error);
+        return Effect.succeed({
+          content: [
+            {
+              type: "text" as const,
+              text: `There was an error with the search tool. Please try again later.`
+            }
+          ]
+        });
+      })
+    );
+
+    return await Effect.runPromise(searchEffect);
   }
 );
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    return createMcpHandler(mcpServer as any)(request, env, ctx);
+    return createMcpHandler(mcpServer)(request, env, ctx);
   }
 };
