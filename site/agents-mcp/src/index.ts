@@ -30,6 +30,8 @@ const inputSchema = {
 mcpServer.registerTool(
   "search-agent-docs",
   {
+    description:
+      "Token efficient search of the Cloudflare Agents SDK documentation",
     inputSchema
   },
   async ({ query, k }) => {
