@@ -1,0 +1,16 @@
+{
+  "name": "@cloudflare/agents-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "@chonkiejs/core": "^0.0.5",
+    "@orama/orama": "^3.1.16",
+    "effect": "^3.19.2"
+  }
+}
