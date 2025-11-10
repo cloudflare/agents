@@ -457,5 +457,6 @@ export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
 
 export {
   WorkerTransport,
-  type WorkerTransportOptions
+  type WorkerTransportOptions,
+  type TransportState
 } from "./worker-transport";

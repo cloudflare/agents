@@ -24,7 +24,8 @@ export class MyAgent extends Agent<Env, State> {
   );
 
   transport = new WorkerTransport({
-    sessionIdGenerator: () => this.name
+    sessionIdGenerator: () => this.name,
+    storage: this.ctx.storage
   });
 
   initialState = {

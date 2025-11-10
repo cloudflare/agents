@@ -30,11 +30,26 @@ interface StreamMapping {
   cleanup: () => void;
 }
 
+export interface TransportState {
+  sessionId?: string;
+  initialized: boolean;
+  protocolVersion?: ProtocolVersion;
+}
+
 export interface WorkerTransportOptions {
   sessionIdGenerator?: () => string;
+  /**
+   * Enable traditional Request/Response mode, this will disable streaming.
+   */
   enableJsonResponse?: boolean;
   onsessioninitialized?: (sessionId: string) => void;
   corsOptions?: CORSOptions;
+  /**
+   * Optional storage api for persisting transport state.
+   * Use this to store session state in Durable Object/Agent storage
+   * so it survives hibernation/restart.
+   */
+  storage?: DurableObjectStorage;
 }
 
 export class WorkerTransport implements Transport {
@@ -49,6 +64,9 @@ export class WorkerTransport implements Transport {
   private requestResponseMap = new Map<RequestId, JSONRPCMessage>();
   private corsOptions?: CORSOptions;
   private protocolVersion?: ProtocolVersion;
+  private storage?: DurableObjectStorage;
+  private storageKey = "mcp_transport_state";
+  private stateRestored = false;
 
   sessionId?: string;
   onclose?: () => void;
@@ -60,6 +78,44 @@ export class WorkerTransport implements Transport {
     this.enableJsonResponse = options?.enableJsonResponse ?? false;
     this.onsessioninitialized = options?.onsessioninitialized;
     this.corsOptions = options?.corsOptions;
+    this.storage = options?.storage;
+  }
+
+  /**
+   * Restore transport state from persistent storage.
+   * This is automatically called on start.
+   */
+  private restoreState() {
+    if (!this.storage || this.stateRestored) {
+      return;
+    }
+
+    const state = this.storage.kv.get<TransportState>(this.storageKey);
+
+    if (state) {
+      this.sessionId = state.sessionId;
+      this.initialized = state.initialized;
+      this.protocolVersion = state.protocolVersion;
+    }
+
+    this.stateRestored = true;
+  }
+
+  /**
+   * Persist current transport state to storage.
+   */
+  private saveState() {
+    if (!this.storage) {
+      return;
+    }
+
+    const state: TransportState = {
+      sessionId: this.sessionId,
+      initialized: this.initialized,
+      protocolVersion: this.protocolVersion
+    };
+
+    this.storage.kv.put(this.storageKey, state);
   }
 
   async start(): Promise<void> {
@@ -181,6 +237,8 @@ export class WorkerTransport implements Transport {
     request: Request,
     parsedBody?: unknown
   ): Promise<Response> {
+    this.restoreState();
+
     switch (request.method) {
       case "OPTIONS":
         return this.handleOptionsRequest(request);
@@ -452,6 +510,7 @@ export class WorkerTransport implements Transport {
 
       this.sessionId = this.sessionIdGenerator?.();
       this.initialized = true;
+      this.saveState();
 
       if (this.sessionId && this.onsessioninitialized) {
         this.onsessioninitialized(this.sessionId);
