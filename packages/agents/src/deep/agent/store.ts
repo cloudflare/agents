@@ -1,12 +1,5 @@
 // storage/store.ts
-import type {
-  ChatMessage,
-  ToolCall,
-  RunState,
-  ThreadMetadata,
-  SubagentLink,
-  ParentInfo
-} from "../types";
+import type { ChatMessage, ToolCall, SubagentLink } from "../types";
 import type { AgentEvent } from "../events";
 
 function toJson(v: unknown) {
@@ -28,42 +21,25 @@ function fromJson<T>(v: unknown): T | undefined {
 
 export class Store {
   // In-memory cache
-  private _runState?: RunState;
-  private _threadId?: string;
   private _messages?: ChatMessage[];
   private _events?: AgentEvent[];
   private _files?: Record<string, string>;
-  private _pendingToolCalls?: ToolCall[];
   private _waitingSubagents?: {
     token: string;
     childThreadId: string;
     toolCallId: string;
   }[];
-  private _threadMetadata?: ThreadMetadata | null;
-  private _agentType?: string | null;
-  private _parentInfo?: ParentInfo | null;
   private _subagentLinks?: SubagentLink[];
 
   constructor(
     // Public so middlewares can access it
-    public sql: SqlStorage,
-    public kv: SyncKvStorage
+    public sql: SqlStorage
   ) {}
 
   /** Create tables if absent */
   init() {
     this.sql.exec(
       `
-CREATE TABLE IF NOT EXISTS runs (
-  run_id TEXT PRIMARY KEY,
-  status TEXT NOT NULL,
-  step INTEGER NOT NULL,
-  reason TEXT,
-  next_alarm_at INTEGER,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS messages (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   role TEXT NOT NULL CHECK(role IN ('user','assistant','tool')),
@@ -88,18 +64,6 @@ CREATE TABLE IF NOT EXISTS waiting_subagents (
   created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS pending_tool_calls (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  args_json TEXT NOT NULL,
-  created_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS thread_meta (
-  id TEXT PRIMARY KEY,
-  metadata_json TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS subagent_links (
   child_thread_id TEXT PRIMARY KEY,
   token TEXT NOT NULL,
@@ -111,164 +75,6 @@ CREATE TABLE IF NOT EXISTS subagent_links (
 );
 `
     );
-  }
-
-  get threadId(): string | undefined {
-    if (this._threadId) return this._threadId;
-    this._threadId = this.kv.get<string>("thread_id");
-    return this._threadId;
-  }
-
-  setThreadId(threadId: string): void {
-    this._threadId = threadId;
-    this.kv.put("thread_id", threadId);
-  }
-
-  // --------------------------
-  // Run
-  // --------------------------
-  get runState(): RunState | null {
-    if (this._runState) return { ...this._runState };
-
-    const rows = this.sql
-      .exec<{
-        run_id: string;
-        status: string;
-        step: number;
-        reason?: string;
-        next_alarm_at?: number;
-      }>("SELECT run_id, status, step, reason, next_alarm_at FROM runs LIMIT 1")
-      .toArray();
-    if (!rows || rows.length === 0) return null;
-    const r = rows[0];
-    this._runState = {
-      runId: r.run_id,
-      status: r.status as RunState["status"],
-      step: r.step,
-      reason: r.reason,
-      nextAlarmAt: r.next_alarm_at
-    };
-    return this._runState;
-  }
-
-  upsertRun(run: RunState): void {
-    this._runState = { ...run };
-    const t = Date.now();
-    this.sql.exec(
-      `
-INSERT INTO runs (run_id, status, step, reason, next_alarm_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(run_id) DO UPDATE SET
-  status=excluded.status,
-  step=excluded.step,
-  reason=excluded.reason,
-  next_alarm_at=excluded.next_alarm_at,
-  updated_at=excluded.updated_at
-`,
-      run.runId,
-      run.status,
-      run.step,
-      run.reason ?? null,
-      run.nextAlarmAt ?? null,
-      t,
-      t
-    );
-  }
-
-  // --------------------------
-  // Thread metadata
-  // --------------------------
-  ensureThreadMetadata(meta: {
-    id: string;
-    createdAt?: string;
-    request?: ThreadMetadata["request"];
-    parent?: ParentInfo;
-    agentType?: string;
-  }): ThreadMetadata {
-    const existing = this.threadMetadata;
-    if (existing) return existing;
-    const next: ThreadMetadata = {
-      id: meta.id,
-      createdAt: meta.createdAt ?? new Date().toISOString(),
-      request: meta.request ?? {},
-      parent: meta.parent,
-      agentType: meta.agentType
-    };
-    this.setThreadMetadata(next);
-    return next;
-  }
-
-  setThreadMetadata(meta: ThreadMetadata): void {
-    this._threadMetadata = { ...meta };
-    this._agentType = meta.agentType ?? null;
-    this._parentInfo = meta.parent ?? null;
-    this.sql.exec(
-      `INSERT INTO thread_meta (id, metadata_json)
-       VALUES (?, ?)
-       ON CONFLICT(id) DO UPDATE SET metadata_json=excluded.metadata_json`,
-      meta.id,
-      toJson(meta)
-    );
-  }
-
-  get agentType(): string | undefined {
-    if (this._agentType !== undefined) {
-      return this._agentType ?? undefined;
-    }
-    const meta = this.threadMetadata;
-    this._agentType = meta?.agentType ?? null;
-    return meta?.agentType ?? undefined;
-  }
-
-  setAgentType(agentType?: string): void {
-    this._agentType = agentType ?? null;
-    const current = this.threadMetadata;
-    if (!current) return;
-    const next: ThreadMetadata = { ...current };
-    if (agentType) next.agentType = agentType;
-    else delete (next as Partial<ThreadMetadata>).agentType;
-    this.setThreadMetadata(next);
-  }
-
-  get parentInfo(): ParentInfo | undefined {
-    if (this._parentInfo !== undefined) {
-      return this._parentInfo ?? undefined;
-    }
-    const meta = this.threadMetadata;
-    this._parentInfo = meta?.parent ?? null;
-    return meta?.parent ?? undefined;
-  }
-
-  setParentInfo(parent?: ParentInfo): void {
-    this._parentInfo = parent ?? null;
-    const current = this.threadMetadata;
-    if (!current) return;
-    const next: ThreadMetadata = { ...current };
-    if (parent) next.parent = parent;
-    else delete (next as Partial<ThreadMetadata>).parent;
-    this.setThreadMetadata(next);
-  }
-
-  get threadMetadata(): ThreadMetadata | null {
-    if (this._threadMetadata !== undefined) {
-      return this._threadMetadata ? { ...this._threadMetadata } : null;
-    }
-    const rows = this.sql
-      .exec<{
-        metadata_json: string;
-      }>("SELECT metadata_json FROM thread_meta LIMIT 1")
-      .toArray();
-    if (!rows.length) {
-      this._threadMetadata = null;
-      return null;
-    }
-    const meta = fromJson<ThreadMetadata>(rows[0].metadata_json) ?? null;
-    this._threadMetadata = meta;
-    if (meta) {
-      this._agentType = meta.agentType ?? null;
-      this._parentInfo = meta.parent ?? null;
-    }
-    return meta ? { ...meta } : null;
   }
 
   // --------------------------
@@ -441,6 +247,34 @@ ON CONFLICT(run_id) DO UPDATE SET
     this._messages = undefined;
   }
 
+  /** Get the last assistant message */
+  lastAssistant(): ChatMessage | null {
+    const rows = this.sql
+      .exec(
+        `SELECT role, content, tool_call_id, tool_calls_json
+         FROM messages 
+         WHERE role = 'assistant'
+         ORDER BY seq DESC
+         LIMIT 1`
+      )
+      .toArray();
+
+    if (!rows || rows.length === 0) return null;
+
+    const r = rows[0];
+    if (r.tool_calls_json) {
+      return {
+        role: "assistant",
+        toolCalls: fromJson<ToolCall[]>(r.tool_calls_json) ?? []
+      };
+    }
+
+    return {
+      role: "assistant",
+      content: String(r.content ?? "")
+    };
+  }
+
   // --------------------------
   // Files
   // --------------------------
@@ -524,78 +358,6 @@ ON CONFLICT(run_id) DO UPDATE SET
       : current.replace(oldStr, newStr);
     this.writeFile(path, content);
     return { replaced: replaceAll ? count : 1, content };
-  }
-
-  // --------------------------
-  // HITL / Pending tool calls
-  // --------------------------
-  setPendingToolCalls(calls: ToolCall[]): void {
-    this.sql.exec("DELETE FROM pending_tool_calls");
-    for (const c of calls) {
-      this.sql.exec(
-        `INSERT INTO pending_tool_calls (id, name, args_json, created_at)
-           VALUES (?, ?, ?, ?)`,
-        c.id,
-        c.name,
-        toJson(c.args ?? {}),
-        Date.now()
-      );
-    }
-    this._pendingToolCalls = [...calls];
-  }
-
-  pushPendingToolCalls(calls: ToolCall[]): void {
-    this._pendingToolCalls = [...(this._pendingToolCalls ?? []), ...calls];
-    for (const c of calls) {
-      this.sql.exec(
-        `INSERT INTO pending_tool_calls (id, name, args_json, created_at)
-         VALUES (?, ?, ?, ?)`,
-        c.id,
-        c.name,
-        toJson(c.args ?? {}),
-        Date.now()
-      );
-    }
-  }
-
-  popPendingToolBatch(n: number): ToolCall[] {
-    const rows = this.sql
-      .exec(
-        `SELECT id, name, args_json FROM pending_tool_calls
-         ORDER BY created_at ASC LIMIT ?`,
-        [Math.max(1, n)]
-      )
-      .toArray();
-
-    const ids = (rows ?? []).map((r) => String(r.id));
-    if (ids.length) {
-      const placeholders = ids.map(() => "?").join(",");
-      this.sql.exec(
-        `DELETE FROM pending_tool_calls WHERE id IN (${placeholders})`,
-        ...ids
-      );
-    }
-    const out = this._pendingToolCalls?.filter((c) => ids.includes(c.id));
-    this._pendingToolCalls = this._pendingToolCalls?.filter(
-      (c) => !ids.includes(c.id)
-    );
-
-    return out ?? [];
-  }
-
-  get pendingToolCalls(): ToolCall[] {
-    if (this._pendingToolCalls) return [...this._pendingToolCalls];
-    const rows = this.sql
-      .exec(
-        "SELECT id, name, args_json FROM pending_tool_calls ORDER BY created_at ASC"
-      )
-      .toArray();
-    this._pendingToolCalls = rows.map((r) => ({
-      id: String(r.id),
-      name: String(r.name),
-      args: fromJson<ToolCall["args"]>(r.args_json)
-    }));
-    return this._pendingToolCalls;
   }
 
   // --------------------------
@@ -697,7 +459,7 @@ ON CONFLICT(run_id) DO UPDATE SET
     for (const r of rows) {
       const data = fromJson(r.data_json) ?? {};
       out.push({
-        threadId: this.threadId ?? "",
+        threadId: "", // TODO: check what to do with this
         ts: String(r.ts),
         seq: Number(r.seq),
         type: String(r.type),

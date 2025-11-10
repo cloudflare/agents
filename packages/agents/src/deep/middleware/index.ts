@@ -289,7 +289,7 @@ export function subagents(
             threadId: childId,
             messages: [{ role: "user", content: String(description ?? "") }],
             agentType: subagentType,
-            parent: { threadId: ctx.agent.store.threadId, token }
+            parent: { threadId: ctx.agent.info.threadId, token }
           })
         })
       );
@@ -306,18 +306,12 @@ export function subagents(
       };
       ctx.agent.store.pushWaitingSubagent(w);
 
-      if (
-        ctx.agent.store.runState &&
-        ctx.agent.store.runState.status === "running"
-      ) {
-        const rs = {
-          ...ctx.agent.store.runState,
-          status: "paused" as const,
-          reason: "subagent"
-        };
-        ctx.agent.store.upsertRun(rs);
+      const runState = ctx.agent.runState;
+      if (runState && runState.status === "running") {
+        runState.status = "paused";
+        runState.reason = "subagent";
         ctx.agent.emit(AgentEventType.RUN_PAUSED, {
-          runId: ctx.agent.store.runState.runId,
+          runId: runState.runId,
           reason: "subagent"
         });
       }
@@ -339,6 +333,7 @@ export function hitl(opts: { interceptTools: string[] }): AgentMiddleware {
   return {
     name: "hitl",
     async onModelResult(ctx, res) {
+      const runState = ctx.agent.runState;
       const last = res.message;
       const calls =
         last?.role === "assistant" && "toolCalls" in last
@@ -348,13 +343,10 @@ export function hitl(opts: { interceptTools: string[] }): AgentMiddleware {
         opts.interceptTools.includes(c.name)
       );
       if (risky) {
-        ctx.agent.store.upsertRun({
-          ...ctx.agent.store.runState!,
-          status: "paused",
-          reason: "hitl"
-        });
+        runState.status = "paused";
+        runState.reason = "hitl";
         ctx.agent.emit(AgentEventType.RUN_PAUSED, {
-          runId: ctx.agent.store.runState!.runId,
+          runId: runState.runId,
           reason: "hitl"
         });
       }

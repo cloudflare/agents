@@ -11,13 +11,13 @@ export type RunStatus =
   | "canceled"
   | "error";
 
-export interface RunState {
+export type RunState = {
   runId: string;
   status: RunStatus;
   step: number; // how many steps executed
   reason?: string; // pause/cancel reason
   nextAlarmAt?: number | null; // ms epoch
-}
+};
 
 export type AgentState = {
   messages: ChatMessage[];

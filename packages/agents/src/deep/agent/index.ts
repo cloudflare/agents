@@ -9,13 +9,17 @@ import type {
   SubagentDescriptor,
   MWContext,
   ThreadMetadata,
-  AgentState
+  AgentState,
+  ParentInfo,
+  ThreadRequestContext,
+  RunState
 } from "../types";
 import { Agent, getAgentByName, type AgentContext } from "../..";
 import { subagents, planning, filesystem, getToolMeta } from "../middleware";
 import { type AgentEvent, AgentEventType } from "../events";
 import { step } from "./step";
 import { Store } from "./store";
+import { PersistedObject } from "./config";
 
 function collectToolsAndDefs(
   mw: AgentMiddleware[],
@@ -50,29 +54,46 @@ export interface AgentEnv {
   DEEP_AGENT: DurableObjectNamespace<DeepAgent>;
 }
 
+// I rather name this State but the name's taken
+export type Info = {
+  threadId: string;
+  createdAt: string;
+  request: ThreadRequestContext;
+  agentType: string;
+  parentInfo?: ParentInfo;
+  pendingToolCalls: ToolCall[];
+};
+
 export abstract class DeepAgent<
   Env extends AgentEnv = AgentEnv
 > extends Agent<Env> {
-  abstract provider: Provider;
-  abstract _model?: string;
-  abstract subagents: Map<string, SubagentDescriptor>;
+  // Abstract properties implemented by the factory
   protected abstract _systemPrompt: string;
   protected abstract defaultMiddleware: AgentMiddleware[];
   protected abstract extraTools: Record<string, ToolHandler>;
-  private _agentType?: string;
+
+  // State
+  readonly info: Info;
+  readonly runState: RunState;
+  abstract provider: Provider;
+  abstract _model?: string;
+  abstract subagents: Map<string, SubagentDescriptor>;
   store: Store;
   observability = undefined;
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
-    this.store = new Store(ctx.storage.sql, ctx.storage.kv);
+    const kv = ctx.storage.kv;
+    this.store = new Store(ctx.storage.sql);
     this.store.init();
+    this.info = PersistedObject(kv);
+    this.runState = PersistedObject<RunState>(kv, { prefix: "_runState" });
   }
 
   // Get system prompt based on agent type
   get systemPrompt(): string {
-    if (this.agentType && this.subagents.has(this.agentType)) {
-      return this.subagents.get(this.agentType)?.prompt ?? "";
+    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
+      return this.subagents.get(this.info.agentType)?.prompt ?? "";
     }
 
     return this._systemPrompt;
@@ -80,8 +101,8 @@ export abstract class DeepAgent<
 
   // Get middleware based on agent type
   get middleware(): AgentMiddleware[] {
-    if (this.agentType && this.subagents.has(this.agentType)) {
-      return this.subagents.get(this.agentType)?.middleware ?? [];
+    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
+      return this.subagents.get(this.info.agentType)?.middleware ?? [];
     }
 
     return this.defaultMiddleware;
@@ -90,8 +111,8 @@ export abstract class DeepAgent<
   // Get tools based on agent type
   get tools(): { handlers: Record<string, ToolHandler>; defs: ToolMeta[] } {
     let tools = this.extraTools;
-    if (this.agentType && this.subagents.has(this.agentType)) {
-      const specificTools = this.subagents.get(this.agentType)?.tools;
+    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
+      const specificTools = this.subagents.get(this.info.agentType)?.tools;
       tools = Object.fromEntries(
         (specificTools ?? []).map((t) => {
           const key = getToolMeta(t)?.name ?? (t.name || "").trim();
@@ -105,8 +126,8 @@ export abstract class DeepAgent<
   }
 
   get model() {
-    if (this.agentType && this.subagents.has(this.agentType)) {
-      return this.subagents.get(this.agentType)?.model;
+    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
+      return this.subagents.get(this.info.agentType)?.model;
     }
 
     return this._model;
@@ -114,11 +135,6 @@ export abstract class DeepAgent<
 
   get messages() {
     return this.store.listMessages();
-  }
-
-  get agentType() {
-    if (this._agentType) return this._agentType;
-    return this.store.agentType;
   }
 
   get mwContext(): MWContext {
@@ -129,7 +145,7 @@ export abstract class DeepAgent<
   }
 
   get isPaused(): boolean {
-    return this.store.runState?.status === "paused";
+    return this.runState.status === "paused";
   }
 
   get isWaitingSubagents(): boolean {
@@ -137,7 +153,7 @@ export abstract class DeepAgent<
   }
 
   get isDone(): boolean {
-    const last = this.lastAssistant();
+    const last = this.store.lastAssistant();
     return (
       !!last &&
       (!("toolCalls" in last) || last.toolCalls?.length === 0) &&
@@ -150,7 +166,7 @@ export abstract class DeepAgent<
     const evt = {
       type,
       data,
-      threadId: this.store.threadId || this.ctx.id.toString(),
+      threadId: this.info.threadId || this.ctx.id.toString(),
       ts: new Date().toISOString()
     } as AgentEvent;
 
@@ -191,19 +207,16 @@ export abstract class DeepAgent<
 
   async registerThread(req: Request) {
     try {
-      const metadata = (await req
-        .json()
-        .catch(() => null)) as ThreadMetadata | null;
+      const metadata = await req.json<ThreadMetadata>().catch(() => null);
       if (!metadata || !metadata.id) {
         return new Response("invalid metadata", { status: 400 });
       }
-      if (!this.store.threadId) {
-        this.store.setThreadId(metadata.id);
+      if (!this.info.threadId) {
+        // magically persisted!
+        this.info.threadId = metadata.id;
       }
-      this.store.setThreadMetadata({
-        ...metadata,
-        request: metadata.request ?? {}
-      });
+      this.info.createdAt = metadata.createdAt;
+      this.info.request = metadata.request;
       return Response.json({ ok: true });
     } catch (error: unknown) {
       const err = error as Error;
@@ -216,44 +229,30 @@ export abstract class DeepAgent<
       const body = (await req.json().catch(() => ({}))) as InvokeBody;
 
       // Store threadId on first invoke if provided
-      if (body.threadId && !this.store.threadId) {
-        this.store.setThreadId(body.threadId);
+      if (body.threadId && !this.info.threadId) {
+        this.info.threadId = body.threadId;
       }
-
-      const threadId =
-        this.store.threadId ?? body.threadId ?? this.ctx.id.toString();
-      const parentInfo = body.parent ?? this.store.parentInfo;
-      const agentType = body.agentType ?? this.store.agentType;
-      this.store.ensureThreadMetadata({
-        id: threadId,
-        parent: parentInfo,
-        agentType
-      });
 
       // Merge input into state
       if (body.messages?.length) this.store.appendMessages(body.messages);
       if (body.files) this.store.mergeFiles(body.files);
       if (body.agentType) {
-        this._agentType = body.agentType;
-        this.store.setAgentType(body.agentType);
+        this.info.agentType = body.agentType;
       }
       if (body.parent) {
-        this.store.setParentInfo(body.parent);
+        this.info.parentInfo = body.parent;
       }
 
-      let { runState } = this.store;
+      let runState = this.runState;
       // Start or continue run
       if (
         !runState ||
         ["completed", "canceled", "error"].includes(runState.status)
       ) {
-        runState = {
-          runId: this.store.runState?.runId ?? crypto.randomUUID(),
-          status: "running",
-          step: 0,
-          nextAlarmAt: null
-        };
-        this.store.upsertRun(runState);
+        runState.runId = this.runState?.runId ?? crypto.randomUUID();
+        runState.status = "running";
+        runState.step = this.runState?.step ?? 0;
+        runState.nextAlarmAt = null;
         this.emit(AgentEventType.RUN_STARTED, {
           runId: runState.runId
         });
@@ -275,16 +274,16 @@ export abstract class DeepAgent<
 
   async approve(req: Request) {
     const body = await req.json<ApproveBody>();
-    const { runState } = this.store;
+    const runState = this.runState;
     if (!runState) return new Response("no run", { status: 400 });
 
     // Apply approval to pending tool calls
-    const pending = this.store.pendingToolCalls;
+    const pending = this.info.pendingToolCalls;
     if (!pending.length)
       return new Response("no pending tool calls", { status: 400 });
 
     const decided = body.modifiedToolCalls ?? pending;
-    this.store.setPendingToolCalls(decided);
+    this.info.pendingToolCalls = decided;
 
     // Resume run
     runState.status = "running";
@@ -300,13 +299,12 @@ export abstract class DeepAgent<
     const ctx = this.mwContext;
     for (const m of this.middleware) m.onResume?.(ctx, "hitl", body);
 
-    this.store.upsertRun(runState);
     await this.ensureScheduled();
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   }
 
   async cancel(_req: Request) {
-    const { runState } = this.store;
+    const runState = this.runState;
     if (runState && runState.status !== "completed") {
       // Cancel all waiting subagents first
       const waitingSubagents = this.store.waitingSubagents;
@@ -344,26 +342,16 @@ export abstract class DeepAgent<
       this.emit(AgentEventType.RUN_CANCELED, {
         runId: runState.runId
       });
-      this.store.upsertRun(runState);
     }
     return new Response(JSON.stringify({ ok: true }));
   }
 
   getState(_req: Request) {
-    const { runState, threadId } = this.store;
+    const { threadId, agentType, parentInfo, request, createdAt } = this.info;
     const {
       model,
-      agentType,
       tools: { defs }
     } = this;
-    const fallbackThreadId = threadId ?? this.ctx.id.toString();
-    const cachedParent = this.store.parentInfo;
-    const threadMeta =
-      this.store.threadMetadata ??
-      this.store.ensureThreadMetadata({
-        id: fallbackThreadId,
-        parent: cachedParent
-      });
     const subagentLinks = this.store.listSubagentLinks();
     let state: AgentState = {
       messages: this.store.listMessages(),
@@ -371,10 +359,10 @@ export abstract class DeepAgent<
       agentType,
       model,
       tools: defs,
-      thread: threadMeta
+      thread: { id: threadId, request, parent: parentInfo, createdAt }
     };
-    if (cachedParent || threadMeta.parent) {
-      state = { ...state, parent: threadMeta.parent ?? cachedParent };
+    if (parentInfo) {
+      state = { ...state, parent: parentInfo };
     }
     if (subagentLinks.length) {
       state = { ...state, subagents: subagentLinks };
@@ -384,7 +372,7 @@ export abstract class DeepAgent<
         state = { ...state, ...m.state(this.mwContext) };
       }
     }
-    return Response.json({ state, run: runState });
+    return Response.json({ state, run: this.runState });
   }
 
   getEvents(_req: Request) {
@@ -393,20 +381,26 @@ export abstract class DeepAgent<
 
   // === Scheduler: ensure an alarm and perform ticks ===
   async ensureScheduled() {
-    const runState = this.store.runState;
+    const runState = this.runState;
     if (!runState || runState.status !== "running") return;
     const schedules = this.getSchedules();
     if (!schedules.length) {
       // now + 1 second
       const now = new Date(Date.now() + 1000);
       runState.nextAlarmAt = now.getTime();
-      this.store.upsertRun(runState);
       await this.schedule(now, "run");
     }
   }
 
+  popPendingToolCalls(n: number) {
+    const calls = this.info.pendingToolCalls;
+    const out = calls.slice(0, n);
+    this.info.pendingToolCalls = calls.slice(n);
+    return out;
+  }
+
   async run() {
-    const { runState } = this.store;
+    const runState = this.runState;
     if (!runState || runState.status !== "running") return;
 
     // One bounded tick to avoid subrequest limits:
@@ -419,9 +413,8 @@ export abstract class DeepAgent<
       step: runState.step
     });
     runState.step += 1;
-    this.store.upsertRun(runState);
 
-    const toolBatch = this.store.popPendingToolBatch(TOOLS_PER_TICK);
+    const toolBatch = this.popPendingToolCalls(TOOLS_PER_TICK);
 
     const mws = this.middleware;
     for (const call of toolBatch)
@@ -503,7 +496,7 @@ export abstract class DeepAgent<
     }
 
     // If we consumed some but still have pending tool calls, pause to yield and reschedule
-    if (this.store.pendingToolCalls.length > 0) {
+    if (this.info.pendingToolCalls.length > 0) {
       await this.reschedule();
       return;
     }
@@ -511,12 +504,8 @@ export abstract class DeepAgent<
     try {
       await step(this.middleware, this.mwContext);
     } catch (error: unknown) {
-      const runState = {
-        ...this.store.runState!,
-        status: "error" as const,
-        reason: "error"
-      };
-      this.store.upsertRun(runState);
+      runState.status = "error";
+      runState.reason = String(error instanceof Error ? error.message : error);
       this.emit(AgentEventType.AGENT_ERROR, {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
@@ -529,11 +518,11 @@ export abstract class DeepAgent<
     // If the agent didn't call any more tools, we consider the run complete.
     // If it was a subagent, we also report back to the parent.
     if (this.isDone) {
-      this.store.upsertRun({ ...this.store.runState!, status: "completed" });
-      const last = this.lastAssistant();
+      runState.status = "completed";
+      const last = this.store.lastAssistant();
       this.emit(AgentEventType.AGENT_COMPLETED, { result: last });
 
-      const parent = this.store.parentInfo;
+      const parent = this.info.parentInfo;
       // If it's a subagent, report back to the parent on completion
       if (parent?.threadId && parent?.token) {
         const parentAgent = await getAgentByName(
@@ -548,7 +537,7 @@ export abstract class DeepAgent<
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               token: parent.token,
-              childThreadId: this.store.threadId || this.ctx.id.toString(),
+              childThreadId: this.info.threadId || this.ctx.id.toString(),
               report: final
             })
           })
@@ -561,21 +550,12 @@ export abstract class DeepAgent<
     await this.reschedule();
   }
 
-  lastAssistant() {
-    const messages = this.store.listMessages();
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant") return messages[i];
-    }
-    return null;
-  }
-
   async reschedule() {
     // Yield to respect per-event subrequest limits; schedule next tick immediately
-    const runState = this.store.runState;
+    const runState = this.runState;
     if (!runState) return;
     const now = new Date(Date.now() + 1000);
     runState.nextAlarmAt = now.getTime();
-    this.store.upsertRun(runState);
     await this.schedule(now, "run");
   }
 
@@ -602,13 +582,12 @@ export abstract class DeepAgent<
 
       // Only resume if ALL waiting subagents have completed
       const remainingWaits = this.store.waitingSubagents;
-      const runState = this.store.runState;
+      const runState = this.runState;
 
       // Resume run if all waiting subagents have completed
       if (runState && remainingWaits.length === 0) {
         runState.status = "running";
         runState.reason = undefined;
-        this.store.upsertRun(runState);
         this.emit(AgentEventType.RUN_RESUMED, {
           runId: runState.runId
         });
