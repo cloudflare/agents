@@ -22,5 +22,9 @@
       "tag": "v1"
     }
   ],
-  "name": "tictactoe"
+  "name": "tictactoe",
+  "ai": {
+		"binding": "AI",
+		"remote": true
+	}
 }
