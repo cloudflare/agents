@@ -33,7 +33,8 @@ export class Store {
 
   constructor(
     // Public so middlewares can access it
-    public sql: SqlStorage
+    public sql: SqlStorage,
+    public kv: SyncKvStorage
   ) {}
 
   /** Create tables if absent */

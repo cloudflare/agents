@@ -83,8 +83,8 @@ export abstract class DeepAgent<
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
-    const kv = ctx.storage.kv;
-    this.store = new Store(ctx.storage.sql);
+    const { kv, sql } = ctx.storage;
+    this.store = new Store(sql, kv);
     this.store.init();
     this.info = PersistedObject(kv);
     this.runState = PersistedObject<RunState>(kv, { prefix: "_runState" });
@@ -392,10 +392,14 @@ export abstract class DeepAgent<
     }
   }
 
-  popPendingToolCalls(n: number) {
+  popPendingToolCalls(maxTools: number) {
     const calls = this.info.pendingToolCalls;
-    const out = calls.slice(0, n);
-    this.info.pendingToolCalls = calls.slice(n);
+    if (calls.length <= maxTools) {
+      this.info.pendingToolCalls = [];
+      return calls;
+    }
+    const out = calls.slice(0, maxTools);
+    this.info.pendingToolCalls = calls.slice(maxTools);
     return out;
   }
 
