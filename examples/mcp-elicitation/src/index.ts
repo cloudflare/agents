@@ -8,7 +8,11 @@ type Env = {
   MyAgent: DurableObjectNamespace<MyAgent>;
 };
 
-export class MyAgent extends Agent {
+interface State {
+  counter: number;
+}
+
+export class MyAgent extends Agent<Env, State> {
   server = new McpServer(
     {
       name: "test",
@@ -23,13 +27,17 @@ export class MyAgent extends Agent {
     sessionIdGenerator: () => this.name
   });
 
+  initialState = {
+    counter: 0
+  };
+
   onStart(): void | Promise<void> {
     this.server.registerTool(
-      "validate",
+      "increase-counter",
       {
-        description: "validate a user",
+        description: "Increase the counter",
         inputSchema: z.object({
-          name: z.string()
+          "do you want to increase the counter?": z.boolean()
         }).shape
       },
       async (args, extra) => {
@@ -37,36 +45,50 @@ export class MyAgent extends Agent {
         console.log("extra", extra);
         try {
           const basicInfo = await this.server.server.elicitInput({
-            message: "Step 1: Enter basic user information",
+            message: "By how much do you want to increase the counter?",
             requestedSchema: {
               type: "object",
               properties: {
-                age: {
+                amount: {
                   type: "number",
-                  title: "Age",
-                  description: "The user age",
+                  title: "Amount",
+                  description: "The amount to increase the counter by",
                   minLength: 1
                 }
               },
-              required: ["age"]
+              required: ["amount"]
             }
           });
 
           if (basicInfo.action !== "accept" || !basicInfo.content) {
             return {
-              content: [{ type: "text", text: "User creation cancelled." }]
+              content: [{ type: "text", text: "Counter increase cancelled." }]
             };
           }
+
+          if (basicInfo.content.amount && Number(basicInfo.content.amount)) {
+            this.state.counter += Number(basicInfo.content.amount);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Counter increased by ${basicInfo.content.amount}, current value is ${this.state.counter}`
+                }
+              ]
+            };
+          }
+
           return {
             content: [
-              { type: "text", text: `User is ${basicInfo.content.age}` }
+              { type: "text", text: "Counter increase failed, invalid amount." }
             ]
           };
         } catch (error) {
           console.log(error);
 
           return {
-            content: [{ type: "text", text: "User creation failed." }]
+            content: [{ type: "text", text: "Counter increase failed." }]
           };
         }
       }

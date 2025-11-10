@@ -1,7 +1,7 @@
 {
   "author": "Matt Carey <mcarey@cloudflare.com>",
   "keywords": [],
-  "name": "@cloudflare/agents-mcp-elicitation-demo",
+  "name": "@cloudflare/agents-mcp-elicitation",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
