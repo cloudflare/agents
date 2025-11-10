@@ -2,16 +2,22 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpHandler, WorkerTransport } from "agents/mcp";
 import * as z from "zod";
 import { Agent, getAgentByName } from "agents";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 
 type Env = {
   MyAgent: DurableObjectNamespace<MyAgent>;
 };
 
 export class MyAgent extends Agent {
-  server = new McpServer({
-    name: "test",
-    version: "1.0.0"
-  });
+  server = new McpServer(
+    {
+      name: "test",
+      version: "1.0.0"
+    },
+    {
+      jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
+    }
+  );
 
   transport = new WorkerTransport({
     sessionIdGenerator: () => this.name
