@@ -32,6 +32,11 @@ interface StreamMapping {
   cleanup: () => void;
 }
 
+export interface MCPStorageApi {
+  get(): Promise<TransportState | undefined> | TransportState | undefined;
+  set(state: TransportState): Promise<void> | void;
+}
+
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
@@ -51,7 +56,7 @@ export interface WorkerTransportOptions {
    * Use this to store session state in Durable Object/Agent storage
    * so it survives hibernation/restart.
    */
-  storage?: DurableObjectStorage;
+  storage?: MCPStorageApi;
 }
 
 export class WorkerTransport implements Transport {
@@ -66,8 +71,7 @@ export class WorkerTransport implements Transport {
   private requestResponseMap = new Map<RequestId, JSONRPCMessage>();
   private corsOptions?: CORSOptions;
   private protocolVersion?: ProtocolVersion;
-  private storage?: DurableObjectStorage;
-  private storageKey = "mcp_transport_state";
+  private storage?: MCPStorageApi;
   private stateRestored = false;
 
   sessionId?: string;
@@ -87,12 +91,12 @@ export class WorkerTransport implements Transport {
    * Restore transport state from persistent storage.
    * This is automatically called on start.
    */
-  private restoreState() {
+  private async restoreState() {
     if (!this.storage || this.stateRestored) {
       return;
     }
 
-    const state = this.storage.kv.get<TransportState>(this.storageKey);
+    const state = await Promise.resolve(this.storage.get());
 
     if (state) {
       this.sessionId = state.sessionId;
@@ -106,7 +110,7 @@ export class WorkerTransport implements Transport {
   /**
    * Persist current transport state to storage.
    */
-  private saveState() {
+  private async saveState() {
     if (!this.storage) {
       return;
     }
@@ -117,7 +121,7 @@ export class WorkerTransport implements Transport {
       protocolVersion: this.protocolVersion
     };
 
-    this.storage.kv.put(this.storageKey, state);
+    await Promise.resolve(this.storage.set(state));
   }
 
   async start(): Promise<void> {
@@ -239,7 +243,7 @@ export class WorkerTransport implements Transport {
     request: Request,
     parsedBody?: unknown
   ): Promise<Response> {
-    this.restoreState();
+    await this.restoreState();
 
     switch (request.method) {
       case "OPTIONS":
@@ -516,7 +520,7 @@ export class WorkerTransport implements Transport {
 
       this.sessionId = this.sessionIdGenerator?.();
       this.initialized = true;
-      this.saveState();
+      await this.saveState();
 
       if (this.sessionId && this.onsessioninitialized) {
         this.onsessioninitialized(this.sessionId);

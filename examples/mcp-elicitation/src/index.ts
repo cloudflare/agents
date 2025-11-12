@@ -1,8 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { createMcpHandler, WorkerTransport } from "agents/mcp";
+import {
+  createMcpHandler,
+  type TransportState,
+  WorkerTransport
+} from "agents/mcp";
 import * as z from "zod";
 import { Agent, getAgentByName } from "agents";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+
+const STATE_KEY = "mcp_transport_state";
 
 type Env = {
   MyAgent: DurableObjectNamespace<MyAgent>;
@@ -25,7 +31,14 @@ export class MyAgent extends Agent<Env, State> {
 
   transport = new WorkerTransport({
     sessionIdGenerator: () => this.name,
-    storage: this.ctx.storage
+    storage: {
+      get: () => {
+        return this.ctx.storage.kv.get<TransportState>(STATE_KEY);
+      },
+      set: (state: TransportState) => {
+        this.ctx.storage.kv.put<TransportState>(STATE_KEY, state);
+      }
+    }
   });
 
   initialState = {
@@ -37,13 +50,16 @@ export class MyAgent extends Agent<Env, State> {
       "increase-counter",
       {
         description: "Increase the counter",
-        inputSchema: z.object({
-          "do you want to increase the counter?": z.boolean()
-        }).shape
+        inputSchema: {
+          confirm: z.boolean().describe("Do you want to increase the counter?")
+        }
       },
-      async (args, extra) => {
-        console.log("args", args);
-        console.log("extra", extra);
+      async ({ confirm }) => {
+        if (!confirm) {
+          return {
+            content: [{ type: "text", text: "Counter increase cancelled." }]
+          };
+        }
         try {
           const basicInfo = await this.server.server.elicitInput({
             message: "By how much do you want to increase the counter?",
@@ -68,7 +84,10 @@ export class MyAgent extends Agent<Env, State> {
           }
 
           if (basicInfo.content.amount && Number(basicInfo.content.amount)) {
-            this.state.counter += Number(basicInfo.content.amount);
+            this.setState({
+              ...this.state,
+              counter: this.state.counter + Number(basicInfo.content.amount)
+            });
 
             return {
               content: [
