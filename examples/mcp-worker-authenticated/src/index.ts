@@ -13,11 +13,9 @@ server.tool(
   "hello",
   "Returns a greeting message",
   { name: z.string().optional() },
-  async ({ name }, extra) => {
+  async ({ name }) => {
     const auth = getMcpAuthContext();
     const username = auth?.props?.username as string | undefined;
-
-    const requestHeaders = new URL(extra.requestInfo);
 
     return {
       content: [
@@ -34,8 +32,8 @@ server.tool(
   "whoami",
   "Returns information about the authenticated user",
   {},
-  async (_, extra) => {
-    const auth = extra.authInfo;
+  async () => {
+    const auth = getMcpAuthContext();
 
     if (!auth) {
       return {
@@ -53,9 +51,9 @@ server.tool(
         {
           text: JSON.stringify(
             {
-              userId: auth.extra?.userId,
-              username: auth.extra?.username,
-              email: auth.extra?.email
+              userId: auth.props?.userId,
+              username: auth.props?.username,
+              email: auth.props?.email
             },
             null,
             2
