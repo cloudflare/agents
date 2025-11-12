@@ -1,0 +1,69 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    # Optional: Only run on specific file changes
+    # paths:
+    #   - "src/**/*.ts"
+    #   - "src/**/*.tsx"
+    #   - "src/**/*.js"
+    #   - "src/**/*.jsx"
+
+jobs:
+  claude-review:
+    # Optional: Filter by PR author
+    # if: |
+    #   github.event.pull_request.user.login == 'external-contributor' ||
+    #   github.event.pull_request.user.login == 'new-developer' ||
+    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review PR #${{ github.event.pull_request.number }}.
+
+            Read CLAUDE.md for project conventions and architecture patterns. Focus on substantive issues:
+            - Code quality, potential bugs, architecture alignment
+            - Testing coverage
+
+            BE CONCISE. Only report actual issues worth addressing - skip generic praise and obvious observations.
+            If the PR looks good, just say so briefly.
+
+            **Posting your review:**
+            1. First, check if you've already posted a review comment on this PR (find the comment ID):
+               ```bash
+               COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments --jq '.[] | select(.user.login == "claude[bot]" or .user.login == "github-actions[bot]") | select(.body | startswith("## Claude Code Review")) | .id' | head -1)
+               ```
+
+            2. If COMMENT_ID exists (non-empty), UPDATE that comment:
+               ```bash
+               gh api repos/${{ github.repository }}/issues/comments/$COMMENT_ID -X PATCH -f body="YOUR_REVIEW_CONTENT_HERE"
+               ```
+
+            3. If COMMENT_ID is empty, create a new comment:
+               ```bash
+               gh pr comment ${{ github.event.pull_request.number }} --body "YOUR_REVIEW_CONTENT_HERE" --repo ${{ github.repository }}
+               ```
+
+            Start your review with "## Claude Code Review" heading so it can be identified and updated on subsequent runs.
+
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://docs.claude.com/en/docs/claude-code/cli-reference for available options
+          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh api:*)"'

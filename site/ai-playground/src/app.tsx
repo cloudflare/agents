@@ -75,7 +75,7 @@ const App = () => {
 
   const agent = useAgent<Playground, PlaygroundState>({
     agent: "playground",
-    name: sessionId,
+    name: `Cloudflare-AI-Playground-${sessionId}`,
     onError(event) {
       console.error("[App] onError callback triggered with event:", event);
     },

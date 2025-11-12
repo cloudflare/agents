@@ -1,6 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  SSEClientTransport,
+  type SSEClientTransportOptions
+} from "@modelcontextprotocol/sdk/client/sse.js";
+import {
+  StreamableHTTPClientTransport,
+  type StreamableHTTPClientTransportOptions
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 // Import types directly from MCP SDK
 import type {
   Prompt,
@@ -31,8 +37,6 @@ import {
   isUnauthorized,
   toErrorMessage
 } from "./errors";
-import { SSEEdgeClientTransport } from "./sse-edge";
-import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
 import type { BaseTransportType, TransportType } from "./types";
 
 /**
@@ -425,12 +429,12 @@ export class MCPClientConnection {
   getTransport(transportType: BaseTransportType) {
     switch (transportType) {
       case "streamable-http":
-        return new StreamableHTTPEdgeClientTransport(
+        return new StreamableHTTPClientTransport(
           this.url,
           this.options.transport as StreamableHTTPClientTransportOptions
         );
       case "sse":
-        return new SSEEdgeClientTransport(
+        return new SSEClientTransport(
           this.url,
           this.options.transport as SSEClientTransportOptions
         );

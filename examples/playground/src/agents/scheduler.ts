@@ -3,7 +3,6 @@ import { Agent } from "agents";
 import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import { generateObject } from "ai";
 import { model } from "../model";
-import type { Env } from "../server";
 import type {
   IncomingMessage,
   OutgoingMessage,

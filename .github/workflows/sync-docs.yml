@@ -1,0 +1,236 @@
+name: Documentation Sync with Claude Code
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited]
+
+jobs:
+  sync-docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Get changed files
+        id: changed-files
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD > changed_files.txt
+          echo "Changed files:"
+          cat changed_files.txt
+          grep '^docs/.*\.md$' changed_files.txt > docs_changed.txt || echo "No docs changed"
+
+      - name: Get file contents and diffs
+        id: get-diffs
+        run: |
+          mkdir -p /tmp/diffs
+          touch /tmp/diffs/changes.txt
+
+          # Capture all changed files and their diffs
+          while IFS= read -r file; do
+            echo "=== $file ===" >> /tmp/diffs/changes.txt
+            git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> /tmp/diffs/changes.txt
+            echo -e "\n\n" >> /tmp/diffs/changes.txt
+          done < changed_files.txt
+
+          # Always run - let Claude decide if docs are needed
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Checkout cloudflare-docs repository
+        if: steps.get-diffs.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: cloudflare/cloudflare-docs
+          token: ${{ secrets.AGENTS_GITHUB_TOKEN }}
+          path: cloudflare-docs
+
+      - name: Create branch in cloudflare-docs
+        if: steps.get-diffs.outputs.skip != 'true'
+        run: |
+          cd cloudflare-docs
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b sync-docs-pr-${{ github.event.pull_request.number }}
+
+      - name: Create prompt for Claude Code
+        if: steps.get-diffs.outputs.skip != 'true'
+        id: create-prompt
+        run: |
+          # Store PR metadata in environment variables to avoid shell escaping issues
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+
+          cat > /tmp/claude_prompt.md << EOF
+          # Intelligent Documentation Sync Task
+
+          ⚠️ **CRITICAL INSTRUCTION**: All PR metadata is provided in the Context section below. 
+          DO NOT run \`gh pr view\`, \`gh api\`, or any other command to fetch PR information from GitHub.
+          The PR number, title, and URL below are the ONLY source of truth. Use them EXACTLY as written.
+
+          ## Context
+          - **Source Repository:** ${{ github.repository }}
+          - **Original PR Number:** ${PR_NUMBER}
+          - **Original PR Title:** ${PR_TITLE}
+          - **Original PR URL:** ${PR_URL}
+          - **PR Description:**
+          ${{ github.event.pull_request.body }}
+
+          ## Changed Files and Diffs
+          $(cat /tmp/diffs/changes.txt)
+
+          ## Your Task: Evaluate and Act
+
+          You have access to two repositories:
+          1. The current directory (our main repo at ${{ github.repository }})
+          2. ./cloudflare-docs (already cloned with branch sync-docs-pr-${{ github.event.pull_request.number }} checked out)
+
+          **Step 1: Evaluate if Documentation Sync is Needed**
+
+          Please review the changes in this PR and determine if they require documentation updates in cloudflare-docs:
+
+          - **ALWAYS sync if ANY of these are true:**
+            - Documentation files in docs/ were directly changed (even if other non-doc files also changed)
+            - New public API features or functions were added
+            - Breaking changes that affect user-facing behavior
+            - New configuration options or environment variables
+            - New examples or usage patterns that should be documented
+            - Bug fixes that clarify documented behavior
+
+          - **DO NOT sync ONLY if ALL changes are:**
+            - Only internal code refactoring with no behavior changes
+            - Test-only changes
+            - CI/workflow changes (UNLESS docs/ files also changed)
+            - Minor typo fixes in code comments
+            - Internal dependency updates with no API changes
+
+          **IMPORTANT**: If this PR includes ANY changes to files in the docs/ directory, you MUST proceed with the sync, even if the PR also includes other types of changes like workflow updates.
+
+          **Step 2: If Documentation Sync is Needed**
+
+          If you determine documentation updates are required, YOU MUST COMPLETE ALL STEPS:
+
+          1. Navigate to ./cloudflare-docs (already cloned, branch sync-docs-pr-${PR_NUMBER} checked out)
+          2. Adapt changes for cloudflare-docs repository structure and style
+          3. Create or update the appropriate markdown files
+          4. Ensure content follows cloudflare-docs conventions
+
+          5. **CRITICAL - Commit changes:**
+             Run exactly: `cd cloudflare-docs && git add . && git commit -m "Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}"`
+
+          6. **CRITICAL - Push to remote:**
+             Run exactly: `cd cloudflare-docs && git push origin sync-docs-pr-${PR_NUMBER}`
+
+          7. **CRITICAL - Create or update PR in cloudflare-docs:**
+             ⚠️ **CRITICAL**: 
+             - DO NOT fetch PR data from GitHub API to get title/description
+             - DO NOT add your own description or summary
+             - Use ONLY the PR_NUMBER, PR_TITLE, and PR_URL from the Context section above
+             
+             First check if PR already exists, then create or update:
+             ```bash
+             # Check if PR already exists
+             EXISTING_PR=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json number --jq '.[0].number')
+             
+             PR_TITLE_TEXT="📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}"
+             PR_BODY_TEXT="Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**"
+             
+             if [ -n "$EXISTING_PR" ]; then
+               # Update existing PR
+               echo "Updating existing PR #$EXISTING_PR"
+               gh pr edit $EXISTING_PR --repo cloudflare/cloudflare-docs --title "$PR_TITLE_TEXT" --body "$PR_BODY_TEXT"
+             else
+               # Create new PR
+               echo "Creating new PR"
+               gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${PR_NUMBER} --title "$PR_TITLE_TEXT" --body "$PR_BODY_TEXT"
+             fi
+             ```
+             
+             DO NOT modify the PR_TITLE_TEXT or PR_BODY_TEXT variables.
+
+          8. **CRITICAL - Comment on original PR (or edit existing comment):**
+             Get the docs PR URL, then create or update comment using PR_NUMBER from context:
+             ```bash
+             DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json url --jq '.[0].url')
+             
+             # Check if bot comment already exists (look for unique marker)
+             EXISTING_COMMENT_ID=$(gh api repos/cloudflare/agents/issues/${PR_NUMBER}/comments --jq '.[] | select(.body | contains("docs-sync-bot-comment-marker")) | .id' | head -1)
+             
+             # Create comment body with proper newlines using printf
+             COMMENT_BODY=$(printf '<!-- docs-sync-bot-comment-marker -->\n\n📚 **Documentation sync PR:** %s\n\n_This comment will be updated as the PR changes._' "$DOCS_PR_URL")
+             
+             if [ -n "$EXISTING_COMMENT_ID" ]; then
+               # Update existing comment
+               echo "Updating existing comment ID: $EXISTING_COMMENT_ID"
+               gh api --method PATCH /repos/cloudflare/agents/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
+             else
+               # Create new comment
+               echo "Creating new comment on PR #${PR_NUMBER}"
+               gh pr comment ${PR_NUMBER} --repo cloudflare/agents --body "$COMMENT_BODY"
+             fi
+             ```
+
+          ⚠️ THE TASK IS NOT COMPLETE UNTIL ALL 8 STEPS ARE DONE. Do not stop after editing files.
+
+          ## Documentation Writing Guidelines (Diátaxis Framework)
+
+          When writing the documentation content, adapt your approach based on what changed:
+
+          **For a single function/method:**
+          - **Reference**: Technical description - signature, parameters, return types, behavior
+          - **Example**: Concise code snippet showing usage in context
+          - **Use cases**: Brief bullets on when/why to use it (if not obvious)
+          - **DO NOT** create separate "how-to" sections - integrate examples into the reference
+
+          **For new features/workflows (multiple related functions):**
+          - **Reference**: Complete API docs for all functions
+          - **How-to guide**: Step-by-step guide for real-world tasks
+          - **Explanation**: Architecture, design decisions, alternatives
+
+          **For breaking changes:**
+          - **Reference**: Updated API documentation
+          - **How-to**: Migration guide (before/after)
+          - **Explanation**: Why changed, implications
+
+          **Key principles:**
+          - Single functions = reference + example (concise)
+          - Multi-step workflows = separate how-to guides
+          - Keep reference neutral and factual
+          - Don't overexplain simple functions
+
+          **Step 3: Provide Clear Output**
+
+          Clearly state your decision:
+          - If syncing: Explain what documentation changes you're making and why
+          - If not syncing: Explain why documentation updates aren't needed for this PR
+
+          ## Important Notes
+          - Use the GH_TOKEN environment variable for authentication with gh CLI
+          - Adapt paths, links, and references as needed for cloudflare-docs structure
+          - Follow existing patterns in the cloudflare-docs repository
+          - **DEFAULT TO SYNCING**: When in doubt about whether changes warrant a sync, ALWAYS create the sync PR for human review. It's better to create an unnecessary PR than to miss important documentation updates.
+
+          Begin your evaluation now.
+          EOF
+
+          echo "prompt<<PROMPT_EOF" >> $GITHUB_OUTPUT
+          cat /tmp/claude_prompt.md >> $GITHUB_OUTPUT
+          echo "PROMPT_EOF" >> $GITHUB_OUTPUT
+
+      - name: Run Claude Code to create adapted PR
+        if: steps.get-diffs.outputs.skip != 'true'
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: ${{ steps.create-prompt.outputs.prompt }}
+          claude_args: "--allowed-tools Bash,Edit,Write"
+        env:
+          GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}

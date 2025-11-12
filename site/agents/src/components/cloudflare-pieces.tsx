@@ -114,8 +114,10 @@ export function CloudflarePieces() {
                         )
                       },
                       {
-                        label: "Pages",
-                        url: withUtm("https://developers.cloudflare.com/pages/")
+                        label: "Workers",
+                        url: withUtm(
+                          "https://developers.cloudflare.com/workers/"
+                        )
                       }
                     ]
                   },

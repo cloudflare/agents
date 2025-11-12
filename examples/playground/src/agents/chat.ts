@@ -7,7 +7,6 @@ import {
   type StreamTextOnFinishCallback
 } from "ai";
 import { model } from "../model";
-import type { Env } from "../server";
 
 export class Chat extends AIChatAgent<Env> {
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {

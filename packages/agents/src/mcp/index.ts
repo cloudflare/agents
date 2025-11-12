@@ -433,8 +433,10 @@ export abstract class McpAgent<
   }
 }
 
-export { SSEEdgeClientTransport } from "./sse-edge";
-export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+export {
+  SSEEdgeClientTransport,
+  StreamableHTTPEdgeClientTransport
+} from "./client-transports";
 
 export {
   ElicitRequestSchema,

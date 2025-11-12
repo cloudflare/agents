@@ -1665,20 +1665,39 @@ export class Agent<
       return config.customHandler(result);
     }
 
-    // Use redirect URLs if configured
+    const baseOrigin = new URL(request.url).origin;
+
+    // Redirect to success URL if configured
     if (config?.successRedirect && result.authSuccess) {
-      return Response.redirect(config.successRedirect);
+      try {
+        return Response.redirect(
+          new URL(config.successRedirect, baseOrigin).href
+        );
+      } catch (e) {
+        console.error(
+          "Invalid successRedirect URL:",
+          config.successRedirect,
+          e
+        );
+        return Response.redirect(baseOrigin);
+      }
     }
 
+    // Redirect to error URL if configured
     if (config?.errorRedirect && !result.authSuccess) {
-      return Response.redirect(
-        `${config.errorRedirect}?error=${encodeURIComponent(result.authError || "Unknown error")}`
-      );
+      try {
+        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
+          result.authError || "Unknown error"
+        )}`;
+        return Response.redirect(new URL(errorUrl, baseOrigin).href);
+      } catch (e) {
+        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
+        return Response.redirect(baseOrigin);
+      }
     }
 
-    // Default behavior - redirect to base URL
-    const baseUrl = new URL(request.url).origin;
-    return Response.redirect(baseUrl);
+    // Default: redirect to base URL
+    return Response.redirect(baseOrigin);
   }
 }
 
@@ -1755,11 +1774,17 @@ export async function routeAgentRequest<Env>(
     request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
     request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
   ) {
+    const newHeaders = new Headers(response.headers);
+
+    // Add CORS headers
+    for (const [key, value] of Object.entries(corsHeaders)) {
+      newHeaders.set(key, value);
+    }
+
     response = new Response(response.body, {
-      headers: {
-        ...response.headers,
-        ...corsHeaders
-      }
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders
     });
   }
   return response;

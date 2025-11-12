@@ -218,8 +218,20 @@ export class MCPClientManager {
     }
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
+    const error = url.searchParams.get("error");
+    const errorDescription = url.searchParams.get("error_description");
     const urlParams = urlMatch.split("/");
     const serverId = urlParams[urlParams.length - 1];
+
+    // Handle OAuth error responses from the provider
+    if (error) {
+      return {
+        serverId,
+        authSuccess: false,
+        authError: errorDescription || error
+      };
+    }
+
     if (!code) {
       throw new Error("Unauthorized: no code provided");
     }

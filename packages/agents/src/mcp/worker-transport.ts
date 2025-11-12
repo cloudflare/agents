@@ -6,7 +6,9 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   JSONRPCMessage,
   RequestId,
-  InitializeRequest
+  InitializeRequest,
+  RequestInfo,
+  MessageExtraInfo
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   isInitializeRequest,
@@ -71,7 +73,7 @@ export class WorkerTransport implements Transport {
   sessionId?: string;
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
+  onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
   constructor(options?: WorkerTransportOptions) {
     this.sessionIdGenerator = options?.sessionIdGenerator;
@@ -447,6 +449,10 @@ export class WorkerTransport implements Transport {
       );
     }
 
+    const requestInfo: RequestInfo = {
+      headers: Object.fromEntries(request.headers.entries())
+    };
+
     const isInitializationRequest = messages.some(isInitializeRequest);
 
     if (isInitializationRequest) {
@@ -534,7 +540,7 @@ export class WorkerTransport implements Transport {
 
     if (!hasRequests) {
       for (const message of messages) {
-        this.onmessage?.(message);
+        this.onmessage?.(message, { requestInfo });
       }
       return new Response(null, {
         status: 202,
@@ -560,7 +566,7 @@ export class WorkerTransport implements Transport {
         }
 
         for (const message of messages) {
-          this.onmessage?.(message);
+          this.onmessage?.(message, { requestInfo });
         }
       });
     }
@@ -596,7 +602,7 @@ export class WorkerTransport implements Transport {
     }
 
     for (const message of messages) {
-      this.onmessage?.(message);
+      this.onmessage?.(message, { requestInfo });
     }
 
     return new Response(readable, { headers });

@@ -1,7 +1,7 @@
 {
   "author": "",
   "dependencies": {
-    "mcp-remote": "^0.1.29"
+    "mcp-remote": "^0.1.30"
   },
   "keywords": [],
   "name": "@cloudflare/agents-mcp-example",

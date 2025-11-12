@@ -174,11 +174,26 @@ describe("MCPClientManager OAuth Integration", () => {
       ).rejects.toThrow("No callback URI match found");
     });
 
-    it("should throw error for callback without code", async () => {
+    it("should handle OAuth error response from provider", async () => {
       const callbackUrl = "http://localhost:3000/callback/server1";
       manager.registerCallbackUrl(callbackUrl);
 
-      const callbackRequest = new Request(`${callbackUrl}?error=access_denied`);
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access`
+      );
+
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.serverId).toBe("server1");
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("User denied access");
+    });
+
+    it("should throw error for callback without code or error", async () => {
+      const callbackUrl = "http://localhost:3000/callback/server1";
+      manager.registerCallbackUrl(callbackUrl);
+
+      const callbackRequest = new Request(`${callbackUrl}?state=test`);
 
       await expect(
         manager.handleCallbackRequest(callbackRequest)
