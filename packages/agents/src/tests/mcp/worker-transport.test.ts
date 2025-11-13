@@ -651,4 +651,385 @@ describe("WorkerTransport", () => {
       expect(body.error.message).toContain("MCP-Protocol-Version");
     });
   });
+
+  describe("Storage API - State Persistence", () => {
+    it("should persist session state to storage", async () => {
+      const server = createTestServer();
+      let storedState: any = undefined;
+
+      const mockStorage = {
+        get: async () => storedState,
+        set: async (state: any) => {
+          storedState = state;
+        }
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "persistent-session",
+        storage: mockStorage
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      await transport.handleRequest(request);
+
+      expect(storedState).toBeDefined();
+      expect(storedState.sessionId).toBe("persistent-session");
+      expect(storedState.initialized).toBe(true);
+      expect(storedState.protocolVersion).toBe("2025-06-18");
+    });
+
+    it("should restore session state from storage", async () => {
+      const server = createTestServer();
+      const existingState = {
+        sessionId: "restored-session",
+        initialized: true,
+        protocolVersion: "2025-06-18" as const
+      };
+
+      const mockStorage = {
+        get: async () => existingState,
+        set: async () => {}
+      };
+
+      const transport = await setupTransport(server, {
+        storage: mockStorage
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "restored-session",
+          "MCP-Protocol-Version": "2025-06-18"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(transport.sessionId).toBe("restored-session");
+      expect(response.status).toBe(202);
+    });
+
+    it("should handle storage with no existing state", async () => {
+      const server = createTestServer();
+      const mockStorage = {
+        get: async () => undefined,
+        set: async () => {}
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "new-session",
+        storage: mockStorage
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("mcp-session-id")).toBe("new-session");
+    });
+
+    it("should only restore state once", async () => {
+      const server = createTestServer();
+      let getCalls = 0;
+
+      const mockStorage = {
+        get: async () => {
+          getCalls++;
+          return {
+            sessionId: "restored-session",
+            initialized: true,
+            protocolVersion: "2025-03-26" as const
+          };
+        },
+        set: async () => {}
+      };
+
+      const transport = await setupTransport(server, {
+        storage: mockStorage
+      });
+
+      // Make multiple requests
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "restored-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        })
+      });
+
+      await transport.handleRequest(request);
+      await transport.handleRequest(request);
+
+      expect(getCalls).toBe(1);
+    });
+  });
+
+  describe("Session Management", () => {
+    it("should use custom sessionIdGenerator", async () => {
+      const server = createTestServer();
+      let generatorCalled = false;
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => {
+          generatorCalled = true;
+          return "custom-generated-id";
+        }
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(response.status).toBe(200);
+      expect(generatorCalled).toBe(true);
+      expect(response.headers.get("mcp-session-id")).toBe(
+        "custom-generated-id"
+      );
+      expect(transport.sessionId).toBe("custom-generated-id");
+    });
+
+    it("should fire onsessioninitialized callback", async () => {
+      const server = createTestServer();
+      let callbackSessionId: string | undefined;
+      let callbackCalled = false;
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "callback-test-session",
+        onsessioninitialized: (sessionId: string) => {
+          callbackCalled = true;
+          callbackSessionId = sessionId;
+        }
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(request);
+
+      expect(callbackCalled).toBe(true);
+      expect(callbackSessionId).toBe("callback-test-session");
+    });
+
+    it("should only call onsessioninitialized once per session", async () => {
+      const server = createTestServer();
+      let callbackCount = 0;
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "single-callback-session",
+        onsessioninitialized: () => {
+          callbackCount++;
+        }
+      });
+
+      // First request - initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      const followupRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "single-callback-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        })
+      });
+
+      await transport.handleRequest(followupRequest);
+
+      expect(callbackCount).toBe(1);
+    });
+  });
+
+  describe("JSON Response Mode", () => {
+    it("should return JSON response when enableJsonResponse is true", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("application/json");
+
+      const body = await response.json();
+      expect(body).toBeDefined();
+      expect((body as any).jsonrpc).toBe("2.0");
+    });
+
+    it("should return SSE stream when enableJsonResponse is false", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: false
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+    });
+
+    it("should return JSON when enableJsonResponse is true regardless of Accept header order", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream, application/json"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("application/json");
+    });
+  });
 });
