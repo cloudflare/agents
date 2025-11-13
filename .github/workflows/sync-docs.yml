@@ -7,6 +7,7 @@ on:
 jobs:
   sync-docs:
     runs-on: ubuntu-latest
+    if: "!startsWith(github.event.pull_request.title, 'Version Packages')"
     permissions:
       contents: write
       pull-requests: write
@@ -155,26 +156,67 @@ jobs:
              
              DO NOT modify the PR_TITLE_TEXT or PR_BODY_TEXT variables.
 
-          8. **CRITICAL - Comment on original PR (or edit existing comment):**
-             Get the docs PR URL, then create or update comment using PR_NUMBER from context:
+          8. **CRITICAL - Comment on original PR:**
+             ⚠️ **IMPORTANT**: Execute this ENTIRE script as ONE command. Do not split into multiple executions.
+             
+             Copy and run this complete bash script:
              ```bash
+             #!/bin/bash
+             set -e
+             
+             echo "=== Step 8: Managing PR comment ==="
+             
+             # Get the docs PR URL
              DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json url --jq '.[0].url')
+             echo "Docs PR URL: $DOCS_PR_URL"
              
-             # Check if bot comment already exists (look for unique marker)
-             EXISTING_COMMENT_ID=$(gh api repos/cloudflare/agents/issues/${PR_NUMBER}/comments --jq '.[] | select(.body | contains("docs-sync-bot-comment-marker")) | .id' | head -1)
+             # Find existing comment with our unique marker
+             EXISTING_COMMENT_ID=$(gh api "repos/cloudflare/agents/issues/${PR_NUMBER}/comments" \
+               --jq '.[] | select(.body | contains("<!-- DOCS-SYNC-AUTOMATION -->")) | .id' \
+               | head -n 1)
              
-             # Create comment body with proper newlines using printf
-             COMMENT_BODY=$(printf '<!-- docs-sync-bot-comment-marker -->\n\n📚 **Documentation sync PR:** %s\n\n_This comment will be updated as the PR changes._' "$DOCS_PR_URL")
+             # Prepare comment body (note the unique marker at the start)
+             COMMENT_BODY=\$(printf '%s\n\n%s\n\n%s' \\
+               '<!-- DOCS-SYNC-AUTOMATION -->' \\
+               "📚 **Documentation sync PR:** \$DOCS_PR_URL" \\
+               '_This comment is automatically updated when the PR changes._')
              
-             if [ -n "$EXISTING_COMMENT_ID" ]; then
-               # Update existing comment
-               echo "Updating existing comment ID: $EXISTING_COMMENT_ID"
-               gh api --method PATCH /repos/cloudflare/agents/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
+             # Update existing or create new comment
+             if [ -n "$EXISTING_COMMENT_ID" ] && [ "$EXISTING_COMMENT_ID" != "null" ]; then
+               echo "Found existing comment ID: $EXISTING_COMMENT_ID - updating it"
+               gh api --method PATCH \
+                 "repos/cloudflare/agents/issues/comments/$EXISTING_COMMENT_ID" \
+                 -f body="$COMMENT_BODY"
+               echo "✅ Updated existing comment"
              else
-               # Create new comment
-               echo "Creating new comment on PR #${PR_NUMBER}"
-               gh pr comment ${PR_NUMBER} --repo cloudflare/agents --body "$COMMENT_BODY"
+               echo "No existing comment found - creating new one"
+               gh pr comment ${PR_NUMBER} \
+                 --repo cloudflare/agents \
+                 --body "$COMMENT_BODY"
+               echo "✅ Created new comment"
              fi
+             
+             # Cleanup any duplicate comments (keep only the newest)
+             ALL_COMMENT_IDS=$(gh api "repos/cloudflare/agents/issues/${PR_NUMBER}/comments" \
+               --jq '.[] | select(.body | contains("<!-- DOCS-SYNC-AUTOMATION -->")) | .id')
+             
+             COMMENT_COUNT=$(echo "$ALL_COMMENT_IDS" | wc -l | tr -d ' ')
+             
+             if [ "$COMMENT_COUNT" -gt 1 ]; then
+               echo "⚠️ Found $COMMENT_COUNT duplicate comments - cleaning up"
+               # Keep the last one (newest), delete others
+               echo "$ALL_COMMENT_IDS" | head -n -1 | while read -r OLD_ID; do
+                 if [ -n "$OLD_ID" ]; then
+                   echo "Deleting old comment ID: $OLD_ID"
+                   gh api --method DELETE "repos/cloudflare/agents/issues/comments/$OLD_ID"
+                 fi
+               done
+               echo "✅ Cleaned up duplicate comments"
+             else
+               echo "✅ Only one comment exists - no cleanup needed"
+             fi
+             
+             echo "=== Step 8 complete ==="
              ```
 
           ⚠️ THE TASK IS NOT COMPLETE UNTIL ALL 8 STEPS ARE DONE. Do not stop after editing files.
@@ -204,6 +246,38 @@ jobs:
           - Multi-step workflows = separate how-to guides
           - Keep reference neutral and factual
           - Don't overexplain simple functions
+
+          ## Cloudflare Docs Style Requirements
+
+          **CRITICAL**: Follow all rules from the [Cloudflare Style Guide](https://developers.cloudflare.com/style-guide/) and these specific requirements:
+
+          **Grammar & Formatting:**
+          - Do not use contractions, exclamation marks, or non-standard quotes like \`''""\`
+          - Fix common spelling errors, specifically misspellings of "wrangler"
+          - Remove whitespace characters from the end of lines
+          - Remove duplicate words
+          - Do not use HTML for ordered lists
+
+          **Links:**
+          - Use full relative links (\`/agents/configuration/\`) instead of full URLs, local dev links, or dot notation
+          - Always use trailing slashes for links without anchors
+          - Use meaningful link words (page titles) - avoid "here", "this page", "read more"
+          - Add cross-links to relevant documentation pages where appropriate
+
+          **Components (MUST USE):**
+          - All components need to be imported below frontmatter: \`import { ComponentName } from "~/components";\`
+          - **WranglerConfig component**: Replace \`toml\` or \`json\` code blocks showing Wrangler configuration with the [\`WranglerConfig\` component](https://developers.cloudflare.com/style-guide/components/wrangler-config/). This is CRITICAL - always use this component for wrangler.toml/wrangler.jsonc examples.
+          - **DashButton component**: Replace \`https://dash.cloudflare.com\` in steps with the [\`DashButton\` component](https://developers.cloudflare.com/style-guide/components/dash-button/)
+          - **APIRequest component**: Replace \`sh\` code blocks with API requests to \`https://api.cloudflare.com\` with the [\`APIRequest\` component](https://developers.cloudflare.com/style-guide/components/api-request/)
+          - **FileTree component**: Replace \`txt\` blocks showing file trees with the [\`FileTree\` component](https://developers.cloudflare.com/style-guide/components/file-tree/)
+          - **PackageManagers component**: Replace \`sh\` blocks with npm commands using the [\`PackageManagers\` component](https://developers.cloudflare.com/style-guide/components/package-managers/)
+          - **TypeScriptExample component**: Replace \`ts\`/\`typescript\` code blocks with the [\`TypeScriptExample\` component](https://developers.cloudflare.com/style-guide/components/typescript-example/) (except in step-by-step TypeScript-specific tutorials)
+
+          **JSX & Partials:**
+          - When using JSX fragments for conditional rendering, use props variable to account for reusability
+          - Only use \`<Markdown />\` component in JSX conditionals, and only if needed
+          - Do not duplicate content in ternary/binary conditions
+          - For variables in links, use HTML instead of Markdown
 
           **Step 3: Provide Clear Output**
 
