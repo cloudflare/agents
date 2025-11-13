@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.23
+
+### Patch Changes
+
+- [#649](https://github.com/cloudflare/agents/pull/649) [`e135cf5`](https://github.com/cloudflare/agents/commit/e135cf5539eb0a4557fda5cf27730818ab2c664d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - fix auth url not being cleared on a successful oauth callback causing endless reconnection
+
 ## 0.2.22
 
 ### Patch Changes
