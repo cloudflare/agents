@@ -291,6 +291,69 @@ describe("OAuth2 MCP Client", () => {
     });
   });
 
+  it("should clear auth_url from database after successful OAuth callback", async () => {
+    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentStub = env.TestOAuthAgent.get(agentId);
+
+    await agentStub.setName("default");
+    await agentStub.onStart();
+
+    const serverId = nanoid(8);
+    const serverName = "test-oauth-server";
+    const serverUrl = "http://example.com/mcp";
+    const clientId = "test-client-id";
+    const authUrl = "http://example.com/oauth/authorize";
+    const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+
+    // Insert MCP server with auth_url
+    agentStub.sql`
+      INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (
+        ${serverId},
+        ${serverName},
+        ${serverUrl},
+        ${clientId},
+        ${authUrl},
+        ${callbackBaseUrl},
+        ${null}
+      )
+    `;
+
+    // Verify auth_url exists before callback
+    const serverBefore = await agentStub.getMcpServerFromDb(serverId);
+    expect(serverBefore).not.toBeNull();
+    expect(serverBefore?.auth_url).toBe(authUrl);
+
+    // Setup mock connection and OAuth state
+    await agentStub.setupMockMcpConnection(
+      serverId,
+      serverName,
+      serverUrl,
+      callbackBaseUrl
+    );
+    await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
+
+    // Simulate successful OAuth callback
+    const authCode = "test-auth-code";
+    const state = "test-state";
+    const callbackUrl = `${callbackBaseUrl}/${serverId}?code=${authCode}&state=${state}`;
+    const request = new Request(callbackUrl, { method: "GET" });
+
+    const response = await agentStub.fetch(request);
+    expect(response.status).toBe(200);
+
+    // Verify auth_url is cleared after successful callback
+    const serverAfter = await agentStub.getMcpServerFromDb(serverId);
+    expect(serverAfter).not.toBeNull();
+    expect(serverAfter?.auth_url).toBeNull();
+
+    // Verify the server record still exists with other data intact
+    expect(serverAfter?.id).toBe(serverId);
+    expect(serverAfter?.name).toBe(serverName);
+    expect(serverAfter?.server_url).toBe(serverUrl);
+    expect(serverAfter?.client_id).toBe(clientId);
+  });
+
   describe("OAuth Redirect Behavior", () => {
     async function setupOAuthTest(config: {
       successRedirect?: string;

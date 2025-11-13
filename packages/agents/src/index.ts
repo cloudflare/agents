@@ -502,6 +502,8 @@ export class Agent<
             this.broadcastMcpServers();
 
             if (result.authSuccess) {
+              this.clearMcpServerAuthUrl(result.serverId);
+
               this.mcp
                 .establishConnection(result.serverId)
                 .catch((error) => {
@@ -1607,6 +1609,19 @@ export class Agent<
       DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
     `;
     this.broadcastMcpServers();
+  }
+
+  /**
+   * Clear the auth_url for an MCP server after successful OAuth authentication
+   * This prevents the agent from continuously asking for OAuth on reconnect
+   * @param id The server ID to clear auth_url for
+   */
+  private clearMcpServerAuthUrl(id: string) {
+    this.sql`
+      UPDATE cf_agents_mcp_servers
+      SET auth_url = NULL
+      WHERE id = ${id}
+    `;
   }
 
   getMcpServers(): MCPServersState {
