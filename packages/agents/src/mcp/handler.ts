@@ -5,7 +5,6 @@ import {
   type WorkerTransportOptions
 } from "./worker-transport";
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
-import type { CORSOptions } from "./types";
 
 export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
   /**
@@ -15,28 +14,13 @@ export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
    */
   route?: string;
   /**
-   * CORS configuration options for handling cross-origin requests.
-   * These options are passed to the WorkerTransport which handles adding
-   * CORS headers to all responses.
-   *
-   * Default values are:
-   * - origin: "*"
-   * - headers: "Content-Type, Accept, Authorization, mcp-session-id, MCP-Protocol-Version"
-   * - methods: "GET, POST, DELETE, OPTIONS"
-   * - exposeHeaders: "mcp-session-id"
-   * - maxAge: 86400
-   *
-   * Provided options will overwrite the defaults.
-   */
-  corsOptions?: CORSOptions;
-  /**
-   * An optional auth info to use for handling MCP requests.
+   * An optional auth context to use for handling MCP requests.
    * If not provided, the handler will look for props in the execution context.
    */
   authContext?: McpAuthContext;
   /**
    * An optional transport to use for handling MCP requests.
-   * If not provided, a new WorkerTransport will be created. Note if you override this you should set your
+   * If not provided, a WorkerTransport will be created with the provided WorkerTransportOptions.
    */
   transport?: WorkerTransport;
 }
@@ -61,7 +45,15 @@ export function createMcpHandler(
       return new Response("Not Found", { status: 404 });
     }
 
-    const transport = options.transport ?? new WorkerTransport();
+    const transport =
+      options.transport ??
+      new WorkerTransport({
+        sessionIdGenerator: options.sessionIdGenerator,
+        enableJsonResponse: options.enableJsonResponse,
+        onsessioninitialized: options.onsessioninitialized,
+        corsOptions: options.corsOptions,
+        storage: options.storage
+      });
 
     const buildAuthContext = () => {
       if (options.authContext) {
