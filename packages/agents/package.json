@@ -42,6 +42,7 @@
   "devDependencies": {
     "@cloudflare/workers-oauth-provider": "^0.1.0",
     "@types/yargs": "^17.0.34",
+    "msw": "^2.11.3",
     "react": "*",
     "vitest-browser-react": "^1.0.1",
     "x402": "^0.7.1"
@@ -130,6 +131,16 @@
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",
       "require": "./dist/mcp/x402.js"
+    },
+    "./ai-chat-agent-http": {
+      "types": "./dist/ai-chat-agent-http.d.ts",
+      "import": "./dist/ai-chat-agent-http.js",
+      "require": "./dist/ai-chat-agent-http.js"
+    },
+    "./use-agent-chat-http": {
+      "types": "./dist/use-agent-chat-http.d.ts",
+      "import": "./dist/use-agent-chat-http.js",
+      "require": "./dist/use-agent-chat-http.js"
     }
   },
   "publishConfig": {
