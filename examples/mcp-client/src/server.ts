@@ -47,6 +47,28 @@ export class MyAgent extends Agent<Env, never> {
       return new Response("Ok", { status: 200 });
     }
 
+    if (reqUrl.pathname.endsWith("get-tools") && request.method === "POST") {
+      try {
+        const { serverId } = (await request.json()) as { serverId: string };
+        const allTools = this.mcp.listTools();
+        const tools = allTools.filter((tool) => tool.serverId === serverId);
+        return new Response(JSON.stringify({ tools }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200
+        });
+      } catch (error) {
+        return new Response(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error)
+          }),
+          {
+            headers: { "Content-Type": "application/json" },
+            status: 500
+          }
+        );
+      }
+    }
+
     return new Response("Not found", { status: 404 });
   }
 }
