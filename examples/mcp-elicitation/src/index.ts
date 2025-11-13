@@ -116,7 +116,7 @@ export class MyAgent extends Agent<Env, State> {
   }
 
   async onMcpRequest(request: Request) {
-    return createMcpHandler(this.server as any, {
+    return createMcpHandler(this.server, {
       transport: this.transport
     })(request, this.env, {} as ExecutionContext);
   }
