@@ -23,6 +23,8 @@ export type AgentClientOptions<State = unknown> = Omit<
   name?: string;
   /** Called when the Agent's state is updated */
   onStateUpdate?: (state: State, source: "server" | "client") => void;
+  /** Called when a state update fails (e.g., connection is readonly) */
+  onStateUpdateError?: (error: string) => void;
 };
 
 /**
@@ -120,6 +122,10 @@ export class AgentClient<State = unknown> extends PartySocket {
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           this.options.onStateUpdate?.(parsedMessage.state as State, "server");
+          return;
+        }
+        if (parsedMessage.type === MessageType.CF_AGENT_STATE_ERROR) {
+          this.options.onStateUpdateError?.(parsedMessage.error as string);
           return;
         }
         if (parsedMessage.type === MessageType.RPC) {
