@@ -45,9 +45,11 @@ server.registerTool(
       "openai/toolInvocation/invoked": "Chess widget opened"
     }
   },
-  async (_, _extra) => {
+  async () => {
     return {
-      content: [{ type: "text", text: "Successfully rendered chess game menu" }]
+      content: [
+        { type: "text" as const, text: "Successfully rendered chess game menu" }
+      ]
     };
   }
 );
