@@ -30,7 +30,7 @@ export interface PlaygroundState {
  */
 export class Playground extends AIChatAgent<Env, PlaygroundState> {
   initialState = {
-    model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+    model: "@cf/qwen/qwen3-30b-a3b-fp8",
     temperature: 1,
     stream: true,
     system:
@@ -143,9 +143,9 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
       await this.removeMcpServer(serverId);
     } else {
       // Disconnect all servers if no serverId provided
-      const mcpState = this.getMcpServers();
-      for (const id of Object.keys(mcpState.servers)) {
-        await this.removeMcpServer(id);
+      const servers = this.mcp.listServers();
+      for (const server of servers) {
+        await this.removeMcpServer(server.id);
       }
     }
   }

@@ -24,9 +24,7 @@ type McpServersProps = {
 };
 
 export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
-  const [serverUrl, setServerUrl] = useState(() => {
-    return sessionStorage.getItem("mcpServerUrl") || "";
-  });
+  const [serverUrl, setServerUrl] = useState("");
   const [_transportType, _setTransportType] = useState<"auto" | "http" | "sse">(
     () => {
       return (
@@ -53,6 +51,12 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
       setIsActive(false);
     }
   }, [mcpState?.state, mcpState]);
+
+  useEffect(() => {
+    if (mcpState?.url) {
+      setServerUrl(mcpState.url);
+    }
+  }, [mcpState?.url]);
   const [error, setError] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
 
@@ -377,9 +381,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
             placeholder="Enter MCP server URL"
             value={serverUrl}
             onChange={(e) => {
-              const newValue = e.target.value;
-              setServerUrl(newValue);
-              sessionStorage.setItem("mcpServerUrl", newValue);
+              setServerUrl(e.target.value);
             }}
             disabled={isActive}
           />
@@ -395,10 +397,21 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
             <button
               type="button"
               className="bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background text-white rounded-md shadow-sm py-2 px-4 text-sm"
-              onClick={handleConnect}
-              disabled={isActive || isConnecting}
+              onClick={
+                mcpState?.state === "authenticating"
+                  ? handleDisconnect
+                  : handleConnect
+              }
+              disabled={
+                isActive ||
+                (isConnecting && mcpState?.state !== "authenticating")
+              }
             >
-              {isConnecting ? "Connecting..." : "Connect"}
+              {mcpState?.state === "authenticating"
+                ? "Cancel"
+                : isConnecting
+                  ? "Connecting..."
+                  : "Connect"}
             </button>
           )}
         </div>

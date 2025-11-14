@@ -1,8 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  CallToolResult,
+  JSONRPCMessage
+} from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import {
   WorkerTransport,
+  type TransportState,
   type WorkerTransportOptions
 } from "../../mcp/worker-transport";
 import { z } from "zod";
@@ -655,11 +659,11 @@ describe("WorkerTransport", () => {
   describe("Storage API - State Persistence", () => {
     it("should persist session state to storage", async () => {
       const server = createTestServer();
-      let storedState: any = undefined;
+      let storedState: TransportState | undefined;
 
       const mockStorage = {
         get: async () => storedState,
-        set: async (state: any) => {
+        set: async (state: TransportState) => {
           storedState = state;
         }
       };
@@ -690,9 +694,9 @@ describe("WorkerTransport", () => {
       await transport.handleRequest(request);
 
       expect(storedState).toBeDefined();
-      expect(storedState.sessionId).toBe("persistent-session");
-      expect(storedState.initialized).toBe(true);
-      expect(storedState.protocolVersion).toBe("2025-06-18");
+      expect(storedState?.sessionId).toBe("persistent-session");
+      expect(storedState?.initialized).toBe(true);
+      expect(storedState?.protocolVersion).toBe("2025-06-18");
     });
 
     it("should restore session state from storage", async () => {
@@ -969,7 +973,7 @@ describe("WorkerTransport", () => {
 
       const body = await response.json();
       expect(body).toBeDefined();
-      expect((body as any).jsonrpc).toBe("2.0");
+      expect((body as JSONRPCMessage).jsonrpc).toBe("2.0");
     });
 
     it("should return SSE stream when enableJsonResponse is false", async () => {

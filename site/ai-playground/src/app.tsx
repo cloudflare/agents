@@ -18,7 +18,7 @@ import type { McpComponentState } from "./components/McpServers";
 
 const STORAGE_KEY = "playground_session_id";
 const DEFAULT_PARAMS = {
-  model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+  model: "@cf/qwen/qwen3-30b-a3b-fp8",
   temperature: 0,
   stream: true,
   system:
@@ -516,13 +516,21 @@ const App = () => {
                       Assistant
                     </button>
                   </div>
-                  <div className="relative grow">
-                    <TextareaAutosize
-                      className="rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-gray-50 pointer-events-none"
-                      value="..."
-                      disabled={true}
-                      readOnly
-                    />
+                  <div className="relative grow flex items-end min-h-[36px]">
+                    <div className="rounded-md p-3 w-full hover:bg-gray-50 pointer-events-none flex items-end gap-1 pb-2">
+                      <div
+                        className="size-1 rounded-full bg-gray-400 animate-bounce"
+                        style={{ animationDelay: "0s" }}
+                      />
+                      <div
+                        className="size-1 rounded-full bg-gray-400 animate-bounce"
+                        style={{ animationDelay: "0.1s" }}
+                      />
+                      <div
+                        className="size-1 rounded-full bg-gray-400 animate-bounce"
+                        style={{ animationDelay: "0.2s" }}
+                      />
+                    </div>
                   </div>
                 </li>
               ) : null}

@@ -35,7 +35,11 @@ export class PayAgent extends Agent<Env> {
     );
     console.log("Agent will pay from this address:", account.address);
 
-    const { id } = await this.mcp.connect("http://localhost:8787/mcp");
+    const { id } = await this.addMcpServer(
+      "x402",
+      "http://localhost:8787/mcp",
+      "http://localhost:3000"
+    );
 
     // Build the x402 MCP client
     this.x402Client = withX402Client(this.mcp.mcpConnections[id].client, {

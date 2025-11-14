@@ -29,6 +29,7 @@ describe("OAuth2 MCP Client", () => {
     const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     // Insert the MCP server record into the database (simulating pre-OAuth persistence)
+    const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
     agentStub.sql`
         INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
         VALUES (
@@ -37,7 +38,7 @@ describe("OAuth2 MCP Client", () => {
           ${serverUrl},
           ${clientId},
           ${authUrl},
-          ${callbackBaseUrl},
+          ${fullCallbackUrl},
           ${null}
         )
       `;
@@ -45,12 +46,11 @@ describe("OAuth2 MCP Client", () => {
     // At this point, the DO has internal state only from database
     // When it wakes up for the OAuth callback, it should restore state from the database
 
-    // Verify callback URL is NOT registered before the callback (simulating hibernation)
-    const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
+    // Verify callback URL is registered from database (no in-memory state needed)
     const isRegisteredBefore = await agentStub.isCallbackUrlRegistered(
       `${fullCallbackUrl}?code=test&state=test`
     );
-    expect(isRegisteredBefore).toBe(false);
+    expect(isRegisteredBefore).toBe(true);
 
     // Simulate the OAuth callback request
     const authCode = "test-auth-code";
@@ -99,8 +99,9 @@ describe("OAuth2 MCP Client", () => {
     const clientId = "test-client-id";
     const authUrl = "http://example.com/oauth/authorize";
     const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+    const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
 
-    // Insert server record in database
+    // Insert server record in database with full callback URL including serverId
     agentStub.sql`
         INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
         VALUES (
@@ -109,30 +110,21 @@ describe("OAuth2 MCP Client", () => {
           ${serverUrl},
           ${clientId},
           ${authUrl},
-          ${callbackBaseUrl},
+          ${fullCallbackUrl},
           ${null}
         )
       `;
 
-    // Simulate partial state: callback URL is registered but connection is missing
-    const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
-    await agentStub.setupMockMcpConnection(
-      serverId,
-      serverName,
-      serverUrl,
-      callbackBaseUrl
-    );
+    // Setup mock OAuth state for the callback to succeed
+    await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
-    // Verify callback URL IS registered
+    // Verify callback URL IS registered from database
     const isRegisteredBefore = await agentStub.isCallbackUrlRegistered(
       `${fullCallbackUrl}?code=test&state=test`
     );
     expect(isRegisteredBefore).toBe(true);
 
-    // Now REMOVE the connection from mcpConnections to simulate the bug scenario
-    await agentStub.removeMcpConnection(serverId);
-
-    // Verify connection is missing
+    // Verify connection does NOT exist yet (hibernated state)
     const connectionExists = await agentStub.hasMcpConnection(serverId);
     expect(connectionExists).toBe(false);
 
@@ -166,8 +158,9 @@ describe("OAuth2 MCP Client", () => {
     const serverName = "test-server";
     const serverUrl = "http://example.com/mcp";
     const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+    const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
 
-    // Insert server record in database
+    // Insert server record in database with full callback URL
     agentStub.sql`
         INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
         VALUES (
@@ -176,7 +169,7 @@ describe("OAuth2 MCP Client", () => {
           ${serverUrl},
           ${"client-id"},
           ${"http://example.com/auth"},
-          ${callbackBaseUrl},
+          ${fullCallbackUrl},
           ${null}
         )
       `;
@@ -186,11 +179,11 @@ describe("OAuth2 MCP Client", () => {
       serverId,
       serverName,
       serverUrl,
-      callbackBaseUrl
+      callbackBaseUrl,
+      "client-id"
     );
 
-    // Verify callback URL is already registered
-    const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
+    // Verify callback URL is already registered from database
     const isRegisteredBefore = await agentStub.isCallbackUrlRegistered(
       `${fullCallbackUrl}?code=test&state=test`
     );
@@ -206,14 +199,14 @@ describe("OAuth2 MCP Client", () => {
 
     const response = await agentStub.fetch(request);
 
-    // Should succeed - the restoration is idempotent
+    // Should succeed
     expect(response.status).toBe(200);
 
-    // Verify callback URL is still registered (idempotent)
+    // Verify callback URL is cleared after successful auth (security measure)
     const isRegisteredAfter = await agentStub.isCallbackUrlRegistered(
       `${fullCallbackUrl}?code=test&state=test`
     );
-    expect(isRegisteredAfter).toBe(true);
+    expect(isRegisteredAfter).toBe(false);
   });
 
   it("should not restore state for non-callback requests", async () => {
@@ -246,15 +239,16 @@ describe("OAuth2 MCP Client", () => {
 
       const serverId = nanoid(8);
       const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+      const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
 
       // Insert OAuth server
       agentStub.sql`
         INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-        VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackBaseUrl}, ${null})
+        VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${fullCallbackUrl}, ${null})
       `;
 
       // Make callback request without code parameter
-      const callbackUrl = `${callbackBaseUrl}/${serverId}?state=test-state`;
+      const callbackUrl = `${fullCallbackUrl}?state=test-state`;
       const request = new Request(callbackUrl, { method: "GET" });
 
       const response = await agentStub.fetch(request);
@@ -273,15 +267,16 @@ describe("OAuth2 MCP Client", () => {
 
       const serverId = nanoid(8);
       const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+      const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
 
       // Insert OAuth server
       agentStub.sql`
         INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-        VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackBaseUrl}, ${null})
+        VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${fullCallbackUrl}, ${null})
       `;
 
       // Make callback request without state parameter
-      const callbackUrl = `${callbackBaseUrl}/${serverId}?code=test-code`;
+      const callbackUrl = `${fullCallbackUrl}?code=test-code`;
       const request = new Request(callbackUrl, { method: "GET" });
 
       const response = await agentStub.fetch(request);
@@ -304,6 +299,7 @@ describe("OAuth2 MCP Client", () => {
     const clientId = "test-client-id";
     const authUrl = "http://example.com/oauth/authorize";
     const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+    const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
 
     // Insert MCP server with auth_url
     agentStub.sql`
@@ -314,7 +310,7 @@ describe("OAuth2 MCP Client", () => {
         ${serverUrl},
         ${clientId},
         ${authUrl},
-        ${callbackBaseUrl},
+        ${fullCallbackUrl},
         ${null}
       )
     `;
@@ -324,19 +320,20 @@ describe("OAuth2 MCP Client", () => {
     expect(serverBefore).not.toBeNull();
     expect(serverBefore?.auth_url).toBe(authUrl);
 
-    // Setup mock connection and OAuth state
+    // Setup mock connection and OAuth state, preserving client_id
     await agentStub.setupMockMcpConnection(
       serverId,
       serverName,
       serverUrl,
-      callbackBaseUrl
+      callbackBaseUrl,
+      clientId
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
     // Simulate successful OAuth callback
     const authCode = "test-auth-code";
     const state = "test-state";
-    const callbackUrl = `${callbackBaseUrl}/${serverId}?code=${authCode}&state=${state}`;
+    const callbackUrl = `${fullCallbackUrl}?code=${authCode}&state=${state}`;
     const request = new Request(callbackUrl, { method: "GET" });
 
     const response = await agentStub.fetch(request);
@@ -369,17 +366,19 @@ describe("OAuth2 MCP Client", () => {
       const serverId = nanoid(8);
       const origin = config.origin || "http://example.com";
       const callbackBaseUrl = `${origin}/agents/oauth/${agentId.toString()}/callback`;
+      const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
 
       agentStub.sql`
         INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-        VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackBaseUrl}, ${null})
+        VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${fullCallbackUrl}, ${null})
       `;
 
       await agentStub.setupMockMcpConnection(
         serverId,
         "test",
         "http://example.com/mcp",
-        callbackBaseUrl
+        callbackBaseUrl,
+        "client"
       );
       await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
