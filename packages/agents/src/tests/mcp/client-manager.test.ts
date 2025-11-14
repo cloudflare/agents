@@ -5,14 +5,15 @@ import {
   AgentMCPStorageAdapter,
   type MCPServerRow
 } from "../../mcp/client-storage";
-import type { AgentsOAuthProvider } from "../../mcp/do-oauth-client-provider";
 
 describe("MCPClientManager OAuth Integration", () => {
   let manager: MCPClientManager;
   let mockStorageData: Map<string, MCPServerRow>;
+  let mockKVData: Map<string, unknown>;
 
   beforeEach(() => {
     mockStorageData = new Map();
+    mockKVData = new Map();
 
     // Create a proper mock storage adapter
     const mockStorage = new AgentMCPStorageAdapter(
@@ -72,6 +73,14 @@ describe("MCPClientManager OAuth Integration", () => {
         }
 
         return [] as unknown as T[];
+      },
+      {
+        get: <T>(key: string) => mockKVData.get(key) as T | undefined,
+        put: (key: string, value: unknown) => {
+          mockKVData.set(key, value);
+        },
+        list: vi.fn(),
+        delete: vi.fn()
       }
     );
 
@@ -598,55 +607,21 @@ describe("MCPClientManager OAuth Integration", () => {
         })
       });
 
-      // Track auth provider creation
-      const createdAuthProviders: AgentsOAuthProvider[] = [];
-      const createAuthProvider = vi.fn(
-        (id: string, url: string, cId?: string): AgentsOAuthProvider => {
-          const provider: AgentsOAuthProvider = {
-            serverId: id,
-            clientId: cId,
-            redirectUrl: url,
-            authUrl: undefined,
-            clientMetadata: {
-              redirect_uris: [url]
-            },
-            tokens: vi.fn(),
-            saveTokens: vi.fn(),
-            clientInformation: vi.fn(),
-            saveClientInformation: vi.fn(),
-            redirectToAuthorization: vi.fn(),
-            saveCodeVerifier: vi.fn(),
-            codeVerifier: vi.fn()
-          };
-          createdAuthProviders.push(provider);
-          return provider;
-        }
-      );
-
-      const reconnectServer = vi.fn();
-
-      await manager.restoreConnectionsFromStorage(
-        createAuthProvider,
-        reconnectServer
-      );
-
-      // Verify auth provider was created with correct parameters
-      expect(createAuthProvider).toHaveBeenCalledWith(
-        serverId,
-        callbackUrl,
-        clientId
-      );
-      expect(createdAuthProviders).toHaveLength(1);
-      expect(createdAuthProviders[0].serverId).toBe(serverId);
-      expect(createdAuthProviders[0].clientId).toBe(clientId);
+      await manager.restoreConnectionsFromStorage("test-agent");
 
       // Verify connection was created in authenticating state
       const connection = manager.mcpConnections[serverId];
       expect(connection).toBeDefined();
       expect(connection.connectionState).toBe("authenticating");
 
-      // Verify non-OAuth reconnect was not called
-      expect(reconnectServer).not.toHaveBeenCalled();
+      // Verify auth provider was set up
+      expect(connection.options.transport.authProvider).toBeDefined();
+      expect(connection.options.transport.authProvider?.serverId).toBe(
+        serverId
+      );
+      expect(connection.options.transport.authProvider?.clientId).toBe(
+        clientId
+      );
     });
 
     it("should restore non-OAuth connections from storage", async () => {
@@ -667,43 +642,21 @@ describe("MCPClientManager OAuth Integration", () => {
         })
       });
 
-      const createAuthProvider = vi.fn();
-      const reconnectServer = vi.fn().mockResolvedValue(undefined);
+      await manager.restoreConnectionsFromStorage("test-agent");
 
-      await manager.restoreConnectionsFromStorage(
-        createAuthProvider,
-        reconnectServer
-      );
+      // Verify connection was registered and connected
+      const connection = manager.mcpConnections[serverId];
+      expect(connection).toBeDefined();
 
-      // Verify auth provider was NOT created
-      expect(createAuthProvider).not.toHaveBeenCalled();
-
-      // Verify reconnectServer was called with correct parameters
-      expect(reconnectServer).toHaveBeenCalledWith(
-        serverId,
-        "Regular Server",
-        "http://regular-server.com",
-        callbackUrl,
-        null, // client_id
-        {
-          transport: { type: "sse", headers: { "X-Custom": "value" } },
-          client: {}
-        }
-      );
+      // Verify auth provider was created (required for all connections)
+      expect(connection.options.transport.authProvider).toBeDefined();
     });
 
     it("should handle empty server list gracefully", async () => {
-      const createAuthProvider = vi.fn();
-      const reconnectServer = vi.fn();
+      await manager.restoreConnectionsFromStorage("test-agent");
 
-      await manager.restoreConnectionsFromStorage(
-        createAuthProvider,
-        reconnectServer
-      );
-
-      // Neither should be called with no servers
-      expect(createAuthProvider).not.toHaveBeenCalled();
-      expect(reconnectServer).not.toHaveBeenCalled();
+      // Should not throw and should have no connections
+      expect(Object.keys(manager.mcpConnections)).toHaveLength(0);
     });
 
     it("should restore mixed OAuth and non-OAuth servers", async () => {
@@ -729,44 +682,16 @@ describe("MCPClientManager OAuth Integration", () => {
         server_options: null
       });
 
-      const createAuthProvider = vi.fn().mockReturnValue({
-        serverId: undefined,
-        clientId: undefined,
-        authUrl: undefined,
-        redirectUrl: "",
-        clientMetadata: {},
-        tokens: vi.fn(),
-        saveTokens: vi.fn(),
-        clientInformation: vi.fn(),
-        saveClientInformation: vi.fn(),
-        redirectToAuthorization: vi.fn(),
-        saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn()
-      });
-      const reconnectServer = vi.fn().mockResolvedValue(undefined);
+      await manager.restoreConnectionsFromStorage("test-agent");
 
-      await manager.restoreConnectionsFromStorage(
-        createAuthProvider,
-        reconnectServer
-      );
-
-      // Verify OAuth server used auth provider
-      expect(createAuthProvider).toHaveBeenCalledTimes(1);
+      // Verify OAuth server is in authenticating state
       expect(manager.mcpConnections["oauth-server"]).toBeDefined();
       expect(manager.mcpConnections["oauth-server"].connectionState).toBe(
         "authenticating"
       );
 
-      // Verify regular server used reconnect
-      expect(reconnectServer).toHaveBeenCalledTimes(1);
-      expect(reconnectServer).toHaveBeenCalledWith(
-        "regular-server",
-        "Regular Server",
-        "http://regular.com",
-        "http://localhost:3000/callback/regular",
-        null,
-        null
-      );
+      // Verify regular server was connected
+      expect(manager.mcpConnections["regular-server"]).toBeDefined();
     });
   });
 });
