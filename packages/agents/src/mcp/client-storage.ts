@@ -53,6 +53,16 @@ export interface MCPStorageAdapter {
    * and prevents malicious second callbacks from being processed
    */
   clearOAuthCredentials(serverId: string): void;
+
+  /**
+   * Get a value from key-value storage (for OAuth data like tokens, client info, etc.)
+   */
+  get<T>(key: string): T | undefined;
+
+  /**
+   * Put a value into key-value storage (for OAuth data like tokens, client info, etc.)
+   */
+  put(key: string, value: unknown): void;
 }
 
 /**
@@ -64,7 +74,8 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     private sql: <T extends Record<string, unknown>>(
       strings: TemplateStringsArray,
       ...values: (string | number | boolean | null)[]
-    ) => T[]
+    ) => T[],
+    private kv: SyncKvStorage
   ) {}
 
   create() {
@@ -138,5 +149,20 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
       SET callback_url = '', auth_url = NULL
       WHERE id = ${serverId}
     `;
+  }
+
+  get<T>(key: string) {
+    return this.kv.get<T>(key);
+  }
+
+  put(
+    key: string,
+    value:
+      | string
+      | ArrayBuffer
+      | ArrayBufferView<ArrayBufferLike>
+      | ReadableStream
+  ) {
+    this.kv.put(key, value);
   }
 }

@@ -408,7 +408,10 @@ export class Agent<
     super(ctx, env);
 
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
-      storage: new AgentMCPStorageAdapter(this.sql.bind(this))
+      storage: new AgentMCPStorageAdapter(
+        this.sql.bind(this),
+        this.ctx.storage.kv
+      )
     });
 
     if (!wrappedClasses.has(this.constructor)) {
@@ -1375,39 +1378,7 @@ export class Agent<
       return;
     }
 
-    await this.mcp.restoreConnectionsFromStorage(
-      (serverId, callbackUrl, clientId) => {
-        const authProvider = new DurableObjectOAuthClientProvider(
-          this.ctx.storage,
-          this.name,
-          callbackUrl
-        );
-        authProvider.serverId = serverId;
-        if (clientId) {
-          authProvider.clientId = clientId;
-        }
-        return authProvider;
-      },
-      async (
-        serverId,
-        serverName,
-        serverUrl,
-        callbackUrl,
-        clientId,
-        serverOptions
-      ) => {
-        await this._connectToMcpServerInternal(
-          serverName,
-          serverUrl,
-          callbackUrl,
-          serverOptions ?? undefined,
-          {
-            id: serverId,
-            oauthClientId: clientId ?? undefined
-          }
-        );
-      }
-    );
+    await this.mcp.restoreConnectionsFromStorage(this.name);
 
     this._mcpConnectionsInitialized = true;
   }
@@ -1503,7 +1474,7 @@ export class Agent<
     clientId: string | undefined;
   }> {
     const authProvider = new DurableObjectOAuthClientProvider(
-      this.ctx.storage,
+      this.mcp.storage,
       this.name,
       callbackUrl
     );

@@ -24,6 +24,7 @@ import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
 import type { MCPStorageAdapter, MCPServerRow } from "./client-storage";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 
 /**
  * Options that can be stored in the server_options column
@@ -92,27 +93,42 @@ export class MCPClientManager {
   jsonSchema: typeof import("ai").jsonSchema | undefined;
 
   /**
+   * Get the storage adapter instance
+   * @internal
+   */
+  get storage(): MCPStorageAdapter {
+    return this._storage;
+  }
+
+  /**
+   * Create an auth provider for a server
+   * @internal
+   */
+  private createAuthProvider(
+    serverId: string,
+    callbackUrl: string,
+    clientName: string,
+    clientId?: string
+  ): AgentsOAuthProvider {
+    const authProvider = new DurableObjectOAuthClientProvider(
+      this._storage,
+      clientName,
+      callbackUrl
+    );
+    authProvider.serverId = serverId;
+    if (clientId) {
+      authProvider.clientId = clientId;
+    }
+    return authProvider;
+  }
+
+  /**
    * Restore MCP server connections from storage
    * This method is called on Agent initialization to restore previously connected servers
    *
-   * @param createAuthProvider Factory function to create OAuth provider instances
-   * @param reconnectServer Function to reconnect to a server (for non-OAuth servers)
+   * @param clientName Name to use for OAuth client (typically the agent instance name)
    */
-  async restoreConnectionsFromStorage(
-    createAuthProvider: (
-      serverId: string,
-      callbackUrl: string,
-      clientId?: string
-    ) => AgentsOAuthProvider,
-    reconnectServer: (
-      serverId: string,
-      serverName: string,
-      serverUrl: string,
-      callbackUrl: string,
-      clientId: string | null,
-      serverOptions: MCPServerOptions | null
-    ) => Promise<void>
-  ): Promise<void> {
+  async restoreConnectionsFromStorage(clientName: string): Promise<void> {
     const servers = this._storage.listServers();
 
     if (!servers || servers.length === 0) {
@@ -120,103 +136,61 @@ export class MCPClientManager {
     }
 
     for (const server of servers) {
+      const existingConn = this.mcpConnections[server.id];
+
+      // Skip if connection already exists and is in a good state
+      if (existingConn) {
+        if (existingConn.connectionState === "ready") {
+          console.warn(
+            `[MCPClientManager] Server ${server.id} already has a ready connection. Skipping recreation.`
+          );
+          continue;
+        }
+
+        // Don't interrupt in-flight OAuth or connections
+        if (
+          existingConn.connectionState === "authenticating" ||
+          existingConn.connectionState === "connecting" ||
+          existingConn.connectionState === "discovering"
+        ) {
+          // Let the existing flow complete
+          continue;
+        }
+
+        // If failed, we'll recreate below
+      }
+
       const needsOAuth = !!server.auth_url;
+      const parsedOptions: MCPServerOptions | null = server.server_options
+        ? JSON.parse(server.server_options)
+        : null;
+
+      // Create auth provider for this server
+      const authProvider = this.createAuthProvider(
+        server.id,
+        server.callback_url,
+        clientName,
+        server.client_id ?? undefined
+      );
+
+      // Register the server
+      this.registerServer(server.id, server.server_url, {
+        client: parsedOptions?.client ?? {},
+        transport: {
+          ...(parsedOptions?.transport ?? {}),
+          type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
+          authProvider
+        }
+      });
 
       if (needsOAuth) {
-        const existingConn = this.mcpConnections[server.id];
-
-        // Skip if connection already exists and is in a good state
-        if (existingConn) {
-          if (existingConn.connectionState === "ready") {
-            // Connection already ready, skip recreation. This means auth_url wasn't properly cleared.
-            console.warn(
-              `[MCPClientManager] Server ${server.id} already has a ready connection but auth_url still exists in DB. Skipping recreation.`
-            );
-            continue;
-          }
-
-          // Don't interrupt in-flight OAuth or connections
-          if (
-            existingConn.connectionState === "authenticating" ||
-            existingConn.connectionState === "connecting" ||
-            existingConn.connectionState === "discovering"
-          ) {
-            // Let the existing flow complete
-            continue;
-          }
-
-          // If failed, we'll recreate below
+        // OAuth server - just set state to authenticating (wait for OAuth flow)
+        if (this.mcpConnections[server.id]) {
+          this.mcpConnections[server.id].connectionState = "authenticating";
         }
-
-        const authProvider = createAuthProvider(
-          server.id,
-          server.callback_url,
-          server.client_id ?? undefined
-        );
-
-        const parsedOptions: MCPServerOptions | null = server.server_options
-          ? JSON.parse(server.server_options)
-          : null;
-
-        const conn = new MCPClientConnection(
-          new URL(server.server_url),
-          {
-            name: this._name,
-            version: this._version
-          },
-          {
-            client: parsedOptions?.client ?? {},
-            transport: {
-              ...(parsedOptions?.transport ?? {}),
-              type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
-              authProvider
-            }
-          }
-        );
-
-        conn.connectionState = "authenticating";
-
-        // Set up observability
-        const store = new DisposableStore();
-        const existing = this._connectionDisposables.get(server.id);
-        if (existing) existing.dispose();
-        this._connectionDisposables.set(server.id, store);
-        store.add(
-          conn.onObservabilityEvent((event) => {
-            this._onObservabilityEvent.fire(event);
-          })
-        );
-
-        this.mcpConnections[server.id] = conn;
       } else {
-        // Non-OAuth server
-        const existingConn = this.mcpConnections[server.id];
-
-        // Skip if connection already exists and is working or in-flight
-        if (existingConn) {
-          if (
-            existingConn.connectionState === "ready" ||
-            existingConn.connectionState === "connecting" ||
-            existingConn.connectionState === "discovering"
-          ) {
-            // Connection already established or in progress
-            continue;
-          }
-          // If failed, we'll recreate below
-        }
-
-        const parsedOptions: MCPServerOptions | null = server.server_options
-          ? JSON.parse(server.server_options)
-          : null;
-
-        reconnectServer(
-          server.id,
-          server.name,
-          server.server_url,
-          server.callback_url,
-          server.client_id,
-          parsedOptions
-        ).catch((error) => {
+        // Non-OAuth server - connect immediately
+        await this.connectToServer(server.id).catch((error) => {
           console.error(`Error restoring ${server.id}:`, error);
         });
       }
@@ -224,8 +198,125 @@ export class MCPClientManager {
   }
 
   /**
+   * Register an MCP server connection without connecting
+   * Creates the connection object and sets up observability
+   *
+   * @param id Server ID
+   * @param url Server URL
+   * @param options Connection options
+   * @returns Server ID
+   */
+  registerServer(
+    id: string,
+    url: string,
+    options: {
+      transport?: MCPTransportOptions;
+      client?: ConstructorParameters<typeof Client>[1];
+    } = {}
+  ): string {
+    // Skip if connection already exists
+    if (this.mcpConnections[id]) {
+      return id;
+    }
+
+    const normalizedTransport = {
+      ...options.transport,
+      type: options.transport?.type ?? ("auto" as TransportType)
+    };
+
+    this.mcpConnections[id] = new MCPClientConnection(
+      new URL(url),
+      {
+        name: this._name,
+        version: this._version
+      },
+      {
+        client: options.client ?? {},
+        transport: normalizedTransport
+      }
+    );
+
+    // Pipe connection-level observability events to the manager-level emitter
+    const store = new DisposableStore();
+    const existing = this._connectionDisposables.get(id);
+    if (existing) existing.dispose();
+    this._connectionDisposables.set(id, store);
+    store.add(
+      this.mcpConnections[id].onObservabilityEvent((event) => {
+        this._onObservabilityEvent.fire(event);
+      })
+    );
+
+    return id;
+  }
+
+  /**
+   * Connect to an already registered MCP server
+   *
+   * @param id Server ID
+   * @param oauthCode Optional OAuth code for completing OAuth flow
+   * @returns Auth URL if OAuth is required, undefined otherwise
+   */
+  async connectToServer(
+    id: string,
+    oauthCode?: string
+  ): Promise<{
+    authUrl?: string;
+    clientId?: string;
+  }> {
+    const conn = this.mcpConnections[id];
+    if (!conn) {
+      throw new Error(
+        `Server ${id} is not registered. Call registerServer() first.`
+      );
+    }
+
+    // Handle OAuth completion if we have a code
+    if (oauthCode) {
+      try {
+        await conn.completeAuthorization(oauthCode);
+        await conn.establishConnection();
+      } catch (error) {
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:connect",
+          displayMessage: `Failed to complete OAuth reconnection for ${id}`,
+          payload: {
+            url: conn.url.toString(),
+            transport: conn.options.transport.type ?? "auto",
+            state: conn.connectionState,
+            error: toErrorMessage(error)
+          },
+          timestamp: Date.now(),
+          id
+        });
+        throw error;
+      }
+      return {};
+    }
+
+    // Initialize connection
+    await conn.init();
+
+    // If connection is in authenticating state, return auth URL for OAuth flow
+    const authUrl = conn.options.transport.authProvider?.authUrl;
+    if (
+      conn.connectionState === "authenticating" &&
+      authUrl &&
+      conn.options.transport.authProvider?.redirectUrl
+    ) {
+      return {
+        authUrl,
+        clientId: conn.options.transport.authProvider?.clientId
+      };
+    }
+
+    return {};
+  }
+
+  /**
    * Connect to and register an MCP server
    *
+   * @deprecated Consider using registerServer() followed by connectToServer() for more control
    * @param transportConfig Transport config
    * @param clientConfig Client config
    * @param capabilities Client capabilities (i.e. if the client supports roots/sampling)
@@ -270,83 +361,17 @@ export class MCPClientManager {
       }
     }
 
-    // During OAuth reconnect, reuse existing connection to preserve state
+    // Register server if not already registered or if not doing OAuth code reconnect
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
-      const normalizedTransport = {
-        ...options.transport,
-        type: options.transport?.type ?? ("auto" as TransportType)
-      };
-
-      this.mcpConnections[id] = new MCPClientConnection(
-        new URL(url),
-        {
-          name: this._name,
-          version: this._version
-        },
-        {
-          client: options.client ?? {},
-          transport: normalizedTransport
-        }
-      );
-
-      // Pipe connection-level observability events to the manager-level emitter
-      // and track the subscription for cleanup.
-      const store = new DisposableStore();
-      // If we somehow already had disposables for this id, clear them first
-      const existing = this._connectionDisposables.get(id);
-      if (existing) existing.dispose();
-      this._connectionDisposables.set(id, store);
-      store.add(
-        this.mcpConnections[id].onObservabilityEvent((event) => {
-          this._onObservabilityEvent.fire(event);
-        })
-      );
+      this.registerServer(id, url, options);
     }
 
-    // Initialize connection first
-    await this.mcpConnections[id].init();
-
-    // Handle OAuth completion if we have a reconnect code
-    if (options.reconnect?.oauthCode) {
-      try {
-        await this.mcpConnections[id].completeAuthorization(
-          options.reconnect.oauthCode
-        );
-        await this.mcpConnections[id].establishConnection();
-      } catch (error) {
-        this._onObservabilityEvent.fire({
-          type: "mcp:client:connect",
-          displayMessage: `Failed to complete OAuth reconnection for ${id} for ${url}`,
-          payload: {
-            url: url,
-            transport: options.transport?.type ?? "auto",
-            state: this.mcpConnections[id].connectionState,
-            error: toErrorMessage(error)
-          },
-          timestamp: Date.now(),
-          id
-        });
-        // Re-throw to signal failure to the caller
-        throw error;
-      }
-    }
-
-    // If connection is in authenticating state, return auth URL for OAuth flow
-    const authUrl = options.transport?.authProvider?.authUrl;
-    if (
-      this.mcpConnections[id].connectionState === "authenticating" &&
-      authUrl &&
-      options.transport?.authProvider?.redirectUrl
-    ) {
-      return {
-        authUrl,
-        clientId: options.transport?.authProvider?.clientId,
-        id
-      };
-    }
+    // Connect to server
+    const result = await this.connectToServer(id, options.reconnect?.oauthCode);
 
     return {
-      id
+      id,
+      ...result
     };
   }
 
@@ -398,6 +423,8 @@ export class MCPClientManager {
 
     // Find the matching server from database
     const servers = this._storage.listServers();
+
+    console.log(servers);
     const matchingServer = servers.find((server: MCPServerRow) => {
       return server.callback_url && req.url.startsWith(server.callback_url);
     });
