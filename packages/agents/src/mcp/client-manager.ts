@@ -123,6 +123,31 @@ export class MCPClientManager {
       const needsOAuth = !!server.auth_url;
 
       if (needsOAuth) {
+        const existingConn = this.mcpConnections[server.id];
+
+        // Skip if connection already exists and is in a good state
+        if (existingConn) {
+          if (existingConn.connectionState === "ready") {
+            // Connection already ready, skip recreation. This means auth_url wasn't properly cleared.
+            console.warn(
+              `[MCPClientManager] Server ${server.id} already has a ready connection but auth_url still exists in DB. Skipping recreation.`
+            );
+            continue;
+          }
+
+          // Don't interrupt in-flight OAuth or connections
+          if (
+            existingConn.connectionState === "authenticating" ||
+            existingConn.connectionState === "connecting" ||
+            existingConn.connectionState === "discovering"
+          ) {
+            // Let the existing flow complete
+            continue;
+          }
+
+          // If failed, we'll recreate below
+        }
+
         const authProvider = createAuthProvider(
           server.id,
           server.callback_url,
@@ -164,6 +189,22 @@ export class MCPClientManager {
 
         this.mcpConnections[server.id] = conn;
       } else {
+        // Non-OAuth server
+        const existingConn = this.mcpConnections[server.id];
+
+        // Skip if connection already exists and is working or in-flight
+        if (existingConn) {
+          if (
+            existingConn.connectionState === "ready" ||
+            existingConn.connectionState === "connecting" ||
+            existingConn.connectionState === "discovering"
+          ) {
+            // Connection already established or in progress
+            continue;
+          }
+          // If failed, we'll recreate below
+        }
+
         const parsedOptions: MCPServerOptions | null = server.server_options
           ? JSON.parse(server.server_options)
           : null;
@@ -216,10 +257,7 @@ export class MCPClientManager {
      * .connect() is called on at least one server.
      * So it's safe to delay loading it until .connect() is called.
      */
-    if (!this.jsonSchema) {
-      const { jsonSchema } = await import("ai");
-      this.jsonSchema = jsonSchema;
-    }
+    await this.ensureJsonSchema();
 
     const id = options.reconnect?.id ?? nanoid(8);
 
@@ -396,9 +434,18 @@ export class MCPClientManager {
       throw new Error(`Could not find serverId: ${serverId}`);
     }
 
+    // If connection is already ready, this is likely a duplicate callback
+    if (this.mcpConnections[serverId].connectionState === "ready") {
+      // Already authenticated and ready, treat as success
+      return {
+        serverId,
+        authSuccess: true
+      };
+    }
+
     if (this.mcpConnections[serverId].connectionState !== "authenticating") {
       throw new Error(
-        "Failed to authenticate: the client isn't in the `authenticating` state"
+        `Failed to authenticate: the client is in "${this.mcpConnections[serverId].connectionState}" state, expected "authenticating"`
       );
     }
 
@@ -502,10 +549,20 @@ export class MCPClientManager {
     return getNamespacedData(this.mcpConnections, "tools");
   }
 
+  async ensureJsonSchema() {
+    if (!this.jsonSchema) {
+      const { jsonSchema } = await import("ai");
+      this.jsonSchema = jsonSchema;
+    }
+  }
+
   /**
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
+    if (!this.jsonSchema) {
+      throw new Error("jsonSchema not initialized.");
+    }
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
@@ -581,17 +638,6 @@ export class MCPClientManager {
     const store = this._connectionDisposables.get(id);
     if (store) store.dispose();
     this._connectionDisposables.delete(id);
-  }
-
-  /**
-   * Clear the auth_url for an MCP server after successful OAuth authentication
-   * This prevents the agent from continuously asking for OAuth on reconnect
-   * @param serverId The server ID to clear auth_url for
-   */
-  clearAuthUrl(serverId: string): void {
-    if (this._storage) {
-      this._storage.clearAuthUrl(serverId);
-    }
   }
 
   /**

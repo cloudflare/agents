@@ -347,7 +347,7 @@ describe("MCPClientManager OAuth Integration", () => {
       ).rejects.toThrow("Could not find serverId: non-existent");
     });
 
-    it("should throw error for callback when not in authenticating state", async () => {
+    it("should handle duplicate callback when already in ready state", async () => {
       const serverId = "test-server";
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
       manager.saveServer({
@@ -360,7 +360,7 @@ describe("MCPClientManager OAuth Integration", () => {
         server_options: null
       });
 
-      // Create real connection in ready state (not authenticating)
+      // Create real connection in ready state (simulates duplicate callback)
       const connection = new MCPClientConnection(
         new URL("http://example.com"),
         { name: "test-client", version: "1.0.0" },
@@ -370,7 +370,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Mock methods and set state
       connection.init = vi.fn().mockResolvedValue(undefined);
       connection.client.close = vi.fn().mockResolvedValue(undefined);
-      connection.connectionState = "ready"; // Not authenticating
+      connection.connectionState = "ready"; // Already authenticated
 
       manager.mcpConnections[serverId] = connection;
 
@@ -378,10 +378,47 @@ describe("MCPClientManager OAuth Integration", () => {
         `${callbackUrl}?code=test&state=client`
       );
 
+      // Should gracefully handle duplicate callback by returning success
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(true);
+      expect(result.serverId).toBe(serverId);
+    });
+
+    it("should error when callback received for connection in failed state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = `http://localhost:3000/callback/${serverId}`;
+      manager.saveServer({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      // Create connection in failed state
+      const connection = new MCPClientConnection(
+        new URL("http://example.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: {}, client: {} }
+      );
+
+      connection.init = vi.fn().mockResolvedValue(undefined);
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+      connection.connectionState = "failed"; // Connection previously failed
+
+      manager.mcpConnections[serverId] = connection;
+
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test&state=client`
+      );
+
+      // Should error - failed connections need to be recreated, not re-authenticated
       await expect(
         manager.handleCallbackRequest(callbackRequest)
       ).rejects.toThrow(
-        "Failed to authenticate: the client isn't in the `authenticating` state"
+        'Failed to authenticate: the client is in "failed" state, expected "authenticating"'
       );
     });
   });
