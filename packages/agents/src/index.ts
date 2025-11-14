@@ -1572,14 +1572,21 @@ export class Agent<
     if (servers && Array.isArray(servers) && servers.length > 0) {
       for (const server of servers) {
         const serverConn = this.mcp.mcpConnections[server.id];
+
+        // Determine the default state when no connection exists
+        let defaultState: "authenticating" | "not-connected" = "not-connected";
+        if (!serverConn && server.auth_url) {
+          // If there's an auth_url but no connection, it's waiting for OAuth
+          defaultState = "authenticating";
+        }
+
         mcpState.servers[server.id] = {
           auth_url: server.auth_url,
           capabilities: serverConn?.serverCapabilities ?? null,
           instructions: serverConn?.instructions ?? null,
           name: server.name,
           server_url: server.server_url,
-          // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
-          state: serverConn?.connectionState ?? "authenticating"
+          state: serverConn?.connectionState ?? defaultState
         };
       }
     }
