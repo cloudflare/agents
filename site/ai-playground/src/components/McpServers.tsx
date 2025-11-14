@@ -397,10 +397,21 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
             <button
               type="button"
               className="bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background text-white rounded-md shadow-sm py-2 px-4 text-sm"
-              onClick={handleConnect}
-              disabled={isActive || isConnecting}
+              onClick={
+                mcpState?.state === "authenticating"
+                  ? handleDisconnect
+                  : handleConnect
+              }
+              disabled={
+                isActive ||
+                (isConnecting && mcpState?.state !== "authenticating")
+              }
             >
-              {isConnecting ? "Connecting..." : "Connect"}
+              {mcpState?.state === "authenticating"
+                ? "Cancel"
+                : isConnecting
+                  ? "Connecting..."
+                  : "Connect"}
             </button>
           )}
         </div>
