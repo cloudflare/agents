@@ -958,4 +958,206 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.clientId).toBeUndefined();
     });
   });
+
+  describe("getAITools() integration", () => {
+    it("should return AI SDK tools after registering and connecting to server", async () => {
+      const id = "test-mcp-server";
+      const url = "http://example.com/mcp";
+      const name = "Test MCP Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      // Initialize jsonSchema (required for getAITools)
+      await manager.ensureJsonSchema();
+
+      // Register server
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Mock the connection to simulate a successful connection with tools
+      const conn = manager.mcpConnections[id];
+
+      // Mock init to reach ready state
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "ready";
+
+        // Simulate discovered tools
+        conn.tools = [
+          {
+            name: "test_tool",
+            description: "A test tool",
+            inputSchema: {
+              type: "object",
+              properties: {
+                message: {
+                  type: "string",
+                  description: "Test message"
+                }
+              },
+              required: ["message"]
+            }
+          }
+        ];
+      });
+
+      // Mock callTool
+      conn.client.callTool = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "Tool result" }]
+      });
+
+      // Connect to server
+      await manager.connectToServer(id);
+
+      // Verify connection is ready
+      expect(conn.connectionState).toBe("ready");
+      expect(conn.tools).toHaveLength(1);
+
+      // Get AI tools
+      const tools = manager.getAITools();
+
+      // Verify tools are properly formatted for AI SDK
+      expect(tools).toBeDefined();
+
+      // Tool name should be namespaced with server ID
+      const toolKey = `tool_${id.replace(/-/g, "")}_test_tool`;
+      expect(tools[toolKey]).toBeDefined();
+
+      // Verify tool structure
+      const tool = tools[toolKey];
+      expect(tool.description).toBe("A test tool");
+      expect(tool.execute).toBeDefined();
+      expect(tool.inputSchema).toBeDefined();
+
+      // Test tool execution
+      const result = await tool.execute({ message: "test" });
+      expect(result).toBeDefined();
+      expect(conn.client.callTool).toHaveBeenCalledWith(
+        {
+          name: "test_tool",
+          arguments: { message: "test" },
+          serverId: id
+        },
+        undefined,
+        undefined
+      );
+    });
+
+    it("should aggregate tools from multiple connected servers", async () => {
+      const server1Id = "server-1";
+      const server2Id = "server-2";
+
+      // Initialize jsonSchema
+      await manager.ensureJsonSchema();
+
+      // Register and connect first server
+      manager.registerServer(server1Id, {
+        url: "http://server1.com/mcp",
+        name: "Server 1",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn1 = manager.mcpConnections[server1Id];
+      conn1.init = vi.fn().mockImplementation(async () => {
+        conn1.connectionState = "ready";
+        conn1.tools = [
+          {
+            name: "tool_one",
+            description: "Tool from server 1",
+            inputSchema: { type: "object", properties: {} }
+          }
+        ];
+      });
+      conn1.client.callTool = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "Result 1" }]
+      });
+
+      await manager.connectToServer(server1Id);
+
+      // Register and connect second server
+      manager.registerServer(server2Id, {
+        url: "http://server2.com/mcp",
+        name: "Server 2",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      const conn2 = manager.mcpConnections[server2Id];
+      conn2.init = vi.fn().mockImplementation(async () => {
+        conn2.connectionState = "ready";
+        conn2.tools = [
+          {
+            name: "tool_two",
+            description: "Tool from server 2",
+            inputSchema: { type: "object", properties: {} }
+          }
+        ];
+      });
+      conn2.client.callTool = vi.fn().mockResolvedValue({
+        content: [{ type: "text", text: "Result 2" }]
+      });
+
+      await manager.connectToServer(server2Id);
+
+      // Get AI tools
+      const tools = manager.getAITools();
+
+      // Verify both tools are available
+      const tool1Key = `tool_${server1Id.replace(/-/g, "")}_tool_one`;
+      const tool2Key = `tool_${server2Id.replace(/-/g, "")}_tool_two`;
+
+      expect(tools[tool1Key]).toBeDefined();
+      expect(tools[tool2Key]).toBeDefined();
+      expect(tools[tool1Key].description).toBe("Tool from server 1");
+      expect(tools[tool2Key].description).toBe("Tool from server 2");
+
+      // Test both tools execute correctly
+      await tools[tool1Key].execute({});
+      expect(conn1.client.callTool).toHaveBeenCalledWith(
+        {
+          name: "tool_one",
+          arguments: {},
+          serverId: server1Id
+        },
+        undefined,
+        undefined
+      );
+
+      await tools[tool2Key].execute({});
+      expect(conn2.client.callTool).toHaveBeenCalledWith(
+        {
+          name: "tool_two",
+          arguments: {},
+          serverId: server2Id
+        },
+        undefined,
+        undefined
+      );
+    });
+
+    it("should throw error if jsonSchema not initialized", () => {
+      // Create a new manager without initializing jsonSchema
+      const newManager = new MCPClientManager("test-client", "1.0.0", {
+        storage: new AgentMCPStorageAdapter(
+          <T extends Record<string, unknown>>() => [] as T[],
+          {
+            get: () => undefined,
+            put: () => {},
+            list: vi.fn(),
+            delete: vi.fn()
+          } as any
+        )
+      });
+
+      expect(() => newManager.getAITools()).toThrow(
+        "jsonSchema not initialized."
+      );
+    });
+  });
 });
