@@ -1,12 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { MCPClientManager } from "../../mcp/client";
+import { MCPClientManager } from "../../mcp/client-manager";
 import { MCPClientConnection } from "../../mcp/client-connection";
+import { AgentMCPStorageAdapter } from "../../mcp/client-storage";
 
 describe("MCPClientManager OAuth Integration", () => {
   let manager: MCPClientManager;
 
   beforeEach(() => {
-    manager = new MCPClientManager("test-client", "1.0.0");
+    manager = new MCPClientManager("test-client", "1.0.0", {
+      storage: new AgentMCPStorageAdapter(vi.fn())
+    });
   });
 
   describe("Connection Reuse During OAuth", () => {

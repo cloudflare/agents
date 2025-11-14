@@ -22,6 +22,7 @@ import {
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
+import type { MCPStorageAdapter } from "./client-storage";
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -35,6 +36,10 @@ export type MCPClientOAuthResult = {
   authError?: string;
 };
 
+export type MCPClientManagerOptions = {
+  storage: MCPStorageAdapter;
+};
+
 /**
  * Utility class that aggregates multiple MCP clients into one
  */
@@ -44,6 +49,7 @@ export class MCPClientManager {
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
+  private _storage: MCPStorageAdapter;
 
   private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
@@ -55,12 +61,18 @@ export class MCPClientManager {
   /**
    * @param _name Name of the MCP client
    * @param _version Version of the MCP Client
-   * @param auth Auth paramters if being used to create a DurableObjectOAuthClientProvider
+   * @param options Storage adapter for persisting MCP server state
    */
   constructor(
     private _name: string,
-    private _version: string
-  ) {}
+    private _version: string,
+    options: MCPClientManagerOptions
+  ) {
+    this._storage = options.storage;
+
+    // Create the storage instance
+    this._storage.create();
+  }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
 
@@ -445,6 +457,61 @@ export class MCPClientManager {
   }
 
   /**
+   * Clear the auth_url for an MCP server after successful OAuth authentication
+   * This prevents the agent from continuously asking for OAuth on reconnect
+   * @param serverId The server ID to clear auth_url for
+   */
+  clearAuthUrl(serverId: string): void {
+    if (this._storage) {
+      this._storage.clearAuthUrl(serverId);
+    }
+  }
+
+  /**
+   * Save an MCP server configuration to storage
+   */
+  saveServer(server: {
+    id: string;
+    name: string;
+    server_url: string;
+    client_id?: string | null;
+    auth_url?: string | null;
+    callback_url: string;
+    server_options?: string | null;
+  }): void {
+    if (this._storage) {
+      this._storage.saveServer({
+        id: server.id,
+        name: server.name,
+        server_url: server.server_url,
+        client_id: server.client_id ?? null,
+        auth_url: server.auth_url ?? null,
+        callback_url: server.callback_url,
+        server_options: server.server_options ?? null
+      });
+    }
+  }
+
+  /**
+   * Remove an MCP server from storage
+   */
+  removeServer(serverId: string): void {
+    if (this._storage) {
+      this._storage.removeServer(serverId);
+    }
+  }
+
+  /**
+   * List all MCP servers from storage
+   */
+  listServers() {
+    if (this._storage) {
+      return this._storage.listServers();
+    }
+    return [];
+  }
+
+  /**
    * Dispose the manager and all resources.
    */
   async dispose(): Promise<void> {
@@ -454,6 +521,9 @@ export class MCPClientManager {
       // Dispose manager-level emitters
       this._onConnected.dispose();
       this._onObservabilityEvent.dispose();
+
+      // Drop the storage table
+      this._storage.destroy();
     }
   }
 

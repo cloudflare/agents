@@ -22,11 +22,15 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
-import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import {
+  MCPClientManager,
+  type MCPClientOAuthResult
+} from "./mcp/client-manager";
 import { MCPClientConnection } from "./mcp/client-connection";
 import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
+import { AgentMCPStorageAdapter } from "./mcp/client-storage";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
@@ -230,20 +234,6 @@ export type MCPServer = {
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
-
-/**
- * MCP Server data stored in DO SQL for resuming MCP Server connections
- */
-type MCPServerRow = {
-  id: string;
-  name: string;
-  server_url: string;
-  client_id: string | null;
-  auth_url: string | null;
-  callback_url: string;
-  server_options: string;
-};
-
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
@@ -325,10 +315,7 @@ export class Agent<
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  readonly mcp: MCPClientManager = new MCPClientManager(
-    this._ParentClass.name,
-    "0.0.1"
-  );
+  readonly mcp!: MCPClientManager;
 
   /**
    * Initial state for the Agent
@@ -421,6 +408,10 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
+      storage: new AgentMCPStorageAdapter(this.sql.bind(this))
+    });
+
     if (!wrappedClasses.has(this.constructor)) {
       // Auto-wrap custom methods with agent context
       this._autoWrapCustomMethods();
@@ -478,18 +469,6 @@ export class Agent<
       });
     });
 
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        server_url TEXT NOT NULL,
-        callback_url TEXT NOT NULL,
-        client_id TEXT,
-        auth_url TEXT,
-        server_options TEXT
-      )
-    `;
-
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
       return agentContext.run(
@@ -502,7 +481,7 @@ export class Agent<
             this.broadcastMcpServers();
 
             if (result.authSuccess) {
-              this.clearMcpServerAuthUrl(result.serverId);
+              this.mcp.clearAuthUrl(result.serverId);
 
               this.mcp
                 .establishConnection(result.serverId)
@@ -1348,14 +1327,16 @@ export class Agent<
     // drop all tables
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
     this._disposables.dispose();
-    await this.mcp.dispose?.();
+
+    // clean up MCP client manager
+    await this.mcp.dispose();
+
     this.ctx.abort("destroyed"); // enforce that the agent is evicted
 
     this.observability?.emit(
@@ -1385,10 +1366,7 @@ export class Agent<
 
     this._mcpStateRestored = true;
 
-    const servers = this.sql<MCPServerRow>`
-        SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
-        FROM cf_agents_mcp_servers
-      `;
+    const servers = this.mcp.listServers();
 
     if (!servers || !Array.isArray(servers) || servers.length === 0) {
       return;
@@ -1504,19 +1482,15 @@ export class Agent<
       options
     );
 
-    this.sql`
-        INSERT
-        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${result.id},
-        ${serverName},
-        ${url},
-        ${result.clientId ?? null},
-        ${result.authUrl ?? null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-        );
-    `;
+    this.mcp.saveServer({
+      id: result.id,
+      name: serverName,
+      server_url: url,
+      client_id: result.clientId ?? null,
+      auth_url: result.authUrl ?? null,
+      callback_url: callbackUrl,
+      server_options: options ? JSON.stringify(options) : null
+    });
 
     this.broadcastMcpServers();
 
@@ -1605,26 +1579,11 @@ export class Agent<
   async removeMcpServer(id: string) {
     this.mcp.closeConnection(id);
     this.mcp.unregisterCallbackUrl(id);
-    this.sql`
-      DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
-    `;
+    this.mcp.removeServer(id);
     this.broadcastMcpServers();
   }
 
-  /**
-   * Clear the auth_url for an MCP server after successful OAuth authentication
-   * This prevents the agent from continuously asking for OAuth on reconnect
-   * @param id The server ID to clear auth_url for
-   */
-  private clearMcpServerAuthUrl(id: string) {
-    this.sql`
-      UPDATE cf_agents_mcp_servers
-      SET auth_url = NULL
-      WHERE id = ${id}
-    `;
-  }
-
-  getMcpServers(): MCPServersState {
+  private getMcpServers(): MCPServersState {
     const mcpState: MCPServersState = {
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
@@ -1632,9 +1591,7 @@ export class Agent<
       tools: this.mcp.listTools()
     };
 
-    const servers = this.sql<MCPServerRow>`
-      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-    `;
+    const servers = this.mcp.listServers();
 
     if (servers && Array.isArray(servers) && servers.length > 0) {
       for (const server of servers) {
