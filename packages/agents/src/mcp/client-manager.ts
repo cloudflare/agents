@@ -566,12 +566,49 @@ export class MCPClientManager {
   }
 
   /**
+   * Check if all MCP connections are in a stable state (ready or authenticating)
+   * Useful to call before getAITools() to avoid race conditions
+   *
+   * @returns Object with ready status and list of connections not ready
+   */
+  areConnectionsReady(): { ready: boolean; pendingConnections: string[] } {
+    const pendingConnections: string[] = [];
+
+    for (const [id, conn] of Object.entries(this.mcpConnections)) {
+      if (
+        conn.connectionState !== "ready" &&
+        conn.connectionState !== "authenticating"
+      ) {
+        pendingConnections.push(id);
+      }
+    }
+
+    return {
+      ready: pendingConnections.length === 0,
+      pendingConnections
+    };
+  }
+
+  /**
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
     if (!this.jsonSchema) {
       throw new Error("jsonSchema not initialized.");
     }
+
+    // Warn if tools are being read from non-ready connections
+    for (const [id, conn] of Object.entries(this.mcpConnections)) {
+      if (
+        conn.connectionState !== "ready" &&
+        conn.connectionState !== "authenticating"
+      ) {
+        console.warn(
+          `[getAITools] WARNING: Reading tools from connection ${id} in state "${conn.connectionState}". Tools may not be loaded yet.`
+        );
+      }
+    }
+
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [

@@ -5,6 +5,7 @@ import {
   AgentMCPStorageAdapter,
   type MCPServerRow
 } from "../../mcp/client-storage";
+import type { ToolCallOptions } from "ai";
 
 describe("MCPClientManager OAuth Integration", () => {
   let manager: MCPClientManager;
@@ -1033,7 +1034,10 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(tool.inputSchema).toBeDefined();
 
       // Test tool execution
-      const result = await tool.execute({ message: "test" });
+      const result = await tool.execute!(
+        { message: "test" },
+        {} as ToolCallOptions
+      );
       expect(result).toBeDefined();
       expect(conn.client.callTool).toHaveBeenCalledWith(
         {
@@ -1118,7 +1122,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(tools[tool2Key].description).toBe("Tool from server 2");
 
       // Test both tools execute correctly
-      await tools[tool1Key].execute({});
+      await tools[tool1Key].execute!({}, {} as ToolCallOptions);
       expect(conn1.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_one",
@@ -1129,7 +1133,7 @@ describe("MCPClientManager OAuth Integration", () => {
         undefined
       );
 
-      await tools[tool2Key].execute({});
+      await tools[tool2Key].execute!({}, {} as ToolCallOptions);
       expect(conn2.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_two",
@@ -1151,7 +1155,7 @@ describe("MCPClientManager OAuth Integration", () => {
             put: () => {},
             list: vi.fn(),
             delete: vi.fn()
-          } as any
+          }
         )
       });
 
