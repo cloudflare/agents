@@ -42,10 +42,19 @@ export interface MCPStorageAdapter {
   listServers(): MCPServerRow[] | Promise<MCPServerRow[]>;
 
   /**
-   * Clear the auth_url for an MCP server after successful OAuth authentication
-   * This prevents the agent from continuously asking for OAuth on reconnect
+   * Get an MCP server by its callback URL
+   * Used during OAuth callback to identify which server is being authenticated
    */
-  clearAuthUrl(serverId: string): void | Promise<void>;
+  getServerByCallbackUrl(
+    callbackUrl: string
+  ): MCPServerRow | null | Promise<MCPServerRow | null>;
+
+  /**
+   * Clear both auth_url and callback_url after successful OAuth authentication
+   * This prevents the agent from continuously asking for OAuth on reconnect
+   * and prevents malicious second callbacks from being processed
+   */
+  clearOAuthCredentials(serverId: string): void | Promise<void>;
 }
 
 /**
@@ -54,7 +63,7 @@ export interface MCPStorageAdapter {
  */
 export class AgentMCPStorageAdapter implements MCPStorageAdapter {
   constructor(
-    private sql: <T = Record<string, unknown>>(
+    private sql: <T extends Record<string, unknown>>(
       strings: TemplateStringsArray,
       ...values: (string | number | boolean | null)[]
     ) => T[]
@@ -108,16 +117,27 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
   }
 
   listServers(): MCPServerRow[] {
-    return this.sql<MCPServerRow>`
+    const servers = this.sql<MCPServerRow>`
       SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
       FROM cf_agents_mcp_servers
     `;
+    return servers;
   }
 
-  clearAuthUrl(serverId: string): void {
+  getServerByCallbackUrl(callbackUrl: string): MCPServerRow | null {
+    const results = this.sql<MCPServerRow>`
+      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
+      FROM cf_agents_mcp_servers
+      WHERE callback_url = ${callbackUrl}
+      LIMIT 1
+    `;
+    return results.length > 0 ? results[0] : null;
+  }
+
+  clearOAuthCredentials(serverId: string): void {
     this.sql`
       UPDATE cf_agents_mcp_servers
-      SET auth_url = NULL
+      SET callback_url = '', auth_url = NULL
       WHERE id = ${serverId}
     `;
   }

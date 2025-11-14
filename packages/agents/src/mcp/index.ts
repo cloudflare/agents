@@ -446,7 +446,8 @@ export {
 
 export type {
   MCPClientOAuthResult,
-  MCPClientOAuthCallbackConfig
+  MCPClientOAuthCallbackConfig,
+  MCPServerOptions
 } from "./client-manager";
 
 export {

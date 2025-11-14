@@ -190,10 +190,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   override async onRequest(request: Request): Promise<Response> {
     return this._tryCatchChat(() => {
       const url = new URL(request.url);
+
       if (url.pathname.endsWith("/get-messages")) {
         const messages = this._loadMessagesFromDb();
         return Response.json(messages);
       }
+
       return super.onRequest(request);
     });
   }

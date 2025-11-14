@@ -22,7 +22,20 @@ import {
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
-import type { MCPStorageAdapter } from "./client-storage";
+import type { MCPStorageAdapter, MCPServerRow } from "./client-storage";
+import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+
+/**
+ * Options that can be stored in the server_options column
+ * This is what gets JSON.stringify'd and stored in the database
+ */
+export type MCPServerOptions = {
+  client?: ConstructorParameters<typeof Client>[1];
+  transport?: {
+    headers?: HeadersInit;
+    type?: TransportType;
+  };
+};
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -45,11 +58,13 @@ export type MCPClientManagerOptions = {
  */
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
-  private _callbackUrls: string[] = [];
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
   private _storage: MCPStorageAdapter;
+
+  // In-memory cache of callback URLs to avoid DB queries on every request
+  private _callbackUrlCache: Set<string> | null = null;
 
   private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
@@ -75,6 +90,97 @@ export class MCPClientManager {
   }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
+
+  /**
+   * Restore MCP server connections from storage
+   * This method is called on Agent initialization to restore previously connected servers
+   *
+   * @param createAuthProvider Factory function to create OAuth provider instances
+   * @param reconnectServer Function to reconnect to a server (for non-OAuth servers)
+   */
+  async restoreConnectionsFromStorage(
+    createAuthProvider: (
+      serverId: string,
+      callbackUrl: string,
+      clientId?: string
+    ) => AgentsOAuthProvider,
+    reconnectServer: (
+      serverId: string,
+      serverName: string,
+      serverUrl: string,
+      callbackUrl: string,
+      clientId: string | null,
+      serverOptions: MCPServerOptions | null
+    ) => Promise<void>
+  ): Promise<void> {
+    const servers = await Promise.resolve(this._storage.listServers());
+
+    if (!servers || servers.length === 0) {
+      return;
+    }
+
+    for (const server of servers) {
+      const needsOAuth = !!server.auth_url;
+
+      if (needsOAuth) {
+        const authProvider = createAuthProvider(
+          server.id,
+          server.callback_url,
+          server.client_id ?? undefined
+        );
+
+        const parsedOptions: MCPServerOptions | null = server.server_options
+          ? JSON.parse(server.server_options)
+          : null;
+
+        const conn = new MCPClientConnection(
+          new URL(server.server_url),
+          {
+            name: this._name,
+            version: this._version
+          },
+          {
+            client: parsedOptions?.client ?? {},
+            transport: {
+              ...(parsedOptions?.transport ?? {}),
+              type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
+              authProvider
+            }
+          }
+        );
+
+        conn.connectionState = "authenticating";
+
+        // Set up observability
+        const store = new DisposableStore();
+        const existing = this._connectionDisposables.get(server.id);
+        if (existing) existing.dispose();
+        this._connectionDisposables.set(server.id, store);
+        store.add(
+          conn.onObservabilityEvent((event) => {
+            this._onObservabilityEvent.fire(event);
+          })
+        );
+
+        this.mcpConnections[server.id] = conn;
+      } else {
+        const parsedOptions: MCPServerOptions | null = server.server_options
+          ? JSON.parse(server.server_options)
+          : null;
+
+        reconnectServer(
+          server.id,
+          server.name,
+          server.server_url,
+          server.callback_url,
+          server.client_id,
+          parsedOptions
+        ).catch((error) => {
+          console.error(`Error restoring ${server.id}:`, error);
+        });
+      }
+    }
+  }
 
   /**
    * Connect to and register an MCP server
@@ -194,9 +300,6 @@ export class MCPClientManager {
       authUrl &&
       options.transport?.authProvider?.redirectUrl
     ) {
-      this._callbackUrls.push(
-        options.transport.authProvider.redirectUrl.toString()
-      );
       return {
         authUrl,
         clientId: options.transport?.authProvider?.clientId,
@@ -209,31 +312,69 @@ export class MCPClientManager {
     };
   }
 
-  isCallbackRequest(req: Request): boolean {
-    return (
-      req.method === "GET" &&
-      !!this._callbackUrls.find((url) => {
-        return req.url.startsWith(url);
-      })
+  /**
+   * Refresh the in-memory callback URL cache from storage
+   */
+  private async _refreshCallbackUrlCache(): Promise<void> {
+    const servers = await Promise.resolve(this._storage.listServers());
+    this._callbackUrlCache = new Set(
+      servers.filter((s) => s.callback_url).map((s) => s.callback_url)
     );
+  }
+
+  /**
+   * Invalidate the callback URL cache so it will be refreshed on next check
+   */
+  private _invalidateCallbackUrlCache(): void {
+    this._callbackUrlCache = null;
+  }
+
+  async isCallbackRequest(req: Request): Promise<boolean> {
+    if (req.method !== "GET") {
+      return false;
+    }
+
+    // Quick heuristic check: most callback URLs contain "/callback"
+    // This avoids DB queries for obviously non-callback requests
+    if (!req.url.includes("/callback")) {
+      return false;
+    }
+
+    // Lazily populate cache on first check
+    if (this._callbackUrlCache === null) {
+      await this._refreshCallbackUrlCache();
+    }
+
+    // Check cache first for quick lookup
+    for (const callbackUrl of this._callbackUrlCache!) {
+      if (req.url.startsWith(callbackUrl)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
-    const urlMatch = this._callbackUrls.find((url) => {
-      return req.url.startsWith(url);
+
+    // Find the matching server from database
+    const servers = await Promise.resolve(this._storage.listServers());
+    const matchingServer = servers.find((server: MCPServerRow) => {
+      return server.callback_url && req.url.startsWith(server.callback_url);
     });
-    if (!urlMatch) {
+
+    if (!matchingServer) {
       throw new Error(
         `No callback URI match found for the request url: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
       );
     }
+
+    const serverId = matchingServer.id;
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     const error = url.searchParams.get("error");
     const errorDescription = url.searchParams.get("error_description");
-    const urlParams = urlMatch.split("/");
-    const serverId = urlParams[urlParams.length - 1];
 
     // Handle OAuth error responses from the provider
     if (error) {
@@ -277,6 +418,13 @@ export class MCPClientManager {
 
     try {
       await conn.completeAuthorization(code);
+
+      // Clear both callback_url and auth_url in a single DB operation to prevent malicious second callbacks
+      await Promise.resolve(this._storage.clearOAuthCredentials(serverId));
+
+      // Invalidate cache since callback URLs changed
+      this._invalidateCallbackUrlCache();
+
       return {
         serverId,
         authSuccess: true
@@ -329,27 +477,6 @@ export class MCPClientManager {
         id: nanoid()
       });
     }
-  }
-
-  /**
-   * Register a callback URL for OAuth handling
-   * @param url The callback URL to register
-   */
-  registerCallbackUrl(url: string): void {
-    if (!this._callbackUrls.includes(url)) {
-      this._callbackUrls.push(url);
-    }
-  }
-
-  /**
-   * Unregister a callback URL
-   * @param serverId The server ID whose callback URL should be removed
-   */
-  unregisterCallbackUrl(serverId: string): void {
-    // Remove callback URLs that end with this serverId
-    this._callbackUrls = this._callbackUrls.filter(
-      (url) => !url.endsWith(`/${serverId}`)
-    );
   }
 
   /**
@@ -489,6 +616,8 @@ export class MCPClientManager {
         callback_url: server.callback_url,
         server_options: server.server_options ?? null
       });
+      // Invalidate cache since callback URLs may have changed
+      this._invalidateCallbackUrlCache();
     }
   }
 
@@ -498,6 +627,8 @@ export class MCPClientManager {
   removeServer(serverId: string): void {
     if (this._storage) {
       this._storage.removeServer(serverId);
+      // Invalidate cache since callback URLs may have changed
+      this._invalidateCallbackUrlCache();
     }
   }
 

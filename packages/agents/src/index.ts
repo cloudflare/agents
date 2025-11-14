@@ -26,7 +26,6 @@ import {
   MCPClientManager,
   type MCPClientOAuthResult
 } from "./mcp/client-manager";
-import { MCPClientConnection } from "./mcp/client-connection";
 import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
@@ -310,7 +309,7 @@ export class Agent<
 > extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
-  private _mcpStateRestored = false;
+  private _mcpConnectionsInitialized = false;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -474,19 +473,23 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          await this._ensureMcpStateRestored();
+          await this._initializeMcpConnectionsFromStorage();
 
-          if (this.mcp.isCallbackRequest(request)) {
+          const isCallback = await this.mcp.isCallbackRequest(request);
+
+          if (isCallback) {
             const result = await this.mcp.handleCallbackRequest(request);
+
             this.broadcastMcpServers();
 
             if (result.authSuccess) {
-              this.mcp.clearAuthUrl(result.serverId);
-
               this.mcp
                 .establishConnection(result.serverId)
                 .catch((error) => {
-                  console.error("Background connection failed:", error);
+                  console.error(
+                    "[Agent onRequest] Background connection failed:",
+                    error
+                  );
                 })
                 .finally(() => {
                   this.broadcastMcpServers();
@@ -642,7 +645,7 @@ export class Agent<
         },
         async () => {
           await this._tryCatch(async () => {
-            await this._ensureMcpStateRestored();
+            await this._initializeMcpConnectionsFromStorage();
             this.broadcastMcpServers();
             return _onStart(props);
           });
@@ -1359,80 +1362,46 @@ export class Agent<
     return callableMetadata.has(this[method as keyof this] as Function);
   }
 
-  private async _ensureMcpStateRestored() {
-    if (this._mcpStateRestored) {
+  private async _initializeMcpConnectionsFromStorage() {
+    if (this._mcpConnectionsInitialized) {
       return;
     }
 
-    this._mcpStateRestored = true;
+    this._mcpConnectionsInitialized = true;
 
-    const servers = this.mcp.listServers();
-
-    if (!servers || !Array.isArray(servers) || servers.length === 0) {
-      return;
-    }
-
-    for (const server of servers) {
-      if (server.callback_url) {
-        this.mcp.registerCallbackUrl(`${server.callback_url}/${server.id}`);
-      }
-    }
-
-    for (const server of servers) {
-      const needsOAuth = !!server.auth_url;
-
-      if (needsOAuth) {
+    await this.mcp.restoreConnectionsFromStorage(
+      (serverId, callbackUrl, clientId) => {
         const authProvider = new DurableObjectOAuthClientProvider(
           this.ctx.storage,
           this.name,
-          server.callback_url
+          callbackUrl
         );
-        authProvider.serverId = server.id;
-        if (server.client_id) {
-          authProvider.clientId = server.client_id;
+        authProvider.serverId = serverId;
+        if (clientId) {
+          authProvider.clientId = clientId;
         }
-
-        const parsedOptions = server.server_options
-          ? JSON.parse(server.server_options)
-          : undefined;
-
-        const conn = new MCPClientConnection(
-          new URL(server.server_url),
+        return authProvider;
+      },
+      async (
+        serverId,
+        serverName,
+        serverUrl,
+        callbackUrl,
+        clientId,
+        serverOptions
+      ) => {
+        await this._connectToMcpServerInternal(
+          serverName,
+          serverUrl,
+          callbackUrl,
+          serverOptions ?? undefined,
           {
-            name: this.name,
-            version: "1.0.0"
-          },
-          {
-            client: parsedOptions?.client ?? {},
-            transport: {
-              ...(parsedOptions?.transport ?? {}),
-              type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
-              authProvider
-            }
+            id: serverId,
+            oauthClientId: clientId ?? undefined
           }
         );
-
-        conn.connectionState = "authenticating";
-        this.mcp.mcpConnections[server.id] = conn;
-      } else {
-        const parsedOptions = server.server_options
-          ? JSON.parse(server.server_options)
-          : undefined;
-
-        this._connectToMcpServerInternal(
-          server.name,
-          server.server_url,
-          server.callback_url,
-          parsedOptions,
-          {
-            id: server.id,
-            oauthClientId: server.client_id ?? undefined
-          }
-        ).catch((error) => {
-          console.error(`Error restoring ${server.id}:`, error);
-        });
       }
-    }
+    );
   }
 
   /**
@@ -1578,7 +1547,6 @@ export class Agent<
 
   async removeMcpServer(id: string) {
     this.mcp.closeConnection(id);
-    this.mcp.unregisterCallbackUrl(id);
     this.mcp.removeServer(id);
     this.broadcastMcpServers();
   }
