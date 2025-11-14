@@ -18,7 +18,7 @@ import type { McpComponentState } from "./components/McpServers";
 
 const STORAGE_KEY = "playground_session_id";
 const DEFAULT_PARAMS = {
-  model: "@hf/nousresearch/hermes-2-pro-mistral-7b",
+  model: "@cf/qwen/qwen3-30b-a3b-fp8",
   temperature: 0,
   stream: true,
   system:
