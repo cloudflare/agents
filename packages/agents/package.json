@@ -24,7 +24,6 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.64",
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/sdk": "^1.21.0",
     "ai": "5.0.89",
