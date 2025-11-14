@@ -694,4 +694,268 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(manager.mcpConnections["regular-server"]).toBeDefined();
     });
   });
+
+  describe("registerServer() and connectToServer()", () => {
+    it("should register a server and save to storage", () => {
+      const id = "test-server-1";
+      const url = "http://example.com/mcp";
+      const name = "Test Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Verify connection was created
+      expect(manager.mcpConnections[id]).toBeDefined();
+      expect(manager.mcpConnections[id].url.toString()).toBe(url);
+
+      // Verify saved to storage
+      const servers = mockStorageData.get(id);
+      expect(servers).toBeDefined();
+      expect(servers?.name).toBe(name);
+      expect(servers?.server_url).toBe(url);
+      expect(servers?.callback_url).toBe(callbackUrl);
+    });
+
+    it("should skip registering if server already exists", () => {
+      const id = "existing-server";
+      const url = "http://example.com/mcp";
+      const name = "Existing Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      // Register once
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+      const firstConnection = manager.mcpConnections[id];
+
+      // Try to register again
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+      const secondConnection = manager.mcpConnections[id];
+
+      // Should be the same connection object
+      expect(secondConnection).toBe(firstConnection);
+    });
+
+    it("should save auth URL and client ID when registering OAuth server", () => {
+      const id = "oauth-server";
+      const url = "http://oauth.example.com/mcp";
+      const name = "OAuth Server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const authUrl = "https://auth.example.com/authorize";
+      const clientId = "test-client-id";
+
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" },
+        authUrl,
+        clientId
+      });
+
+      // Verify OAuth info saved to storage
+      const server = mockStorageData.get(id);
+      expect(server?.auth_url).toBe(authUrl);
+      expect(server?.client_id).toBe(clientId);
+    });
+
+    it("should throw error when connecting to non-registered server", async () => {
+      await expect(
+        manager.connectToServer("non-existent-server")
+      ).rejects.toThrow(
+        "Server non-existent-server is not registered. Call registerServer() first."
+      );
+    });
+
+    it("should update storage with OAuth info after connection", async () => {
+      const id = "test-oauth-server";
+      const url = "http://oauth.example.com/mcp";
+      const name = "OAuth Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      // Create a mock auth provider that returns auth URL
+      const mockAuthProvider = {
+        serverId: id,
+        clientId: "mock-client-id",
+        authUrl: "https://auth.example.com/authorize",
+        redirectUrl: callbackUrl,
+        clientMetadata: {
+          client_name: "test-client",
+          redirect_uris: [callbackUrl]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn((url) => {
+          mockAuthProvider.authUrl = url.toString();
+        }),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn()
+      };
+
+      // Register server with auth provider
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: {
+          type: "auto",
+          authProvider: mockAuthProvider
+        }
+      });
+
+      // Mock the connection to return authenticating state
+      const conn = manager.mcpConnections[id];
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "authenticating";
+      });
+
+      // Connect to server
+      const result = await manager.connectToServer(id);
+
+      // Verify auth URL is returned
+      expect(result.authUrl).toBe(mockAuthProvider.authUrl);
+      expect(result.clientId).toBe(mockAuthProvider.clientId);
+
+      // Verify storage was updated with OAuth info
+      const server = mockStorageData.get(id);
+      expect(server?.auth_url).toBe(mockAuthProvider.authUrl);
+      expect(server?.client_id).toBe(mockAuthProvider.clientId);
+    });
+
+    it("should fire onConnected event for non-OAuth servers", async () => {
+      const id = "non-oauth-server";
+      const url = "http://example.com/mcp";
+      const name = "Non-OAuth Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      const onConnectedSpy = vi.fn();
+      manager.onConnected(onConnectedSpy);
+
+      // Register server
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Mock connection to go straight to ready state
+      const conn = manager.mcpConnections[id];
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "ready";
+      });
+
+      // Connect to server
+      await manager.connectToServer(id);
+
+      // Verify onConnected was fired
+      expect(onConnectedSpy).toHaveBeenCalledWith(id);
+    });
+
+    it("should not fire onConnected event for OAuth servers in authenticating state", async () => {
+      const id = "oauth-server";
+      const url = "http://oauth.example.com/mcp";
+      const name = "OAuth Server";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      const onConnectedSpy = vi.fn();
+      manager.onConnected(onConnectedSpy);
+
+      const mockAuthProvider = {
+        serverId: id,
+        clientId: "mock-client-id",
+        authUrl: "https://auth.example.com/authorize",
+        redirectUrl: callbackUrl,
+        clientMetadata: {
+          client_name: "test-client",
+          redirect_uris: [callbackUrl]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn()
+      };
+
+      // Register server
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: {
+          type: "auto",
+          authProvider: mockAuthProvider
+        }
+      });
+
+      // Mock connection to stay in authenticating state
+      const conn = manager.mcpConnections[id];
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "authenticating";
+      });
+
+      // Connect to server
+      await manager.connectToServer(id);
+
+      // Verify onConnected was NOT fired (OAuth not complete)
+      expect(onConnectedSpy).not.toHaveBeenCalled();
+    });
+
+    it("should handle OAuth code reconnection", async () => {
+      const id = "oauth-reconnect-server";
+      const url = "http://oauth.example.com/mcp";
+      const name = "OAuth Reconnect Server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const oauthCode = "test-auth-code";
+
+      // Register server
+      manager.registerServer(id, {
+        url,
+        name,
+        callbackUrl,
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      // Mock connection methods
+      const conn = manager.mcpConnections[id];
+      conn.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      conn.establishConnection = vi.fn().mockResolvedValue(undefined);
+
+      // Connect with OAuth code
+      const result = await manager.connectToServer(id, { oauthCode });
+
+      // Verify OAuth completion was called
+      expect(conn.completeAuthorization).toHaveBeenCalledWith(oauthCode);
+      expect(conn.establishConnection).toHaveBeenCalled();
+
+      // Result should be empty for successful OAuth completion
+      expect(result.authUrl).toBeUndefined();
+      expect(result.clientId).toBeUndefined();
+    });
+  });
 });

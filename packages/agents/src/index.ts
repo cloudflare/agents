@@ -1423,68 +1423,17 @@ export class Agent<
 
     const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
-    const result = await this._connectToMcpServerInternal(
-      serverName,
-      url,
-      callbackUrl,
-      options
-    );
+    // Late initialization of jsonSchemaFn (needed for getAITools)
+    await this.mcp.ensureJsonSchema();
 
-    this.mcp.saveServer({
-      id: result.id,
-      name: serverName,
-      server_url: url,
-      client_id: result.clientId ?? null,
-      auth_url: result.authUrl ?? null,
-      callback_url: callbackUrl,
-      server_options: options ? JSON.stringify(options) : null
-    });
+    const id = nanoid(8);
 
-    this.broadcastMcpServers();
-
-    return result;
-  }
-
-  private async _connectToMcpServerInternal(
-    _serverName: string,
-    url: string,
-    callbackUrl: string,
-    // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      /**
-       * We don't expose the normal set of transport options because:
-       * 1) we can't serialize things like the auth provider or a fetch function into the DB for reconnection purposes
-       * 2) We probably want these options to be agnostic to the transport type (SSE vs Streamable)
-       *
-       * This has the limitation that you can't override fetch, but I think headers should handle nearly all cases needed (i.e. non-standard bearer auth).
-       */
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
-      };
-    },
-    reconnect?: {
-      id: string;
-      oauthClientId?: string;
-    }
-  ): Promise<{
-    id: string;
-    authUrl: string | undefined;
-    clientId: string | undefined;
-  }> {
     const authProvider = new DurableObjectOAuthClientProvider(
       this.mcp.storage,
       this.name,
       callbackUrl
     );
-
-    if (reconnect) {
-      authProvider.serverId = reconnect.id;
-      if (reconnect.oauthClientId) {
-        authProvider.clientId = reconnect.oauthClientId;
-      }
-    }
+    authProvider.serverId = id;
 
     // Use the transport type specified in options, or default to "auto"
     const transportType: TransportType = options?.transport?.type ?? "auto";
@@ -1507,9 +1456,12 @@ export class Agent<
       };
     }
 
-    const { id, authUrl, clientId } = await this.mcp.connect(url, {
+    // Register server (also saves to storage)
+    this.mcp.registerServer(id, {
+      url,
+      name: serverName,
+      callbackUrl,
       client: options?.client,
-      reconnect,
       transport: {
         ...headerTransportOpts,
         authProvider,
@@ -1517,10 +1469,14 @@ export class Agent<
       }
     });
 
+    // Connect to server (updates storage with auth URL if OAuth)
+    const result = await this.mcp.connectToServer(id);
+
+    this.broadcastMcpServers();
+
     return {
-      authUrl,
-      clientId,
-      id
+      id,
+      authUrl: result.authUrl
     };
   }
 

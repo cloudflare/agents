@@ -38,6 +38,26 @@ export type MCPServerOptions = {
   };
 };
 
+/**
+ * Options for registering an MCP server
+ */
+export type RegisterServerOptions = {
+  url: string;
+  name: string;
+  callbackUrl: string;
+  client?: ConstructorParameters<typeof Client>[1];
+  transport?: MCPTransportOptions;
+  authUrl?: string;
+  clientId?: string;
+};
+
+/**
+ * Options for connecting to an MCP server
+ */
+export type ConnectServerOptions = {
+  oauthCode?: string;
+};
+
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
   errorRedirect?: string;
@@ -165,7 +185,6 @@ export class MCPClientManager {
         ? JSON.parse(server.server_options)
         : null;
 
-      // Create auth provider for this server
       const authProvider = this.createAuthProvider(
         server.id,
         server.callback_url,
@@ -173,14 +192,18 @@ export class MCPClientManager {
         server.client_id ?? undefined
       );
 
-      // Register the server
-      this.registerServer(server.id, server.server_url, {
+      this.registerServer(server.id, {
+        url: server.server_url,
+        name: server.name,
+        callbackUrl: server.callback_url,
         client: parsedOptions?.client ?? {},
         transport: {
           ...(parsedOptions?.transport ?? {}),
           type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
           authProvider
-        }
+        },
+        authUrl: server.auth_url ?? undefined,
+        clientId: server.client_id ?? undefined
       });
 
       if (needsOAuth) {
@@ -199,21 +222,13 @@ export class MCPClientManager {
 
   /**
    * Register an MCP server connection without connecting
-   * Creates the connection object and sets up observability
+   * Creates the connection object, sets up observability, and saves to storage
    *
    * @param id Server ID
-   * @param url Server URL
-   * @param options Connection options
+   * @param options Registration options including URL, name, callback URL, and connection config
    * @returns Server ID
    */
-  registerServer(
-    id: string,
-    url: string,
-    options: {
-      transport?: MCPTransportOptions;
-      client?: ConstructorParameters<typeof Client>[1];
-    } = {}
-  ): string {
+  registerServer(id: string, options: RegisterServerOptions): string {
     // Skip if connection already exists
     if (this.mcpConnections[id]) {
       return id;
@@ -225,7 +240,7 @@ export class MCPClientManager {
     };
 
     this.mcpConnections[id] = new MCPClientConnection(
-      new URL(url),
+      new URL(options.url),
       {
         name: this._name,
         version: this._version
@@ -247,19 +262,34 @@ export class MCPClientManager {
       })
     );
 
+    // Save to storage
+    this._storage.saveServer({
+      id,
+      name: options.name,
+      server_url: options.url,
+      callback_url: options.callbackUrl,
+      client_id: options.clientId ?? null,
+      auth_url: options.authUrl ?? null,
+      server_options: JSON.stringify({
+        client: options.client,
+        transport: options.transport
+      })
+    });
+
     return id;
   }
 
   /**
    * Connect to an already registered MCP server
+   * Updates storage with auth URL and client ID after connection
    *
    * @param id Server ID
-   * @param oauthCode Optional OAuth code for completing OAuth flow
+   * @param options Connection options (e.g., OAuth code for completing OAuth flow)
    * @returns Auth URL if OAuth is required, undefined otherwise
    */
   async connectToServer(
     id: string,
-    oauthCode?: string
+    options?: ConnectServerOptions
   ): Promise<{
     authUrl?: string;
     clientId?: string;
@@ -272,9 +302,9 @@ export class MCPClientManager {
     }
 
     // Handle OAuth completion if we have a code
-    if (oauthCode) {
+    if (options?.oauthCode) {
       try {
-        await conn.completeAuthorization(oauthCode);
+        await conn.completeAuthorization(options.oauthCode);
         await conn.establishConnection();
       } catch (error) {
         this._onObservabilityEvent.fire({
@@ -299,80 +329,36 @@ export class MCPClientManager {
 
     // If connection is in authenticating state, return auth URL for OAuth flow
     const authUrl = conn.options.transport.authProvider?.authUrl;
+
     if (
       conn.connectionState === "authenticating" &&
       authUrl &&
       conn.options.transport.authProvider?.redirectUrl
     ) {
+      const clientId = conn.options.transport.authProvider?.clientId;
+
+      // Update storage with auth URL and client ID
+      const serverRow = this._storage.listServers().find((s) => s.id === id);
+      if (serverRow) {
+        this._storage.saveServer({
+          ...serverRow,
+          auth_url: authUrl,
+          client_id: clientId ?? null
+        });
+      }
+
       return {
         authUrl,
-        clientId: conn.options.transport.authProvider?.clientId
+        clientId
       };
+    }
+
+    // Fire connected event for non-OAuth connections that reached ready state
+    if (conn.connectionState === "ready") {
+      this._onConnected.fire(id);
     }
 
     return {};
-  }
-
-  /**
-   * Connect to and register an MCP server
-   *
-   * @deprecated Consider using registerServer() followed by connectToServer() for more control
-   * @param transportConfig Transport config
-   * @param clientConfig Client config
-   * @param capabilities Client capabilities (i.e. if the client supports roots/sampling)
-   */
-  async connect(
-    url: string,
-    options: {
-      // Allows you to reconnect to a server (in the case of an auth reconnect)
-      reconnect?: {
-        // server id
-        id: string;
-        oauthClientId?: string;
-        oauthCode?: string;
-      };
-      // we're overriding authProvider here because we want to be able to access the auth URL
-      transport?: MCPTransportOptions;
-      client?: ConstructorParameters<typeof Client>[1];
-    } = {}
-  ): Promise<{
-    id: string;
-    authUrl?: string;
-    clientId?: string;
-  }> {
-    /* Late initialization of jsonSchemaFn */
-    /**
-     * We need to delay loading ai sdk, because putting it in module scope is
-     * causing issues with startup time.
-     * The only place it's used is in getAITools, which only matters after
-     * .connect() is called on at least one server.
-     * So it's safe to delay loading it until .connect() is called.
-     */
-    await this.ensureJsonSchema();
-
-    const id = options.reconnect?.id ?? nanoid(8);
-
-    if (options.transport?.authProvider) {
-      options.transport.authProvider.serverId = id;
-      // reconnect with auth
-      if (options.reconnect?.oauthClientId) {
-        options.transport.authProvider.clientId =
-          options.reconnect?.oauthClientId;
-      }
-    }
-
-    // Register server if not already registered or if not doing OAuth code reconnect
-    if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
-      this.registerServer(id, url, options);
-    }
-
-    // Connect to server
-    const result = await this.connectToServer(id, options.reconnect?.oauthCode);
-
-    return {
-      id,
-      ...result
-    };
   }
 
   /**
