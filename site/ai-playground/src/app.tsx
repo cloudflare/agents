@@ -8,6 +8,7 @@ import { McpServers } from "./components/McpServers";
 import ModelSelector from "./components/ModelSelector";
 import ViewCodeModal from "./components/ViewCodeModal";
 import { ToolCallCard } from "./components/ToolCallCard";
+import { ReasoningCard } from "./components/ReasoningCard";
 import { isToolUIPart, type UIMessage } from "ai";
 import { useAgent } from "agents/react";
 import type { MCPServersState } from "agents";
@@ -425,9 +426,9 @@ const App = () => {
           >
             <div className="bg-ai h-[3px] hidden md:block" />
             <ul className="pb-6 px-6 pt-6">
-              {messages.map((message) => (
-                <div key={message.id}>
-                  {message.parts.map((part, i) => {
+              {messages.map((message) => {
+                const renderedParts = message.parts
+                  .map((part, i) => {
                     // Render text messages
                     if (part.type === "text") {
                       // Skip empty text parts (e.g., when message only contains tool calls)
@@ -461,6 +462,24 @@ const App = () => {
                               readOnly
                             />
                           </div>
+                        </li>
+                      );
+                    }
+
+                    // Render reasoning
+                    if (part.type === "reasoning") {
+                      // Skip empty reasoning parts
+                      if (!part.text || part.text.trim() === "") {
+                        return null;
+                      }
+
+                      return (
+                        <li
+                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          key={i}
+                          className="mb-3 w-full"
+                        >
+                          <ReasoningCard part={part} />
                         </li>
                       );
                     }
@@ -500,9 +519,16 @@ const App = () => {
                     }
 
                     return null;
-                  })}
-                </div>
-              ))}
+                  })
+                  .filter(Boolean);
+
+                // Only render the message wrapper if there are actual parts to show
+                if (renderedParts.length === 0) {
+                  return null;
+                }
+
+                return <div key={message.id}>{renderedParts}</div>;
+              })}
 
               {(loading || streaming) &&
               (messages[messages.length - 1].role !== "assistant" ||
