@@ -113,7 +113,7 @@ export class MCPClientManager {
       serverOptions: MCPServerOptions | null
     ) => Promise<void>
   ): Promise<void> {
-    const servers = await Promise.resolve(this._storage.listServers());
+    const servers = this._storage.listServers();
 
     if (!servers || servers.length === 0) {
       return;
@@ -354,7 +354,7 @@ export class MCPClientManager {
    * Refresh the in-memory callback URL cache from storage
    */
   private async _refreshCallbackUrlCache(): Promise<void> {
-    const servers = await Promise.resolve(this._storage.listServers());
+    const servers = this._storage.listServers();
     this._callbackUrlCache = new Set(
       servers.filter((s) => s.callback_url).map((s) => s.callback_url)
     );
@@ -397,7 +397,7 @@ export class MCPClientManager {
     const url = new URL(req.url);
 
     // Find the matching server from database
-    const servers = await Promise.resolve(this._storage.listServers());
+    const servers = this._storage.listServers();
     const matchingServer = servers.find((server: MCPServerRow) => {
       return server.callback_url && req.url.startsWith(server.callback_url);
     });
@@ -465,11 +465,7 @@ export class MCPClientManager {
 
     try {
       await conn.completeAuthorization(code);
-
-      // Clear both callback_url and auth_url in a single DB operation to prevent malicious second callbacks
-      await Promise.resolve(this._storage.clearOAuthCredentials(serverId));
-
-      // Invalidate cache since callback URLs changed
+      this._storage.clearOAuthCredentials(serverId);
       this._invalidateCallbackUrlCache();
 
       return {

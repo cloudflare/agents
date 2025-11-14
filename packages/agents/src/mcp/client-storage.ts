@@ -19,42 +19,40 @@ export interface MCPStorageAdapter {
   /**
    * Create the cf_agents_mcp_servers table if it doesn't exist
    */
-  create(): void | Promise<void>;
+  create(): void;
 
   /**
    * Drop the cf_agents_mcp_servers table
    */
-  destroy(): void | Promise<void>;
+  destroy(): void;
 
   /**
    * Save or update an MCP server configuration
    */
-  saveServer(server: MCPServerRow): void | Promise<void>;
+  saveServer(server: MCPServerRow): void;
 
   /**
    * Remove an MCP server from storage
    */
-  removeServer(serverId: string): void | Promise<void>;
+  removeServer(serverId: string): void;
 
   /**
    * List all MCP servers from storage
    */
-  listServers(): MCPServerRow[] | Promise<MCPServerRow[]>;
+  listServers(): MCPServerRow[];
 
   /**
    * Get an MCP server by its callback URL
    * Used during OAuth callback to identify which server is being authenticated
    */
-  getServerByCallbackUrl(
-    callbackUrl: string
-  ): MCPServerRow | null | Promise<MCPServerRow | null>;
+  getServerByCallbackUrl(callbackUrl: string): MCPServerRow | null;
 
   /**
    * Clear both auth_url and callback_url after successful OAuth authentication
    * This prevents the agent from continuously asking for OAuth on reconnect
    * and prevents malicious second callbacks from being processed
    */
-  clearOAuthCredentials(serverId: string): void | Promise<void>;
+  clearOAuthCredentials(serverId: string): void;
 }
 
 /**
@@ -69,7 +67,7 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     ) => T[]
   ) {}
 
-  create(): void {
+  create() {
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
         id TEXT PRIMARY KEY NOT NULL,
@@ -83,11 +81,11 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     `;
   }
 
-  destroy(): void {
+  destroy() {
     this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
   }
 
-  saveServer(server: MCPServerRow): void {
+  saveServer(server: MCPServerRow) {
     this.sql`
       INSERT OR REPLACE INTO cf_agents_mcp_servers (
         id,
@@ -110,13 +108,13 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     `;
   }
 
-  removeServer(serverId: string): void {
+  removeServer(serverId: string) {
     this.sql`
       DELETE FROM cf_agents_mcp_servers WHERE id = ${serverId}
     `;
   }
 
-  listServers(): MCPServerRow[] {
+  listServers() {
     const servers = this.sql<MCPServerRow>`
       SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
       FROM cf_agents_mcp_servers
@@ -124,7 +122,7 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     return servers;
   }
 
-  getServerByCallbackUrl(callbackUrl: string): MCPServerRow | null {
+  getServerByCallbackUrl(callbackUrl: string) {
     const results = this.sql<MCPServerRow>`
       SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
       FROM cf_agents_mcp_servers
@@ -134,7 +132,7 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     return results.length > 0 ? results[0] : null;
   }
 
-  clearOAuthCredentials(serverId: string): void {
+  clearOAuthCredentials(serverId: string) {
     this.sql`
       UPDATE cf_agents_mcp_servers
       SET callback_url = '', auth_url = NULL
