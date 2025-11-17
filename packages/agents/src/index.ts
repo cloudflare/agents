@@ -1486,7 +1486,7 @@ export class Agent<
     this.broadcastMcpServers();
   }
 
-  private getMcpServers(): MCPServersState {
+  getMcpServers(): MCPServersState {
     const mcpState: MCPServersState = {
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
