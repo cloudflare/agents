@@ -1044,6 +1044,50 @@ describe("WorkerTransport", () => {
     let postStreamData: string[] = [];
     let getStreamData: string[] = [];
 
+    // Type for accessing private properties during testing (whitebox testing)
+    type TransportInternal = {
+      streamMapping: Map<string, unknown>;
+      requestToStreamMapping: Map<string | number, string>;
+    };
+
+    /**
+     * Helper to set up mock streams on the transport for testing.
+     * This is whitebox testing that accesses private fields via type assertion.
+     */
+    const setupMockStream = (
+      transport: WorkerTransport,
+      streamId: string,
+      writer: WritableStreamDefaultWriter<Uint8Array>,
+      encoder: TextEncoder
+    ) => {
+      const transportInternal = transport as unknown as TransportInternal;
+      transportInternal.streamMapping.set(streamId, {
+        writer,
+        encoder,
+        cleanup: vi.fn()
+      });
+    };
+
+    /**
+     * Helper to map a request ID to a stream ID for testing.
+     */
+    const mapRequestToStream = (
+      transport: WorkerTransport,
+      requestId: string | number,
+      streamId: string
+    ) => {
+      const transportInternal = transport as unknown as TransportInternal;
+      transportInternal.requestToStreamMapping.set(requestId, streamId);
+    };
+
+    /**
+     * Helper to delete a stream from the transport for testing.
+     */
+    const deleteStream = (transport: WorkerTransport, streamId: string) => {
+      const transportInternal = transport as unknown as TransportInternal;
+      transportInternal.streamMapping.delete(streamId);
+    };
+
     beforeEach(() => {
       // Reset data arrays
       postStreamData = [];
@@ -1077,29 +1121,15 @@ describe("WorkerTransport", () => {
         releaseLock: vi.fn()
       } as unknown as WritableStreamDefaultWriter<Uint8Array>;
 
-      // Access private properties for testing using type assertion
-      type TransportInternal = {
-        streamMapping: Map<string, unknown>;
-        requestToStreamMapping: Map<string | number, string>;
-      };
-
-      const transportInternal = transport as unknown as TransportInternal;
-
-      // Set up the stream mappings
-      transportInternal.streamMapping.set("post-stream-1", {
-        writer: postStreamWriter,
-        encoder: postEncoder,
-        cleanup: vi.fn()
-      });
-
-      transportInternal.streamMapping.set("_GET_stream", {
-        writer: getStreamWriter,
-        encoder: getEncoder,
-        cleanup: vi.fn()
-      });
-
-      // Map a request ID to the POST stream
-      transportInternal.requestToStreamMapping.set("req-1", "post-stream-1");
+      // Set up the stream mappings using helpers
+      setupMockStream(
+        transport,
+        "post-stream-1",
+        postStreamWriter,
+        postEncoder
+      );
+      setupMockStream(transport, "_GET_stream", getStreamWriter, getEncoder);
+      mapRequestToStream(transport, "req-1", "post-stream-1");
     });
 
     describe("Server-to-client requests with relatedRequestId", () => {
@@ -1145,19 +1175,13 @@ describe("WorkerTransport", () => {
 
         const postEncoder2 = new TextEncoder();
 
-        type TransportInternal = {
-          streamMapping: Map<string, unknown>;
-          requestToStreamMapping: Map<string | number, string>;
-        };
-
-        const transportInternal = transport as unknown as TransportInternal;
-
-        transportInternal.streamMapping.set("post-stream-2", {
-          writer: postStreamWriter2,
-          encoder: postEncoder2,
-          cleanup: vi.fn()
-        });
-        transportInternal.requestToStreamMapping.set("req-2", "post-stream-2");
+        setupMockStream(
+          transport,
+          "post-stream-2",
+          postStreamWriter2,
+          postEncoder2
+        );
+        mapRequestToStream(transport, "req-2", "post-stream-2");
 
         const message1: JSONRPCRequest = {
           jsonrpc: "2.0",
@@ -1211,12 +1235,7 @@ describe("WorkerTransport", () => {
 
       it("should not fail when standalone GET stream is not available", async () => {
         // Remove the GET stream
-        type TransportInternal = {
-          streamMapping: Map<string, unknown>;
-        };
-
-        const transportInternal = transport as unknown as TransportInternal;
-        transportInternal.streamMapping.delete("_GET_stream");
+        deleteStream(transport, "_GET_stream");
 
         const notification: JSONRPCRequest = {
           jsonrpc: "2.0",
@@ -1272,6 +1291,84 @@ describe("WorkerTransport", () => {
         await expect(transport.send(response)).rejects.toThrow(
           /No connection established for request ID/
         );
+      });
+    });
+
+    describe("Edge cases", () => {
+      it("should use message.id for responses even when relatedRequestId matches a different mapped request", async () => {
+        // Set up: req-1 -> post-stream-1, req-2 -> post-stream-2
+        const postStreamWriter2: WritableStreamDefaultWriter<Uint8Array> = {
+          write: vi.fn(async (_chunk: Uint8Array) => {}),
+          close: vi.fn(),
+          abort: vi.fn(),
+          releaseLock: vi.fn()
+        } as unknown as WritableStreamDefaultWriter<Uint8Array>;
+
+        setupMockStream(
+          transport,
+          "post-stream-2",
+          postStreamWriter2,
+          new TextEncoder()
+        );
+        mapRequestToStream(transport, "req-2", "post-stream-2");
+
+        // Send a response with id="req-2" but relatedRequestId="req-1"
+        const response = {
+          jsonrpc: "2.0" as const,
+          id: "req-2",
+          result: { content: [{ type: "text" as const, text: "Response" }] }
+        };
+
+        await transport.send(response, { relatedRequestId: "req-1" });
+
+        // Should go through post-stream-2 (based on message.id="req-2")
+        // NOT post-stream-1 (based on relatedRequestId="req-1")
+        expect(postStreamWriter2.write).toHaveBeenCalled();
+        expect(postStreamWriter.write).not.toHaveBeenCalled();
+      });
+
+      it("should handle multiple concurrent server-to-client requests with the same relatedRequestId", async () => {
+        // Both elicitations reference the same originating request
+        const elicitation1: JSONRPCRequest = {
+          jsonrpc: "2.0",
+          id: "elicit-1",
+          method: "elicitation/create",
+          params: { message: "First elicitation" }
+        };
+
+        const elicitation2: JSONRPCRequest = {
+          jsonrpc: "2.0",
+          id: "elicit-2",
+          method: "elicitation/create",
+          params: { message: "Second elicitation" }
+        };
+
+        // Both use the same relatedRequestId
+        await transport.send(elicitation1, { relatedRequestId: "req-1" });
+        await transport.send(elicitation2, { relatedRequestId: "req-1" });
+
+        // Both should go through the same POST stream
+        expect(postStreamWriter.write).toHaveBeenCalledTimes(2);
+        expect(postStreamData.length).toBe(2);
+        expect(postStreamData[0]).toContain("First elicitation");
+        expect(postStreamData[1]).toContain("Second elicitation");
+      });
+
+      it("should handle relatedRequestId that points to a closed stream differently than missing stream", async () => {
+        // Map req-2 to a stream, then delete the stream (simulating closure)
+        mapRequestToStream(transport, "req-2", "closed-stream");
+
+        const message: JSONRPCRequest = {
+          jsonrpc: "2.0",
+          id: "msg-1",
+          method: "elicitation/create",
+          params: {}
+        };
+
+        // Should throw because stream is mapped but doesn't exist
+        await expect(
+          transport.send(message, { relatedRequestId: "req-2" })
+        ).rejects.toThrow(/No connection established/);
       });
     });
   });

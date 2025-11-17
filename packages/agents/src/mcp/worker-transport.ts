@@ -745,7 +745,7 @@ export class WorkerTransport implements Transport {
     message: JSONRPCMessage,
     options?: TransportSendOptions
   ): Promise<void> {
-    // Check relatedRequestId to FIRST to route server-to-client requests through the same stream as the originating client request
+    // Check relatedRequestId FIRST to route server-to-client requests through the same stream as the originating client request
     let requestId: RequestId | undefined = options?.relatedRequestId;
 
     // Then override with message.id for responses/errors
