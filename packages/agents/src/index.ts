@@ -321,6 +321,7 @@ export class Agent<
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _mcpStateRestored = false;
+  private _destroyed = false;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -1321,6 +1322,7 @@ export class Agent<
           }
         );
         if (row.type === "cron") {
+          if (this._destroyed) return;
           // Update next execution time for cron schedules
           const nextExecutionTime = getNextCronTime(row.cron);
           const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
@@ -1329,6 +1331,7 @@ export class Agent<
           UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
         `;
         } else {
+          if (this._destroyed) return;
           // Delete one-time schedules after execution
           this.sql`
           DELETE FROM cf_agents_schedules WHERE id = ${row.id}
@@ -1356,7 +1359,13 @@ export class Agent<
     await this.ctx.storage.deleteAll();
     this._disposables.dispose();
     await this.mcp.dispose?.();
-    this.ctx.abort("destroyed"); // enforce that the agent is evicted
+    this._destroyed = true;
+
+    // `ctx.abort` throws an uncatchable error, so we yield to the event loop
+    // to avoid capturing it and let handlers finish cleaning up
+    setTimeout(() => {
+      this.ctx.abort("destroyed");
+    }, 0);
 
     this.observability?.emit(
       {
