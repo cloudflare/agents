@@ -2,7 +2,10 @@
  * Based on @hono/mcp transport implementation (https://github.com/honojs/middleware/tree/main/packages/mcp)
  */
 
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type {
+  Transport,
+  TransportSendOptions
+} from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   JSONRPCMessage,
   RequestId,
@@ -738,9 +741,14 @@ export class WorkerTransport implements Transport {
     this.onclose?.();
   }
 
-  async send(message: JSONRPCMessage): Promise<void> {
-    let requestId: RequestId | undefined;
+  async send(
+    message: JSONRPCMessage,
+    options?: TransportSendOptions
+  ): Promise<void> {
+    // Check relatedRequestId to FIRST to route server-to-client requests through the same stream as the originating client request
+    let requestId: RequestId | undefined = options?.relatedRequestId;
 
+    // Then override with message.id for responses/errors
     if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
       requestId = message.id;
     }

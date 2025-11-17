@@ -45,7 +45,13 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
 
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
-    { capabilities: { logging: {}, tools: { listChanged: true } } }
+    {
+      capabilities: {
+        logging: {},
+        tools: { listChanged: true },
+        elicitation: { form: {}, url: {} }
+      }
+    }
   );
 
   async init() {
@@ -83,6 +89,42 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
         });
         return {
           content: [{ type: "text", text: `logged:${level}` }]
+        };
+      }
+    );
+
+    this.server.tool(
+      "elicitName",
+      "Test tool that elicits user input for a name",
+      {},
+      async (): Promise<CallToolResult> => {
+        const result = await this.server.server.elicitInput({
+          message: "What is your name?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Your name"
+              }
+            },
+            required: ["name"]
+          }
+        });
+
+        if (result.action === "accept" && result.content?.name) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `You said your name is: ${result.content.name}`
+              }
+            ]
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: "Elicitation cancelled" }]
         };
       }
     );

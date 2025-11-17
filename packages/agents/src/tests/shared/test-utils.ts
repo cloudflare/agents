@@ -17,7 +17,9 @@ export const TEST_MESSAGES = {
     jsonrpc: "2.0",
     method: "initialize",
     params: {
-      capabilities: {},
+      capabilities: {
+        elicitation: { form: {} }
+      },
       clientInfo: { name: "test-client", version: "1.0" },
       protocolVersion: "2025-03-26"
     }
