@@ -475,7 +475,7 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          await this.mcp.restoreConnectionsFromStorage(this.name);
+          await this.mcp.ensureJsonSchema();
 
           const isCallback = await this.mcp.isCallbackRequest(request);
 
@@ -511,10 +511,7 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
-          if (typeof this.mcp.ensureJsonSchema === "function") {
-            await this.mcp.ensureJsonSchema();
-          }
-
+          await this.mcp.ensureJsonSchema();
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
           }

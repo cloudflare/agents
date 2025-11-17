@@ -150,8 +150,6 @@ export class MCPClientManager {
    * @param clientName Name to use for OAuth client (typically the agent instance name)
    */
   async restoreConnectionsFromStorage(clientName: string): Promise<void> {
-    await this.ensureJsonSchema();
-
     if (this._isRestored) {
       return;
     }
@@ -419,8 +417,6 @@ export class MCPClientManager {
 
     // Find the matching server from database
     const servers = this._storage.listServers();
-
-    console.log(servers);
     const matchingServer = servers.find((server: MCPServerRow) => {
       return server.callback_url && req.url.startsWith(server.callback_url);
     });
