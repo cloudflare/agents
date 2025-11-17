@@ -13,13 +13,6 @@ describe("OAuth2 MCP Client", () => {
     const agentId = env.TestOAuthAgent.idFromName("test-oauth-hibernation");
     const agentStub = env.TestOAuthAgent.get(agentId);
 
-    // Initialize the agent
-    await agentStub.setName("default");
-    await agentStub.onStart();
-
-    // Reset the restoration flag to simulate fresh DO wake-up
-    await agentStub.resetMcpStateRestoredFlag();
-
     // Setup: Simulate a persisted MCP server that was saved before hibernation
     const serverId = nanoid(8);
     const serverName = "test-oauth-server";
@@ -43,10 +36,11 @@ describe("OAuth2 MCP Client", () => {
         )
       `;
 
-    // At this point, the DO has internal state only from database
-    // When it wakes up for the OAuth callback, it should restore state from the database
+    // Simulate DO wake-up from hibernation: initialize agent and restore from database
+    await agentStub.setName("default");
+    await agentStub.onStart();
 
-    // Verify callback URL is registered from database (no in-memory state needed)
+    // Verify callback URL is registered from database (restored in onStart)
     const isRegisteredBefore = await agentStub.isCallbackUrlRegistered(
       `${fullCallbackUrl}?code=test&state=test`
     );
@@ -89,10 +83,6 @@ describe("OAuth2 MCP Client", () => {
     const agentId = env.TestOAuthAgent.idFromName("test-partial-state");
     const agentStub = env.TestOAuthAgent.get(agentId);
 
-    await agentStub.setName("default");
-    await agentStub.onStart();
-    await agentStub.resetMcpStateRestoredFlag();
-
     const serverId = nanoid(8);
     const serverName = "test-server";
     const serverUrl = "http://example.com/mcp";
@@ -118,15 +108,19 @@ describe("OAuth2 MCP Client", () => {
     // Setup mock OAuth state for the callback to succeed
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    // Simulate DO wake-up: initialize agent and restore connections from database
+    await agentStub.setName("default");
+    await agentStub.onStart();
+
     // Verify callback URL IS registered from database
     const isRegisteredBefore = await agentStub.isCallbackUrlRegistered(
       `${fullCallbackUrl}?code=test&state=test`
     );
     expect(isRegisteredBefore).toBe(true);
 
-    // Verify connection does NOT exist yet (hibernated state)
+    // Verify connection exists in authenticating state (restored from DB with auth_url)
     const connectionExists = await agentStub.hasMcpConnection(serverId);
-    expect(connectionExists).toBe(false);
+    expect(connectionExists).toBe(true);
 
     const authCode = "test-code";
     const state = "test-state";
