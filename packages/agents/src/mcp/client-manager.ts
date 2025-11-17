@@ -83,6 +83,7 @@ export class MCPClientManager {
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
   private _storage: MCPStorageAdapter;
+  private _isRestored = false;
 
   // In-memory cache of callback URLs to avoid DB queries on every request
   private _callbackUrlCache: Set<string> | null = null;
@@ -149,9 +150,16 @@ export class MCPClientManager {
    * @param clientName Name to use for OAuth client (typically the agent instance name)
    */
   async restoreConnectionsFromStorage(clientName: string): Promise<void> {
+    await this.ensureJsonSchema();
+
+    if (this._isRestored) {
+      return;
+    }
+
     const servers = this._storage.listServers();
 
     if (!servers || servers.length === 0) {
+      this._isRestored = true;
       return;
     }
 
@@ -218,6 +226,8 @@ export class MCPClientManager {
         });
       }
     }
+
+    this._isRestored = true;
   }
 
   /**

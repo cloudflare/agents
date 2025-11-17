@@ -309,7 +309,6 @@ export class Agent<
 > extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
-  private _mcpConnectionsInitialized = false;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -476,11 +475,7 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          if (typeof this.mcp.ensureJsonSchema === "function") {
-            await this.mcp.ensureJsonSchema();
-          }
-
-          await this._initializeMcpConnectionsFromStorage();
+          await this.mcp.restoreConnectionsFromStorage(this.name);
 
           const isCallback = await this.mcp.isCallbackRequest(request);
 
@@ -656,7 +651,7 @@ export class Agent<
         },
         async () => {
           await this._tryCatch(async () => {
-            await this._initializeMcpConnectionsFromStorage();
+            await this.mcp.restoreConnectionsFromStorage(this.name);
             this.broadcastMcpServers();
             return _onStart(props);
           });
@@ -1371,16 +1366,6 @@ export class Agent<
    */
   private _isCallable(method: string): boolean {
     return callableMetadata.has(this[method as keyof this] as Function);
-  }
-
-  private async _initializeMcpConnectionsFromStorage() {
-    if (this._mcpConnectionsInitialized) {
-      return;
-    }
-
-    await this.mcp.restoreConnectionsFromStorage(this.name);
-
-    this._mcpConnectionsInitialized = true;
   }
 
   /**
