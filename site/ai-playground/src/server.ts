@@ -9,8 +9,7 @@ import {
   type StreamTextOnFinishCallback,
   stepCountIs,
   streamText,
-  type ToolSet,
-  smoothStream
+  type ToolSet
 } from "ai";
 import { cleanupMessages } from "./utils";
 
@@ -91,11 +90,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
             typeof tools
           >,
           temperature: this.state.temperature,
-          stopWhen: stepCountIs(10),
-          experimental_transform: smoothStream({
-            delayInMs: 20,
-            chunking: "line"
-          })
+          stopWhen: stepCountIs(10)
         });
 
         writer.merge(result.toUIMessageStream());
