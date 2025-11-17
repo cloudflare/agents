@@ -1252,7 +1252,7 @@ export class Agent<
     // Find the next schedule that needs to be executed
     const result = this.sql`
       SELECT time FROM cf_agents_schedules
-      WHERE time > ${Math.floor(Date.now() / 1000)}
+      WHERE time >= ${Math.floor(Date.now() / 1000)}
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -1339,6 +1339,7 @@ export class Agent<
         }
       }
     }
+    if (this._destroyed) return;
 
     // Schedule the next alarm
     await this._scheduleNextAlarm();

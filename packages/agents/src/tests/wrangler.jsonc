@@ -38,6 +38,10 @@
       {
         "class_name": "TestMcpJurisdiction",
         "name": "TEST_MCP_JURISDICTION"
+      },
+      {
+        "class_name": "TestDestroyScheduleAgent",
+        "name": "TestDestroyScheduleAgent"
       }
     ]
   },
@@ -52,7 +56,8 @@
         "TestRaceAgent",
         "TestChatAgent",
         "TestOAuthAgent",
-        "TestMcpJurisdiction"
+        "TestMcpJurisdiction",
+        "TestDestroyScheduleAgent"
       ],
       "tag": "v1"
     }

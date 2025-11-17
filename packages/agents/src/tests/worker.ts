@@ -30,6 +30,7 @@ export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
+  TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
 };
 
 type State = unknown;
@@ -39,6 +40,7 @@ type Props = {
 };
 
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
+  observability = undefined;
   private tempToolHandle?: { remove: () => void };
 
   server = new McpServer(
@@ -130,6 +132,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
 
 // Test email agents
 export class TestEmailAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -144,6 +147,7 @@ export class TestEmailAgent extends Agent<Env> {
 }
 
 export class TestCaseSensitiveAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -156,6 +160,7 @@ export class TestCaseSensitiveAgent extends Agent<Env> {
 }
 
 export class TestUserNotificationAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -167,11 +172,29 @@ export class TestUserNotificationAgent extends Agent<Env> {
   }
 }
 
+export class TestDestroyScheduleAgent extends Agent<Env, { status: string }> {
+  observability = undefined;
+  initialState = {
+    status: "unscheduled"
+  };
+
+  async scheduleSelfDestructingAlarm() {
+    this.setState({ status: "scheduled" });
+    await this.schedule(0, "destroy");
+  }
+
+  getStatus() {
+    return this.state.status;
+  }
+}
+
 // An Agent that tags connections in onConnect,
 // then echoes whether the tag was observed in onMessage
 export class TestRaceAgent extends Agent<Env> {
   initialState = { hello: "world" };
   static options = { hibernate: true };
+
+  observability = undefined;
 
   async onConnect(conn: Connection<{ tagged: boolean }>) {
     // Simulate real async setup to widen the window a bit
@@ -187,6 +210,8 @@ export class TestRaceAgent extends Agent<Env> {
 
 // Test Agent for OAuth client side flows
 export class TestOAuthAgent extends Agent<Env> {
+  observability = undefined;
+
   async onRequest(_request: Request): Promise<Response> {
     return new Response("Test OAuth Agent");
   }
@@ -311,6 +336,8 @@ export class TestOAuthAgent extends Agent<Env> {
 }
 
 export class TestChatAgent extends AIChatAgent<Env> {
+  observability = undefined;
+
   async onChatMessage() {
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
@@ -373,6 +400,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
 // Test MCP Agent for jurisdiction feature
 export class TestMcpJurisdiction extends McpAgent<Env> {
+  observability = undefined;
+
   server = new McpServer(
     { name: "test-jurisdiction-server", version: "1.0.0" },
     { capabilities: { tools: {} } }
