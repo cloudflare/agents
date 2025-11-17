@@ -54,28 +54,31 @@ export class MyAgent extends Agent<Env, State> {
           confirm: z.boolean().describe("Do you want to increase the counter?")
         }
       },
-      async ({ confirm }) => {
+      async ({ confirm }, extra) => {
         if (!confirm) {
           return {
             content: [{ type: "text", text: "Counter increase cancelled." }]
           };
         }
         try {
-          const basicInfo = await this.server.server.elicitInput({
-            message: "By how much do you want to increase the counter?",
-            requestedSchema: {
-              type: "object",
-              properties: {
-                amount: {
-                  type: "number",
-                  title: "Amount",
-                  description: "The amount to increase the counter by",
-                  minLength: 1
-                }
-              },
-              required: ["amount"]
-            }
-          });
+          const basicInfo = await this.server.server.elicitInput(
+            {
+              message: "By how much do you want to increase the counter?",
+              requestedSchema: {
+                type: "object",
+                properties: {
+                  amount: {
+                    type: "number",
+                    title: "Amount",
+                    description: "The amount to increase the counter by",
+                    minLength: 1
+                  }
+                },
+                required: ["amount"]
+              }
+            },
+            { relatedRequestId: extra.requestId }
+          );
 
           if (basicInfo.action !== "accept" || !basicInfo.content) {
             return {
