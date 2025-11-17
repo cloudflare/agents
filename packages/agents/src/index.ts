@@ -458,26 +458,18 @@ export class Agent<
       )
     `;
 
-    void this.ctx.blockConcurrencyWhile(async () => {
-      return this._tryCatch(async () => {
-        // Create alarms table if it doesn't exist
-        this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        )
-      `;
-
-        // execute any pending alarms and schedule the next alarm
-        await this.alarm();
-      });
-    });
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_schedules (
+        id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+        callback TEXT,
+        payload TEXT,
+        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron')),
+        time INTEGER,
+        delayInSeconds INTEGER,
+        cron TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
 
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
