@@ -9,7 +9,8 @@ import {
   type StreamTextOnFinishCallback,
   stepCountIs,
   streamText,
-  type ToolSet
+  type ToolSet,
+  smoothStream
 } from "ai";
 import { cleanupMessages } from "./utils";
 
@@ -75,6 +76,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
     });
 
     await this.ensureDestroy();
+
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         // Clean up incomplete tool calls to prevent API errors
@@ -89,7 +91,11 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
             typeof tools
           >,
           temperature: this.state.temperature,
-          stopWhen: stepCountIs(10)
+          stopWhen: stepCountIs(10),
+          experimental_transform: smoothStream({
+            delayInMs: 20,
+            chunking: "line"
+          })
         });
 
         writer.merge(result.toUIMessageStream());
