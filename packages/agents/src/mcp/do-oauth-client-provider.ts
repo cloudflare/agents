@@ -6,7 +6,7 @@ import type {
   OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { nanoid } from "nanoid";
-import type { MCPStorageAdapter } from "./client-storage";
+import type { OAuthClientStorage } from "./client-storage";
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
 // This allows us to track authentication for a specific server and associated dynamic client registration
@@ -22,7 +22,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   private _clientId_: string | undefined;
 
   constructor(
-    public storage: MCPStorageAdapter,
+    public storage: OAuthClientStorage,
     public clientName: string,
     public baseRedirectUrl: string
   ) {}
@@ -76,17 +76,19 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return `${this.keyPrefix(clientId)}/client_info/`;
   }
 
-  clientInformation() {
+  async clientInformation() {
     if (!this._clientId_) {
       return undefined;
     }
-    return this.storage.get<OAuthClientInformation>(
-      this.clientInfoKey(this.clientId)
+    return (
+      (await this.storage.get<OAuthClientInformation>(
+        this.clientInfoKey(this.clientId)
+      )) ?? undefined
     );
   }
 
-  saveClientInformation(clientInformation: OAuthClientInformationFull) {
-    this.storage.put(
+  async saveClientInformation(clientInformation: OAuthClientInformationFull) {
+    await this.storage.put(
       this.clientInfoKey(clientInformation.client_id),
       clientInformation
     );
@@ -97,15 +99,18 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return `${this.keyPrefix(clientId)}/token`;
   }
 
-  tokens() {
+  async tokens() {
     if (!this._clientId_) {
       return undefined;
     }
-    return this.storage.get<OAuthTokens>(this.tokenKey(this.clientId));
+    return (
+      (await this.storage.get<OAuthTokens>(this.tokenKey(this.clientId))) ??
+      undefined
+    );
   }
 
-  saveTokens(tokens: OAuthTokens) {
-    this.storage.put(this.tokenKey(this.clientId), tokens);
+  async saveTokens(tokens: OAuthTokens) {
+    await this.storage.put(this.tokenKey(this.clientId), tokens);
   }
 
   get authUrl() {
@@ -127,20 +132,20 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return `${this.keyPrefix(clientId)}/code_verifier`;
   }
 
-  saveCodeVerifier(verifier: string) {
+  async saveCodeVerifier(verifier: string) {
     const key = this.codeVerifierKey(this.clientId);
 
     // Don't overwrite existing verifier to preserve first PKCE verifier
-    const existing = this.storage.get<string>(key);
+    const existing = await this.storage.get<string>(key);
     if (existing) {
       return;
     }
 
-    this.storage.put(key, verifier);
+    await this.storage.put(key, verifier);
   }
 
-  codeVerifier(): string {
-    const codeVerifier = this.storage.get<string>(
+  async codeVerifier() {
+    const codeVerifier = await this.storage.get<string>(
       this.codeVerifierKey(this.clientId)
     );
     if (!codeVerifier) {

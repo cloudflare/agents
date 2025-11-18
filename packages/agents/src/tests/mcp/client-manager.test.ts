@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MCPClientManager } from "../../mcp/client";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import {
-  AgentMCPStorageAdapter,
+  AgentMCPClientStorage,
   type MCPServerRow
 } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
@@ -17,7 +17,7 @@ describe("MCPClientManager OAuth Integration", () => {
     mockKVData = new Map();
 
     // Create a proper mock storage adapter
-    const mockStorage = new AgentMCPStorageAdapter(
+    const mockStorage = new AgentMCPClientStorage(
       <T extends Record<string, unknown>>(
         strings: TemplateStringsArray,
         ...values: (string | number | boolean | null)[]
@@ -167,7 +167,7 @@ describe("MCPClientManager OAuth Integration", () => {
       ).toBe(false);
 
       // Remove server from database
-      manager.removeServer("server1");
+      await manager.removeServer("server1");
 
       // Should no longer recognize the removed server's callback
       expect(
@@ -1148,7 +1148,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should throw error if jsonSchema not initialized", () => {
       // Create a new manager without initializing jsonSchema
       const newManager = new MCPClientManager("test-client", "1.0.0", {
-        storage: new AgentMCPStorageAdapter(
+        storage: new AgentMCPClientStorage(
           <T extends Record<string, unknown>>() => [] as T[],
           {
             get: () => undefined,

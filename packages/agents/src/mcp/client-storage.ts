@@ -12,64 +12,92 @@ export type MCPServerRow = {
 };
 
 /**
- * Storage adapter interface for MCP client manager
- * Abstracts SQL operations to decouple from specific storage implementations
+ * Options for listing keys in KV storage
  */
-export interface MCPStorageAdapter {
+export interface SyncKvListOptions {
+  start?: string;
+  end?: string;
+  prefix?: string;
+  reverse?: boolean;
+  limit?: number;
+}
+
+/**
+ * Synchronous KV storage interface
+ * Matches Cloudflare's Durable Object KV API
+ */
+export interface SyncKvStorage {
+  get<T = unknown>(key: string): T | undefined;
+  list<T = unknown>(options?: SyncKvListOptions): Iterable<[string, T]>;
+  put<T>(key: string, value: T): void;
+  delete(key: string): boolean;
+}
+
+/**
+ * KV storage interface for OAuth-related data
+ * Used by OAuth providers to store tokens, client info, etc.
+ */
+export interface OAuthClientStorage {
+  /**
+   * Get a value from key-value storage (for OAuth data like tokens, client info, etc.)
+   */
+  get<T>(key: string): Promise<T | undefined>;
+
+  /**
+   * Put a value into key-value storage (for OAuth data like tokens, client info, etc.)
+   */
+  put(key: string, value: unknown): Promise<void>;
+}
+
+/**
+ * Storage interface for MCP client manager
+ * Abstracts storage operations to decouple from specific storage implementations
+ */
+export interface MCPClientStorage extends OAuthClientStorage {
   /**
    * Create the cf_agents_mcp_servers table if it doesn't exist
    */
-  create(): void;
+  create(): Promise<void>;
 
   /**
    * Drop the cf_agents_mcp_servers table
    */
-  destroy(): void;
+  destroy(): Promise<void>;
 
   /**
    * Save or update an MCP server configuration
    */
-  saveServer(server: MCPServerRow): void;
+  saveServer(server: MCPServerRow): Promise<void>;
 
   /**
    * Remove an MCP server from storage
    */
-  removeServer(serverId: string): void;
+  removeServer(serverId: string): Promise<void>;
 
   /**
    * List all MCP servers from storage
    */
-  listServers(): MCPServerRow[];
+  listServers(): Promise<MCPServerRow[]>;
 
   /**
    * Get an MCP server by its callback URL
    * Used during OAuth callback to identify which server is being authenticated
    */
-  getServerByCallbackUrl(callbackUrl: string): MCPServerRow | null;
+  getServerByCallbackUrl(callbackUrl: string): Promise<MCPServerRow | null>;
 
   /**
    * Clear both auth_url and callback_url after successful OAuth authentication
    * This prevents the agent from continuously asking for OAuth on reconnect
    * and prevents malicious second callbacks from being processed
    */
-  clearOAuthCredentials(serverId: string): void;
-
-  /**
-   * Get a value from key-value storage (for OAuth data like tokens, client info, etc.)
-   */
-  get<T>(key: string): T | undefined;
-
-  /**
-   * Put a value into key-value storage (for OAuth data like tokens, client info, etc.)
-   */
-  put(key: string, value: unknown): void;
+  clearOAuthCredentials(serverId: string): Promise<void>;
 }
 
 /**
  * SQL-based storage adapter that wraps SQL operations
  * Used by Agent class to provide SQL access to MCPClientManager
  */
-export class AgentMCPStorageAdapter implements MCPStorageAdapter {
+export class AgentMCPClientStorage implements MCPClientStorage {
   constructor(
     private sql: <T extends Record<string, unknown>>(
       strings: TemplateStringsArray,
@@ -78,7 +106,7 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     private kv: SyncKvStorage
   ) {}
 
-  create() {
+  async create() {
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
         id TEXT PRIMARY KEY NOT NULL,
@@ -92,11 +120,11 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     `;
   }
 
-  destroy() {
+  async destroy() {
     this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
   }
 
-  saveServer(server: MCPServerRow) {
+  async saveServer(server: MCPServerRow) {
     this.sql`
       INSERT OR REPLACE INTO cf_agents_mcp_servers (
         id,
@@ -119,13 +147,13 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     `;
   }
 
-  removeServer(serverId: string) {
+  async removeServer(serverId: string) {
     this.sql`
       DELETE FROM cf_agents_mcp_servers WHERE id = ${serverId}
     `;
   }
 
-  listServers() {
+  async listServers() {
     const servers = this.sql<MCPServerRow>`
       SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
       FROM cf_agents_mcp_servers
@@ -133,7 +161,7 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     return servers;
   }
 
-  getServerByCallbackUrl(callbackUrl: string) {
+  async getServerByCallbackUrl(callbackUrl: string) {
     const results = this.sql<MCPServerRow>`
       SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
       FROM cf_agents_mcp_servers
@@ -143,7 +171,7 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     return results.length > 0 ? results[0] : null;
   }
 
-  clearOAuthCredentials(serverId: string) {
+  async clearOAuthCredentials(serverId: string) {
     this.sql`
       UPDATE cf_agents_mcp_servers
       SET callback_url = '', auth_url = NULL
@@ -151,18 +179,11 @@ export class AgentMCPStorageAdapter implements MCPStorageAdapter {
     `;
   }
 
-  get<T>(key: string) {
+  async get<T>(key: string) {
     return this.kv.get<T>(key);
   }
 
-  put(
-    key: string,
-    value:
-      | string
-      | ArrayBuffer
-      | ArrayBufferView<ArrayBufferLike>
-      | ReadableStream
-  ) {
-    this.kv.put(key, value);
+  async put(key: string, value: unknown) {
+    return this.kv.put(key, value);
   }
 }

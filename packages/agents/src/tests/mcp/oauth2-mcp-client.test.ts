@@ -16,6 +16,19 @@ describe("OAuth2 MCP Client - Hibernation", () => {
     const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
     const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
 
+    // Ensure storage table exists
+    agentStub.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        callback_url TEXT NOT NULL,
+        client_id TEXT,
+        auth_url TEXT,
+        server_options TEXT
+      )
+    `;
+
     // Insert persisted MCP server (simulating pre-hibernation state)
     agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -36,6 +49,19 @@ describe("OAuth2 MCP Client - Hibernation", () => {
     const serverId = nanoid(8);
     const callbackBaseUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
     const fullCallbackUrl = `${callbackBaseUrl}/${serverId}`;
+
+    // Ensure storage table exists
+    agentStub.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        server_url TEXT NOT NULL,
+        callback_url TEXT NOT NULL,
+        client_id TEXT,
+        auth_url TEXT,
+        server_options TEXT
+      )
+    `;
 
     agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)

@@ -26,7 +26,7 @@ import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
-import { AgentMCPStorageAdapter } from "./mcp/client-storage";
+import { AgentMCPClientStorage } from "./mcp/client-storage";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
@@ -404,7 +404,7 @@ export class Agent<
     super(ctx, env);
 
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
-      storage: new AgentMCPStorageAdapter(
+      storage: new AgentMCPClientStorage(
         this.sql.bind(this),
         this.ctx.storage.kv
       )
@@ -419,7 +419,7 @@ export class Agent<
     // Broadcast server state after background connects (for OAuth servers)
     this._disposables.add(
       this.mcp.onConnected(async () => {
-        this.broadcastMcpServers();
+        await this.broadcastMcpServers();
       })
     );
 
@@ -479,7 +479,7 @@ export class Agent<
           if (isCallback) {
             const result = await this.mcp.handleCallbackRequest(request);
 
-            this.broadcastMcpServers();
+            await this.broadcastMcpServers();
 
             if (result.authSuccess) {
               this.mcp
@@ -490,8 +490,8 @@ export class Agent<
                     error
                   );
                 })
-                .finally(() => {
-                  this.broadcastMcpServers();
+                .finally(async () => {
+                  await this.broadcastMcpServers();
                 });
             }
 
@@ -600,7 +600,7 @@ export class Agent<
       // must fix this
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
-        () => {
+        async () => {
           if (this.state) {
             connection.send(
               JSON.stringify({
@@ -612,7 +612,7 @@ export class Agent<
 
           connection.send(
             JSON.stringify({
-              mcp: this.getMcpServers(),
+              mcp: await this.getMcpServers(),
               type: MessageType.CF_AGENT_MCP_SERVERS
             })
           );
@@ -646,7 +646,7 @@ export class Agent<
         async () => {
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
-            this.broadcastMcpServers();
+            await this.broadcastMcpServers();
             return _onStart(props);
           });
         }
@@ -1436,7 +1436,7 @@ export class Agent<
     }
 
     // Register server (also saves to storage)
-    this.mcp.registerServer(id, {
+    await this.mcp.registerServer(id, {
       url,
       name: serverName,
       callbackUrl,
@@ -1451,7 +1451,7 @@ export class Agent<
     // Connect to server (updates storage with auth URL if OAuth)
     const result = await this.mcp.connectToServer(id);
 
-    this.broadcastMcpServers();
+    await this.broadcastMcpServers();
 
     return {
       id,
@@ -1461,11 +1461,11 @@ export class Agent<
 
   async removeMcpServer(id: string) {
     this.mcp.closeConnection(id);
-    this.mcp.removeServer(id);
-    this.broadcastMcpServers();
+    await this.mcp.removeServer(id);
+    await this.broadcastMcpServers();
   }
 
-  getMcpServers(): MCPServersState {
+  async getMcpServers(): Promise<MCPServersState> {
     const mcpState: MCPServersState = {
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
@@ -1473,7 +1473,7 @@ export class Agent<
       tools: this.mcp.listTools()
     };
 
-    const servers = this.mcp.listServers();
+    const servers = await this.mcp.listServers();
 
     if (servers && Array.isArray(servers) && servers.length > 0) {
       for (const server of servers) {
@@ -1500,10 +1500,10 @@ export class Agent<
     return mcpState;
   }
 
-  private broadcastMcpServers() {
+  private async broadcastMcpServers() {
     this.broadcast(
       JSON.stringify({
-        mcp: this.getMcpServers(),
+        mcp: await this.getMcpServers(),
         type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );

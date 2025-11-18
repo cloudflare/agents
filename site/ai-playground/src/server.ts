@@ -144,9 +144,9 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
       await this.removeMcpServer(serverId);
     } else {
       // Disconnect all servers if no serverId provided
-      const servers = this.mcp.listServers();
-      for (const server of servers) {
-        await this.removeMcpServer(server.id);
+      const { servers } = await this.getMcpServers();
+      for (const id of Object.keys(servers)) {
+        await this.removeMcpServer(id);
       }
     }
   }

@@ -22,7 +22,7 @@ import {
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
-import type { MCPStorageAdapter, MCPServerRow } from "./client-storage";
+import type { MCPClientStorage, MCPServerRow } from "./client-storage";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 
@@ -71,7 +71,7 @@ export type MCPClientOAuthResult = {
 };
 
 export type MCPClientManagerOptions = {
-  storage: MCPStorageAdapter;
+  storage: MCPClientStorage;
 };
 
 /**
@@ -82,7 +82,7 @@ export class MCPClientManager {
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
-  private _storage: MCPStorageAdapter;
+  private _storage: MCPClientStorage;
   private _isRestored = false;
 
   // In-memory cache of callback URLs to avoid DB queries on every request
@@ -106,9 +106,6 @@ export class MCPClientManager {
     options: MCPClientManagerOptions
   ) {
     this._storage = options.storage;
-
-    // Create the storage instance
-    this._storage.create();
   }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
@@ -117,7 +114,7 @@ export class MCPClientManager {
    * Get the storage adapter instance
    * @internal
    */
-  get storage(): MCPStorageAdapter {
+  get storage(): MCPClientStorage {
     return this._storage;
   }
 
@@ -154,7 +151,8 @@ export class MCPClientManager {
       return;
     }
 
-    const servers = this._storage.listServers();
+    await this._storage.create();
+    const servers = await this._storage.listServers();
 
     if (!servers || servers.length === 0) {
       this._isRestored = true;
@@ -198,7 +196,7 @@ export class MCPClientManager {
         server.client_id ?? undefined
       );
 
-      this.registerServer(server.id, {
+      await this.registerServer(server.id, {
         url: server.server_url,
         name: server.name,
         callbackUrl: server.callback_url,
@@ -369,7 +367,10 @@ export class MCPClientManager {
    * @param options Registration options including URL, name, callback URL, and connection config
    * @returns Server ID
    */
-  registerServer(id: string, options: RegisterServerOptions): string {
+  async registerServer(
+    id: string,
+    options: RegisterServerOptions
+  ): Promise<string> {
     // Skip if connection already exists
     if (this.mcpConnections[id]) {
       return id;
@@ -404,7 +405,7 @@ export class MCPClientManager {
     );
 
     // Save to storage
-    this._storage.saveServer({
+    await this._storage.saveServer({
       id,
       name: options.name,
       server_url: options.url,
@@ -479,9 +480,10 @@ export class MCPClientManager {
       const clientId = conn.options.transport.authProvider?.clientId;
 
       // Update storage with auth URL and client ID
-      const serverRow = this._storage.listServers().find((s) => s.id === id);
+      const servers = await this._storage.listServers();
+      const serverRow = servers.find((s) => s.id === id);
       if (serverRow) {
-        this._storage.saveServer({
+        await this._storage.saveServer({
           ...serverRow,
           auth_url: authUrl,
           client_id: clientId ?? null
@@ -506,7 +508,7 @@ export class MCPClientManager {
    * Refresh the in-memory callback URL cache from storage
    */
   private async _refreshCallbackUrlCache(): Promise<void> {
-    const servers = this._storage.listServers();
+    const servers = await this._storage.listServers();
     this._callbackUrlCache = new Set(
       servers.filter((s) => s.callback_url).map((s) => s.callback_url)
     );
@@ -549,7 +551,7 @@ export class MCPClientManager {
     const url = new URL(req.url);
 
     // Find the matching server from database
-    const servers = this._storage.listServers();
+    const servers = await this._storage.listServers();
     const matchingServer = servers.find((server: MCPServerRow) => {
       return server.callback_url && req.url.startsWith(server.callback_url);
     });
@@ -617,7 +619,7 @@ export class MCPClientManager {
 
     try {
       await conn.completeAuthorization(code);
-      this._storage.clearOAuthCredentials(serverId);
+      await this._storage.clearOAuthCredentials(serverId);
       this._invalidateCallbackUrlCache();
 
       return {
@@ -828,7 +830,7 @@ export class MCPClientManager {
   /**
    * Save an MCP server configuration to storage
    */
-  saveServer(server: {
+  async saveServer(server: {
     id: string;
     name: string;
     server_url: string;
@@ -836,9 +838,9 @@ export class MCPClientManager {
     auth_url?: string | null;
     callback_url: string;
     server_options?: string | null;
-  }): void {
+  }): Promise<void> {
     if (this._storage) {
-      this._storage.saveServer({
+      await this._storage.saveServer({
         id: server.id,
         name: server.name,
         server_url: server.server_url,
@@ -855,9 +857,9 @@ export class MCPClientManager {
   /**
    * Remove an MCP server from storage
    */
-  removeServer(serverId: string): void {
+  async removeServer(serverId: string): Promise<void> {
     if (this._storage) {
-      this._storage.removeServer(serverId);
+      await this._storage.removeServer(serverId);
       // Invalidate cache since callback URLs may have changed
       this._invalidateCallbackUrlCache();
     }
@@ -866,9 +868,9 @@ export class MCPClientManager {
   /**
    * List all MCP servers from storage
    */
-  listServers() {
+  async listServers(): Promise<MCPServerRow[]> {
     if (this._storage) {
-      return this._storage.listServers();
+      return await this._storage.listServers();
     }
     return [];
   }
@@ -885,7 +887,7 @@ export class MCPClientManager {
       this._onObservabilityEvent.dispose();
 
       // Drop the storage table
-      this._storage.destroy();
+      await this._storage.destroy();
     }
   }
 
