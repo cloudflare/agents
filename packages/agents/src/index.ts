@@ -472,6 +472,8 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
+          // TODO: make zod/ai sdk more performant and remove this
+          // Late initialization of jsonSchemaFn (needed for getAITools)
           await this.mcp.ensureJsonSchema();
 
           const isCallback = await this.mcp.isCallbackRequest(request);
@@ -508,6 +510,8 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
+          // TODO: make zod/ai sdk more performant and remove this
+          // Late initialization of jsonSchemaFn (needed for getAITools)
           await this.mcp.ensureJsonSchema();
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
@@ -1402,6 +1406,7 @@ export class Agent<
 
     const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
+    // TODO: make zod/ai sdk more performant and remove this
     // Late initialization of jsonSchemaFn (needed for getAITools)
     await this.mcp.ensureJsonSchema();
 

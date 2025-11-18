@@ -691,6 +691,17 @@ export class MCPClientManager {
     return getNamespacedData(this.mcpConnections, "tools");
   }
 
+  /**
+   * Lazy-loads the jsonSchema function from the AI SDK.
+   *
+   * This defers importing the "ai" package until it's actually needed, which helps reduce
+   * initial bundle size and startup time. The jsonSchema function is required for converting
+   * MCP tools into AI SDK tool definitions via getAITools().
+   *
+   * @internal This method is for internal use only. It's automatically called before operations
+   * that need jsonSchema (like getAITools() or OAuth flows). External consumers should not need
+   * to call this directly.
+   */
   async ensureJsonSchema() {
     if (!this.jsonSchema) {
       const { jsonSchema } = await import("ai");
