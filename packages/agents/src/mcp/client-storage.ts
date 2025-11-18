@@ -23,17 +23,6 @@ export interface SyncKvListOptions {
 }
 
 /**
- * Synchronous KV storage interface
- * Matches Cloudflare's Durable Object KV API
- */
-export interface SyncKvStorage {
-  get<T = unknown>(key: string): T | undefined;
-  list<T = unknown>(options?: SyncKvListOptions): Iterable<[string, T]>;
-  put<T>(key: string, value: T): void;
-  delete(key: string): boolean;
-}
-
-/**
  * KV storage interface for OAuth-related data
  * Used by OAuth providers to store tokens, client info, etc.
  */
@@ -41,12 +30,12 @@ export interface OAuthClientStorage {
   /**
    * Get a value from key-value storage (for OAuth data like tokens, client info, etc.)
    */
-  get<T>(key: string): Promise<T | undefined>;
+  get<T>(key: string): Promise<T | undefined> | undefined;
 
   /**
    * Put a value into key-value storage (for OAuth data like tokens, client info, etc.)
    */
-  put(key: string, value: unknown): Promise<void>;
+  put(key: string, value: unknown): Promise<void> | void;
 }
 
 /**

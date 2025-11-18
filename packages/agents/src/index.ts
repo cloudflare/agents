@@ -1408,7 +1408,7 @@ export class Agent<
     const id = nanoid(8);
 
     const authProvider = new DurableObjectOAuthClientProvider(
-      this.mcp.storage,
+      this.ctx.storage.kv,
       this.name,
       callbackUrl
     );

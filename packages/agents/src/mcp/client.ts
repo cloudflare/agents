@@ -111,14 +111,6 @@ export class MCPClientManager {
   jsonSchema: typeof import("ai").jsonSchema | undefined;
 
   /**
-   * Get the storage adapter instance
-   * @internal
-   */
-  get storage(): MCPClientStorage {
-    return this._storage;
-  }
-
-  /**
    * Create an auth provider for a server
    * @internal
    */
