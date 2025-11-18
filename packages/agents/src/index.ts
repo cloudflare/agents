@@ -22,10 +22,7 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
-import {
-  MCPClientManager,
-  type MCPClientOAuthResult
-} from "./mcp/client-manager";
+import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";

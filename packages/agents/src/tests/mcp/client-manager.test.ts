@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { MCPClientManager } from "../../mcp/client-manager";
+import { MCPClientManager } from "../../mcp/client";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import {
   AgentMCPStorageAdapter,
