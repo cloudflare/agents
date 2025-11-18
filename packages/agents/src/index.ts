@@ -416,9 +416,9 @@ export class Agent<
       wrappedClasses.add(this.constructor);
     }
 
-    // Broadcast server state after background connects (for OAuth servers)
+    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
-      this.mcp.onConnected(async () => {
+      this.mcp.onServerStateChanged(async () => {
         await this.broadcastMcpServers();
       })
     );
@@ -476,28 +476,10 @@ export class Agent<
           // Late initialization of jsonSchemaFn (needed for getAITools)
           await this.mcp.ensureJsonSchema();
 
-          const isCallback = await this.mcp.isCallbackRequest(request);
-
-          if (isCallback) {
-            const result = await this.mcp.handleCallbackRequest(request);
-
-            await this.broadcastMcpServers();
-
-            if (result.authSuccess) {
-              this.mcp
-                .establishConnection(result.serverId)
-                .catch((error) => {
-                  console.error(
-                    "[Agent onRequest] Background connection failed:",
-                    error
-                  );
-                })
-                .finally(async () => {
-                  await this.broadcastMcpServers();
-                });
-            }
-
-            return this.handleOAuthCallbackResponse(result, request);
+          // Handle MCP OAuth callback if this is one
+          const oauthResponse = await this.handleMcpOAuthCallback(request);
+          if (oauthResponse) {
+            return oauthResponse;
           }
 
           return this._tryCatch(() => _onRequest(request));
@@ -1454,20 +1436,18 @@ export class Agent<
     });
 
     // Connect to server (updates storage with auth URL if OAuth)
+    // This fires onServerStateChanged event which triggers broadcast
     const result = await this.mcp.connectToServer(id);
-
-    await this.broadcastMcpServers();
 
     return {
       id,
-      authUrl: result.authUrl
+      authUrl: result.state === "authenticating" ? result.authUrl : undefined
     };
   }
 
   async removeMcpServer(id: string) {
     this.mcp.closeConnection(id);
     await this.mcp.removeServer(id);
-    await this.broadcastMcpServers();
   }
 
   async getMcpServers(): Promise<MCPServersState> {
@@ -1512,6 +1492,47 @@ export class Agent<
         type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );
+  }
+
+  /**
+   * Handle MCP OAuth callback request if it's an OAuth callback.
+   *
+   * This method encapsulates the entire OAuth callback flow:
+   * 1. Checks if the request is an MCP OAuth callback
+   * 2. Processes the OAuth code exchange
+   * 3. Establishes the connection if successful
+   * 4. Broadcasts MCP server state updates
+   * 5. Returns the appropriate HTTP response
+   *
+   * @param request The incoming HTTP request
+   * @returns Response if this was an OAuth callback, null otherwise
+   */
+  private async handleMcpOAuthCallback(
+    request: Request
+  ): Promise<Response | null> {
+    // Check if this is an OAuth callback request
+    const isCallback = await this.mcp.isCallbackRequest(request);
+    if (!isCallback) {
+      return null;
+    }
+
+    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
+    // This fires onServerStateChanged event which triggers broadcast
+    const result = await this.mcp.handleCallbackRequest(request);
+
+    // If auth was successful, establish the connection in the background
+    // establishConnection() will fire onServerStateChanged event which triggers another broadcast
+    if (result.authSuccess) {
+      this.mcp.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[Agent handleMcpOAuthCallback] Background connection failed:",
+          error
+        );
+      });
+    }
+
+    // Return the HTTP response for the OAuth callback
+    return this.handleOAuthCallbackResponse(result, request);
   }
 
   /**

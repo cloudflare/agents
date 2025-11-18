@@ -52,11 +52,15 @@ export type RegisterServerOptions = {
 };
 
 /**
- * Options for connecting to an MCP server
+ * Result of attempting to connect to an MCP server.
+ * Returns the current connection state after the operation.
+ *
+ * - "ready": Connection established and ready to use (non-OAuth)
+ * - "authenticating": OAuth required, user must visit authUrl to authorize
  */
-export type ConnectServerOptions = {
-  oauthCode?: string;
-};
+export type MCPConnectionResult =
+  | { state: "ready" }
+  | { state: "authenticating"; authUrl: string; clientId?: string };
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -92,8 +96,13 @@ export class MCPClientManager {
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
     this._onObservabilityEvent.event;
 
-  private readonly _onConnected = new Emitter<string>();
-  public readonly onConnected: Event<string> = this._onConnected.event;
+  private readonly _onServerStateChanged = new Emitter<void>();
+  /**
+   * Event that fires whenever any MCP server state changes (registered, connected, removed, etc.)
+   * This is useful for broadcasting server state to clients.
+   */
+  public readonly onServerStateChanged: Event<void> =
+    this._onServerStateChanged.event;
 
   /**
    * @param _name Name of the MCP client
@@ -255,10 +264,7 @@ export class MCPClientManager {
      * .connect() is called on at least one server.
      * So it's safe to delay loading it until .connect() is called.
      */
-    if (!this.jsonSchema) {
-      const { jsonSchema } = await import("ai");
-      this.jsonSchema = jsonSchema;
-    }
+    await this.ensureJsonSchema();
 
     const id = options.reconnect?.id ?? nanoid(8);
 
@@ -410,52 +416,33 @@ export class MCPClientManager {
       })
     });
 
+    this._invalidateCallbackUrlCache();
+    this._onServerStateChanged.fire();
+
     return id;
   }
 
   /**
-   * Connect to an already registered MCP server
-   * Updates storage with auth URL and client ID after connection
+   * Connect to an already registered MCP server and initialize the connection.
    *
-   * @param id Server ID
-   * @param options Connection options (e.g., OAuth code for completing OAuth flow)
-   * @returns Auth URL if OAuth is required, undefined otherwise
+   * For OAuth servers, this returns `{ state: "authenticating", authUrl, clientId? }`
+   * without establishing the connection. The user must complete the OAuth flow via
+   * the authUrl, which will trigger a callback handled by `handleCallbackRequest()`.
+   *
+   * For non-OAuth servers, this establishes the connection immediately and returns
+   * `{ state: "ready" }`.
+   *
+   * Updates storage with auth URL and client ID after connection.
+   *
+   * @param id Server ID (must be registered first via registerServer())
+   * @returns Connection result with current state and OAuth info (if applicable)
    */
-  async connectToServer(
-    id: string,
-    options?: ConnectServerOptions
-  ): Promise<{
-    authUrl?: string;
-    clientId?: string;
-  }> {
+  async connectToServer(id: string): Promise<MCPConnectionResult> {
     const conn = this.mcpConnections[id];
     if (!conn) {
       throw new Error(
         `Server ${id} is not registered. Call registerServer() first.`
       );
-    }
-
-    // Handle OAuth completion if we have a code
-    if (options?.oauthCode) {
-      try {
-        await conn.completeAuthorization(options.oauthCode);
-        await conn.establishConnection();
-      } catch (error) {
-        this._onObservabilityEvent.fire({
-          type: "mcp:client:connect",
-          displayMessage: `Failed to complete OAuth reconnection for ${id}`,
-          payload: {
-            url: conn.url.toString(),
-            transport: conn.options.transport.type ?? "auto",
-            state: conn.connectionState,
-            error: toErrorMessage(error)
-          },
-          timestamp: Date.now(),
-          id
-        });
-        throw error;
-      }
-      return {};
     }
 
     // Initialize connection
@@ -482,18 +469,21 @@ export class MCPClientManager {
         });
       }
 
+      this._onServerStateChanged.fire();
+
       return {
+        state: "authenticating",
         authUrl,
         clientId
       };
     }
 
-    // Fire connected event for non-OAuth connections that reached ready state
+    // Fire state changed event for non-OAuth connections that reached ready state
     if (conn.connectionState === "ready") {
-      this._onConnected.fire(id);
+      this._onServerStateChanged.fire();
     }
 
-    return {};
+    return { state: "ready" };
   }
 
   /**
@@ -613,6 +603,7 @@ export class MCPClientManager {
       await conn.completeAuthorization(code);
       await this._storage.clearOAuthCredentials(serverId);
       this._invalidateCallbackUrlCache();
+      this._onServerStateChanged.fire();
 
       return {
         serverId,
@@ -621,6 +612,8 @@ export class MCPClientManager {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
+
+      this._onServerStateChanged.fire();
 
       return {
         serverId,
@@ -650,7 +643,7 @@ export class MCPClientManager {
 
     try {
       await conn.establishConnection();
-      this._onConnected.fire(serverId);
+      this._onServerStateChanged.fire();
     } catch (error) {
       const url = conn.url.toString();
       this._onObservabilityEvent.fire({
@@ -665,6 +658,7 @@ export class MCPClientManager {
         timestamp: Date.now(),
         id: nanoid()
       });
+      this._onServerStateChanged.fire();
     }
   }
 
@@ -865,6 +859,7 @@ export class MCPClientManager {
       await this._storage.removeServer(serverId);
       // Invalidate cache since callback URLs may have changed
       this._invalidateCallbackUrlCache();
+      this._onServerStateChanged.fire();
     }
   }
 
@@ -886,7 +881,7 @@ export class MCPClientManager {
       await this.closeAllConnections();
     } finally {
       // Dispose manager-level emitters
-      this._onConnected.dispose();
+      this._onServerStateChanged.dispose();
       this._onObservabilityEvent.dispose();
 
       // Drop the storage table
