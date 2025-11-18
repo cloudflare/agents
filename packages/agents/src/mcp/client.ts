@@ -182,7 +182,6 @@ export class MCPClientManager {
         // If failed, we'll recreate below
       }
 
-      const needsOAuth = !!server.auth_url;
       const parsedOptions: MCPServerOptions | null = server.server_options
         ? JSON.parse(server.server_options)
         : null;
@@ -194,31 +193,23 @@ export class MCPClientManager {
         server.client_id ?? undefined
       );
 
-      await this.registerServer(server.id, {
-        url: server.server_url,
-        name: server.name,
-        callbackUrl: server.callback_url,
+      // Create the in-memory connection object (no need to save to storage - we just read from it!)
+      this.createConnection(server.id, server.server_url, {
         client: parsedOptions?.client ?? {},
         transport: {
           ...(parsedOptions?.transport ?? {}),
           type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
           authProvider
-        },
-        authUrl: server.auth_url ?? undefined,
-        clientId: server.client_id ?? undefined
+        }
       });
 
-      if (needsOAuth) {
-        // OAuth server - just set state to authenticating (wait for OAuth flow)
-        if (this.mcpConnections[server.id]) {
-          this.mcpConnections[server.id].connectionState = "authenticating";
-        }
-      } else {
-        // Non-OAuth server - connect immediately
-        await this.connectToServer(server.id).catch((error) => {
-          console.error(`Error restoring ${server.id}:`, error);
-        });
-      }
+      // Always try to connect - the connection logic will determine if OAuth is needed
+      // If stored OAuth tokens are valid, connection will succeed automatically
+      // If tokens are missing/invalid, connection will fail with Unauthorized
+      // and state will be set to "authenticating"
+      await this.connectToServer(server.id).catch((error) => {
+        console.error(`Error restoring ${server.id}:`, error);
+      });
     }
 
     this._isRestored = true;
@@ -355,20 +346,20 @@ export class MCPClientManager {
   }
 
   /**
-   * Register an MCP server connection without connecting
-   * Creates the connection object, sets up observability, and saves to storage
-   *
-   * @param id Server ID
-   * @param options Registration options including URL, name, callback URL, and connection config
-   * @returns Server ID
+   * Create an in-memory connection object and set up observability
+   * Does NOT save to storage - use registerServer() for that
    */
-  async registerServer(
+  private createConnection(
     id: string,
-    options: RegisterServerOptions
-  ): Promise<string> {
+    url: string,
+    options: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport: MCPTransportOptions;
+    }
+  ): void {
     // Skip if connection already exists
     if (this.mcpConnections[id]) {
-      return id;
+      return;
     }
 
     const normalizedTransport = {
@@ -377,7 +368,7 @@ export class MCPClientManager {
     };
 
     this.mcpConnections[id] = new MCPClientConnection(
-      new URL(options.url),
+      new URL(url),
       {
         name: this._name,
         version: this._version
@@ -398,6 +389,28 @@ export class MCPClientManager {
         this._onObservabilityEvent.fire(event);
       })
     );
+  }
+
+  /**
+   * Register an MCP server connection without connecting
+   * Creates the connection object, sets up observability, and saves to storage
+   *
+   * @param id Server ID
+   * @param options Registration options including URL, name, callback URL, and connection config
+   * @returns Server ID
+   */
+  async registerServer(
+    id: string,
+    options: RegisterServerOptions
+  ): Promise<string> {
+    // Create the in-memory connection
+    this.createConnection(id, options.url, {
+      client: options.client,
+      transport: {
+        ...options.transport,
+        type: options.transport?.type ?? ("auto" as TransportType)
+      }
+    });
 
     // Save to storage
     await this._storage.saveServer({
@@ -572,7 +585,7 @@ export class MCPClientManager {
 
     try {
       await conn.completeAuthorization(code);
-      await this._storage.clearOAuthCredentials(serverId);
+      await this._storage.clearAuthUrl(serverId);
       this._onServerStateChanged.fire();
 
       return {

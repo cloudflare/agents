@@ -64,11 +64,11 @@ export interface MCPClientStorage extends OAuthClientStorage {
   getServerByCallbackUrl(callbackUrl: string): Promise<MCPServerRow | null>;
 
   /**
-   * Clear both auth_url and callback_url after successful OAuth authentication
+   * Clear auth_url after successful OAuth authentication
    * This prevents the agent from continuously asking for OAuth on reconnect
-   * and prevents malicious second callbacks from being processed
+   * when stored tokens are still valid.
    */
-  clearOAuthCredentials(serverId: string): Promise<void>;
+  clearAuthUrl(serverId: string): Promise<void>;
 }
 
 /**
@@ -149,10 +149,10 @@ export class AgentMCPClientStorage implements MCPClientStorage {
     return results.length > 0 ? results[0] : null;
   }
 
-  async clearOAuthCredentials(serverId: string) {
+  async clearAuthUrl(serverId: string) {
     this.sql`
       UPDATE cf_agents_mcp_servers
-      SET callback_url = '', auth_url = NULL
+      SET auth_url = NULL
       WHERE id = ${serverId}
     `;
   }

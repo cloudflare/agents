@@ -51,16 +51,11 @@ describe("MCPClientManager OAuth Integration", () => {
           return [] as unknown as T[];
         }
 
-        if (
-          query.includes("UPDATE") &&
-          query.includes("callback_url = ''") &&
-          query.includes("auth_url = NULL")
-        ) {
-          // Combined clearOAuthCredentials query
+        if (query.includes("UPDATE") && query.includes("auth_url = NULL")) {
+          // clearAuthUrl query - only clears auth_url, preserves callback_url
           const id = values[0] as string;
           const server = mockStorageData.get(id);
           if (server) {
-            server.callback_url = "";
             server.auth_url = null;
             mockStorageData.set(id, server);
           }
