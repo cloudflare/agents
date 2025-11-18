@@ -310,7 +310,7 @@ export class Agent<
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  readonly mcp!: MCPClientManager;
+  readonly mcp: MCPClientManager;
 
   /**
    * Initial state for the Agent
