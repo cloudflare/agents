@@ -229,6 +229,139 @@ export class MCPClientManager {
   }
 
   /**
+   * Connect to and register an MCP server
+   *
+   * @deprecated This method is maintained for backward compatibility.
+   * For new code, use registerServer() and connectToServer() separately.
+   *
+   * @param url Server URL
+   * @param options Connection options
+   * @returns Object with server ID, auth URL (if OAuth), and client ID (if OAuth)
+   */
+  async connect(
+    url: string,
+    options: {
+      // Allows you to reconnect to a server (in the case of an auth reconnect)
+      reconnect?: {
+        // server id
+        id: string;
+        oauthClientId?: string;
+        oauthCode?: string;
+      };
+      // we're overriding authProvider here because we want to be able to access the auth URL
+      transport?: MCPTransportOptions;
+      client?: ConstructorParameters<typeof Client>[1];
+    } = {}
+  ): Promise<{
+    id: string;
+    authUrl?: string;
+    clientId?: string;
+  }> {
+    /* Late initialization of jsonSchemaFn */
+    /**
+     * We need to delay loading ai sdk, because putting it in module scope is
+     * causing issues with startup time.
+     * The only place it's used is in getAITools, which only matters after
+     * .connect() is called on at least one server.
+     * So it's safe to delay loading it until .connect() is called.
+     */
+    if (!this.jsonSchema) {
+      const { jsonSchema } = await import("ai");
+      this.jsonSchema = jsonSchema;
+    }
+
+    const id = options.reconnect?.id ?? nanoid(8);
+
+    if (options.transport?.authProvider) {
+      options.transport.authProvider.serverId = id;
+      // reconnect with auth
+      if (options.reconnect?.oauthClientId) {
+        options.transport.authProvider.clientId =
+          options.reconnect?.oauthClientId;
+      }
+    }
+
+    // During OAuth reconnect, reuse existing connection to preserve state
+    if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
+      const normalizedTransport = {
+        ...options.transport,
+        type: options.transport?.type ?? ("auto" as TransportType)
+      };
+
+      this.mcpConnections[id] = new MCPClientConnection(
+        new URL(url),
+        {
+          name: this._name,
+          version: this._version
+        },
+        {
+          client: options.client ?? {},
+          transport: normalizedTransport
+        }
+      );
+
+      // Pipe connection-level observability events to the manager-level emitter
+      // and track the subscription for cleanup.
+      const store = new DisposableStore();
+      // If we somehow already had disposables for this id, clear them first
+      const existing = this._connectionDisposables.get(id);
+      if (existing) existing.dispose();
+      this._connectionDisposables.set(id, store);
+      store.add(
+        this.mcpConnections[id].onObservabilityEvent((event) => {
+          this._onObservabilityEvent.fire(event);
+        })
+      );
+    }
+
+    // Initialize connection first
+    await this.mcpConnections[id].init();
+
+    // Handle OAuth completion if we have a reconnect code
+    if (options.reconnect?.oauthCode) {
+      try {
+        await this.mcpConnections[id].completeAuthorization(
+          options.reconnect.oauthCode
+        );
+        await this.mcpConnections[id].establishConnection();
+      } catch (error) {
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:connect",
+          displayMessage: `Failed to complete OAuth reconnection for ${id} for ${url}`,
+          payload: {
+            url: url,
+            transport: options.transport?.type ?? "auto",
+            state: this.mcpConnections[id].connectionState,
+            error: toErrorMessage(error)
+          },
+          timestamp: Date.now(),
+          id
+        });
+        // Re-throw to signal failure to the caller
+        throw error;
+      }
+    }
+
+    // If connection is in authenticating state, return auth URL for OAuth flow
+    const authUrl = options.transport?.authProvider?.authUrl;
+    if (
+      this.mcpConnections[id].connectionState === "authenticating" &&
+      authUrl &&
+      options.transport?.authProvider?.redirectUrl
+    ) {
+      return {
+        authUrl,
+        clientId: options.transport?.authProvider?.clientId,
+        id
+      };
+    }
+
+    return {
+      id
+    };
+  }
+
+  /**
    * Register an MCP server connection without connecting
    * Creates the connection object, sets up observability, and saves to storage
    *
