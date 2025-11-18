@@ -800,20 +800,15 @@ export class MCPClientManager {
    * Remove an MCP server from storage
    */
   async removeServer(serverId: string): Promise<void> {
-    if (this._storage) {
-      await this._storage.removeServer(serverId);
-      this._onServerStateChanged.fire();
-    }
+    await this._storage.removeServer(serverId);
+    this._onServerStateChanged.fire();
   }
 
   /**
    * List all MCP servers from storage
    */
   async listServers(): Promise<MCPServerRow[]> {
-    if (this._storage) {
-      return await this._storage.listServers();
-    }
-    return [];
+    return await this._storage.listServers();
   }
 
   /**
