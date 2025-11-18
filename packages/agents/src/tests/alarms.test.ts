@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
+import { getAgentByName } from "..";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -8,10 +9,10 @@ declare module "cloudflare:test" {
 
 describe("scheduled destroys", () => {
   it("should not throw when a scheduled callback nukes storage", async () => {
-    const agentId = env.TestDestroyScheduleAgent.idFromName(
+    let agentStub = await getAgentByName(
+      env.TestDestroyScheduleAgent,
       "alarm-destroy-repro"
     );
-    let agentStub = env.TestDestroyScheduleAgent.get(agentId);
 
     // Alarm should fire immediately
     await agentStub.scheduleSelfDestructingAlarm();
@@ -20,7 +21,11 @@ describe("scheduled destroys", () => {
     // Let the alarm run
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    agentStub = env.TestDestroyScheduleAgent.get(agentId);
+    agentStub = await getAgentByName(
+      env.TestDestroyScheduleAgent,
+      "alarm-destroy-repro"
+    );
+
     await expect(agentStub.getStatus()).resolves.toBe("unscheduled");
   });
 });
