@@ -1317,7 +1317,7 @@ export class Agent<
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
-    
+
     this._disposables.dispose();
     await this.mcp.dispose();
 
