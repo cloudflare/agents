@@ -12,17 +12,6 @@ export type MCPServerRow = {
 };
 
 /**
- * Options for listing keys in KV storage
- */
-export interface SyncKvListOptions {
-  start?: string;
-  end?: string;
-  prefix?: string;
-  reverse?: boolean;
-  limit?: number;
-}
-
-/**
  * KV storage interface for OAuth-related data
  * Used by OAuth providers to store tokens, client info, etc.
  */
