@@ -360,7 +360,7 @@ export class WorkerTransport implements Transport {
     const acceptHeader = request.headers.get("Accept");
     if (
       !acceptHeader?.includes("application/json") ||
-      !acceptHeader.includes("text/event-stream")
+      !acceptHeader?.includes("text/event-stream")
     ) {
       return new Response(
         JSON.stringify({
