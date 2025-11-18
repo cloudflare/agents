@@ -1447,7 +1447,9 @@ export class Agent<
   }
 
   async removeMcpServer(id: string) {
-    this.mcp.closeConnection(id);
+    if (this.mcp.mcpConnections[id]) {
+      await this.mcp.closeConnection(id);
+    }
     await this.mcp.removeServer(id);
   }
 
