@@ -29,12 +29,14 @@ export class MyMCP extends McpAgent<Env> {
       // ...
     });
 
-    this.server.tool(
+    this.server.registerTool(
       "add",
-      "Add to the counter, stored in the MCP",
-      { a: z.number() },
+      {
+        description: "Add to the counter, stored in the MCP",
+        inputSchema: { a: z.number() }
+      },
       async ({ a }) => {
-        // ...
+        // add your logic here
       }
     );
   }

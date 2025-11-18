@@ -1,5 +1,4 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { McpAgent } from "../mcp/index.ts";
 import {
@@ -55,33 +54,41 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
   );
 
   async init() {
-    this.server.tool(
+    this.server.registerTool(
       "greet",
-      "A simple greeting tool",
-      { name: z.string().describe("Name to greet") },
-      async ({ name }): Promise<CallToolResult> => {
+      {
+        description: "A simple greeting tool",
+        inputSchema: { name: z.string().describe("Name to greet") }
+      },
+      async ({ name }) => {
         return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "getPropsTestValue",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Get the test value"
+      },
+      async () => {
         return {
-          content: [{ text: this.props?.testValue ?? "unknown", type: "text" }]
+          content: [
+            { text: this.props?.testValue ?? "unknown", type: "text" as const }
+          ]
         };
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "emitLog",
-      "Emit a logging/message notification",
       {
-        level: z.enum(["debug", "info", "warning", "error"]),
-        message: z.string()
+        description: "Emit a logging/message notification",
+        inputSchema: {
+          level: z.enum(["debug", "info", "warning", "error"]),
+          message: z.string()
+        }
       },
-      async ({ level, message }): Promise<CallToolResult> => {
+      async ({ level, message }) => {
         // Force a logging message to be sent when the tool is called
         await this.server.server.sendLoggingMessage({
           level,
@@ -131,42 +138,46 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
 
     // Use `registerTool` so we can later remove it.
     // Triggers notifications/tools/list_changed
-    this.server.tool(
+    this.server.registerTool(
       "installTempTool",
-      "Register a temporary tool that echoes input",
-      {},
-      async (): Promise<CallToolResult> => {
-        if (!this.tempToolHandle) {
-          // Prefer modern registerTool(name, description, schema, handler)
-          this.tempToolHandle = this.server.registerTool(
-            "temp-echo",
-            {
-              description: "Echo text (temporary tool)",
-              inputSchema: { what: z.string().describe("Text to echo") }
-            },
-            async ({ what }: { what: string }): Promise<CallToolResult> => {
-              return { content: [{ type: "text", text: `echo:${what}` }] };
-            }
-          );
-        }
-        // Most SDKs auto-send notifications/tools/list_changed here.
-        return { content: [{ type: "text", text: "temp tool installed" }] };
+      {
+        description: "Register a temporary tool that echoes input",
+        inputSchema: { what: z.string().describe("Text to echo") }
+      },
+      async ({ what }) => {
+        return { content: [{ type: "text", text: `echo:${what}` }] };
       }
     );
+    if (!this.tempToolHandle) {
+      this.tempToolHandle = this.server.registerTool(
+        "temp-echo",
+        {
+          description: "Echo text (temporary tool)",
+          inputSchema: { what: z.string().describe("Text to echo") }
+        },
+        async ({ what }) => {
+          return { content: [{ type: "text", text: `echo:${what}` }] };
+        }
+      );
+    }
 
     // Remove the dynamically added tool.
-    // Triggers notifications/tools/list_changed
-    this.server.tool(
+    this.server.registerTool(
       "uninstallTempTool",
-      "Remove the temporary tool if present",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Remove the temporary tool if present"
+      },
+      async () => {
         if (this.tempToolHandle?.remove) {
           this.tempToolHandle.remove();
           this.tempToolHandle = undefined;
-          return { content: [{ type: "text", text: "temp tool removed" }] };
+          return {
+            content: [{ type: "text" as const, text: "temp tool removed" }]
+          };
         }
-        return { content: [{ type: "text", text: "nothing to remove" }] };
+        return {
+          content: [{ type: "text" as const, text: "nothing to remove" }]
+        };
       }
     );
   }
@@ -461,13 +472,15 @@ export class TestMcpJurisdiction extends McpAgent<Env> {
   );
 
   async init() {
-    this.server.tool(
+    this.server.registerTool(
       "test-tool",
-      "A test tool",
-      { message: z.string().describe("Test message") },
-      async ({ message }): Promise<CallToolResult> => ({
-        content: [{ text: `Echo: ${message}`, type: "text" }]
-      })
+      {
+        description: "A test tool",
+        inputSchema: { message: z.string().describe("Test message") }
+      },
+      async ({ message }) => {
+        return { content: [{ text: `Echo: ${message}`, type: "text" }] };
+      }
     );
   }
 }

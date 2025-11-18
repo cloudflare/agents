@@ -73,11 +73,17 @@ export function withX402<T extends McpServer>(
     annotations: ToolAnnotations,
     cb: ToolCallback<Args>
   ): RegisteredTool {
-    return server.tool(
+    return server.registerTool(
       name,
-      description,
-      paramsSchema,
-      { ...annotations, paymentHint: true, paymentPriceUSD: priceUSD },
+      {
+        description,
+        inputSchema: paramsSchema,
+        annotations: {
+          ...annotations,
+          paymentHint: true,
+          paymentPriceUSD: priceUSD
+        }
+      },
       (async (args, extra) => {
         // Build PaymentRequirements for this call
         const atomic = processPriceToAtomicAmount(priceUSD, cfg.network);

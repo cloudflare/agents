@@ -1,8 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type {
-  CallToolResult,
-  JSONRPCRequest
-} from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   WorkerTransport,
@@ -21,13 +18,15 @@ describe("WorkerTransport", () => {
       { capabilities: { tools: {} } }
     );
 
-    server.tool(
+    server.registerTool(
       "test-tool",
-      "A test tool",
-      { message: z.string().describe("Test message") },
-      async ({ message }): Promise<CallToolResult> => ({
-        content: [{ text: `Echo: ${message}`, type: "text" }]
-      })
+      {
+        description: "A test tool",
+        inputSchema: { message: z.string().describe("Test message") }
+      },
+      async ({ message }) => {
+        return { content: [{ text: `Echo: ${message}`, type: "text" }] };
+      }
     );
 
     return server;
