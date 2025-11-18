@@ -179,7 +179,20 @@ export class MCPClientManager {
           continue;
         }
 
-        // If failed, we'll recreate below
+        // If failed, clean up the old connection before recreating
+        if (existingConn.connectionState === "failed") {
+          try {
+            await existingConn.client.close();
+          } catch (error) {
+            console.warn(
+              `[MCPClientManager] Error closing failed connection ${server.id}:`,
+              error
+            );
+          }
+          delete this.mcpConnections[server.id];
+          this._connectionDisposables.get(server.id)?.dispose();
+          this._connectionDisposables.delete(server.id);
+        }
       }
 
       const parsedOptions: MCPServerOptions | null = server.server_options
