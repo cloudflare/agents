@@ -238,7 +238,7 @@ export class TestOAuthAgent extends Agent<Env> {
     clientId?: string | null
   ): Promise<void> {
     // Save server to database with callback URL
-    this.mcp.saveServer({
+    await (this.mcp as any)._storage.saveServer({
       id: serverId,
       name: serverName,
       server_url: serverUrl,

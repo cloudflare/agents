@@ -89,9 +89,6 @@ export class MCPClientManager {
   private _storage: MCPClientStorage;
   private _isRestored = false;
 
-  // In-memory cache of callback URLs to avoid DB queries on every request
-  private _callbackUrlCache: Set<string> | null = null;
-
   private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
     this._onObservabilityEvent.event;
@@ -416,7 +413,6 @@ export class MCPClientManager {
       })
     });
 
-    this._invalidateCallbackUrlCache();
     this._onServerStateChanged.fire();
 
     return id;
@@ -486,23 +482,6 @@ export class MCPClientManager {
     return { state: "ready" };
   }
 
-  /**
-   * Refresh the in-memory callback URL cache from storage
-   */
-  private async _refreshCallbackUrlCache(): Promise<void> {
-    const servers = await this._storage.listServers();
-    this._callbackUrlCache = new Set(
-      servers.filter((s) => s.callback_url).map((s) => s.callback_url)
-    );
-  }
-
-  /**
-   * Invalidate the callback URL cache so it will be refreshed on next check
-   */
-  private _invalidateCallbackUrlCache(): void {
-    this._callbackUrlCache = null;
-  }
-
   async isCallbackRequest(req: Request): Promise<boolean> {
     if (req.method !== "GET") {
       return false;
@@ -514,19 +493,11 @@ export class MCPClientManager {
       return false;
     }
 
-    // Lazily populate cache on first check
-    if (this._callbackUrlCache === null) {
-      await this._refreshCallbackUrlCache();
-    }
-
-    // Check cache first for quick lookup
-    for (const callbackUrl of this._callbackUrlCache!) {
-      if (req.url.startsWith(callbackUrl)) {
-        return true;
-      }
-    }
-
-    return false;
+    // Check database for matching callback URL
+    const servers = await this._storage.listServers();
+    return servers.some(
+      (server) => server.callback_url && req.url.startsWith(server.callback_url)
+    );
   }
 
   async handleCallbackRequest(req: Request) {
@@ -602,7 +573,6 @@ export class MCPClientManager {
     try {
       await conn.completeAuthorization(code);
       await this._storage.clearOAuthCredentials(serverId);
-      this._invalidateCallbackUrlCache();
       this._onServerStateChanged.fire();
 
       return {
@@ -704,30 +674,6 @@ export class MCPClientManager {
   }
 
   /**
-   * Check if all MCP connections are in a stable state (ready or authenticating)
-   * Useful to call before getAITools() to avoid race conditions
-   *
-   * @returns Object with ready status and list of connections not ready
-   */
-  areConnectionsReady(): { ready: boolean; pendingConnections: string[] } {
-    const pendingConnections: string[] = [];
-
-    for (const [id, conn] of Object.entries(this.mcpConnections)) {
-      if (
-        conn.connectionState !== "ready" &&
-        conn.connectionState !== "authenticating"
-      ) {
-        pendingConnections.push(id);
-      }
-    }
-
-    return {
-      ready: pendingConnections.length === 0,
-      pendingConnections
-    };
-  }
-
-  /**
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
@@ -825,40 +771,11 @@ export class MCPClientManager {
   }
 
   /**
-   * Save an MCP server configuration to storage
-   */
-  async saveServer(server: {
-    id: string;
-    name: string;
-    server_url: string;
-    client_id?: string | null;
-    auth_url?: string | null;
-    callback_url: string;
-    server_options?: string | null;
-  }): Promise<void> {
-    if (this._storage) {
-      await this._storage.saveServer({
-        id: server.id,
-        name: server.name,
-        server_url: server.server_url,
-        client_id: server.client_id ?? null,
-        auth_url: server.auth_url ?? null,
-        callback_url: server.callback_url,
-        server_options: server.server_options ?? null
-      });
-      // Invalidate cache since callback URLs may have changed
-      this._invalidateCallbackUrlCache();
-    }
-  }
-
-  /**
    * Remove an MCP server from storage
    */
   async removeServer(serverId: string): Promise<void> {
     if (this._storage) {
       await this._storage.removeServer(serverId);
-      // Invalidate cache since callback URLs may have changed
-      this._invalidateCallbackUrlCache();
       this._onServerStateChanged.fire();
     }
   }

@@ -7,6 +7,13 @@ import {
 } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
 
+/**
+ * Internal type for test access to private storage.
+ */
+type MCPClientManagerInternal = {
+  _storage: AgentMCPClientStorage;
+};
+
 describe("MCPClientManager OAuth Integration", () => {
   let manager: MCPClientManager;
   let mockStorageData: Map<string, MCPServerRow>;
@@ -130,7 +137,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl2 = "http://localhost:3000/callback/server2";
 
       // Save servers with callback URLs to database
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "server1",
         name: "Test Server 1",
         server_url: "http://test1.com",
@@ -139,7 +148,9 @@ describe("MCPClientManager OAuth Integration", () => {
         auth_url: null,
         server_options: null
       });
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "server2",
         name: "Test Server 2",
         server_url: "http://test2.com",
@@ -189,7 +200,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
 
       // Save server to database with callback URL
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -277,7 +290,9 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should handle OAuth error response from provider", async () => {
       const callbackUrl = "http://localhost:3000/callback/server1";
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "server1",
         name: "Test Server",
         server_url: "http://test.com",
@@ -300,7 +315,9 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should throw error for callback without code or error", async () => {
       const callbackUrl = "http://localhost:3000/callback/server1";
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "server1",
         name: "Test Server",
         server_url: "http://test.com",
@@ -319,7 +336,9 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should throw error for callback without state", async () => {
       const callbackUrl = "http://localhost:3000/callback/server1";
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "server1",
         name: "Test Server",
         server_url: "http://test.com",
@@ -338,7 +357,9 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should throw error for callback with non-existent server", async () => {
       const callbackUrl = "http://localhost:3000/callback/non-existent";
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "non-existent",
         name: "Test Server",
         server_url: "http://test.com",
@@ -360,7 +381,9 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should handle duplicate callback when already in ready state", async () => {
       const serverId = "test-server";
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -397,7 +420,9 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should error when callback received for connection in failed state", async () => {
       const serverId = "test-server";
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -440,7 +465,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Save server with auth_url and callback_url
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -512,7 +539,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
 
       // Save server with cleared callback_url (simulating post-auth state)
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -540,7 +569,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const serverId = "test-server";
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
 
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -595,7 +626,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Save OAuth server to storage
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "OAuth Server",
         server_url: "http://oauth-server.com",
@@ -630,7 +663,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl = "http://localhost:3000/callback";
 
       // Save non-OAuth server (no auth_url)
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: serverId,
         name: "Regular Server",
         server_url: "http://regular-server.com",
@@ -662,7 +697,9 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should restore mixed OAuth and non-OAuth servers", async () => {
       // Save OAuth server
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "oauth-server",
         name: "OAuth Server",
         server_url: "http://oauth.com",
@@ -673,7 +710,9 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       // Save regular server
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id: "regular-server",
         name: "Regular Server",
         server_url: "http://regular.com",
@@ -946,7 +985,9 @@ describe("MCPClientManager OAuth Integration", () => {
       manager.onServerStateChanged(onStateChangedSpy);
 
       // Setup server in storage
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id,
         name: "OAuth Server",
         server_url: "http://oauth.example.com/mcp",
@@ -1015,7 +1056,9 @@ describe("MCPClientManager OAuth Integration", () => {
       manager.onServerStateChanged(onStateChangedSpy);
 
       // Setup server in storage
-      manager.saveServer({
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
         id,
         name: "OAuth Server",
         server_url: "http://oauth.example.com/mcp",
