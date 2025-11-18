@@ -12,6 +12,7 @@ import {
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { getCurrentAgent, type Connection } from "..";
 import type { McpAgent } from ".";
+import type { RequestWithAuth } from "./types";
 import { MessageType } from "../ai-types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
@@ -20,12 +21,13 @@ export class McpSSETransport implements Transport {
   // Set by the server in `server.connect(transport)`
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
+  onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
   private _getWebSocket: () => WebSocket | null;
   private _started = false;
-  constructor(getWebSocket: () => WebSocket | null) {
+  constructor(getWebSocket: () => WebSocket | null, sessionId?: string) {
     this._getWebSocket = getWebSocket;
+    this.sessionId = sessionId;
   }
 
   async start() {
@@ -220,7 +222,7 @@ export class StreamableHTTPServerTransport implements Transport {
    * Handles POST requests containing JSON-RPC messages
    */
   async handlePostRequest(
-    req: Request & { auth?: AuthInfo },
+    req: RequestWithAuth,
     parsedBody: unknown
   ): Promise<void> {
     const authInfo: AuthInfo | undefined = req.auth;

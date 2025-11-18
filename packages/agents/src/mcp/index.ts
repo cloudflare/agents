@@ -1,13 +1,17 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  JSONRPCMessage,
+  MessageExtraInfo
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   JSONRPCMessageSchema,
   isJSONRPCError,
   isJSONRPCResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
+import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Connection, ConnectionContext } from "../";
 import { Agent } from "../index";
 import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
@@ -85,11 +89,34 @@ export abstract class McpAgent<
     return websockets[0];
   }
 
+  /** Build MessageExtraInfo from extracted headers and auth info */
+  private buildMessageExtraInfo(extraInfo?: {
+    headers: Record<string, string>;
+    auth?: AuthInfo;
+  }): MessageExtraInfo | undefined {
+    if (!extraInfo) return;
+
+    const headers = { ...extraInfo.headers };
+
+    // Remove internal headers that are not part of the original request
+    delete headers["content-type"];
+    delete headers["content-length"];
+    delete headers["upgrade"];
+
+    return {
+      authInfo: extraInfo.auth,
+      requestInfo: { headers }
+    };
+  }
+
   /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
       case "sse": {
-        return new McpSSETransport(() => this.getWebSocket());
+        return new McpSSETransport(
+          () => this.getWebSocket(),
+          this.getSessionId()
+        );
       }
       case "streamable-http": {
         return new StreamableHTTPServerTransport({});
@@ -188,12 +215,18 @@ export abstract class McpAgent<
   /** Handles MCP Messages for the legacy SSE transport. */
   async onSSEMcpMessage(
     _sessionId: string,
-    messageBody: unknown
+    messageBody: unknown,
+    extraInfo?: { headers: Record<string, string>; auth?: AuthInfo }
   ): Promise<Error | null> {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
     if (this.getTransportType() !== "sse") {
       return new Error("Internal Server Error: Expected SSE transport");
+    }
+
+    // Ensure transport is initialized before processing messages
+    if (!this._transport) {
+      await this.onStart();
     }
 
     try {
@@ -210,7 +243,10 @@ export abstract class McpAgent<
         return null; // Message was handled by elicitation system
       }
 
-      this._transport?.onmessage?.(parsedMessage);
+      // Build extra info with auth and request headers, matching StreamableHTTP behavior
+      const extra = this.buildMessageExtraInfo(extraInfo);
+
+      this._transport?.onmessage?.(parsedMessage, extra);
       return null;
     } catch (error) {
       console.error("Error forwarding message to SSE:", error);
