@@ -1994,3 +1994,11 @@ export class StreamingResponse {
     this._connection.send(JSON.stringify(response));
   }
 }
+
+// Test utilities for documentation sync validation
+export {
+  testDocsSync,
+  validateDocsSyncBot,
+  type TestDocsSyncOptions,
+  type TestDocsSyncResult
+} from "./test-docs-sync";
