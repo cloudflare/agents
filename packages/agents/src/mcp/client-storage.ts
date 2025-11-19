@@ -33,16 +33,6 @@ export interface OAuthClientStorage {
  */
 export interface MCPClientStorage extends OAuthClientStorage {
   /**
-   * Create the cf_agents_mcp_servers table if it doesn't exist
-   */
-  create(): Promise<void>;
-
-  /**
-   * Drop the cf_agents_mcp_servers table
-   */
-  destroy(): Promise<void>;
-
-  /**
    * Save or update an MCP server configuration
    */
   saveServer(server: MCPServerRow): Promise<void>;
@@ -83,24 +73,6 @@ export class AgentMCPClientStorage implements MCPClientStorage {
     ) => T[],
     private kv: SyncKvStorage
   ) {}
-
-  async create() {
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        server_url TEXT NOT NULL,
-        callback_url TEXT NOT NULL,
-        client_id TEXT,
-        auth_url TEXT,
-        server_options TEXT
-      )
-    `;
-  }
-
-  async destroy() {
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
-  }
 
   async saveServer(server: MCPServerRow) {
     this.sql`

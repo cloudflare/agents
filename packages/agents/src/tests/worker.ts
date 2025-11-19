@@ -263,6 +263,7 @@ export class TestOAuthAgent extends Agent<Env> {
     clientId?: string | null
   ): Promise<void> {
     // Save server to database with callback URL
+    // biome-ignore lint/suspicious/noExplicitAny: just a test
     await (this.mcp as any)._storage.saveServer({
       id: serverId,
       name: serverName,

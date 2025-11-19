@@ -149,7 +149,6 @@ export class MCPClientManager {
       return;
     }
 
-    await this._storage.create();
     const servers = await this._storage.listServers();
 
     if (!servers || servers.length === 0) {
@@ -821,9 +820,6 @@ export class MCPClientManager {
       // Dispose manager-level emitters
       this._onServerStateChanged.dispose();
       this._onObservabilityEvent.dispose();
-
-      // Drop the storage table
-      await this._storage.destroy();
     }
   }
 

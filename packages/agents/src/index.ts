@@ -432,6 +432,18 @@ export class Agent<
     );
 
     this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          server_url TEXT NOT NULL,
+          callback_url TEXT NOT NULL,
+          client_id TEXT,
+          auth_url TEXT,
+          server_options TEXT
+        )
+      `;
+
+    this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
         state TEXT
@@ -1310,6 +1322,7 @@ export class Agent<
    */
   async destroy() {
     // drop all tables
+    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
