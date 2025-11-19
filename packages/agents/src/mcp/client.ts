@@ -11,6 +11,7 @@ import type {
   ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
@@ -25,6 +26,10 @@ import type { TransportType } from "./types";
 import type { MCPClientStorage, MCPServerRow } from "./client-storage";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
+
+const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
+  jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
+};
 
 /**
  * Options that can be stored in the server_options column
@@ -386,7 +391,7 @@ export class MCPClientManager {
         version: this._version
       },
       {
-        client: options.client ?? {},
+        client: { ...defaultClientOptions, ...options.client },
         transport: normalizedTransport
       }
     );
