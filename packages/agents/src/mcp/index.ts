@@ -224,11 +224,6 @@ export abstract class McpAgent<
       return new Error("Internal Server Error: Expected SSE transport");
     }
 
-    // Ensure transport is initialized before processing messages
-    if (!this._transport) {
-      await this.onStart();
-    }
-
     try {
       let parsedMessage: JSONRPCMessage;
       try {
