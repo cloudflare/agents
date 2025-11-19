@@ -7,7 +7,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpAgent } from ".";
 import { getAgentByName } from "..";
-import type { CORSOptions, RequestWithAuth } from "./types";
+import type { CORSOptions } from "./types";
 import { MessageType } from "../ai-types";
 
 /**
@@ -683,8 +683,7 @@ export const createLegacySseHandler = (
 
       const messageBody = await request.json();
       const error = await agent.onSSEMcpMessage(sessionId, messageBody, {
-        headers: Object.fromEntries(request.headers.entries()),
-        auth: (request as RequestWithAuth).auth
+        headers: Object.fromEntries(request.headers.entries())
       });
 
       if (error) {

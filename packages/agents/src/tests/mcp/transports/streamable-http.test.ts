@@ -617,36 +617,29 @@ describe("Streamable HTTP Transport", () => {
       expectValidToolsList(result);
     });
 
-    it("should extract auth info from RequestWithAuth", async () => {
+    it("should extract request headers from request", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);
 
-      // Create a request with auth info attached (simulating middleware)
+      // Create a request with custom headers
       const request = new Request(baseUrl, {
         body: JSON.stringify(TEST_MESSAGES.toolsList),
         headers: {
           Accept: "application/json, text/event-stream",
           "Content-Type": "application/json",
-          "mcp-session-id": sessionId
+          "mcp-session-id": sessionId,
+          "X-Custom-Header": "custom-value",
+          "X-Request-Id": "test-123"
         },
         method: "POST"
-      }) as any; // Cast to any to add auth property
-
-      // Simulate auth middleware adding auth info
-      request.auth = {
-        userId: "test-user",
-        scopes: ["read", "write"],
-        metadata: {
-          role: "admin"
-        }
-      };
+      });
 
       const response = await worker.fetch(request, env, ctx);
 
       expect(response.status).toBe(200);
 
-      // The auth info would be available to the MCP server through
-      // MessageExtraInfo.authInfo
+      // The request headers would be available to the MCP server through
+      // MessageExtraInfo.requestInfo.headers
       const sseText = await readSSEEvent(response);
       const result = parseSSEData(sseText);
       expectValidToolsList(result);

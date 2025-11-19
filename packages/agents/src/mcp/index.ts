@@ -11,7 +11,6 @@ import {
   isJSONRPCResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import type { Connection, ConnectionContext } from "../";
 import { Agent } from "../index";
 import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
@@ -92,7 +91,6 @@ export abstract class McpAgent<
   /** Build MessageExtraInfo from extracted headers and auth info */
   private buildMessageExtraInfo(extraInfo?: {
     headers: Record<string, string>;
-    auth?: AuthInfo;
   }): MessageExtraInfo | undefined {
     if (!extraInfo) return;
 
@@ -102,7 +100,6 @@ export abstract class McpAgent<
     delete headers["upgrade"];
 
     return {
-      authInfo: extraInfo.auth,
       requestInfo: { headers }
     };
   }
@@ -214,7 +211,7 @@ export abstract class McpAgent<
   async onSSEMcpMessage(
     _sessionId: string,
     messageBody: unknown,
-    extraInfo?: { headers: Record<string, string>; auth?: AuthInfo }
+    extraInfo?: { headers: Record<string, string> }
   ): Promise<Error | null> {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case

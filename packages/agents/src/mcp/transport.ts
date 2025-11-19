@@ -12,7 +12,6 @@ import {
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { getCurrentAgent, type Connection } from "..";
 import type { McpAgent } from ".";
-import type { RequestWithAuth } from "./types";
 import { MessageType } from "../ai-types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
@@ -227,7 +226,7 @@ export class StreamableHTTPServerTransport implements Transport {
    * Handles POST requests containing JSON-RPC messages
    */
   async handlePostRequest(
-    req: RequestWithAuth,
+    req: Request & { auth?: AuthInfo },
     parsedBody: unknown
   ): Promise<void> {
     const authInfo: AuthInfo | undefined = req.auth;
