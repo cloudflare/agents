@@ -2,6 +2,8 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "agents-site",
   "compatibility_date": "2025-10-25",
+  "main": "src/server/index.ts",
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "dist"
   },
