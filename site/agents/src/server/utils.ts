@@ -36,6 +36,7 @@ const fetchWithRetry = (url: string) =>
         Accept: "application/vnd.github+json"
       };
 
+      // @ts-expect-error - GITHUB_TOKEN is not defined in the environment variables
       const githubToken = env.GITHUB_TOKEN;
       if (githubToken) {
         headers["Authorization"] = `Bearer ${githubToken}`;

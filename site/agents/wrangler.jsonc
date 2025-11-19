@@ -1,7 +1,13 @@
 {
+  "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "agents-site",
   "compatibility_date": "2025-10-25",
   "assets": {
     "directory": "dist"
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "DOCS_KV"
+    }
+  ]
 }

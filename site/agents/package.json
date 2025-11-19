@@ -4,16 +4,22 @@
   "private": true,
   "scripts": {
     "dev": "astro dev",
+    "start": "wrangler dev",
     "build": "astro build",
-    "deploy": "wrangler deploy"
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.10",
     "@astrojs/react": "^4.4.2",
+    "@cfworker/json-schema": "^4.1.1",
+    "@chonkiejs/core": "^0.0.5",
     "@gsap/react": "^2.1.2",
+    "@orama/orama": "^3.1.16",
     "@use-it/interval": "^1.0.0",
     "astro": "^5.15.4",
     "clsx": "^2.1.1",
+    "effect": "^3.19.2",
     "framer-motion": "^12.23.24",
     "gsap": "^3.13.0",
     "react": "^19.2.0",
