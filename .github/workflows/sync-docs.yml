@@ -13,6 +13,14 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
+      - name: Generate GitHub App token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: cloudflare
+
       - name: Checkout source repository
         uses: actions/checkout@v4
         with:
@@ -23,37 +31,18 @@ jobs:
         id: changed-files
         run: |
           git fetch origin ${{ github.event.pull_request.base.ref }}
-          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD > changed_files.txt
-          echo "Changed files:"
-          cat changed_files.txt
-          grep '^docs/.*\.md$' changed_files.txt > docs_changed.txt || echo "No docs changed"
-
-      - name: Get file contents and diffs
-        id: get-diffs
-        run: |
-          mkdir -p /tmp/diffs
-          touch /tmp/diffs/changes.txt
-
-          # Capture all changed files and their diffs
-          while IFS= read -r file; do
-            echo "=== $file ===" >> /tmp/diffs/changes.txt
-            git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> /tmp/diffs/changes.txt
-            echo -e "\n\n" >> /tmp/diffs/changes.txt
-          done < changed_files.txt
-
-          # Always run - let Claude decide if docs are needed
-          echo "skip=false" >> $GITHUB_OUTPUT
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD | tr '\n' ',' | sed 's/,$//')
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "Changed files: $CHANGED_FILES"
 
       - name: Checkout cloudflare-docs repository
-        if: steps.get-diffs.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: cloudflare/cloudflare-docs
-          token: ${{ secrets.AGENTS_GITHUB_TOKEN }}
+          token: ${{ steps.generate-token.outputs.token }}
           path: cloudflare-docs
 
       - name: Create branch in cloudflare-docs
-        if: steps.get-diffs.outputs.skip != 'true'
         run: |
           cd cloudflare-docs
           git config user.name "github-actions[bot]"
@@ -61,7 +50,6 @@ jobs:
           git checkout -b sync-docs-pr-${{ github.event.pull_request.number }}
 
       - name: Create prompt for Claude Code
-        if: steps.get-diffs.outputs.skip != 'true'
         id: create-prompt
         run: |
           # Store PR metadata in environment variables to avoid shell escaping issues
@@ -72,22 +60,24 @@ jobs:
           cat > /tmp/claude_prompt.md << EOF
           # Intelligent Documentation Sync Task
 
-          ⚠️ **CRITICAL INSTRUCTION**: All PR metadata is provided in the Context section below. 
-          DO NOT run \`gh pr view\`, \`gh api\`, or any other command to fetch PR information from GitHub.
-          The PR number, title, and URL below are the ONLY source of truth. Use them EXACTLY as written.
-
           ## Context
           - **Source Repository:** ${{ github.repository }}
           - **Original PR Number:** ${PR_NUMBER}
           - **Original PR Title:** ${PR_TITLE}
           - **Original PR URL:** ${PR_URL}
+          - **Changed Files:** ${{ steps.changed-files.outputs.changed_files }}
           - **PR Description:**
           ${{ github.event.pull_request.body }}
 
-          ## Changed Files and Diffs
-          $(cat /tmp/diffs/changes.txt)
+          ⚠️ **IMPORTANT**: All PR metadata above is the ONLY source of truth. Use these values EXACTLY as written.
+          DO NOT fetch PR title/URL from GitHub APIs.
 
           ## Your Task: Evaluate and Act
+
+          **First, gather the information you need:**
+          1. Review the list of changed files above
+          2. Use \`gh pr diff ${PR_NUMBER}\` to see the full diff for this PR
+          3. Use the Read tool to examine specific files if needed
 
           You have access to two repositories:
           1. The current directory (our main repo at ${{ github.repository }})
@@ -95,7 +85,7 @@ jobs:
 
           **Step 1: Evaluate if Documentation Sync is Needed**
 
-          Please review the changes in this PR and determine if they require documentation updates in cloudflare-docs:
+          Review the changes and determine if they require documentation updates in cloudflare-docs:
 
           - **ALWAYS sync if ANY of these are true:**
             - Documentation files in docs/ were directly changed (even if other non-doc files also changed)
@@ -170,16 +160,17 @@ jobs:
              DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json url --jq '.[0].url')
              echo "Docs PR URL: $DOCS_PR_URL"
              
-             # Find existing comment with our unique marker
+             # Find existing comment with our unique marker (searches for both hidden marker and visible footer)
              EXISTING_COMMENT_ID=$(gh api "repos/cloudflare/agents/issues/${PR_NUMBER}/comments" \
-               --jq '.[] | select(.body | contains("<!-- DOCS-SYNC-AUTOMATION -->")) | .id' \
+               --jq '.[] | select(.body | contains("<!-- DOCS-SYNC-AUTOMATION -->") or contains("Generated by Claude for Cloudflare Agents team")) | .id' \
                | head -n 1)
              
              # Prepare comment body (note the unique marker at the start)
-             COMMENT_BODY=\$(printf '%s\n\n%s\n\n%s' \\
+             COMMENT_BODY=\$(printf '%s\n\n%s\n\n%s\n\n---\n\n%s' \\
                '<!-- DOCS-SYNC-AUTOMATION -->' \\
                "📚 **Documentation sync PR:** \$DOCS_PR_URL" \\
-               '_This comment is automatically updated when the PR changes._')
+               '_This comment is automatically updated when the PR changes._' \\
+               '_Generated by Claude for Cloudflare Agents team_')
              
              # Update existing or create new comment
              if [ -n "$EXISTING_COMMENT_ID" ] && [ "$EXISTING_COMMENT_ID" != "null" ]; then
@@ -198,7 +189,7 @@ jobs:
              
              # Cleanup any duplicate comments (keep only the newest)
              ALL_COMMENT_IDS=$(gh api "repos/cloudflare/agents/issues/${PR_NUMBER}/comments" \
-               --jq '.[] | select(.body | contains("<!-- DOCS-SYNC-AUTOMATION -->")) | .id')
+               --jq '.[] | select(.body | contains("<!-- DOCS-SYNC-AUTOMATION -->") or contains("Generated by Claude for Cloudflare Agents team")) | .id')
              
              COMMENT_COUNT=$(echo "$ALL_COMMENT_IDS" | wc -l | tr -d ' ')
              
@@ -299,12 +290,11 @@ jobs:
           echo "PROMPT_EOF" >> $GITHUB_OUTPUT
 
       - name: Run Claude Code to create adapted PR
-        if: steps.get-diffs.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.generate-token.outputs.token }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
-          claude_args: "--allowed-tools Bash,Edit,Write"
+          claude_args: '--allowed-tools "Read,Edit,Write,Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr create:*),Bash(gh pr edit:*),Bash(gh pr comment:*),Bash(gh api:*),Bash(git *),Bash(cd *)"'
         env:
-          GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
