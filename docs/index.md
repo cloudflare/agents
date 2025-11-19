@@ -18,6 +18,9 @@
 - evals
 - observability
 - connect anything
+
+<!-- Test sync workflow -->
+
 - self hosting
 - how is this different from durable objects?
 - resources / read more
