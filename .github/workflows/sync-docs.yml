@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: cloudflare/cloudflare-docs
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           path: cloudflare-docs
 
       - name: Create branch in cloudflare-docs
@@ -285,8 +285,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
           claude_args: '--allowed-tools "Read,Edit,Write,Bash"'
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
