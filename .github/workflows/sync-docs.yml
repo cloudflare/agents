@@ -13,14 +13,6 @@ jobs:
       pull-requests: write
       id-token: write
     steps:
-      - name: Generate GitHub App token
-        id: generate-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.GH_APP_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          owner: cloudflare
-
       - name: Checkout source repository
         uses: actions/checkout@v4
         with:
@@ -39,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: cloudflare/cloudflare-docs
-          token: ${{ steps.generate-token.outputs.token }}
+          token: ${{ secrets.GH_TOKEN }}
           path: cloudflare-docs
 
       - name: Create branch in cloudflare-docs
@@ -293,8 +285,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ steps.generate-token.outputs.token }}
+          github_token: ${{ secrets.GH_TOKEN }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
           claude_args: '--allowed-tools "Read,Edit,Write,Bash"'
         env:
-          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}

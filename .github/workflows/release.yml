@@ -15,14 +15,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Generate GitHub App token
-        id: generate-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.GH_APP_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          owner: cloudflare
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -52,6 +44,6 @@ jobs:
           version: npx tsx .github/changeset-version.ts
           publish: npx tsx .github/changeset-publish.ts
         env:
-          GITHUB_TOKEN: ${{ steps.generate-token.outputs.token }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
           NPM_PUBLISH_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
