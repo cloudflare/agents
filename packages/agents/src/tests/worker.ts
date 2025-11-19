@@ -127,6 +127,56 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
         return { content: [{ type: "text", text: "nothing to remove" }] };
       }
     );
+
+    // Echo request info for testing header and auth passthrough
+    this.server.tool(
+      "echoRequestInfo",
+      "Echo back request headers and auth info",
+      {},
+      async (_args, extra): Promise<CallToolResult> => {
+        // Extract headers from requestInfo, auth from authInfo
+        const headers = extra?.requestInfo?.headers || {};
+        const authInfo = extra?.authInfo || null;
+
+        // Get all properties from extra, excluding functions
+        const extraKeys = extra
+          ? Object.keys(extra).filter(
+              (key) => typeof extra[key as keyof typeof extra] !== "function"
+            )
+          : [];
+
+        // Build response object with all available data
+        const responseData: Record<string, any> = {
+          headers: headers,
+          authInfo: authInfo,
+          hasRequestInfo: !!extra?.requestInfo,
+          hasAuthInfo: !!extra?.authInfo,
+          requestId: extra?.requestId,
+          // Include any sessionId if it exists
+          sessionId: (extra as any)?.sessionId || null,
+          // List all available properties in extra
+          availableExtraKeys: extraKeys
+        };
+
+        // Add any other properties from extra that aren't already included
+        extraKeys.forEach((key) => {
+          if (
+            !["requestInfo", "authInfo", "requestId", "sessionId"].includes(key)
+          ) {
+            responseData[`extra_${key}`] = (extra as any)[key];
+          }
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(responseData, null, 2)
+            }
+          ]
+        };
+      }
+    );
   }
 }
 

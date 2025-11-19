@@ -97,6 +97,8 @@ export abstract class McpAgent<
     const headers = { ...extraInfo.headers };
 
     // Remove internal headers that are not part of the original request
+    delete headers[MCP_HTTP_METHOD_HEADER];
+    delete headers[MCP_MESSAGE_HEADER];
     delete headers["upgrade"];
 
     return {

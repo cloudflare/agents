@@ -589,9 +589,19 @@ describe("Streamable HTTP Transport", () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);
 
-      // Send request with custom headers
+      // Send request with custom headers using the echoRequestInfo tool
+      const echoMessage: JSONRPCMessage = {
+        id: "echo-headers-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "echoRequestInfo",
+          arguments: {}
+        }
+      };
+
       const request = new Request(baseUrl, {
-        body: JSON.stringify(TEST_MESSAGES.toolsList),
+        body: JSON.stringify(echoMessage),
         headers: {
           Accept: "application/json, text/event-stream",
           "Content-Type": "application/json",
@@ -603,77 +613,37 @@ describe("Streamable HTTP Transport", () => {
         method: "POST"
       });
 
-      // Spy on the transport to capture the extraInfo
-      // Note: In actual implementation, the headers are available to the MCP server
-      // through MessageExtraInfo.requestInfo.headers
       const response = await worker.fetch(request, env, ctx);
-
       expect(response.status).toBe(200);
 
-      // The test verifies that custom headers would be available in the transport
-      // through the MessageExtraInfo structure, filtered of internal headers
+      // Parse the SSE response
       const sseText = await readSSEEvent(response);
-      const result = parseSSEData(sseText);
-      expectValidToolsList(result);
-    });
+      const parsed = parseSSEData(sseText) as JSONRPCResponse;
+      expect(parsed.id).toBe("echo-headers-1");
 
-    it("should extract request headers from request", async () => {
-      const ctx = createExecutionContext();
-      const sessionId = await initializeStreamableHTTPServer(ctx);
+      // Extract the echoed request info
+      const result = parsed.result as CallToolResult;
+      const echoedData = JSON.parse(result.content?.[0]?.text || "{}");
 
-      // Create a request with custom headers
-      const request = new Request(baseUrl, {
-        body: JSON.stringify(TEST_MESSAGES.toolsList),
-        headers: {
-          Accept: "application/json, text/event-stream",
-          "Content-Type": "application/json",
-          "mcp-session-id": sessionId,
-          "X-Custom-Header": "custom-value",
-          "X-Request-Id": "test-123"
-        },
-        method: "POST"
-      });
+      // Verify custom headers were passed through
+      expect(echoedData.hasRequestInfo).toBe(true);
+      expect(echoedData.headers["x-user-id"]).toBe("test-user-123");
+      expect(echoedData.headers["x-request-id"]).toBe("req-456");
+      expect(echoedData.headers["x-custom-header"]).toBe("custom-value");
 
-      const response = await worker.fetch(request, env, ctx);
+      // Verify that certain internal headers that the transport adds are NOT exposed
+      // The transport adds cf-mcp-method and cf-mcp-message internally but should filter them
+      expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
+      expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
+      expect(echoedData.headers["upgrade"]).toBeUndefined();
 
-      expect(response.status).toBe(200);
+      // Verify standard headers are also present
+      expect(echoedData.headers["accept"]).toContain("text/event-stream");
+      expect(echoedData.headers["content-type"]).toBe("application/json");
 
-      // The request headers would be available to the MCP server through
-      // MessageExtraInfo.requestInfo.headers
-      const sseText = await readSSEEvent(response);
-      const result = parseSSEData(sseText);
-      expectValidToolsList(result);
-    });
-
-    it("should filter internal MCP headers from requestInfo", async () => {
-      const ctx = createExecutionContext();
-      const sessionId = await initializeStreamableHTTPServer(ctx);
-
-      // Send request with custom headers
-      // Internal headers (cf-mcp-method, cf-mcp-message) are added by the transport layer
-      // and should be filtered before passing to the MCP server
-      const request = new Request(baseUrl, {
-        body: JSON.stringify(TEST_MESSAGES.toolsList),
-        headers: {
-          Accept: "application/json, text/event-stream",
-          "Content-Type": "application/json",
-          "mcp-session-id": sessionId,
-          "x-custom-header": "should-be-preserved",
-          "x-another-header": "also-preserved"
-        },
-        method: "POST"
-      });
-
-      const response = await worker.fetch(request, env, ctx);
-
-      expect(response.status).toBe(200);
-
-      // The test verifies that internal headers (cf-mcp-method, cf-mcp-message, upgrade)
-      // are filtered out before being passed to the MCP server
-      // Only custom headers like x-custom-header should be preserved in requestInfo.headers
-      const sseText = await readSSEEvent(response);
-      const result = parseSSEData(sseText);
-      expectValidToolsList(result);
+      // Verify sessionId is passed through extra data
+      expect(echoedData.sessionId).toBeDefined();
+      expect(echoedData.sessionId).toBe(sessionId);
     });
   });
 });
