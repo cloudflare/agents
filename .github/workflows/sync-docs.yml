@@ -295,6 +295,6 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.generate-token.outputs.token }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
-          claude_args: '--allowed-tools "Read,Edit,Write,Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr create:*),Bash(gh pr edit:*),Bash(gh pr comment:*),Bash(gh api:*),Bash(git *),Bash(cd *)"'
+          claude_args: '--allowed-tools "Read,Edit,Write,Bash"'
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token }}
