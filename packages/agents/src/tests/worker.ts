@@ -45,7 +45,13 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
 
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
-    { capabilities: { logging: {}, tools: { listChanged: true } } }
+    {
+      capabilities: {
+        logging: {},
+        tools: { listChanged: true },
+        elicitation: { form: {}, url: {} }
+      }
+    }
   );
 
   async init() {
@@ -83,6 +89,42 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
         });
         return {
           content: [{ type: "text", text: `logged:${level}` }]
+        };
+      }
+    );
+
+    this.server.tool(
+      "elicitName",
+      "Test tool that elicits user input for a name",
+      {},
+      async (): Promise<CallToolResult> => {
+        const result = await this.server.server.elicitInput({
+          message: "What is your name?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Your name"
+              }
+            },
+            required: ["name"]
+          }
+        });
+
+        if (result.action === "accept" && result.content?.name) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `You said your name is: ${result.content.name}`
+              }
+            ]
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: "Elicitation cancelled" }]
         };
       }
     );
@@ -307,11 +349,22 @@ export class TestOAuthAgent extends Agent<Env> {
 
   async setupMockMcpConnection(
     serverId: string,
-    _serverName: string,
+    serverName: string,
     serverUrl: string,
-    callbackUrl: string
+    callbackUrl: string,
+    clientId?: string | null
   ): Promise<void> {
-    this.mcp.registerCallbackUrl(`${callbackUrl}/${serverId}`);
+    // Save server to database with callback URL
+    // biome-ignore lint/suspicious/noExplicitAny: just a test
+    await (this.mcp as any)._storage.saveServer({
+      id: serverId,
+      name: serverName,
+      server_url: serverUrl,
+      callback_url: `${callbackUrl}/${serverId}`,
+      client_id: clientId ?? null,
+      auth_url: null,
+      server_options: null
+    });
     this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
       serverId,
       serverUrl,
@@ -367,8 +420,8 @@ export class TestOAuthAgent extends Agent<Env> {
     return servers.length > 0 ? servers[0] : null;
   }
 
-  isCallbackUrlRegistered(callbackUrl: string): boolean {
-    return this.mcp.isCallbackRequest(new Request(callbackUrl));
+  async isCallbackUrlRegistered(callbackUrl: string): Promise<boolean> {
+    return await this.mcp.isCallbackRequest(new Request(callbackUrl));
   }
 
   removeMcpConnection(serverId: string): void {
@@ -381,7 +434,7 @@ export class TestOAuthAgent extends Agent<Env> {
 
   resetMcpStateRestoredFlag(): void {
     // @ts-expect-error - accessing private property for testing
-    this._mcpStateRestored = false;
+    this._mcpConnectionsInitialized = false;
   }
 }
 
