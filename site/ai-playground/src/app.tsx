@@ -16,6 +16,7 @@ import { nanoid } from "nanoid";
 import type { Playground, PlaygroundState } from "./server";
 import type { Model } from "./models";
 import type { McpComponentState } from "./components/McpServers";
+import { Streamdown } from "streamdown";
 
 const STORAGE_KEY = "playground_session_id";
 const DEFAULT_PARAMS = {
@@ -57,7 +58,6 @@ function generateNewSessionId(): string {
 }
 
 const App = () => {
-  const [error, setError] = useState("");
   const [codeVisible, setCodeVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
@@ -152,7 +152,6 @@ const App = () => {
 
     const message = agentInput;
     setAgentInput("");
-    setError(""); // Clear any previous errors
 
     // Send message to agent
     await sendMessage(
@@ -170,7 +169,8 @@ const App = () => {
     PlaygroundState,
     UIMessage<{ createdAt: string }>
   >({
-    agent
+    agent,
+    experimental_throttle: 50
   });
 
   const loading = status === "submitted";
@@ -190,6 +190,13 @@ const App = () => {
   };
 
   const messageElement = useRef<HTMLDivElement>(null);
+
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    if (messageElement.current) {
+      messageElement.current.scrollTop = messageElement.current.scrollHeight;
+    }
+  }, [messages]);
 
   const activeModelName = params.model ?? DEFAULT_PARAMS.model;
   const activeModel = models.find((model) => model.name === activeModelName);
@@ -453,14 +460,13 @@ const App = () => {
                             </button>
                           </div>
                           <div className="relative grow">
-                            <TextareaAutosize
+                            <Streamdown
                               className={`rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-gray-50 ${
                                 (streaming || loading) && "pointer-events-none"
                               }`}
-                              value={part.text}
-                              disabled={true}
-                              readOnly
-                            />
+                            >
+                              {part.text}
+                            </Streamdown>
                           </div>
                         </li>
                       );
@@ -560,56 +566,30 @@ const App = () => {
                   </div>
                 </li>
               ) : null}
-
-              {/*{messages.map((message, idx) =>*/}
-              {/*  message.role === 'system' ? null : (*/}
-              {loading || streaming ? null : (
-                <li className="mb-3 flex items-start border-b border-b-gray-100 w-full py-2">
-                  <div className="mr-3 w-[80px]">
-                    <button
-                      type="button"
-                      className="px-3 py-2 bg-orange-100 hover:bg-orange-200 rounded-lg text-sm capitalize cursor-pointer"
-                    >
-                      User
-                    </button>
-                  </div>
-
-                  <div className="relative grow">
-                    <TextareaAutosize
-                      className="rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-gray-50"
-                      placeholder="Enter a message..."
-                      value={agentInput}
-                      disabled={loading || streaming}
-                      onChange={handleAgentInputChange}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          handleAgentSubmit(e);
-                        }
-                      }}
-                    />
-                  </div>
-                </li>
-              )}
             </ul>
 
-            <div className="sticky mt-auto bottom-0 left-0 right-0 bg-white flex items-center p-5 border-t border-t-gray-200">
-              {error ? (
-                <div className="text-sm text-red-600 md:block hidden">
-                  {error}
-                </div>
-              ) : (
-                <div className="text-sm text-gray-400 md:block hidden">
-                  Send messages and generate a response (⌘/Ctrl + Enter)
-                </div>
-              )}
+            <div className="sticky mt-auto bottom-0 left-0 right-0 bg-white flex items-center p-5 border-t border-t-gray-200 gap-4">
+              <div className="flex-1">
+                <TextareaAutosize
+                  className="rounded-md p-3 w-full resize-none border border-gray-300 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-orange-300 focus:border-transparent disabled:bg-gray-50 disabled:cursor-not-allowed"
+                  placeholder="Enter a message..."
+                  value={agentInput}
+                  disabled={loading || streaming}
+                  onChange={handleAgentInputChange}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleAgentSubmit(e);
+                    }
+                  }}
+                />
+              </div>
               <button
                 type="button"
                 onClick={() => {
-                  setError("");
                   clearHistory();
                 }}
-                className={`ml-auto mr-8 text-gray-500 hover:text-violet-900 ${
+                className={`text-gray-500 hover:text-violet-900 ${
                   (streaming || loading) && "pointer-events-none opacity-50"
                 }`}
               >
