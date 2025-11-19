@@ -16,6 +16,11 @@ import type { RequestWithAuth } from "./types";
 import { MessageType } from "../ai-types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
+export interface McpSSETransportOptions {
+  getWebSocket: () => WebSocket | null;
+  sessionId?: string;
+}
+
 export class McpSSETransport implements Transport {
   sessionId?: string;
   // Set by the server in `server.connect(transport)`
@@ -25,9 +30,9 @@ export class McpSSETransport implements Transport {
 
   private _getWebSocket: () => WebSocket | null;
   private _started = false;
-  constructor(getWebSocket: () => WebSocket | null, sessionId?: string) {
-    this._getWebSocket = getWebSocket;
-    this.sessionId = sessionId;
+  constructor(options: McpSSETransportOptions) {
+    this._getWebSocket = options.getWebSocket;
+    this.sessionId = options.sessionId;
   }
 
   async start() {

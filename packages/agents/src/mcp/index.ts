@@ -99,8 +99,6 @@ export abstract class McpAgent<
     const headers = { ...extraInfo.headers };
 
     // Remove internal headers that are not part of the original request
-    delete headers["content-type"];
-    delete headers["content-length"];
     delete headers["upgrade"];
 
     return {
@@ -113,10 +111,10 @@ export abstract class McpAgent<
   private initTransport() {
     switch (this.getTransportType()) {
       case "sse": {
-        return new McpSSETransport(
-          () => this.getWebSocket(),
-          this.getSessionId()
-        );
+        return new McpSSETransport({
+          getWebSocket: () => this.getWebSocket(),
+          sessionId: this.getSessionId()
+        });
       }
       case "streamable-http": {
         return new StreamableHTTPServerTransport({});
