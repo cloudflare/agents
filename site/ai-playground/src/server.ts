@@ -101,7 +101,9 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
   }
 
   async ensureDestroy() {
-    const schedules = this.getSchedules();
+    const schedules = this.getSchedules().filter(
+      (s) => s.callback === "destroy"
+    );
     if (schedules.length > 0) {
       // Cancel previously set destroy schedules
       for (const s of schedules) {
