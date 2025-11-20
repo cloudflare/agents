@@ -15,13 +15,8 @@ import type { McpAgent } from ".";
 import { MessageType } from "../ai-types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
-export interface McpSSETransportOptions {
-  getWebSocket: () => WebSocket | null;
-  sessionId?: string;
-}
-
 export class McpSSETransport implements Transport {
-  sessionId?: string;
+  sessionId: string;
   // Set by the server in `server.connect(transport)`
   onclose?: () => void;
   onerror?: (error: Error) => void;
@@ -29,9 +24,13 @@ export class McpSSETransport implements Transport {
 
   private _getWebSocket: () => WebSocket | null;
   private _started = false;
-  constructor(options: McpSSETransportOptions) {
-    this._getWebSocket = options.getWebSocket;
-    this.sessionId = options.sessionId;
+  constructor() {
+    const { agent } = getCurrentAgent<McpAgent>();
+    if (!agent)
+      throw new Error("McpAgent was not found in Transport constructor");
+
+    this.sessionId = agent.getSessionId();
+    this._getWebSocket = () => agent.getWebSocket();
   }
 
   async start() {

@@ -80,7 +80,7 @@ export abstract class McpAgent<
   }
 
   /** Get the unique WebSocket. SSE transport only. */
-  private getWebSocket() {
+  getWebSocket() {
     const websockets = Array.from(this.getConnections());
     if (websockets.length === 0) {
       return null;
@@ -110,10 +110,7 @@ export abstract class McpAgent<
   private initTransport() {
     switch (this.getTransportType()) {
       case "sse": {
-        return new McpSSETransport({
-          getWebSocket: () => this.getWebSocket(),
-          sessionId: this.getSessionId()
-        });
+        return new McpSSETransport();
       }
       case "streamable-http": {
         return new StreamableHTTPServerTransport({});
