@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "types": "wrangler types"
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
   "type": "module"
 }

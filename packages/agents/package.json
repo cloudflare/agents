@@ -123,9 +123,9 @@
       "require": "./dist/react.js"
     },
     "./realtime": {
-      "types": "./dist/realtime-agent.d.ts",
-      "import": "./dist/realtime-agent.js",
-      "require": "./dist/realtime-agent.js"
+      "types": "./dist/realtime.d.ts",
+      "import": "./dist/realtime.js",
+      "require": "./dist/realtime.js"
     },
     "./schedule": {
       "types": "./dist/schedule.d.ts",

@@ -30,11 +30,12 @@ import { AgentMCPClientStorage } from "./mcp/client-storage";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import { DataKind, type RealtimePipelineComponent } from "./realtime";
 import {
-  DataKind,
-  type RealtimePipelineComponent
-} from "./realtime-components";
-import { isRealtimeRequest, Realtime, REALTIME_WS_TAG } from "./realtime";
+  isRealtimeRequest,
+  Realtime,
+  REALTIME_WS_TAG
+} from "./realtime-manager";
 import { randomUUID } from "node:crypto";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
@@ -1713,7 +1714,9 @@ export class Agent<
    * @param {boolean} reply.canInterrupt Whether the User is allowed to interrupt the Agent
    */
   onRealtimeTranscript(
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: this method will be overridden by the user
     text: string,
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: this method will be overridden by the user
     reply: (
       text: string | ReadableStream<Uint8Array>,
       canInterrupt?: boolean
