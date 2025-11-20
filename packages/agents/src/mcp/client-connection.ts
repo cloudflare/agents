@@ -1,6 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { StreamableHTTPClientTransportOptions } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  SSEClientTransport,
+  type SSEClientTransportOptions
+} from "@modelcontextprotocol/sdk/client/sse.js";
+import {
+  StreamableHTTPClientTransport,
+  type StreamableHTTPClientTransportOptions
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 // Import types directly from MCP SDK
 import type {
   Prompt,
@@ -31,18 +37,46 @@ import {
   isUnauthorized,
   toErrorMessage
 } from "./errors";
-import { SSEEdgeClientTransport } from "./sse-edge";
-import { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
 import type { BaseTransportType, TransportType } from "./types";
 
 /**
- * Connection state for MCP client connections
+ * Connection state machine for MCP client connections.
+ *
+ * State transitions:
+ * - Non-OAuth: init() → "connecting" → "discovering" → "ready"
+ * - OAuth: init() → "authenticating" → (callback) → "connecting" → "discovering" → "ready"
+ * - Any state can transition to "failed" on error
  */
 export type MCPConnectionState =
+  /**
+   * Waiting for OAuth authorization to complete.
+   * Server requires OAuth and user must complete the authorization flow.
+   * Next state: "connecting" (after handleCallbackRequest + establishConnection)
+   */
   | "authenticating"
+  /**
+   * Establishing transport connection to MCP server.
+   * OAuth (if required) is complete, now connecting to the actual MCP endpoint.
+   * Next state: "discovering" (after transport connected)
+   */
   | "connecting"
+  /**
+   * Fully connected and ready to use.
+   * Tools, resources, and prompts have been discovered and registered.
+   * This is the terminal success state.
+   */
   | "ready"
+  /**
+   * Discovering server capabilities (tools, resources, prompts).
+   * Transport is connected, now fetching available capabilities via MCP protocol.
+   * Next state: "ready" (after capabilities fetched)
+   */
   | "discovering"
+  /**
+   * Connection failed at some point.
+   * Check observability events for error details.
+   * This is a terminal error state.
+   */
   | "failed";
 
 export type MCPTransportOptions = (
@@ -425,12 +459,12 @@ export class MCPClientConnection {
   getTransport(transportType: BaseTransportType) {
     switch (transportType) {
       case "streamable-http":
-        return new StreamableHTTPEdgeClientTransport(
+        return new StreamableHTTPClientTransport(
           this.url,
           this.options.transport as StreamableHTTPClientTransportOptions
         );
       case "sse":
-        return new SSEEdgeClientTransport(
+        return new SSEClientTransport(
           this.url,
           this.options.transport as SSEClientTransportOptions
         );

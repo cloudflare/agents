@@ -1,0 +1,25 @@
+{
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "MyAgent",
+        "name": "MyAgent"
+      }
+    ]
+  },
+  "main": "src/index.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["MyAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "mcp-elicitation-demo",
+  "observability": {
+    "logs": {
+      "enabled": true
+    }
+  }
+}

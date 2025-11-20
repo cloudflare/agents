@@ -358,7 +358,8 @@ export abstract class McpAgent<
     {
       binding = "MCP_OBJECT",
       corsOptions,
-      transport = "streamable-http"
+      transport = "streamable-http",
+      jurisdiction
     }: ServeOptions = {}
   ) {
     return {
@@ -399,17 +400,16 @@ export abstract class McpAgent<
             const handleStreamableHttp = createStreamingHttpHandler(
               path,
               namespace,
-              corsOptions
+              { corsOptions, jurisdiction }
             );
             return handleStreamableHttp(request, ctx);
           }
           case "sse": {
             // Legacy SSE transport handling
-            const handleLegacySse = createLegacySseHandler(
-              path,
-              namespace,
-              corsOptions
-            );
+            const handleLegacySse = createLegacySseHandler(path, namespace, {
+              corsOptions,
+              jurisdiction
+            });
             return handleLegacySse(request, ctx);
           }
           default:
@@ -433,19 +433,34 @@ export abstract class McpAgent<
   }
 }
 
-// Export client transport classes
-export { SSEEdgeClientTransport } from "./sse-edge";
-export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+export {
+  SSEEdgeClientTransport,
+  StreamableHTTPEdgeClientTransport
+} from "./client-transports";
 
-// Export elicitation types and schemas
 export {
   ElicitRequestSchema,
   type ElicitRequest,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 
-// Export OAuth-related types
 export type {
   MCPClientOAuthResult,
-  MCPClientOAuthCallbackConfig
+  MCPClientOAuthCallbackConfig,
+  MCPServerOptions,
+  MCPConnectionResult
 } from "./client";
+
+export {
+  createMcpHandler,
+  experimental_createMcpHandler,
+  type CreateMcpHandlerOptions
+} from "./handler";
+
+export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
+
+export {
+  WorkerTransport,
+  type WorkerTransportOptions,
+  type TransportState
+} from "./worker-transport";

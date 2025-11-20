@@ -11,6 +11,7 @@ import type {
   ResourceTemplate,
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
+import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
@@ -22,6 +23,49 @@ import {
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
+import type { MCPClientStorage, MCPServerRow } from "./client-storage";
+import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
+
+const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
+  jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
+};
+
+/**
+ * Options that can be stored in the server_options column
+ * This is what gets JSON.stringify'd and stored in the database
+ */
+export type MCPServerOptions = {
+  client?: ConstructorParameters<typeof Client>[1];
+  transport?: {
+    headers?: HeadersInit;
+    type?: TransportType;
+  };
+};
+
+/**
+ * Options for registering an MCP server
+ */
+export type RegisterServerOptions = {
+  url: string;
+  name: string;
+  callbackUrl: string;
+  client?: ConstructorParameters<typeof Client>[1];
+  transport?: MCPTransportOptions;
+  authUrl?: string;
+  clientId?: string;
+};
+
+/**
+ * Result of attempting to connect to an MCP server.
+ * Returns the current connection state after the operation.
+ *
+ * - "ready": Connection established and ready to use (non-OAuth)
+ * - "authenticating": OAuth required, user must visit authUrl to authorize
+ */
+export type MCPConnectionResult =
+  | { state: "ready" }
+  | { state: "authenticating"; authUrl: string; clientId?: string };
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -35,41 +79,168 @@ export type MCPClientOAuthResult = {
   authError?: string;
 };
 
+export type MCPClientManagerOptions = {
+  storage: MCPClientStorage;
+};
+
 /**
  * Utility class that aggregates multiple MCP clients into one
  */
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
-  private _callbackUrls: string[] = [];
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
+  private _storage: MCPClientStorage;
+  private _isRestored = false;
 
   private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
     this._onObservabilityEvent.event;
 
-  private readonly _onConnected = new Emitter<string>();
-  public readonly onConnected: Event<string> = this._onConnected.event;
+  private readonly _onServerStateChanged = new Emitter<void>();
+  /**
+   * Event that fires whenever any MCP server state changes (registered, connected, removed, etc.)
+   * This is useful for broadcasting server state to clients.
+   */
+  public readonly onServerStateChanged: Event<void> =
+    this._onServerStateChanged.event;
 
   /**
    * @param _name Name of the MCP client
    * @param _version Version of the MCP Client
-   * @param auth Auth paramters if being used to create a DurableObjectOAuthClientProvider
+   * @param options Storage adapter for persisting MCP server state
    */
   constructor(
     private _name: string,
-    private _version: string
-  ) {}
+    private _version: string,
+    options: MCPClientManagerOptions
+  ) {
+    this._storage = options.storage;
+  }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
 
   /**
+   * Create an auth provider for a server
+   * @internal
+   */
+  private createAuthProvider(
+    serverId: string,
+    callbackUrl: string,
+    clientName: string,
+    clientId?: string
+  ): AgentsOAuthProvider {
+    const authProvider = new DurableObjectOAuthClientProvider(
+      this._storage,
+      clientName,
+      callbackUrl
+    );
+    authProvider.serverId = serverId;
+    if (clientId) {
+      authProvider.clientId = clientId;
+    }
+    return authProvider;
+  }
+
+  /**
+   * Restore MCP server connections from storage
+   * This method is called on Agent initialization to restore previously connected servers
+   *
+   * @param clientName Name to use for OAuth client (typically the agent instance name)
+   */
+  async restoreConnectionsFromStorage(clientName: string): Promise<void> {
+    if (this._isRestored) {
+      return;
+    }
+
+    const servers = await this._storage.listServers();
+
+    if (!servers || servers.length === 0) {
+      this._isRestored = true;
+      return;
+    }
+
+    for (const server of servers) {
+      const existingConn = this.mcpConnections[server.id];
+
+      // Skip if connection already exists and is in a good state
+      if (existingConn) {
+        if (existingConn.connectionState === "ready") {
+          console.warn(
+            `[MCPClientManager] Server ${server.id} already has a ready connection. Skipping recreation.`
+          );
+          continue;
+        }
+
+        // Don't interrupt in-flight OAuth or connections
+        if (
+          existingConn.connectionState === "authenticating" ||
+          existingConn.connectionState === "connecting" ||
+          existingConn.connectionState === "discovering"
+        ) {
+          // Let the existing flow complete
+          continue;
+        }
+
+        // If failed, clean up the old connection before recreating
+        if (existingConn.connectionState === "failed") {
+          try {
+            await existingConn.client.close();
+          } catch (error) {
+            console.warn(
+              `[MCPClientManager] Error closing failed connection ${server.id}:`,
+              error
+            );
+          }
+          delete this.mcpConnections[server.id];
+          this._connectionDisposables.get(server.id)?.dispose();
+          this._connectionDisposables.delete(server.id);
+        }
+      }
+
+      const parsedOptions: MCPServerOptions | null = server.server_options
+        ? JSON.parse(server.server_options)
+        : null;
+
+      const authProvider = this.createAuthProvider(
+        server.id,
+        server.callback_url,
+        clientName,
+        server.client_id ?? undefined
+      );
+
+      // Create the in-memory connection object (no need to save to storage - we just read from it!)
+      this.createConnection(server.id, server.server_url, {
+        client: parsedOptions?.client ?? {},
+        transport: {
+          ...(parsedOptions?.transport ?? {}),
+          type: parsedOptions?.transport?.type ?? ("auto" as TransportType),
+          authProvider
+        }
+      });
+
+      // Always try to connect - the connection logic will determine if OAuth is needed
+      // If stored OAuth tokens are valid, connection will succeed automatically
+      // If tokens are missing/invalid, connection will fail with Unauthorized
+      // and state will be set to "authenticating"
+      await this.connectToServer(server.id).catch((error) => {
+        console.error(`Error restoring ${server.id}:`, error);
+      });
+    }
+
+    this._isRestored = true;
+  }
+
+  /**
    * Connect to and register an MCP server
    *
-   * @param transportConfig Transport config
-   * @param clientConfig Client config
-   * @param capabilities Client capabilities (i.e. if the client supports roots/sampling)
+   * @deprecated This method is maintained for backward compatibility.
+   * For new code, use registerServer() and connectToServer() separately.
+   *
+   * @param url Server URL
+   * @param options Connection options
+   * @returns Object with server ID, auth URL (if OAuth), and client ID (if OAuth)
    */
   async connect(
     url: string,
@@ -98,10 +269,7 @@ export class MCPClientManager {
      * .connect() is called on at least one server.
      * So it's safe to delay loading it until .connect() is called.
      */
-    if (!this.jsonSchema) {
-      const { jsonSchema } = await import("ai");
-      this.jsonSchema = jsonSchema;
-    }
+    await this.ensureJsonSchema();
 
     const id = options.reconnect?.id ?? nanoid(8);
 
@@ -182,9 +350,6 @@ export class MCPClientManager {
       authUrl &&
       options.transport?.authProvider?.redirectUrl
     ) {
-      this._callbackUrls.push(
-        options.transport.authProvider.redirectUrl.toString()
-      );
       return {
         authUrl,
         clientId: options.transport?.authProvider?.clientId,
@@ -197,29 +362,204 @@ export class MCPClientManager {
     };
   }
 
-  isCallbackRequest(req: Request): boolean {
-    return (
-      req.method === "GET" &&
-      !!this._callbackUrls.find((url) => {
-        return req.url.startsWith(url);
+  /**
+   * Create an in-memory connection object and set up observability
+   * Does NOT save to storage - use registerServer() for that
+   */
+  private createConnection(
+    id: string,
+    url: string,
+    options: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport: MCPTransportOptions;
+    }
+  ): void {
+    // Skip if connection already exists
+    if (this.mcpConnections[id]) {
+      return;
+    }
+
+    const normalizedTransport = {
+      ...options.transport,
+      type: options.transport?.type ?? ("auto" as TransportType)
+    };
+
+    this.mcpConnections[id] = new MCPClientConnection(
+      new URL(url),
+      {
+        name: this._name,
+        version: this._version
+      },
+      {
+        client: { ...defaultClientOptions, ...options.client },
+        transport: normalizedTransport
+      }
+    );
+
+    // Pipe connection-level observability events to the manager-level emitter
+    const store = new DisposableStore();
+    const existing = this._connectionDisposables.get(id);
+    if (existing) existing.dispose();
+    this._connectionDisposables.set(id, store);
+    store.add(
+      this.mcpConnections[id].onObservabilityEvent((event) => {
+        this._onObservabilityEvent.fire(event);
       })
+    );
+  }
+
+  /**
+   * Register an MCP server connection without connecting
+   * Creates the connection object, sets up observability, and saves to storage
+   *
+   * @param id Server ID
+   * @param options Registration options including URL, name, callback URL, and connection config
+   * @returns Server ID
+   */
+  async registerServer(
+    id: string,
+    options: RegisterServerOptions
+  ): Promise<string> {
+    // Create the in-memory connection
+    this.createConnection(id, options.url, {
+      client: options.client,
+      transport: {
+        ...options.transport,
+        type: options.transport?.type ?? ("auto" as TransportType)
+      }
+    });
+
+    // Save to storage
+    await this._storage.saveServer({
+      id,
+      name: options.name,
+      server_url: options.url,
+      callback_url: options.callbackUrl,
+      client_id: options.clientId ?? null,
+      auth_url: options.authUrl ?? null,
+      server_options: JSON.stringify({
+        client: options.client,
+        transport: options.transport
+      })
+    });
+
+    this._onServerStateChanged.fire();
+
+    return id;
+  }
+
+  /**
+   * Connect to an already registered MCP server and initialize the connection.
+   *
+   * For OAuth servers, this returns `{ state: "authenticating", authUrl, clientId? }`
+   * without establishing the connection. The user must complete the OAuth flow via
+   * the authUrl, which will trigger a callback handled by `handleCallbackRequest()`.
+   *
+   * For non-OAuth servers, this establishes the connection immediately and returns
+   * `{ state: "ready" }`.
+   *
+   * Updates storage with auth URL and client ID after connection.
+   *
+   * @param id Server ID (must be registered first via registerServer())
+   * @returns Connection result with current state and OAuth info (if applicable)
+   */
+  async connectToServer(id: string): Promise<MCPConnectionResult> {
+    const conn = this.mcpConnections[id];
+    if (!conn) {
+      throw new Error(
+        `Server ${id} is not registered. Call registerServer() first.`
+      );
+    }
+
+    // Initialize connection
+    await conn.init();
+
+    // If connection is in authenticating state, return auth URL for OAuth flow
+    const authUrl = conn.options.transport.authProvider?.authUrl;
+
+    if (
+      conn.connectionState === "authenticating" &&
+      authUrl &&
+      conn.options.transport.authProvider?.redirectUrl
+    ) {
+      const clientId = conn.options.transport.authProvider?.clientId;
+
+      // Update storage with auth URL and client ID
+      const servers = await this._storage.listServers();
+      const serverRow = servers.find((s) => s.id === id);
+      if (serverRow) {
+        await this._storage.saveServer({
+          ...serverRow,
+          auth_url: authUrl,
+          client_id: clientId ?? null
+        });
+      }
+
+      this._onServerStateChanged.fire();
+
+      return {
+        state: "authenticating",
+        authUrl,
+        clientId
+      };
+    }
+
+    // Fire state changed event for non-OAuth connections that reached ready state
+    if (conn.connectionState === "ready") {
+      this._onServerStateChanged.fire();
+    }
+
+    return { state: "ready" };
+  }
+
+  async isCallbackRequest(req: Request): Promise<boolean> {
+    if (req.method !== "GET") {
+      return false;
+    }
+
+    // Quick heuristic check: most callback URLs contain "/callback"
+    // This avoids DB queries for obviously non-callback requests
+    if (!req.url.includes("/callback")) {
+      return false;
+    }
+
+    // Check database for matching callback URL
+    const servers = await this._storage.listServers();
+    return servers.some(
+      (server) => server.callback_url && req.url.startsWith(server.callback_url)
     );
   }
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
-    const urlMatch = this._callbackUrls.find((url) => {
-      return req.url.startsWith(url);
+
+    // Find the matching server from database
+    const servers = await this._storage.listServers();
+    const matchingServer = servers.find((server: MCPServerRow) => {
+      return server.callback_url && req.url.startsWith(server.callback_url);
     });
-    if (!urlMatch) {
+
+    if (!matchingServer) {
       throw new Error(
         `No callback URI match found for the request url: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
       );
     }
+
+    const serverId = matchingServer.id;
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
-    const urlParams = urlMatch.split("/");
-    const serverId = urlParams[urlParams.length - 1];
+    const error = url.searchParams.get("error");
+    const errorDescription = url.searchParams.get("error_description");
+
+    // Handle OAuth error responses from the provider
+    if (error) {
+      return {
+        serverId,
+        authSuccess: false,
+        authError: errorDescription || error
+      };
+    }
+
     if (!code) {
       throw new Error("Unauthorized: no code provided");
     }
@@ -231,9 +571,18 @@ export class MCPClientManager {
       throw new Error(`Could not find serverId: ${serverId}`);
     }
 
+    // If connection is already ready, this is likely a duplicate callback
+    if (this.mcpConnections[serverId].connectionState === "ready") {
+      // Already authenticated and ready, treat as success
+      return {
+        serverId,
+        authSuccess: true
+      };
+    }
+
     if (this.mcpConnections[serverId].connectionState !== "authenticating") {
       throw new Error(
-        "Failed to authenticate: the client isn't in the `authenticating` state"
+        `Failed to authenticate: the client is in "${this.mcpConnections[serverId].connectionState}" state, expected "authenticating"`
       );
     }
 
@@ -253,6 +602,9 @@ export class MCPClientManager {
 
     try {
       await conn.completeAuthorization(code);
+      await this._storage.clearAuthUrl(serverId);
+      this._onServerStateChanged.fire();
+
       return {
         serverId,
         authSuccess: true
@@ -260,6 +612,8 @@ export class MCPClientManager {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
+
+      this._onServerStateChanged.fire();
 
       return {
         serverId,
@@ -289,7 +643,7 @@ export class MCPClientManager {
 
     try {
       await conn.establishConnection();
-      this._onConnected.fire(serverId);
+      this._onServerStateChanged.fire();
     } catch (error) {
       const url = conn.url.toString();
       this._onObservabilityEvent.fire({
@@ -304,28 +658,8 @@ export class MCPClientManager {
         timestamp: Date.now(),
         id: nanoid()
       });
+      this._onServerStateChanged.fire();
     }
-  }
-
-  /**
-   * Register a callback URL for OAuth handling
-   * @param url The callback URL to register
-   */
-  registerCallbackUrl(url: string): void {
-    if (!this._callbackUrls.includes(url)) {
-      this._callbackUrls.push(url);
-    }
-  }
-
-  /**
-   * Unregister a callback URL
-   * @param serverId The server ID whose callback URL should be removed
-   */
-  unregisterCallbackUrl(serverId: string): void {
-    // Remove callback URLs that end with this serverId
-    this._callbackUrls = this._callbackUrls.filter(
-      (url) => !url.endsWith(`/${serverId}`)
-    );
   }
 
   /**
@@ -352,9 +686,43 @@ export class MCPClientManager {
   }
 
   /**
+   * Lazy-loads the jsonSchema function from the AI SDK.
+   *
+   * This defers importing the "ai" package until it's actually needed, which helps reduce
+   * initial bundle size and startup time. The jsonSchema function is required for converting
+   * MCP tools into AI SDK tool definitions via getAITools().
+   *
+   * @internal This method is for internal use only. It's automatically called before operations
+   * that need jsonSchema (like getAITools() or OAuth flows). External consumers should not need
+   * to call this directly.
+   */
+  async ensureJsonSchema() {
+    if (!this.jsonSchema) {
+      const { jsonSchema } = await import("ai");
+      this.jsonSchema = jsonSchema;
+    }
+  }
+
+  /**
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
+    if (!this.jsonSchema) {
+      throw new Error("jsonSchema not initialized.");
+    }
+
+    // Warn if tools are being read from non-ready connections
+    for (const [id, conn] of Object.entries(this.mcpConnections)) {
+      if (
+        conn.connectionState !== "ready" &&
+        conn.connectionState !== "authenticating"
+      ) {
+        console.warn(
+          `[getAITools] WARNING: Reading tools from connection ${id} in state "${conn.connectionState}". Tools may not be loaded yet.`
+        );
+      }
+    }
+
     return Object.fromEntries(
       getNamespacedData(this.mcpConnections, "tools").map((tool) => {
         return [
@@ -433,6 +801,21 @@ export class MCPClientManager {
   }
 
   /**
+   * Remove an MCP server from storage
+   */
+  async removeServer(serverId: string): Promise<void> {
+    await this._storage.removeServer(serverId);
+    this._onServerStateChanged.fire();
+  }
+
+  /**
+   * List all MCP servers from storage
+   */
+  async listServers(): Promise<MCPServerRow[]> {
+    return await this._storage.listServers();
+  }
+
+  /**
    * Dispose the manager and all resources.
    */
   async dispose(): Promise<void> {
@@ -440,7 +823,7 @@ export class MCPClientManager {
       await this.closeAllConnections();
     } finally {
       // Dispose manager-level emitters
-      this._onConnected.dispose();
+      this._onServerStateChanged.dispose();
       this._onObservabilityEvent.dispose();
     }
   }

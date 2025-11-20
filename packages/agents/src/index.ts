@@ -26,6 +26,7 @@ import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
+import { AgentMCPClientStorage } from "./mcp/client-storage";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
@@ -235,20 +236,6 @@ export type MCPServer = {
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
-
-/**
- * MCP Server data stored in DO SQL for resuming MCP Server connections
- */
-type MCPServerRow = {
-  id: string;
-  name: string;
-  server_url: string;
-  client_id: string | null;
-  auth_url: string | null;
-  callback_url: string;
-  server_options: string;
-};
-
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
@@ -329,14 +316,12 @@ export class Agent<
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private realtime?: Realtime;
+  private _destroyed = false;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  readonly mcp: MCPClientManager = new MCPClientManager(
-    this._ParentClass.name,
-    "0.0.1"
-  );
+  readonly mcp: MCPClientManager;
 
   realtimePipelineComponents?: () => RealtimePipelineComponent[];
 
@@ -448,16 +433,23 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
+    this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
+      storage: new AgentMCPClientStorage(
+        this.sql.bind(this),
+        this.ctx.storage.kv
+      )
+    });
+
     if (!wrappedClasses.has(this.constructor)) {
       // Auto-wrap custom methods with agent context
       this._autoWrapCustomMethods();
       wrappedClasses.add(this.constructor);
     }
 
-    // Broadcast server state after background connects (for OAuth servers)
+    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
-      this.mcp.onConnected(async () => {
-        this.broadcastMcpServers();
+      this.mcp.onServerStateChanged(async () => {
+        await this.broadcastMcpServers();
       })
     );
 
@@ -467,6 +459,18 @@ export class Agent<
         this.observability?.emit(event);
       })
     );
+
+    this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          server_url TEXT NOT NULL,
+          callback_url TEXT NOT NULL,
+          client_id TEXT,
+          auth_url TEXT,
+          server_options TEXT
+        )
+      `;
 
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
@@ -484,36 +488,16 @@ export class Agent<
       )
     `;
 
-    void this.ctx.blockConcurrencyWhile(async () => {
-      return this._tryCatch(async () => {
-        // Create alarms table if it doesn't exist
-        this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        )
-      `;
-
-        // execute any pending alarms and schedule the next alarm
-        await this.alarm();
-      });
-    });
-
     this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        server_url TEXT NOT NULL,
-        callback_url TEXT NOT NULL,
-        client_id TEXT,
-        auth_url TEXT,
-        server_options TEXT
+      CREATE TABLE IF NOT EXISTS cf_agents_schedules (
+        id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+        callback TEXT,
+        payload TEXT,
+        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron')),
+        time INTEGER,
+        delayInSeconds INTEGER,
+        cron TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
       )
     `;
 
@@ -522,11 +506,14 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          // Check if this is an OAuth callback and restore state if needed
-          const callbackResult =
-            await this._handlePotentialOAuthCallback(request);
-          if (callbackResult) {
-            return callbackResult;
+          // TODO: make zod/ai sdk more performant and remove this
+          // Late initialization of jsonSchemaFn (needed for getAITools)
+          await this.mcp.ensureJsonSchema();
+
+          // Handle MCP OAuth callback if this is one
+          const oauthResponse = await this.handleMcpOAuthCallback(request);
+          if (oauthResponse) {
+            return oauthResponse;
           }
 
           if (this.realtime && isRealtimeRequest(request)) {
@@ -543,6 +530,7 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
+          // TODO: remove this
           console.log(
             "incoming connection message",
             message,
@@ -551,6 +539,9 @@ export class Agent<
             "conn url:",
             connection.url
           );
+          // TODO: make zod/ai sdk more performant and remove this
+          // Late initialization of jsonSchemaFn (needed for getAITools)
+          await this.mcp.ensureJsonSchema();
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
           }
@@ -646,7 +637,7 @@ export class Agent<
       // must fix this
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
-        () => {
+        async () => {
           if (this.state) {
             connection.send(
               JSON.stringify({
@@ -658,7 +649,7 @@ export class Agent<
 
           connection.send(
             JSON.stringify({
-              mcp: this.getMcpServers(),
+              mcp: await this.getMcpServers(),
               type: MessageType.CF_AGENT_MCP_SERVERS
             })
           );
@@ -691,52 +682,8 @@ export class Agent<
         },
         async () => {
           await this._tryCatch(async () => {
-            const servers = this.sql<MCPServerRow>`
-            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-          `;
-
-            this.broadcastMcpServers();
-
-            // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-            if (servers && Array.isArray(servers) && servers.length > 0) {
-              // Restore callback URLs for OAuth-enabled servers
-              servers.forEach((server) => {
-                if (server.callback_url) {
-                  // Register the full redirect URL including serverId to avoid ambiguous matches
-                  this.mcp.registerCallbackUrl(
-                    `${server.callback_url}/${server.id}`
-                  );
-                }
-              });
-
-              servers.forEach((server) => {
-                this._connectToMcpServerInternal(
-                  server.name,
-                  server.server_url,
-                  server.callback_url,
-                  server.server_options
-                    ? JSON.parse(server.server_options)
-                    : undefined,
-                  {
-                    id: server.id,
-                    oauthClientId: server.client_id ?? undefined
-                  }
-                )
-                  .then(() => {
-                    // Broadcast updated MCP servers state after each server connects
-                    this.broadcastMcpServers();
-                  })
-                  .catch((error) => {
-                    console.error(
-                      `Error connecting to MCP server: ${server.name} (${server.server_url})`,
-                      error
-                    );
-                    // Still broadcast even if connection fails, so clients know about the failure
-                    this.broadcastMcpServers();
-                  });
-              });
-            }
-
+            await this.mcp.restoreConnectionsFromStorage(this.name);
+            await this.broadcastMcpServers();
             if (this.realtimePipelineComponents) {
               const { CF_ACCOUNT_ID, CF_API_TOKEN } = this.env as {
                 CF_ACCOUNT_ID: string;
@@ -1346,7 +1293,7 @@ export class Agent<
     // Find the next schedule that needs to be executed
     const result = this.sql`
       SELECT time FROM cf_agents_schedules
-      WHERE time > ${Math.floor(Date.now() / 1000)}
+      WHERE time >= ${Math.floor(Date.now() / 1000)}
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -1416,6 +1363,7 @@ export class Agent<
           }
         );
         if (row.type === "cron") {
+          if (this._destroyed) return;
           // Update next execution time for cron schedules
           const nextExecutionTime = getNextCronTime(row.cron);
           const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
@@ -1424,6 +1372,7 @@ export class Agent<
           UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
         `;
         } else {
+          if (this._destroyed) return;
           // Delete one-time schedules after execution
           this.sql`
           DELETE FROM cf_agents_schedules WHERE id = ${row.id}
@@ -1431,6 +1380,7 @@ export class Agent<
         }
       }
     }
+    if (this._destroyed) return;
 
     // Schedule the next alarm
     await this._scheduleNextAlarm();
@@ -1441,18 +1391,27 @@ export class Agent<
    */
   async destroy() {
     // drop all tables
+    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
+
     this._disposables.dispose();
-    await this.mcp.dispose?.();
+    await this.mcp.dispose();
+
+    this._destroyed = true;
+
+    // `ctx.abort` throws an uncatchable error, so we yield to the event loop
+    // to avoid capturing it and let handlers finish cleaning up
+    setTimeout(() => {
+      this.ctx.abort("destroyed");
+    }, 0);
+
     await this.realtime?.dispose();
-    this.ctx.abort("destroyed"); // enforce that the agent is evicted
 
     this.observability?.emit(
       {
@@ -1514,222 +1473,18 @@ export class Agent<
 
     const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
-    // Generate a serverId upfront
-    const serverId = nanoid(8);
+    // TODO: make zod/ai sdk more performant and remove this
+    // Late initialization of jsonSchemaFn (needed for getAITools)
+    await this.mcp.ensureJsonSchema();
 
-    // Persist to database BEFORE starting OAuth flow to survive DO hibernation
-    this.sql`
-        INSERT OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${serverId},
-        ${serverName},
-        ${url},
-        ${null},
-        ${null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-        );
-    `;
+    const id = nanoid(8);
 
-    // _connectToMcpServerInternal will call mcp.connect which registers the callback URL
-    const result = await this._connectToMcpServerInternal(
-      serverName,
-      url,
-      callbackUrl,
-      options,
-      { id: serverId }
-    );
-
-    // Update database with OAuth client info if auth is required
-    if (result.clientId || result.authUrl) {
-      this.sql`
-        UPDATE cf_agents_mcp_servers
-        SET client_id = ${result.clientId ?? null}, auth_url = ${result.authUrl ?? null}
-        WHERE id = ${serverId}
-      `;
-    }
-
-    this.broadcastMcpServers();
-
-    return result;
-  }
-
-  /**
-   * Handle potential OAuth callback requests after DO hibernation.
-   * Detects OAuth callbacks, restores state from database, and processes the callback.
-   * Returns a Response if this was an OAuth callback, otherwise returns undefined.
-   */
-  private async _handlePotentialOAuthCallback(
-    request: Request
-  ): Promise<Response | undefined> {
-    // Quick check: must be GET with callback pattern and code parameter
-    if (request.method !== "GET") {
-      return undefined;
-    }
-
-    const url = new URL(request.url);
-    const hasCallbackPattern =
-      url.pathname.includes("/callback/") && url.searchParams.has("code");
-
-    if (!hasCallbackPattern) {
-      return undefined;
-    }
-
-    // Extract serverId from callback URL
-    const pathParts = url.pathname.split("/");
-    const callbackIndex = pathParts.indexOf("callback");
-    const serverId = callbackIndex !== -1 ? pathParts[callbackIndex + 1] : null;
-
-    if (!serverId) {
-      return new Response("Invalid callback URL: missing serverId", {
-        status: 400
-      });
-    }
-
-    // Check if callback is already registered AND connection exists (not hibernated)
-    if (
-      this.mcp.isCallbackRequest(request) &&
-      this.mcp.mcpConnections[serverId]
-    ) {
-      // State already restored, handle normally
-      return this._processOAuthCallback(request);
-    }
-
-    // Need to restore from database after hibernation
-    try {
-      const server = this.sql<MCPServerRow>`
-        SELECT id, name, server_url, client_id, auth_url, callback_url, server_options
-        FROM cf_agents_mcp_servers
-        WHERE id = ${serverId}
-      `.find((s) => s.id === serverId);
-
-      if (!server) {
-        return new Response(
-          `OAuth callback failed: Server ${serverId} not found in database`,
-          { status: 404 }
-        );
-      }
-
-      // Register callback URL (restores it after hibernation)
-      if (!server.callback_url) {
-        return new Response(
-          `OAuth callback failed: No callback URL stored for server ${serverId}`,
-          { status: 500 }
-        );
-      }
-
-      this.mcp.registerCallbackUrl(`${server.callback_url}/${server.id}`);
-
-      // Restore connection if not in memory
-      if (!this.mcp.mcpConnections[serverId]) {
-        let parsedOptions:
-          | {
-              client?: ConstructorParameters<typeof Client>[1];
-              transport?: {
-                headers?: HeadersInit;
-                type?: TransportType;
-              };
-            }
-          | undefined;
-        try {
-          parsedOptions = server.server_options
-            ? JSON.parse(server.server_options)
-            : undefined;
-        } catch {
-          return new Response(
-            `OAuth callback failed: Invalid server options in database for ${serverId}`,
-            { status: 500 }
-          );
-        }
-
-        await this._connectToMcpServerInternal(
-          server.name,
-          server.server_url,
-          server.callback_url,
-          parsedOptions,
-          {
-            id: server.id,
-            oauthClientId: server.client_id ?? undefined
-          }
-        );
-      }
-
-      // Now process the OAuth callback
-      return this._processOAuthCallback(request);
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : "Unknown error";
-      console.error(`Failed to restore MCP state for ${serverId}:`, error);
-      return new Response(
-        `OAuth callback failed during state restoration: ${errorMsg}`,
-        { status: 500 }
-      );
-    }
-  }
-
-  /**
-   * Process an OAuth callback request (assumes state is already restored)
-   */
-  private async _processOAuthCallback(request: Request): Promise<Response> {
-    const result = await this.mcp.handleCallbackRequest(request);
-    this.broadcastMcpServers();
-
-    if (result.authSuccess) {
-      // Start background connection if auth was successful
-      this.mcp
-        .establishConnection(result.serverId)
-        .catch((error) => {
-          console.error("Background connection failed:", error);
-        })
-        .finally(() => {
-          // Broadcast after background connection resolves (success/failure)
-          this.broadcastMcpServers();
-        });
-    }
-
-    // Handle OAuth callback response using MCPClientManager configuration
-    return this.handleOAuthCallbackResponse(result, request);
-  }
-
-  private async _connectToMcpServerInternal(
-    _serverName: string,
-    url: string,
-    callbackUrl: string,
-    // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      /**
-       * We don't expose the normal set of transport options because:
-       * 1) we can't serialize things like the auth provider or a fetch function into the DB for reconnection purposes
-       * 2) We probably want these options to be agnostic to the transport type (SSE vs Streamable)
-       *
-       * This has the limitation that you can't override fetch, but I think headers should handle nearly all cases needed (i.e. non-standard bearer auth).
-       */
-      transport?: {
-        headers?: HeadersInit;
-        type?: TransportType;
-      };
-    },
-    reconnect?: {
-      id: string;
-      oauthClientId?: string;
-    }
-  ): Promise<{
-    id: string;
-    authUrl: string | undefined;
-    clientId: string | undefined;
-  }> {
     const authProvider = new DurableObjectOAuthClientProvider(
-      this.ctx.storage,
+      this.ctx.storage.kv,
       this.name,
       callbackUrl
     );
-
-    if (reconnect) {
-      authProvider.serverId = reconnect.id;
-      if (reconnect.oauthClientId) {
-        authProvider.clientId = reconnect.oauthClientId;
-      }
-    }
+    authProvider.serverId = id;
 
     // Use the transport type specified in options, or default to "auto"
     const transportType: TransportType = options?.transport?.type ?? "auto";
@@ -1752,9 +1507,12 @@ export class Agent<
       };
     }
 
-    const { id, authUrl, clientId } = await this.mcp.connect(url, {
+    // Register server (also saves to storage)
+    await this.mcp.registerServer(id, {
+      url,
+      name: serverName,
+      callbackUrl,
       client: options?.client,
-      reconnect,
       transport: {
         ...headerTransportOpts,
         authProvider,
@@ -1762,23 +1520,24 @@ export class Agent<
       }
     });
 
+    // Connect to server (updates storage with auth URL if OAuth)
+    // This fires onServerStateChanged event which triggers broadcast
+    const result = await this.mcp.connectToServer(id);
+
     return {
-      authUrl,
-      clientId,
-      id
+      id,
+      authUrl: result.state === "authenticating" ? result.authUrl : undefined
     };
   }
 
   async removeMcpServer(id: string) {
-    this.mcp.closeConnection(id);
-    this.mcp.unregisterCallbackUrl(id);
-    this.sql`
-      DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
-    `;
-    this.broadcastMcpServers();
+    if (this.mcp.mcpConnections[id]) {
+      await this.mcp.closeConnection(id);
+    }
+    await this.mcp.removeServer(id);
   }
 
-  getMcpServers(): MCPServersState {
+  async getMcpServers(): Promise<MCPServersState> {
     const mcpState: MCPServersState = {
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
@@ -1786,21 +1545,26 @@ export class Agent<
       tools: this.mcp.listTools()
     };
 
-    const servers = this.sql<MCPServerRow>`
-      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-    `;
+    const servers = await this.mcp.listServers();
 
     if (servers && Array.isArray(servers) && servers.length > 0) {
       for (const server of servers) {
         const serverConn = this.mcp.mcpConnections[server.id];
+
+        // Determine the default state when no connection exists
+        let defaultState: "authenticating" | "not-connected" = "not-connected";
+        if (!serverConn && server.auth_url) {
+          // If there's an auth_url but no connection, it's waiting for OAuth
+          defaultState = "authenticating";
+        }
+
         mcpState.servers[server.id] = {
           auth_url: server.auth_url,
           capabilities: serverConn?.serverCapabilities ?? null,
           instructions: serverConn?.instructions ?? null,
           name: server.name,
           server_url: server.server_url,
-          // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
-          state: serverConn?.connectionState ?? "authenticating"
+          state: serverConn?.connectionState ?? defaultState
         };
       }
     }
@@ -1808,13 +1572,54 @@ export class Agent<
     return mcpState;
   }
 
-  private broadcastMcpServers() {
+  private async broadcastMcpServers() {
     this.broadcast(
       JSON.stringify({
-        mcp: this.getMcpServers(),
+        mcp: await this.getMcpServers(),
         type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );
+  }
+
+  /**
+   * Handle MCP OAuth callback request if it's an OAuth callback.
+   *
+   * This method encapsulates the entire OAuth callback flow:
+   * 1. Checks if the request is an MCP OAuth callback
+   * 2. Processes the OAuth code exchange
+   * 3. Establishes the connection if successful
+   * 4. Broadcasts MCP server state updates
+   * 5. Returns the appropriate HTTP response
+   *
+   * @param request The incoming HTTP request
+   * @returns Response if this was an OAuth callback, null otherwise
+   */
+  private async handleMcpOAuthCallback(
+    request: Request
+  ): Promise<Response | null> {
+    // Check if this is an OAuth callback request
+    const isCallback = await this.mcp.isCallbackRequest(request);
+    if (!isCallback) {
+      return null;
+    }
+
+    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
+    // This fires onServerStateChanged event which triggers broadcast
+    const result = await this.mcp.handleCallbackRequest(request);
+
+    // If auth was successful, establish the connection in the background
+    // establishConnection() will fire onServerStateChanged event which triggers another broadcast
+    if (result.authSuccess) {
+      this.mcp.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[Agent handleMcpOAuthCallback] Background connection failed:",
+          error
+        );
+      });
+    }
+
+    // Return the HTTP response for the OAuth callback
+    return this.handleOAuthCallbackResponse(result, request);
   }
 
   /**
@@ -1834,20 +1639,39 @@ export class Agent<
       return config.customHandler(result);
     }
 
-    // Use redirect URLs if configured
+    const baseOrigin = new URL(request.url).origin;
+
+    // Redirect to success URL if configured
     if (config?.successRedirect && result.authSuccess) {
-      return Response.redirect(config.successRedirect);
+      try {
+        return Response.redirect(
+          new URL(config.successRedirect, baseOrigin).href
+        );
+      } catch (e) {
+        console.error(
+          "Invalid successRedirect URL:",
+          config.successRedirect,
+          e
+        );
+        return Response.redirect(baseOrigin);
+      }
     }
 
+    // Redirect to error URL if configured
     if (config?.errorRedirect && !result.authSuccess) {
-      return Response.redirect(
-        `${config.errorRedirect}?error=${encodeURIComponent(result.authError || "Unknown error")}`
-      );
+      try {
+        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
+          result.authError || "Unknown error"
+        )}`;
+        return Response.redirect(new URL(errorUrl, baseOrigin).href);
+      } catch (e) {
+        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
+        return Response.redirect(baseOrigin);
+      }
     }
 
-    // Default behavior - redirect to base URL
-    const baseUrl = new URL(request.url).origin;
-    return Response.redirect(baseUrl);
+    // Default: redirect to base URL
+    return Response.redirect(baseOrigin);
   }
 
   /**
@@ -1970,11 +1794,17 @@ export async function routeAgentRequest<Env>(
     request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
     request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
   ) {
+    const newHeaders = new Headers(response.headers);
+
+    // Add CORS headers
+    for (const [key, value] of Object.entries(corsHeaders)) {
+      newHeaders.set(key, value);
+    }
+
     response = new Response(response.body, {
-      headers: {
-        ...response.headers,
-        ...corsHeaders
-      }
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders
     });
   }
   return response;

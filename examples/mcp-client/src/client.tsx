@@ -78,6 +78,52 @@ function App() {
     });
   };
 
+  const handleDisconnect = async (serverId: string) => {
+    await agentFetch(
+      {
+        agent: "my-agent",
+        host: agent.host,
+        name: sessionId!,
+        path: "disconnect-mcp"
+      },
+      {
+        body: JSON.stringify({ serverId }),
+        method: "POST"
+      }
+    );
+  };
+
+  const handleGetTools = async (serverId: string) => {
+    try {
+      const response = await agentFetch(
+        {
+          agent: "my-agent",
+          host: agent.host,
+          name: sessionId!,
+          path: "get-tools"
+        },
+        {
+          body: JSON.stringify({ serverId }),
+          method: "POST"
+        }
+      );
+      // biome-ignore lint/suspicious/noExplicitAny: just a demo
+      const data = (await response.json()) as { tools: any[]; error?: string };
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      console.log("Server tools:", data.tools);
+      alert(`Server Tools:\n\n${JSON.stringify(data.tools, null, 2)}`);
+    } catch (error) {
+      console.error("Failed to get tools:", error);
+      alert(
+        `Failed to get tools: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  };
+
   return (
     <div className="container">
       <div className="status-indicator">
@@ -116,14 +162,24 @@ function App() {
                 {server.state} (id: {id})
               </div>
             </div>
-            {server.state === "authenticating" && server.auth_url && (
-              <button
-                type="button"
-                onClick={() => openPopup(server.auth_url as string)}
-              >
-                Authorize
+            <div style={{ display: "flex", gap: "8px" }}>
+              {server.state === "authenticating" && server.auth_url && (
+                <button
+                  type="button"
+                  onClick={() => openPopup(server.auth_url as string)}
+                >
+                  Authorize
+                </button>
+              )}
+              {server.state === "ready" && (
+                <button type="button" onClick={() => handleGetTools(id)}>
+                  List Tools
+                </button>
+              )}
+              <button type="button" onClick={() => handleDisconnect(id)}>
+                Disconnect
               </button>
-            )}
+            </div>
           </div>
         ))}
       </div>

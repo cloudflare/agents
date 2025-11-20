@@ -140,13 +140,7 @@ export default function RPC({
             </div>
             <div className="messages-list">
               {messages.map((message, messageId) => (
-                <div
-                  key={`message-${
-                    // biome-ignore lint/suspicious/noArrayIndexKey: eh
-                    messageId
-                  }`}
-                  className="message-item"
-                >
+                <div key={`message-${messageId}`} className="message-item">
                   <div className="message-content">
                     <div className="message-icon-container">
                       <svg

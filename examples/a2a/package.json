@@ -1,13 +1,10 @@
 {
   "name": "@cloudflare/agents-a2a-example",
   "private": true,
-  "author": {
-    "email": "matt@stackone.com",
-    "name": "Matt Carey"
-  },
+  "author": "Matt Carey <mcarey@cloudflare.com>",
   "dependencies": {
     "@a2a-js/sdk": "^0.2.2",
-    "hono": "^4.9.10"
+    "hono": "^4.10.4"
   },
   "keywords": [],
   "scripts": {

@@ -1,0 +1,11 @@
+{
+  "author": "Matt Carey <mcarey@cloudflare.com>",
+  "keywords": [],
+  "name": "@cloudflare/agents-mcp-elicitation",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "type": "module"
+}

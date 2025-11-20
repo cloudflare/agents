@@ -1,0 +1,26 @@
+{
+  "name": "@cloudflare/agents-app-sdk-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "vite build && wrangler deploy",
+    "dev:wrangler": "wrangler dev",
+    "dev": "vite",
+    "build": "vite build",
+    "types": "wrangler types --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/vite-plugin": "^1.14.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "chess.js": "^1.4.0",
+    "react": "^19.2.0",
+    "react-chessboard": "^5.8.3",
+    "react-dom": "^19.2.0",
+    "vite": "^7.2.2",
+    "vite-plugin-singlefile": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2"
+  }
+}

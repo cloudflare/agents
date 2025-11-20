@@ -179,7 +179,6 @@ export default function Chat() {
                 switch (part.type) {
                   case "text":
                     return (
-                      // biome-ignore lint/suspicious/noArrayIndexKey: vibes
                       <div key={i} className="message-content">
                         {part.text}
                       </div>

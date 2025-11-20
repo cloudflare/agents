@@ -29,6 +29,8 @@ export type Env = {
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
+  TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
+  TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
 };
 
 type State = unknown;
@@ -38,11 +40,18 @@ type Props = {
 };
 
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
+  observability = undefined;
   private tempToolHandle?: { remove: () => void };
 
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
-    { capabilities: { logging: {}, tools: { listChanged: true } } }
+    {
+      capabilities: {
+        logging: {},
+        tools: { listChanged: true },
+        elicitation: { form: {}, url: {} }
+      }
+    }
   );
 
   async init() {
@@ -80,6 +89,42 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
         });
         return {
           content: [{ type: "text", text: `logged:${level}` }]
+        };
+      }
+    );
+
+    this.server.tool(
+      "elicitName",
+      "Test tool that elicits user input for a name",
+      {},
+      async (): Promise<CallToolResult> => {
+        const result = await this.server.server.elicitInput({
+          message: "What is your name?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Your name"
+              }
+            },
+            required: ["name"]
+          }
+        });
+
+        if (result.action === "accept" && result.content?.name) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `You said your name is: ${result.content.name}`
+              }
+            ]
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: "Elicitation cancelled" }]
         };
       }
     );
@@ -129,6 +174,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
 
 // Test email agents
 export class TestEmailAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -143,6 +189,7 @@ export class TestEmailAgent extends Agent<Env> {
 }
 
 export class TestCaseSensitiveAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -155,6 +202,7 @@ export class TestCaseSensitiveAgent extends Agent<Env> {
 }
 
 export class TestUserNotificationAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -166,11 +214,29 @@ export class TestUserNotificationAgent extends Agent<Env> {
   }
 }
 
+export class TestDestroyScheduleAgent extends Agent<Env, { status: string }> {
+  observability = undefined;
+  initialState = {
+    status: "unscheduled"
+  };
+
+  async scheduleSelfDestructingAlarm() {
+    this.setState({ status: "scheduled" });
+    await this.schedule(0, "destroy");
+  }
+
+  getStatus() {
+    return this.state.status;
+  }
+}
+
 // An Agent that tags connections in onConnect,
 // then echoes whether the tag was observed in onMessage
 export class TestRaceAgent extends Agent<Env> {
   initialState = { hello: "world" };
   static options = { hibernate: true };
+
+  observability = undefined;
 
   async onConnect(conn: Connection<{ tagged: boolean }>) {
     // Simulate real async setup to widen the window a bit
@@ -186,26 +252,34 @@ export class TestRaceAgent extends Agent<Env> {
 
 // Test Agent for OAuth client side flows
 export class TestOAuthAgent extends Agent<Env> {
+  observability = undefined;
+
   async onRequest(_request: Request): Promise<Response> {
     return new Response("Test OAuth Agent");
   }
 
-  async setupMockMcpConnection(
-    serverId: string,
-    _serverName: string,
-    _serverUrl: string,
-    callbackUrl: string
-  ): Promise<void> {
-    // Register the callback URL in memory (simulates non-hibernated state)
-    this.mcp.registerCallbackUrl(`${callbackUrl}/${serverId}`);
+  // Allow tests to configure OAuth callback behavior
+  configureOAuthForTest(config: {
+    successRedirect?: string;
+    errorRedirect?: string;
+  }): void {
+    this.mcp.configureOAuthCallback(config);
+  }
 
-    // Create a mock connection object in mcpConnections to fully simulate non-hibernated state
-    // This prevents _handlePotentialOAuthCallback from trying to restore the connection
-    this.mcp.mcpConnections[serverId] = {
-      connectionState: "ready",
+  private createMockMcpConnection(
+    serverId: string,
+    serverUrl: string,
+    connectionState: "ready" | "authenticating" | "connecting" = "ready"
+  ): MCPClientConnection {
+    return {
+      url: new URL(serverUrl),
+      connectionState,
       tools: [],
       resources: [],
       prompts: [],
+      resourceTemplates: [],
+      serverCapabilities: undefined,
+      lastConnectedTransport: undefined,
       options: {
         transport: {
           authProvider: {
@@ -215,10 +289,37 @@ export class TestOAuthAgent extends Agent<Env> {
         }
       },
       completeAuthorization: async (_code: string) => {
-        // Mock successful authorization
+        this.mcp.mcpConnections[serverId].connectionState = "ready";
+      },
+      establishConnection: async () => {
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       }
     } as unknown as MCPClientConnection;
+  }
+
+  async setupMockMcpConnection(
+    serverId: string,
+    serverName: string,
+    serverUrl: string,
+    callbackUrl: string,
+    clientId?: string | null
+  ): Promise<void> {
+    // Save server to database with callback URL
+    // biome-ignore lint/suspicious/noExplicitAny: just a test
+    await (this.mcp as any)._storage.saveServer({
+      id: serverId,
+      name: serverName,
+      server_url: serverUrl,
+      callback_url: `${callbackUrl}/${serverId}`,
+      client_id: clientId ?? null,
+      auth_url: null,
+      server_options: null
+    });
+    this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
+      serverId,
+      serverUrl,
+      "ready"
+    );
   }
 
   async setupMockOAuthState(
@@ -227,37 +328,26 @@ export class TestOAuthAgent extends Agent<Env> {
     _state: string,
     options?: { createConnection?: boolean }
   ): Promise<void> {
-    // Set up connection in authenticating state so OAuth callback can be processed
-
-    // If requested, pre-create a connection in authenticating state
-    // This is needed for non-hibernation tests where the connection already exists
     if (options?.createConnection) {
-      this.mcp.mcpConnections[serverId] = {
-        connectionState: "authenticating",
-        tools: [],
-        resources: [],
-        prompts: [],
-        options: {
-          transport: {
-            authProvider: {
-              clientId: "test-client-id",
-              authUrl: "http://example.com/oauth/authorize"
-            }
-          }
-        },
-        completeAuthorization: async (_code: string) => {
-          // Mock successful authorization
-          this.mcp.mcpConnections[serverId].connectionState = "ready";
-        }
-      } as unknown as MCPClientConnection;
+      const server = this.getMcpServerFromDb(serverId);
+      if (!server) {
+        throw new Error(
+          `Test error: Server ${serverId} not found in DB. Set up DB record before calling setupMockOAuthState.`
+        );
+      }
+
+      this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
+        serverId,
+        server.server_url,
+        "authenticating"
+      );
     } else if (this.mcp.mcpConnections[serverId]) {
-      // Set existing connection state to "authenticating" and mock completeAuthorization
-      // so the callback can be processed
-      this.mcp.mcpConnections[serverId].connectionState = "authenticating";
-      this.mcp.mcpConnections[serverId].completeAuthorization = async (
-        _code: string
-      ) => {
-        // Mock successful authorization
+      const conn = this.mcp.mcpConnections[serverId];
+      conn.connectionState = "authenticating";
+      conn.completeAuthorization = async (_code: string) => {
+        this.mcp.mcpConnections[serverId].connectionState = "ready";
+      };
+      conn.establishConnection = async () => {
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       };
     }
@@ -280,8 +370,8 @@ export class TestOAuthAgent extends Agent<Env> {
     return servers.length > 0 ? servers[0] : null;
   }
 
-  isCallbackUrlRegistered(callbackUrl: string): boolean {
-    return this.mcp.isCallbackRequest(new Request(callbackUrl));
+  async isCallbackUrlRegistered(callbackUrl: string): Promise<boolean> {
+    return await this.mcp.isCallbackRequest(new Request(callbackUrl));
   }
 
   removeMcpConnection(serverId: string): void {
@@ -291,9 +381,16 @@ export class TestOAuthAgent extends Agent<Env> {
   hasMcpConnection(serverId: string): boolean {
     return !!this.mcp.mcpConnections[serverId];
   }
+
+  resetMcpStateRestoredFlag(): void {
+    // @ts-expect-error - accessing private property for testing
+    this._mcpConnectionsInitialized = false;
+  }
 }
 
 export class TestChatAgent extends AIChatAgent<Env> {
+  observability = undefined;
+
   async onChatMessage() {
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
@@ -351,6 +448,27 @@ export class TestChatAgent extends AIChatAgent<Env> {
     };
     await this.persistMessages([messageWithToolOutput]);
     return messageWithToolOutput;
+  }
+}
+
+// Test MCP Agent for jurisdiction feature
+export class TestMcpJurisdiction extends McpAgent<Env> {
+  observability = undefined;
+
+  server = new McpServer(
+    { name: "test-jurisdiction-server", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+
+  async init() {
+    this.server.tool(
+      "test-tool",
+      "A test tool",
+      { message: z.string().describe("Test message") },
+      async ({ message }): Promise<CallToolResult> => ({
+        content: [{ text: `Echo: ${message}`, type: "text" }]
+      })
+    );
   }
 }
 
