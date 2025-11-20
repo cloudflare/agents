@@ -88,24 +88,6 @@ export abstract class McpAgent<
     return websockets[0];
   }
 
-  /** Build MessageExtraInfo from extracted headers and auth info */
-  private buildMessageExtraInfo(extraInfo?: {
-    headers: Record<string, string>;
-  }): MessageExtraInfo | undefined {
-    if (!extraInfo) return;
-
-    const headers = { ...extraInfo.headers };
-
-    // Remove internal headers that are not part of the original request
-    delete headers[MCP_HTTP_METHOD_HEADER];
-    delete headers[MCP_MESSAGE_HEADER];
-    delete headers["upgrade"];
-
-    return {
-      requestInfo: { headers }
-    };
-  }
-
   /** Returns a new transport matching the type of the Agent. */
   private initTransport() {
     switch (this.getTransportType()) {
@@ -210,7 +192,7 @@ export abstract class McpAgent<
   async onSSEMcpMessage(
     _sessionId: string,
     messageBody: unknown,
-    extraInfo?: { headers: Record<string, string> }
+    extraInfo?: MessageExtraInfo
   ): Promise<Error | null> {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
@@ -232,10 +214,7 @@ export abstract class McpAgent<
         return null; // Message was handled by elicitation system
       }
 
-      // Build extra info with auth and request headers, matching StreamableHTTP behavior
-      const extra = this.buildMessageExtraInfo(extraInfo);
-
-      this._transport?.onmessage?.(parsedMessage, extra);
+      this._transport?.onmessage?.(parsedMessage, extraInfo);
       return null;
     } catch (error) {
       console.error("Error forwarding message to SSE:", error);

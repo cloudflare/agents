@@ -1,6 +1,7 @@
 import {
   JSONRPCMessageSchema,
   type JSONRPCMessage,
+  type MessageExtraInfo,
   InitializeRequestSchema,
   isJSONRPCResponse,
   isJSONRPCNotification
@@ -682,9 +683,24 @@ export const createLegacySseHandler = (
       });
 
       const messageBody = await request.json();
-      const error = await agent.onSSEMcpMessage(sessionId, messageBody, {
-        headers: Object.fromEntries(request.headers.entries())
-      });
+
+      // Build MessageExtraInfo with filtered headers
+      const headers = Object.fromEntries(request.headers.entries());
+
+      // Remove internal headers that are not part of the original request
+      delete headers[MCP_HTTP_METHOD_HEADER];
+      delete headers[MCP_MESSAGE_HEADER];
+      delete headers["upgrade"];
+
+      const extraInfo: MessageExtraInfo = {
+        requestInfo: { headers }
+      };
+
+      const error = await agent.onSSEMcpMessage(
+        sessionId,
+        messageBody,
+        extraInfo
+      );
 
       if (error) {
         return new Response(error.message, {
