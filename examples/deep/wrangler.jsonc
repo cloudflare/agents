@@ -4,8 +4,8 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "DeepAgent",
-        "name": "DEEP_AGENT"
+        "class_name": "SystemAgent",
+        "name": "SYSTEM_AGENT"
       }
     ]
   },
@@ -18,7 +18,7 @@
   "main": "src/index.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["DeepAgent"],
+      "new_sqlite_classes": ["SystemAgent"],
       "tag": "v1"
     }
   ],

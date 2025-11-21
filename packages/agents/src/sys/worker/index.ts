@@ -6,6 +6,7 @@ import type {
   ThreadRequestContext
 } from "../types";
 import type { KVNamespace } from "@cloudflare/workers-types";
+import type { SystemAgent } from "../agent";
 
 const CF_CONTEXT_KEYS = [
   "colo",
@@ -81,7 +82,7 @@ export type HandlerOptions = {
 };
 
 type HandlerEnv = {
-  DEEP_AGENT: DurableObjectNamespace<Agent>;
+  SYSTEM_AGENT: DurableObjectNamespace<SystemAgent>;
   AGENT_REGISTRY: KVNamespace;
 };
 
@@ -146,7 +147,7 @@ export const createHandler = (opts: HandlerOptions = {}) => {
           request: buildRequestContext(req),
           agentType
         };
-        const stub = await getAgentByName(env.DEEP_AGENT, id);
+        const stub = await getAgentByName(env.SYSTEM_AGENT, id);
         const registerRes = await stub.fetch(
           new Request("http://do/register", {
             method: "POST",
@@ -155,7 +156,10 @@ export const createHandler = (opts: HandlerOptions = {}) => {
           })
         );
         if (!registerRes.ok) {
-          return new Response("failed to register thread", { status: 500 });
+          const err = await registerRes.text();
+          return new Response(`failed to register thread: ${err}`, {
+            status: 500
+          });
         }
 
         await saveThreadMetadata(env.AGENT_REGISTRY, metadata);
@@ -169,7 +173,7 @@ export const createHandler = (opts: HandlerOptions = {}) => {
       const match = url.pathname.match(/^\/threads\/([^/]+)(?:\/(.*))?$/);
       if (!match) return new Response("not found", { status: 404 });
       const [_, threadId, tail] = match;
-      const stub = await getAgentByName(env.DEEP_AGENT, threadId);
+      const stub = await getAgentByName(env.SYSTEM_AGENT, threadId);
 
       // Create a new request with the path that the DO expects
       const doUrl = new URL(req.url);

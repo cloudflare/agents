@@ -20,12 +20,8 @@ async function main() {
     external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
     sourcemap: true,
-    splitting: true,
-    esbuildOptions(options, _) {
-      options.loader = {
-        ...options.loader,
-        ".html": "text"
-      };
+    loader: {
+      ".html": "text"
     }
   });
 

@@ -140,7 +140,7 @@ export class AgentSystem {
       options,
       customProvider
     } = this;
-    class AgentSystem extends SystemAgent<AgentEnv> {
+    class ConfiguredAgentSystem extends SystemAgent<AgentEnv> {
       async onDone(ctx: { agent: SystemAgent; final: string }): Promise<void> {
         // throw new Error("Method not implemented.");
       }
@@ -242,6 +242,6 @@ export class AgentSystem {
       handlerOptions.agentDefinitions = Array.from(this.agentRegistry.values());
     }
     const handler = createHandler(handlerOptions);
-    return { SystemAgent, handler };
+    return { SystemAgent: ConfiguredAgentSystem, handler };
   }
 }

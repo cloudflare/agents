@@ -1,4 +1,4 @@
-import { makeOpenAI, type Provider } from "../providers";
+import { type Provider } from "../providers";
 import type {
   AgentMiddleware,
   ToolHandler,
@@ -178,7 +178,7 @@ export abstract class SystemAgent<
       return Response.json({ ok: true });
     } catch (error: unknown) {
       const err = error as Error;
-      return Response.json({ error: err.message }, { status: 500 });
+      return new Response(err.message, { status: 500 });
     }
   }
 
@@ -342,8 +342,7 @@ export abstract class SystemAgent<
     if (!runState || runState.status !== "running") return;
     const schedules = this.getSchedules();
     if (!schedules.length) {
-      // now + 1 second
-      const now = new Date(Date.now() + 1000);
+      const now = new Date();
       runState.nextAlarmAt = now.getTime();
       await this.schedule(now, "run");
     }
@@ -529,7 +528,7 @@ export abstract class SystemAgent<
     // Yield to respect per-event subrequest limits; schedule next tick immediately
     const runState = this.runState;
     if (!runState) return;
-    const now = new Date(Date.now() + 1000);
+    const now = new Date();
     runState.nextAlarmAt = now.getTime();
     await this.schedule(now, "run");
   }
