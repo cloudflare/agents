@@ -28,5 +28,5 @@ export async function step(
     res.message && "toolCalls" in res.message && res.message.toolCalls
       ? res.message.toolCalls
       : [];
-  ctx.agent.store.setPendingToolCalls(newToolCalls);
+  ctx.agent.info.pendingToolCalls = newToolCalls;
 }

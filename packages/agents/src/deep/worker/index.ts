@@ -1,6 +1,10 @@
 import { getAgentByName, type Agent } from "../..";
 import html from "./client.html";
-import type { ThreadMetadata, ThreadRequestContext } from "../types";
+import type {
+  AgentBlueprint,
+  ThreadMetadata,
+  ThreadRequestContext
+} from "../types";
 import type { KVNamespace } from "@cloudflare/workers-types";
 
 const CF_CONTEXT_KEYS = [
@@ -73,6 +77,7 @@ type HandlerOpions = {
   baseUrl?: string;
   /** Secret to use for authorization. Optional means no check. */
   secret?: string;
+  agentDefinitions?: AgentBlueprint[];
 };
 
 type HandlerEnv = {
@@ -112,17 +117,34 @@ export const createHandler = (opts: HandlerOpions = {}) => {
         return new Response("invalid secret", { status: 401 });
       }
 
+      if (req.method === "GET" && url.pathname === "/info") {
+        // Transform blueprints into a clean list for the UI
+        const agents = (opts.agentDefinitions || []).map((b) => ({
+          name: b.name,
+          description: b.description
+        }));
+        return Response.json({ agents });
+      }
+
       if (req.method === "GET" && url.pathname === "/threads") {
         const threads = await listThreads(env.AGENT_REGISTRY);
         return Response.json({ threads });
       }
 
       if (req.method === "POST" && url.pathname === "/threads") {
+        const body = (await req.json().catch(() => ({}))) as {
+          agentType?: string;
+        };
+
+        // Default to "default" or "base-agent" if not specified
+        const agentType = body.agentType || "default";
+
         const id = crypto.randomUUID();
         const metadata: ThreadMetadata = {
           id,
           createdAt: new Date().toISOString(),
-          request: buildRequestContext(req)
+          request: buildRequestContext(req),
+          agentType
         };
         const stub = await getAgentByName(env.DEEP_AGENT, id);
         const registerRes = await stub.fetch(
@@ -139,7 +161,7 @@ export const createHandler = (opts: HandlerOpions = {}) => {
         await saveThreadMetadata(env.AGENT_REGISTRY, metadata);
 
         return Response.json(
-          { id, createdAt: metadata.createdAt },
+          { id, createdAt: metadata.createdAt, agentType },
           { status: 201 }
         );
       }

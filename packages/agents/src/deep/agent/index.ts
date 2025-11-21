@@ -1,12 +1,11 @@
-import type { Provider } from "../providers";
+import { makeOpenAI, type Provider } from "../providers";
 import type {
   AgentMiddleware,
   ToolHandler,
   ApproveBody,
   ToolCall,
   InvokeBody,
-  ToolMeta,
-  SubagentDescriptor,
+  AgentBlueprint,
   MWContext,
   ThreadMetadata,
   AgentState,
@@ -21,37 +20,10 @@ import { step } from "./step";
 import { Store } from "./store";
 import { PersistedObject } from "./config";
 
-function collectToolsAndDefs(
-  mw: AgentMiddleware[],
-  extra?: Record<string, ToolHandler>
-): { handlers: Record<string, ToolHandler>; defs: ToolMeta[] } {
-  const handlers: Record<string, ToolHandler> = {};
-  const defsMap = new Map<string, ToolMeta>();
-
-  const ingest = (name: string, fn: ToolHandler) => {
-    if (handlers[name])
-      throw new Error(`Tool ${name} already exists (conflict).`);
-    handlers[name] = fn;
-    const meta = getToolMeta(fn, name);
-    if (meta && !defsMap.has(meta.name)) defsMap.set(meta.name, meta);
-  };
-
-  // First ingest extra tools
-  for (const [name, fn] of Object.entries(extra ?? {})) {
-    ingest(name, fn);
-  }
-
-  // Then ingest middleware tools
-  for (const m of mw) {
-    for (const [name, fn] of Object.entries(m.tools ?? {})) {
-      ingest(name, fn);
-    }
-  }
-  return { handlers, defs: Array.from(defsMap.values()) };
-}
-
 export interface AgentEnv {
   DEEP_AGENT: DurableObjectNamespace<DeepAgent>;
+  LLM_API_KEY?: string;
+  LLM_API_BASE?: string;
 }
 
 // I rather name this State but the name's taken
@@ -61,23 +33,23 @@ export type Info = {
   request: ThreadRequestContext;
   agentType: string;
   parentInfo?: ParentInfo;
-  pendingToolCalls: ToolCall[];
+  pendingToolCalls?: ToolCall[];
+};
+
+// Per-agent configuration for middleware and tools
+export type AgentConfig = {
+  middleware: Record<string, unknown>;
+  tools: Record<string, unknown>;
 };
 
 export abstract class DeepAgent<
   Env extends AgentEnv = AgentEnv
 > extends Agent<Env> {
-  // Abstract properties implemented by the factory
-  protected abstract _systemPrompt: string;
-  protected abstract defaultMiddleware: AgentMiddleware[];
-  protected abstract extraTools: Record<string, ToolHandler>;
+  protected _tools: Record<string, ToolHandler> = {};
 
   // State
   readonly info: Info;
   readonly runState: RunState;
-  abstract provider: Provider;
-  abstract _model?: string;
-  abstract subagents: Map<string, SubagentDescriptor>;
   store: Store;
   observability = undefined;
 
@@ -86,52 +58,21 @@ export abstract class DeepAgent<
     const { kv, sql } = ctx.storage;
     this.store = new Store(sql, kv);
     this.store.init();
-    this.info = PersistedObject(kv);
-    this.runState = PersistedObject<RunState>(kv, { prefix: "_runState" });
+    this.info = PersistedObject<Info>(kv, { prefix: "_info" });
+    this.runState = PersistedObject<RunState>(kv, {
+      prefix: "_runState",
+      defaults: {
+        status: "registered"
+      }
+    });
   }
 
-  // Get system prompt based on agent type
-  get systemPrompt(): string {
-    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
-      return this.subagents.get(this.info.agentType)?.prompt ?? "";
-    }
-
-    return this._systemPrompt;
-  }
-
-  // Get middleware based on agent type
-  get middleware(): AgentMiddleware[] {
-    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
-      return this.subagents.get(this.info.agentType)?.middleware ?? [];
-    }
-
-    return this.defaultMiddleware;
-  }
-
-  // Get tools based on agent type
-  get tools(): { handlers: Record<string, ToolHandler>; defs: ToolMeta[] } {
-    let tools = this.extraTools;
-    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
-      const specificTools = this.subagents.get(this.info.agentType)?.tools;
-      tools = Object.fromEntries(
-        (specificTools ?? []).map((t) => {
-          const key = getToolMeta(t)?.name ?? (t.name || "").trim();
-          if (!key) throw new Error("Tool missing name: use defineTool(...)");
-          return [key, t];
-        })
-      );
-    }
-
-    return collectToolsAndDefs(this.middleware, tools);
-  }
-
-  get model() {
-    if (this.info.agentType && this.subagents.has(this.info.agentType)) {
-      return this.subagents.get(this.info.agentType)?.model;
-    }
-
-    return this._model;
-  }
+  abstract get middleware(): AgentMiddleware[];
+  abstract get tools(): Record<string, ToolHandler>;
+  abstract get systemPrompt(): string;
+  abstract get model(): string;
+  abstract get config(): AgentConfig;
+  abstract get provider(): Provider;
 
   get messages() {
     return this.store.listMessages();
@@ -140,7 +81,13 @@ export abstract class DeepAgent<
   get mwContext(): MWContext {
     return {
       agent: this,
-      provider: this.provider
+      provider: this.provider,
+      registerTool: (tool: ToolHandler) => {
+        const name = getToolMeta(tool)?.name;
+        if (!name) throw new Error("Tool missing name: use defineTool(...)");
+
+        this._tools[name] = tool;
+      }
     };
   }
 
@@ -176,10 +123,6 @@ export abstract class DeepAgent<
     this.broadcast(JSON.stringify({ ...evt, seq }));
   }
 
-  async onStart() {
-    for (const m of this.middleware) await m.onInit?.(this.mwContext);
-  }
-
   // callback exposed by Agent class
   async onRequest(req: Request) {
     const url = new URL(req.url);
@@ -205,18 +148,34 @@ export abstract class DeepAgent<
     }
   }
 
+  // TODO: revisit registration/init
   async registerThread(req: Request) {
     try {
       const metadata = await req.json<ThreadMetadata>().catch(() => null);
       if (!metadata || !metadata.id) {
         return new Response("invalid metadata", { status: 400 });
       }
+
+      // persist ID
       if (!this.info.threadId) {
-        // magically persisted!
         this.info.threadId = metadata.id;
       }
+
+      // persist agent configuration
       this.info.createdAt = metadata.createdAt;
       this.info.request = metadata.request;
+
+      // Critical: Set the type so dynamic getters (tools/prompt) work
+      if (metadata.agentType) {
+        this.info.agentType = metadata.agentType;
+      }
+
+      // If this is a subagent, persist parent info immediately
+      if (metadata.parent) {
+        this.info.parentInfo = metadata.parent;
+      }
+      for (const m of this.middleware) await m.onInit?.(this.mwContext);
+
       return Response.json({ ok: true });
     } catch (error: unknown) {
       const err = error as Error;
@@ -228,26 +187,17 @@ export abstract class DeepAgent<
     try {
       const body = (await req.json().catch(() => ({}))) as InvokeBody;
 
-      // Store threadId on first invoke if provided
-      if (body.threadId && !this.info.threadId) {
-        this.info.threadId = body.threadId;
-      }
-
       // Merge input into state
       if (body.messages?.length) this.store.appendMessages(body.messages);
       if (body.files) this.store.mergeFiles(body.files);
-      if (body.agentType) {
-        this.info.agentType = body.agentType;
-      }
-      if (body.parent) {
-        this.info.parentInfo = body.parent;
-      }
 
       let runState = this.runState;
       // Start or continue run
       if (
         !runState ||
-        ["completed", "canceled", "error"].includes(runState.status)
+        ["completed", "canceled", "error", "registered"].includes(
+          runState.status
+        )
       ) {
         runState.runId = this.runState?.runId ?? crypto.randomUUID();
         runState.status = "running";
@@ -278,7 +228,7 @@ export abstract class DeepAgent<
     if (!runState) return new Response("no run", { status: 400 });
 
     // Apply approval to pending tool calls
-    const pending = this.info.pendingToolCalls;
+    const pending = this.info.pendingToolCalls ?? [];
     if (!pending.length)
       return new Response("no pending tool calls", { status: 400 });
 
@@ -348,18 +298,26 @@ export abstract class DeepAgent<
 
   getState(_req: Request) {
     const { threadId, agentType, parentInfo, request, createdAt } = this.info;
-    const {
-      model,
-      tools: { defs }
-    } = this;
+    const { model } = this;
+    const tools = Object.values(this.tools).map((tool) => {
+      const meta = getToolMeta(tool);
+      if (!meta) throw new Error(`Tool ${tool.name} has no metadata`);
+      return meta;
+    });
     const subagentLinks = this.store.listSubagentLinks();
     let state: AgentState = {
       messages: this.store.listMessages(),
       threadId,
       agentType,
       model,
-      tools: defs,
-      thread: { id: threadId, request, parent: parentInfo, createdAt }
+      tools,
+      thread: {
+        id: threadId,
+        request,
+        parent: parentInfo,
+        createdAt,
+        agentType
+      }
     };
     if (parentInfo) {
       state = { ...state, parent: parentInfo };
@@ -393,7 +351,7 @@ export abstract class DeepAgent<
   }
 
   popPendingToolCalls(maxTools: number) {
-    const calls = this.info.pendingToolCalls;
+    const calls = this.info.pendingToolCalls ?? [];
     if (calls.length <= maxTools) {
       this.info.pendingToolCalls = [];
       return calls;
@@ -425,7 +383,7 @@ export abstract class DeepAgent<
       await Promise.all(mws.map((m) => m.onToolStart?.(this.mwContext, call)));
 
     // Execute all tool calls in parallel
-    const tools = this.tools.handlers;
+    const tools = this.tools;
     const toolResults = await Promise.all(
       toolBatch.map(async (call) => {
         this.emit(AgentEventType.TOOL_STARTED, {
@@ -499,8 +457,9 @@ export abstract class DeepAgent<
       return;
     }
 
+    const pending = this.info.pendingToolCalls ?? [];
     // If we consumed some but still have pending tool calls, pause to yield and reschedule
-    if (this.info.pendingToolCalls.length > 0) {
+    if (pending.length > 0) {
       await this.reschedule();
       return;
     }
@@ -608,72 +567,259 @@ export abstract class DeepAgent<
  * This creates a Durable Object class that needs to be exported, so wrangler can read it.
  * Make sure you add the binding `DEEP_AGENT` in your `wrangler.jsonc` file.
  */
-export const createDeepAgent = (options: {
-  provider: Provider;
-  systemPrompt: string;
-  middleware?: AgentMiddleware[];
-  model?: string;
-  tools?: ToolHandler[];
-  subagents?: SubagentDescriptor[];
-  onDone?: (ctx: { agent: DeepAgent; final: string }) => Promise<void>;
-}): typeof Agent<unknown> => {
-  // Build configuration maps from subagent descriptors
-  const subagentDescriptorMap = new Map<string, SubagentDescriptor>();
 
-  const extraTools = Object.fromEntries(
-    (options.tools ?? []).map((t) => {
-      const key = getToolMeta(t)?.name ?? (t.name || "").trim();
-      if (!key) throw new Error("Tool missing name: use defineTool(...)");
-      return [key, t];
-    })
-  );
+// TODO: I want this API surface
+// import { AgentSystem } from "agents/sys";
 
-  for (const desc of options.subagents ?? []) {
-    subagentDescriptorMap.set(desc.name, desc);
+// const system = new AgentSystem({
+//   defaultModel: "openai:gpt-4.1",
+// });
+
+// // add/override custom tools/middleware
+// system.addTool("util/echo", echoHandler, echoMeta, { tags: ["util"] });
+// system.addMiddleware("logger", loggerMw)
+
+// // Agents can also be added using HTTP API
+// // so we can have a Agent Dev UI server 👀
+// system.addAgent({
+//   name: "general-purpose",
+//   memoryBlocks: [...],
+//   prompt: BASE_AGENT_PROMPT,
+//   use: {
+//     tools: [{ pattern: "fs/*" }, "plan/write_todos", "agent/task"],
+//     middleware: ["planning", "filesystem"]
+//   }
+// });
+
+// export const Runtime = system.export();   // Durable Object class
+// export default system.handler();          // Worker fetch()
+
+// Agent Systems are the control plane for your agents.
+// The Agent System managed a hierarchy of agents and tools.
+//
+// From an Agent System you can create an Agency, which is a namespace
+// for your agents. Agencies are durable objects that can be used to
+// run your agents.
+
+type AgentSystemOptions = {
+  defaultModel: string;
+};
+
+class ToolRegistry {
+  private tools = new Map<string, ToolHandler>();
+  private tags = new Map<string, string[]>(); // Map<tag, toolNames>
+
+  addTool(name: string, handler: ToolHandler, tags?: string[]) {
+    this.tools.set(name, handler);
+    if (tags) {
+      for (const tag of tags) {
+        const tools = this.tags.get(tag) || [];
+        tools.push(name);
+        this.tags.set(tag, tools);
+      }
+    }
   }
-  return class extends DeepAgent {
-    defaultMiddleware: AgentMiddleware[] = options.middleware ?? [
-      planning(),
-      filesystem(),
-      subagents({ subagents: options.subagents })
-    ];
-    subagents = subagentDescriptorMap;
-    extraTools = extraTools;
-    _systemPrompt = options.systemPrompt;
-    _model = options.model;
 
-    // Wrapped provider to emit events
-    provider: Provider = {
-      invoke: async (req, opts) => {
-        this.emit(AgentEventType.MODEL_STARTED, {
-          model: req.model
-        });
-        const out = await options.provider.invoke(req, opts);
-        this.emit(AgentEventType.MODEL_COMPLETED, {
-          usage: {
-            inputTokens: out.usage?.promptTokens ?? 0,
-            outputTokens: out.usage?.completionTokens ?? 0
+  select(tools: string[], tags: string[]): ToolHandler[] {
+    const selected = [];
+    for (const tool of tools) {
+      selected.push(this.tools.get(tool)!);
+    }
+    for (const tag of tags) {
+      let tools = this.tags.get(tag);
+      if (!tools) {
+        console.warn(`No tools found for tag ${tag}`);
+        tools = [];
+      }
+      selected.push(...tools.map((t) => this.tools.get(t)!));
+    }
+    return selected;
+  }
+}
+
+class MiddlewareRegistry {
+  private middlewares = new Map<string, AgentMiddleware>();
+  private tags = new Map<string, string[]>(); // Map<tag, middlewareNames>
+
+  addMiddleware(name: string, handler: AgentMiddleware, tags?: string[]) {
+    this.middlewares.set(name, handler);
+    if (tags) {
+      for (const tag of tags) {
+        const tools = this.tags.get(tag) || [];
+        tools.push(name);
+        this.tags.set(tag, tools);
+      }
+    }
+  }
+
+  select(tools: string[], tags: string[]): AgentMiddleware[] {
+    const selected = [];
+    for (const tool of tools) {
+      selected.push(this.middlewares.get(tool)!);
+    }
+    for (const tag of tags) {
+      let tools = this.tags.get(tag);
+      if (!tools) {
+        console.warn(`No tools found for tag ${tag}`);
+        tools = [];
+      }
+      selected.push(...tools.map((t) => this.middlewares.get(t)!));
+    }
+    return selected;
+  }
+}
+
+export class AgentSystem {
+  toolRegistry = new ToolRegistry();
+  middlewareRegistry = new MiddlewareRegistry();
+  agentRegistry = new Map<string, AgentBlueprint>();
+  customProvider?: Provider;
+  config: Record<string, AgentConfig> = {};
+
+  constructor(private options: AgentSystemOptions) {}
+
+  addTool(name: string, handler: ToolHandler, tags?: string[]) {
+    this.toolRegistry.addTool(name, handler, tags);
+  }
+
+  addMiddleware(name: string, handler: AgentMiddleware, tags?: string[]) {
+    this.middlewareRegistry.addMiddleware(name, handler, tags);
+  }
+
+  addAgent(blueprint: AgentBlueprint) {
+    this.agentRegistry.set(blueprint.name, blueprint);
+  }
+
+  setProvider(provider: Provider) {
+    this.customProvider = provider;
+  }
+
+  export(): typeof Agent<AgentEnv> {
+    // Add built-ins
+    this.addMiddleware("planning", planning, [...planning.tags, "default"]);
+    this.addMiddleware("fs", filesystem, [...filesystem.tags, "default"]);
+    this.addMiddleware("subagents", subagents, [...subagents.tags, "default"]);
+
+    this.addAgent({
+      name: "base-agent",
+      description:
+        "Default agent with access to planning, file system tools. Can also delegate tasks to other agents.",
+      prompt:
+        "You are a helpful assistant with access to tools to complete your user request.",
+      tags: ["default"],
+      config: {
+        middleware: {
+          subagents: {
+            subagents: Array.from(this.agentRegistry.values())
           }
-        });
-        return out;
-      },
-      stream: async (req, onDelta) => {
-        this.emit(AgentEventType.MODEL_STARTED, {
-          model: req.model
-        });
-        const out = await options.provider.stream(req, (d) => {
-          this.emit(AgentEventType.MODEL_DELTA, { delta: d });
-          onDelta(d);
-        });
-        this.emit(AgentEventType.MODEL_COMPLETED, {
-          usage: undefined
-        });
-        return out;
+        },
+        tools: {}
+      }
+    });
+
+    const {
+      toolRegistry,
+      middlewareRegistry,
+      agentRegistry,
+      options,
+      customProvider
+    } = this;
+    return class extends DeepAgent<AgentEnv> {
+      async onDone(ctx: { agent: DeepAgent; final: string }): Promise<void> {
+        // throw new Error("Method not implemented.");
+      }
+
+      get tools() {
+        if (!this.info.agentType) throw new Error("Agent type not set");
+
+        const blueprint = agentRegistry.get(this.info.agentType);
+        if (!blueprint) throw new Error("Agent type not found");
+
+        const tools = toolRegistry.select([], blueprint.tags);
+        return {
+          ...Object.fromEntries(tools.map((t) => [getToolMeta(t)!.name, t])),
+          ...this._tools
+        };
+      }
+
+      get middleware() {
+        if (!this.info.agentType) throw new Error("Agent type not set");
+
+        const blueprint = agentRegistry.get(this.info.agentType);
+        if (!blueprint) throw new Error("Agent type not found");
+
+        const middleware = middlewareRegistry.select([], blueprint.tags);
+        return middleware;
+      }
+
+      get model() {
+        if (!this.info.agentType) throw new Error("Agent type not set");
+
+        const blueprint = agentRegistry.get(this.info.agentType);
+        if (!blueprint) throw new Error("Agent type not found");
+
+        return blueprint.model ?? options.defaultModel;
+      }
+
+      get systemPrompt(): string {
+        if (!this.info.agentType) throw new Error("Agent type not set");
+
+        const blueprint = agentRegistry.get(this.info.agentType);
+        if (!blueprint) throw new Error("Agent type not found");
+
+        return blueprint.prompt;
+      }
+
+      get config(): AgentConfig {
+        if (!this.info.agentType) throw new Error("Agent type not set");
+
+        const blueprint = agentRegistry.get(this.info.agentType);
+        if (!blueprint) throw new Error("Agent type not found");
+
+        return blueprint.config ?? { middleware: {}, tools: {} };
+      }
+
+      get provider(): Provider {
+        let baseProvider = customProvider;
+        // Set OpenAI (chat completions really) provider if not set
+        if (!baseProvider) {
+          const apiKey = this.env.LLM_API_KEY;
+          const apiBase = this.env.LLM_API_BASE;
+          if (!apiKey)
+            throw new Error("Neither LLM_API_KEY nor custom provider set");
+
+          baseProvider = makeOpenAI(apiKey, apiBase);
+        }
+
+        return {
+          invoke: async (req, opts) => {
+            this.emit(AgentEventType.MODEL_STARTED, {
+              model: req.model
+            });
+            const out = await baseProvider.invoke(req, opts);
+            this.emit(AgentEventType.MODEL_COMPLETED, {
+              usage: {
+                inputTokens: out.usage?.promptTokens ?? 0,
+                outputTokens: out.usage?.completionTokens ?? 0
+              }
+            });
+            return out;
+          },
+          stream: async (req, onDelta) => {
+            this.emit(AgentEventType.MODEL_STARTED, {
+              model: req.model
+            });
+            const out = await baseProvider.stream(req, (d) => {
+              this.emit(AgentEventType.MODEL_DELTA, { delta: d });
+              onDelta(d);
+            });
+            this.emit(AgentEventType.MODEL_COMPLETED, {
+              usage: undefined
+            });
+            return out;
+          }
+        };
       }
     };
-
-    async onDone(ctx: { agent: DeepAgent; final: string }) {
-      await options.onDone?.(ctx);
-    }
-  };
-};
+  }
+}

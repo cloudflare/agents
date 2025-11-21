@@ -1,8 +1,10 @@
-type Options = {
+type Options<T extends Record<string, unknown>> = {
   /** Prefix all keys */
   prefix?: string;
   /** Warn on mutations (default: true) */
   warnOnMutation?: boolean;
+  /** Default values for properties when not in KV */
+  defaults?: Partial<T>;
 };
 
 const INTERNAL = Symbol("kv-state:internal");
@@ -10,10 +12,11 @@ const PERSISTED_REF = "__persistedRef__";
 
 export function PersistedObject<T extends Record<string, unknown>>(
   kv: SyncKvStorage,
-  opts: Options = {}
+  opts: Options<T> = {}
 ): T {
   const prefix = opts.prefix ?? "";
   const warnOnMutation = opts.warnOnMutation ?? true;
+  const defaults = opts.defaults ?? ({} as Record<string, unknown>);
   const cache = new Map<string, unknown>();
 
   const keyOf = (prop: string) => prefix + prop;
@@ -29,6 +32,9 @@ export function PersistedObject<T extends Record<string, unknown>>(
 
     // Different types or one is null/undefined
     if (typeof a !== typeof b || a === null || b === null) return false;
+
+    // If not objects, they're not equal (already checked === above)
+    if (typeof a !== "object" || typeof b !== "object") return false;
 
     // Both are PersistedObjects - compare their prefixes
     if (INTERNAL in a && INTERNAL in b) {
@@ -98,8 +104,11 @@ export function PersistedObject<T extends Record<string, unknown>>(
         return nested;
       }
 
+      // If no value in KV, check for default
+      const valueToWrap = v !== undefined ? v : defaults[prop];
+
       // Wrap arrays/objects with mutation detection
-      const wrapped = wrapWithMutationWarning(v, prop);
+      const wrapped = wrapWithMutationWarning(valueToWrap, prop);
       cache.set(k, wrapped);
       return wrapped;
     },

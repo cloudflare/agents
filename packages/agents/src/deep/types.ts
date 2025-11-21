@@ -1,10 +1,11 @@
 import type { env } from "cloudflare:workers";
 import type { ModelPlanBuilder } from "./middleware/plan";
-import type { DeepAgent } from "./agent";
+import type { AgentConfig, DeepAgent } from "./agent";
 import type { Provider } from "./providers";
 
 export type RunStatus =
   | "idle"
+  | "registered"
   | "running"
   | "paused"
   | "completed"
@@ -98,7 +99,12 @@ export interface ThreadMetadata {
   createdAt: string;
   request: ThreadRequestContext;
   parent?: ParentInfo;
+  agentType: string;
+}
+
+export interface CreateThreadRequest {
   agentType?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export type SubagentLinkStatus = "waiting" | "completed" | "canceled";
@@ -113,20 +119,20 @@ export interface SubagentLink {
   toolCallId?: string;
 }
 
-export type SubagentDescriptor = {
+export type AgentBlueprint = {
   name: string;
   description: string;
   prompt: string;
-  tools?: ToolHandler[];
+  tags: string[];
   model?: string;
   middleware?: AgentMiddleware[];
+  config?: AgentConfig;
 };
 
 export type MWContext = {
   provider: Provider;
   agent: DeepAgent;
-  // TODO: tool registry for dynamic additions, prolly mcp
-  // registerTool: (name: string, handler: ToolHandler) => void;
+  registerTool: (handler: ToolHandler) => void;
 };
 
 // Middleware lifecycle
@@ -156,8 +162,7 @@ export interface AgentMiddleware {
       report?: string;
     }
   ): Promise<void>;
-
-  tools?: Record<string, ToolHandler>;
+  tags: string[];
 }
 
 export type ToolHandler = ((

@@ -1066,6 +1066,48 @@
       color: var(--muted);
       background: rgba(255, 255, 255, 0.02);
     }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .form-select {
+      appearance: none;
+      background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239da5ba%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E");
+      background-repeat: no-repeat;
+      background-position: right 0.7em top 50%;
+      background-size: 0.65em auto;
+      padding-right: 2em;
+      cursor: pointer;
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px dashed rgba(255, 255, 255, 0.12);
+      background-color: rgba(6, 10, 18, 0.9);
+      color: var(--fg);
+      font-family: inherit;
+    }
+
+    .agent-desc-preview {
+      font-size: 13px;
+      color: var(--muted);
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 6px;
+      border: 1px dashed var(--border);
+      min-height: 40px;
+      line-height: 1.4;
+    }
 
     @media (max-width: 1280px) {
       .dashboard {
@@ -1305,6 +1347,35 @@
         <div class="modal-json" id="modalJson"></div>
       </div>
     </div>
+    <!-- New Thread Modal -->
+    <div id="newThreadModal" class="modal">
+      <div class="modal-content" style="width: 400px">
+        <div class="modal-header">
+          <h3 class="modal-title">New Agent Thread</h3>
+          <button class="modal-close" id="newThreadClose">✕</button>
+        </div>
+
+        <div class="form-group">
+          <label for="newAgentType">Select Agent Type</label>
+          <select id="newAgentType" class="form-select">
+            <option value="" disabled selected>Loading agents...</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Description</label>
+          <div id="newAgentDesc" class="agent-desc-preview">
+            Select an agent type to see its description.
+          </div>
+        </div>
+
+        <div class="chat-actions" style="margin-top: 24px">
+          <button id="btnCreateThread" class="primary" style="width: 100%">
+            Create Thread
+          </button>
+        </div>
+      </div>
+    </div>
 
     <script>
       const $ = (id) => document.getElementById(id);
@@ -1328,6 +1399,11 @@
           (section) => [section.id, section]
         )
       );
+      const newThreadModal = $("newThreadModal");
+      const newThreadClose = $("newThreadClose");
+      const newAgentTypeSelect = $("newAgentType");
+      const newAgentDesc = $("newAgentDesc");
+      const btnCreateThread = $("btnCreateThread");
 
       for (const btn of viewTabs) {
         btn.addEventListener("click", () => {
@@ -1352,6 +1428,85 @@
       let stateRefreshInFlight = false;
       const REFRESH_DEBOUNCE_MS = 220;
       const REFRESH_PRIORITY_MS = 40;
+      let availableAgents = [];
+
+      function updateAgentPreview() {
+        const name = newAgentTypeSelect.value;
+        const agent = availableAgents.find((a) => a.name === name);
+        newAgentDesc.textContent = agent
+          ? agent.description
+          : "No description available.";
+      }
+
+      async function loadAgentDefinitions() {
+        try {
+          const res = await fetch("/info"); // The endpoint we created in Step 1
+          const data = await res.json();
+          availableAgents = data.agents || [];
+
+          // Populate dropdown
+          newAgentTypeSelect.innerHTML = "";
+          availableAgents.forEach((agent) => {
+            const opt = document.createElement("option");
+            opt.value = agent.name;
+            opt.textContent = agent.name;
+            newAgentTypeSelect.appendChild(opt);
+          });
+
+          // Select first by default and update desc
+          if (availableAgents.length > 0) {
+            newAgentTypeSelect.value = availableAgents[0].name;
+            updateAgentPreview();
+          }
+        } catch (e) {
+          console.error("Failed to load agent defs", e);
+          newAgentTypeSelect.innerHTML = "<option>Failed to load</option>";
+        }
+      }
+
+      newAgentTypeSelect.onchange = updateAgentPreview;
+
+      $("btnNew").onclick = () => {
+        newThreadModal.classList.add("open");
+        if (availableAgents.length === 0) loadAgentDefinitions();
+      };
+
+      // 5. Close handlers
+      newThreadClose.onclick = () => newThreadModal.classList.remove("open");
+
+      // 6. The Actual Create Logic
+      btnCreateThread.onclick = async () => {
+        const agentType = newAgentTypeSelect.value;
+        if (!agentType) return;
+
+        try {
+          // Visual feedback
+          btnCreateThread.textContent = "Creating...";
+          btnCreateThread.disabled = true;
+
+          const res = await fetch("/threads", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ agentType }) // Sending the type from dropdown
+          });
+
+          if (!res.ok) throw new Error(await res.text());
+
+          const json = await res.json();
+
+          // Success: Close modal, notify, load
+          newThreadModal.classList.remove("open");
+          showNotification(`New ${agentType} thread created`, "success");
+          await loadThreads(json.id);
+          await selectThread(json.id);
+        } catch (error) {
+          console.error("Failed to create:", error);
+          showNotification(error.message, "error");
+        } finally {
+          btnCreateThread.textContent = "Create Thread";
+          btnCreateThread.disabled = false;
+        }
+      };
 
       // --- Graph state ---
       const palette = [
@@ -2185,24 +2340,23 @@
           : "Disconnected";
       }
 
-      // --- Existing UI functions (kept) ---
-      async function newThread() {
-        try {
-          const res = await fetch("/threads", { method: "POST" });
-          const json = await res.json();
-          const id = json.id;
-          if (!id) throw new Error("Thread creation missing id");
-          showNotification("New thread created", "success");
-          await loadThreads(id);
-          await selectThread(id);
-        } catch (error) {
-          console.error("Failed to create new thread:", error);
-          showNotification(
-            "Failed to create new thread: " + error.message,
-            "error"
-          );
-        }
-      }
+      // async function newThread() {
+      //   try {
+      //     const res = await fetch("/threads", { method: "POST" });
+      //     const json = await res.json();
+      //     const id = json.id;
+      //     if (!id) throw new Error("Thread creation missing id");
+      //     showNotification("New thread created", "success");
+      //     await loadThreads(id);
+      //     await selectThread(id);
+      //   } catch (error) {
+      //     console.error("Failed to create new thread:", error);
+      //     showNotification(
+      //       "Failed to create new thread: " + error.message,
+      //       "error"
+      //     );
+      //   }
+      // }
 
       async function connect(idOverride) {
         const id = (idOverride ?? $("threadId").value ?? "").trim();
@@ -2426,12 +2580,12 @@
         // Ctrl/Cmd + N for new thread
         if ((e.ctrlKey || e.metaKey) && e.key === "n") {
           e.preventDefault();
-          newThread();
+          // newThread();
         }
       });
 
       // Button handlers
-      $("btnNew").onclick = () => newThread();
+      // $("btnNew").onclick = () => newThread();
       if (btnRefreshThreads) btnRefreshThreads.onclick = () => loadThreads();
       $("btnSend").onclick = send;
       $("btnApprove").onclick = () => hitl(true);
@@ -2940,6 +3094,7 @@
       function statusLabel(s) {
         return String(s || "").replace(/_/g, " ");
       }
+      loadAgentDefinitions();
     </script>
   </body>
 </html>

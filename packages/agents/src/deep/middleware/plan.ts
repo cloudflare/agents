@@ -1,9 +1,9 @@
 import type { ModelRequest, ToolMeta } from "../types";
 import type { DeepAgent } from "../agent";
+import { getToolMeta } from "..";
 
 export class ModelPlanBuilder {
   private sysParts: string[] = [];
-  private defs = new Map<string, ToolMeta>();
   private _toolChoice: ModelRequest["toolChoice"] = "auto";
   private _responseFormat: ModelRequest["responseFormat"];
   private _temperature?: number;
@@ -16,11 +16,6 @@ export class ModelPlanBuilder {
   addSystemPrompt(...parts: Array<string | undefined | null>) {
     for (const p of parts) if (p) this.sysParts.push(p);
   }
-
-  addToolDefs(...defs: ToolMeta[]) {
-    for (const d of defs) if (d?.name) this.defs.set(d.name, d);
-  }
-
   setModel(id?: string) {
     if (id) this._model = id;
   }
@@ -41,19 +36,22 @@ export class ModelPlanBuilder {
   }
 
   build(): ModelRequest {
-    const { defs } = this.agent.tools;
-    for (const d of defs) {
-      if (d?.name && !this.defs.has(d.name)) this.defs.set(d.name, d);
-    }
     const systemPrompt = [this.agent.systemPrompt, ...this.sysParts]
       .filter(Boolean)
       .join("\n\n");
+
+    const toolDefs = Object.values(this.agent.tools).map((tool) => {
+      const meta = getToolMeta(tool);
+      if (!meta) throw new Error(`Tool ${tool.name} has no metadata`);
+      return meta;
+    });
+
     const messages = this.agent.messages.filter((m) => m.role !== "system");
     return {
       model: this._model ?? this.agent.model ?? "openai:gpt-4.1",
       systemPrompt,
       messages,
-      toolDefs: Array.from(this.defs.values()),
+      toolDefs,
       toolChoice: this._toolChoice,
       responseFormat: this._responseFormat,
       temperature: this._temperature,
