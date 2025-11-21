@@ -1548,10 +1548,12 @@ export class Agent<
             error
           );
         })
-        .finally(() => {
+        .then(() => {
           this.broadcastMcpServers();
         });
     }
+
+    this.broadcastMcpServers();
 
     // Return the HTTP response for the OAuth callback
     return this.handleOAuthCallbackResponse(result, request);

@@ -19,6 +19,7 @@ import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
   MCPClientConnection,
+  MCPConnectionState,
   type MCPTransportOptions
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
@@ -59,13 +60,12 @@ export type RegisterServerOptions = {
 /**
  * Result of attempting to connect to an MCP server.
  * Returns the current connection state after the operation.
- *
- * - "ready": Connection established and ready to use (non-OAuth)
- * - "authenticating": OAuth required, user must visit authUrl to authorize
  */
-export type MCPConnectionResult =
-  | { state: "ready" }
-  | { state: "authenticating"; authUrl: string; clientId?: string };
+export type MCPConnectionResult = {
+  state: MCPConnectionState;
+  authUrl?: string;
+  clientId?: string;
+};
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -166,7 +166,7 @@ export class MCPClientManager {
 
       // Skip if connection already exists and is in a good state
       if (existingConn) {
-        if (existingConn.connectionState === "ready") {
+        if (existingConn.connectionState === MCPConnectionState.READY) {
           console.warn(
             `[MCPClientManager] Server ${server.id} already has a ready connection. Skipping recreation.`
           );
@@ -175,16 +175,16 @@ export class MCPClientManager {
 
         // Don't interrupt in-flight OAuth or connections
         if (
-          existingConn.connectionState === "authenticating" ||
-          existingConn.connectionState === "connecting" ||
-          existingConn.connectionState === "discovering"
+          existingConn.connectionState === MCPConnectionState.AUTHENTICATING ||
+          existingConn.connectionState === MCPConnectionState.CONNECTING ||
+          existingConn.connectionState === MCPConnectionState.DISCOVERING
         ) {
           // Let the existing flow complete
           continue;
         }
 
         // If failed, clean up the old connection before recreating
-        if (existingConn.connectionState === "failed") {
+        if (existingConn.connectionState === MCPConnectionState.FAILED) {
           try {
             await existingConn.client.close();
           } catch (error) {
@@ -346,7 +346,8 @@ export class MCPClientManager {
     // If connection is in authenticating state, return auth URL for OAuth flow
     const authUrl = options.transport?.authProvider?.authUrl;
     if (
-      this.mcpConnections[id].connectionState === "authenticating" &&
+      this.mcpConnections[id].connectionState ===
+        MCPConnectionState.AUTHENTICATING &&
       authUrl &&
       options.transport?.authProvider?.redirectUrl
     ) {
@@ -473,12 +474,13 @@ export class MCPClientManager {
 
     // Initialize connection
     await conn.init();
+    this._onServerStateChanged.fire();
 
     // If connection is in authenticating state, return auth URL for OAuth flow
     const authUrl = conn.options.transport.authProvider?.authUrl;
 
     if (
-      conn.connectionState === "authenticating" &&
+      conn.connectionState === MCPConnectionState.AUTHENTICATING &&
       authUrl &&
       conn.options.transport.authProvider?.redirectUrl
     ) {
@@ -498,18 +500,15 @@ export class MCPClientManager {
       this._onServerStateChanged.fire();
 
       return {
-        state: "authenticating",
+        state: conn.connectionState,
         authUrl,
         clientId
       };
     }
 
-    // Fire state changed event for non-OAuth connections that reached ready state
-    if (conn.connectionState === "ready") {
-      this._onServerStateChanged.fire();
-    }
+    this._onServerStateChanged.fire();
 
-    return { state: "ready" };
+    return { state: conn.connectionState };
   }
 
   async isCallbackRequest(req: Request): Promise<boolean> {
@@ -572,7 +571,9 @@ export class MCPClientManager {
     }
 
     // If connection is already ready, this is likely a duplicate callback
-    if (this.mcpConnections[serverId].connectionState === "ready") {
+    if (
+      this.mcpConnections[serverId].connectionState === MCPConnectionState.READY
+    ) {
       // Already authenticated and ready, treat as success
       return {
         serverId,
@@ -580,7 +581,10 @@ export class MCPClientManager {
       };
     }
 
-    if (this.mcpConnections[serverId].connectionState !== "authenticating") {
+    if (
+      this.mcpConnections[serverId].connectionState !==
+      MCPConnectionState.AUTHENTICATING
+    ) {
       throw new Error(
         `Failed to authenticate: the client is in "${this.mcpConnections[serverId].connectionState}" state, expected "authenticating"`
       );
@@ -714,8 +718,8 @@ export class MCPClientManager {
     // Warn if tools are being read from non-ready connections
     for (const [id, conn] of Object.entries(this.mcpConnections)) {
       if (
-        conn.connectionState !== "ready" &&
-        conn.connectionState !== "authenticating"
+        conn.connectionState !== MCPConnectionState.READY &&
+        conn.connectionState !== MCPConnectionState.AUTHENTICATING
       ) {
         console.warn(
           `[getAITools] WARNING: Reading tools from connection ${id} in state "${conn.connectionState}". Tools may not be loaded yet.`

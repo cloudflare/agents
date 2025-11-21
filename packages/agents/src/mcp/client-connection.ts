@@ -43,41 +43,28 @@ import type { BaseTransportType, TransportType } from "./types";
  * Connection state machine for MCP client connections.
  *
  * State transitions:
- * - Non-OAuth: init() → "connecting" → "discovering" → "ready"
- * - OAuth: init() → "authenticating" → (callback) → "connecting" → "discovering" → "ready"
- * - Any state can transition to "failed" on error
+ * - Non-OAuth: init() → CONNECTING → DISCOVERING → READY
+ * - OAuth: init() → AUTHENTICATING → (callback) → CONNECTING → DISCOVERING → READY
+ * - Any state can transition to FAILED on error
+ */
+export const MCPConnectionState = {
+  /** Waiting for OAuth authorization to complete */
+  AUTHENTICATING: "authenticating",
+  /** Establishing transport connection to MCP server */
+  CONNECTING: "connecting",
+  /** Discovering server capabilities (tools, resources, prompts) */
+  DISCOVERING: "discovering",
+  /** Fully connected and ready to use */
+  READY: "ready",
+  /** Connection failed at some point */
+  FAILED: "failed"
+} as const;
+
+/**
+ * Connection state type for MCP client connections.
  */
 export type MCPConnectionState =
-  /**
-   * Waiting for OAuth authorization to complete.
-   * Server requires OAuth and user must complete the authorization flow.
-   * Next state: "connecting" (after handleCallbackRequest + establishConnection)
-   */
-  | "authenticating"
-  /**
-   * Establishing transport connection to MCP server.
-   * OAuth (if required) is complete, now connecting to the actual MCP endpoint.
-   * Next state: "discovering" (after transport connected)
-   */
-  | "connecting"
-  /**
-   * Fully connected and ready to use.
-   * Tools, resources, and prompts have been discovered and registered.
-   * This is the terminal success state.
-   */
-  | "ready"
-  /**
-   * Discovering server capabilities (tools, resources, prompts).
-   * Transport is connected, now fetching available capabilities via MCP protocol.
-   * Next state: "ready" (after capabilities fetched)
-   */
-  | "discovering"
-  /**
-   * Connection failed at some point.
-   * Check observability events for error details.
-   * This is a terminal error state.
-   */
-  | "failed";
+  (typeof MCPConnectionState)[keyof typeof MCPConnectionState];
 
 export type MCPTransportOptions = (
   | SSEClientTransportOptions
@@ -89,7 +76,7 @@ export type MCPTransportOptions = (
 
 export class MCPClientConnection {
   client: Client;
-  connectionState: MCPConnectionState = "connecting";
+  connectionState: MCPConnectionState = MCPConnectionState.CONNECTING;
   lastConnectedTransport: BaseTransportType | undefined;
   instructions?: string;
   tools: Tool[] = [];
@@ -122,7 +109,7 @@ export class MCPClientConnection {
   }
 
   /**
-   * Initialize a client connection
+   * Initialize a client connection, if authentication is required, the connection will be in the AUTHENTICATING state
    *
    * @returns
    */
@@ -137,7 +124,7 @@ export class MCPClientConnection {
     } catch (e) {
       if (isUnauthorized(e)) {
         // unauthorized, we should wait for the user to authenticate
-        this.connectionState = "authenticating";
+        this.connectionState = MCPConnectionState.AUTHENTICATING;
         return;
       }
       // For explicit transport mismatches or other errors, mark as failed
@@ -154,7 +141,7 @@ export class MCPClientConnection {
         timestamp: Date.now(),
         id: nanoid()
       });
-      this.connectionState = "failed";
+      this.connectionState = MCPConnectionState.FAILED;
       return;
     }
 
@@ -202,7 +189,7 @@ export class MCPClientConnection {
    * Complete OAuth authorization
    */
   async completeAuthorization(code: string): Promise<void> {
-    if (this.connectionState !== "authenticating") {
+    if (this.connectionState !== MCPConnectionState.AUTHENTICATING) {
       throw new Error(
         "Connection must be in authenticating state to complete authorization"
       );
@@ -213,9 +200,9 @@ export class MCPClientConnection {
       await this.finishAuthProbe(code);
 
       // Mark as connecting
-      this.connectionState = "connecting";
+      this.connectionState = MCPConnectionState.CONNECTING;
     } catch (error) {
-      this.connectionState = "failed";
+      this.connectionState = MCPConnectionState.FAILED;
       throw error;
     }
   }
@@ -224,7 +211,7 @@ export class MCPClientConnection {
    * Establish connection after successful authorization
    */
   async establishConnection(): Promise<void> {
-    if (this.connectionState !== "connecting") {
+    if (this.connectionState !== MCPConnectionState.CONNECTING) {
       throw new Error(
         "Connection must be in connecting state to establish connection"
       );
@@ -235,11 +222,11 @@ export class MCPClientConnection {
       if (!transportType) {
         throw new Error("Transport type must be specified");
       }
-      await this.tryConnect(transportType);
 
+      await this.tryConnect(transportType);
       await this.discoverAndRegister();
     } catch (error) {
-      this.connectionState = "failed";
+      this.connectionState = MCPConnectionState.FAILED;
       throw error;
     }
   }
@@ -248,78 +235,78 @@ export class MCPClientConnection {
    * Discover server capabilities and register tools, resources, prompts, and templates
    */
   private async discoverAndRegister(): Promise<void> {
-    this.connectionState = "discovering";
+    this.connectionState = MCPConnectionState.DISCOVERING;
 
     this.serverCapabilities = this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
+      this.connectionState = MCPConnectionState.FAILED;
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
-    const [
-      instructionsResult,
-      toolsResult,
-      resourcesResult,
-      promptsResult,
-      resourceTemplatesResult
-    ] = await Promise.allSettled([
-      this.client.getInstructions(),
-      this.registerTools(),
-      this.registerResources(),
-      this.registerPrompts(),
-      this.registerResourceTemplates()
-    ]);
+    // Build list of operations to perform based on server capabilities
+    const operations: Promise<any>[] = [];
+    const operationNames: string[] = [];
 
-    const operations = [
-      { name: "instructions", result: instructionsResult },
-      { name: "tools", result: toolsResult },
-      { name: "resources", result: resourcesResult },
-      { name: "prompts", result: promptsResult },
-      { name: "resource templates", result: resourceTemplatesResult }
-    ];
+    // Instructions (always try to fetch if available)
+    operations.push(Promise.resolve(this.client.getInstructions()));
+    operationNames.push("instructions");
 
-    for (const { name, result } of operations) {
-      if (result.status === "rejected") {
-        const url = this.url.toString();
-        this._onObservabilityEvent.fire({
-          type: "mcp:client:discover",
-          displayMessage: `Failed to discover ${name} for ${url}`,
-          payload: {
-            url,
-            capability: name,
-            error: result.reason
-          },
-          timestamp: Date.now(),
-          id: nanoid()
-        });
+    // Only register capabilities that the server advertises
+    if (this.serverCapabilities.tools) {
+      operations.push(this.registerTools());
+      operationNames.push("tools");
+    }
+
+    if (this.serverCapabilities.resources) {
+      operations.push(this.registerResources());
+      operationNames.push("resources");
+    }
+
+    if (this.serverCapabilities.prompts) {
+      operations.push(this.registerPrompts());
+      operationNames.push("prompts");
+    }
+
+    if (this.serverCapabilities.resources) {
+      operations.push(this.registerResourceTemplates());
+      operationNames.push("resource templates");
+    }
+
+    const results = await Promise.all(operations);
+
+    // Assign results to properties
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      const name = operationNames[i];
+
+      switch (name) {
+        case "instructions":
+          this.instructions = result;
+          break;
+        case "tools":
+          this.tools = result;
+          break;
+        case "resources":
+          this.resources = result;
+          break;
+        case "prompts":
+          this.prompts = result;
+          break;
+        case "resource templates":
+          this.resourceTemplates = result;
+          break;
       }
     }
 
-    this.instructions =
-      instructionsResult.status === "fulfilled"
-        ? instructionsResult.value
-        : undefined;
-    this.tools = toolsResult.status === "fulfilled" ? toolsResult.value : [];
-    this.resources =
-      resourcesResult.status === "fulfilled" ? resourcesResult.value : [];
-    this.prompts =
-      promptsResult.status === "fulfilled" ? promptsResult.value : [];
-    this.resourceTemplates =
-      resourceTemplatesResult.status === "fulfilled"
-        ? resourceTemplatesResult.value
-        : [];
-
-    this.connectionState = "ready";
+    this.connectionState = MCPConnectionState.READY;
   }
 
   /**
-   * Notification handler registration
+   * Notification handler registration for tools
+   * Should only be called if serverCapabilities.tools exists
    */
   async registerTools(): Promise<Tool[]> {
-    if (!this.serverCapabilities || !this.serverCapabilities.tools) {
-      return [];
-    }
-
-    if (this.serverCapabilities.tools.listChanged) {
+    if (this.serverCapabilities?.tools?.listChanged) {
       this.client.setNotificationHandler(
         ToolListChangedNotificationSchema,
         async (_notification) => {
@@ -331,12 +318,12 @@ export class MCPClientConnection {
     return this.fetchTools();
   }
 
+  /**
+   * Notification handler registration for resources
+   * Should only be called if serverCapabilities.resources exists
+   */
   async registerResources(): Promise<Resource[]> {
-    if (!this.serverCapabilities || !this.serverCapabilities.resources) {
-      return [];
-    }
-
-    if (this.serverCapabilities.resources.listChanged) {
+    if (this.serverCapabilities?.resources?.listChanged) {
       this.client.setNotificationHandler(
         ResourceListChangedNotificationSchema,
         async (_notification) => {
@@ -348,12 +335,12 @@ export class MCPClientConnection {
     return this.fetchResources();
   }
 
+  /**
+   * Notification handler registration for prompts
+   * Should only be called if serverCapabilities.prompts exists
+   */
   async registerPrompts(): Promise<Prompt[]> {
-    if (!this.serverCapabilities || !this.serverCapabilities.prompts) {
-      return [];
-    }
-
-    if (this.serverCapabilities.prompts.listChanged) {
+    if (this.serverCapabilities?.prompts?.listChanged) {
       this.client.setNotificationHandler(
         PromptListChangedNotificationSchema,
         async (_notification) => {
@@ -366,10 +353,6 @@ export class MCPClientConnection {
   }
 
   async registerResourceTemplates(): Promise<ResourceTemplate[]> {
-    if (!this.serverCapabilities || !this.serverCapabilities.resources) {
-      return [];
-    }
-
     return this.fetchResourceTemplates();
   }
 
