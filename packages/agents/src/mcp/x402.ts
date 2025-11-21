@@ -78,10 +78,10 @@ export function withX402<T extends McpServer>(
       {
         description,
         inputSchema: paramsSchema,
-        annotations: {
-          ...annotations,
-          paymentHint: true,
-          paymentPriceUSD: priceUSD
+        annotations,
+        _meta: {
+          "agents-x402/paymentRequired": true,
+          "agents-x402/priceUSD": priceUSD
         }
       },
       (async (args, extra) => {
@@ -265,9 +265,10 @@ export function withX402Client<T extends MCPClient>(
     const toolsRes = await _listTools(params, options);
     toolsRes.tools = toolsRes.tools.map((tool) => {
       let description = tool.description;
-      if (tool.annotations?.paymentHint) {
-        const cost = tool.annotations?.paymentPriceUSD
-          ? `$${tool.annotations?.paymentPriceUSD}`
+      // Check _meta for payment information (agents-x402/ is our extension for pre-advertising prices)
+      if (tool._meta?.["agents-x402/paymentRequired"]) {
+        const cost = tool._meta?.["agents-x402/priceUSD"]
+          ? `$${tool._meta?.["agents-x402/priceUSD"]}`
           : "an unknown amount";
         description += ` (This is a paid tool, you will be charged ${cost} for its execution)`;
       }
