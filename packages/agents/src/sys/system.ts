@@ -3,15 +3,21 @@
  * Make sure you add the binding `DEEP_AGENT` in your `wrangler.jsonc` file.
  */
 
-import { SystemAgent, type AgentConfig, type AgentEnv } from "./agent";
+import { SystemAgent, type AgentEnv } from "./agent";
 import { AgentEventType } from "./events";
 import { planning, filesystem, subagents, getToolMeta } from "./middleware";
 import { makeOpenAI, type Provider } from "./providers";
-import type { ToolHandler, AgentMiddleware, AgentBlueprint } from "./types";
+import type {
+  ToolHandler,
+  AgentMiddleware,
+  AgentBlueprint,
+  AgentConfig
+} from "./types";
 import { createHandler, type HandlerOptions } from "./worker";
 
 type AgentSystemOptions = {
   defaultModel: string;
+  provider?: Provider;
   handlerOptions?: HandlerOptions;
 };
 
@@ -79,67 +85,48 @@ class MiddlewareRegistry {
   }
 }
 
-export class AgentSystem {
+export class AgentSystem<TConfig = Record<string, unknown>> {
   toolRegistry = new ToolRegistry();
   middlewareRegistry = new MiddlewareRegistry();
   agentRegistry = new Map<string, AgentBlueprint>();
-  customProvider?: Provider;
   config: Record<string, AgentConfig> = {};
+  // private defaultMiddlewares: AgentMiddleware[] = [];
 
   constructor(private options: AgentSystemOptions) {}
 
-  addTool(handler: ToolHandler, tags?: string[]) {
+  defaults() {
+    return this.use(planning, ["default"])
+      .use(filesystem, ["default"])
+      .use(subagents, ["default"]);
+  }
+
+  addTool(handler: ToolHandler, tags?: string[]): AgentSystem<TConfig> {
     const toolName = getToolMeta(handler)?.name;
     if (!toolName) throw new Error("Tool missing name: use defineTool(...)");
     this.toolRegistry.addTool(toolName, handler, tags);
+
+    return this;
   }
 
-  addMiddleware(mw: AgentMiddleware, tags?: string[]) {
+  use<TNewConfig>(
+    mw: AgentMiddleware<TNewConfig>,
+    tags?: string[]
+  ): AgentSystem<TConfig & TNewConfig> {
     const uniqueTags = Array.from(new Set([...(tags || []), ...mw.tags]));
     this.middlewareRegistry.addMiddleware(mw.name, mw, uniqueTags);
+    return this as unknown as AgentSystem<TConfig & TNewConfig>;
   }
 
-  addAgent(blueprint: AgentBlueprint) {
+  addAgent(blueprint: AgentBlueprint<Partial<TConfig>>): AgentSystem<TConfig> {
     this.agentRegistry.set(blueprint.name, blueprint);
-  }
-
-  setProvider(provider: Provider) {
-    this.customProvider = provider;
+    return this;
   }
 
   export(): {
     SystemAgent: typeof SystemAgent<AgentEnv>;
     handler: ReturnType<typeof createHandler>;
   } {
-    // Add built-ins
-    this.addMiddleware(planning, ["default"]);
-    this.addMiddleware(filesystem, ["default"]);
-    this.addMiddleware(subagents, ["default"]);
-
-    this.addAgent({
-      name: "base-agent",
-      description:
-        "Default agent with access to planning, file system tools. Can also delegate tasks to other agents.",
-      prompt:
-        "You are a helpful assistant with access to tools to complete your user request.",
-      tags: ["default"],
-      config: {
-        middleware: {
-          subagents: {
-            subagents: Array.from(this.agentRegistry.values())
-          }
-        },
-        tools: {}
-      }
-    });
-
-    const {
-      toolRegistry,
-      middlewareRegistry,
-      agentRegistry,
-      options,
-      customProvider
-    } = this;
+    const { toolRegistry, middlewareRegistry, agentRegistry, options } = this;
     class ConfiguredAgentSystem extends SystemAgent<AgentEnv> {
       async onDone(ctx: { agent: SystemAgent; final: string }): Promise<void> {
         // throw new Error("Method not implemented.");
@@ -196,7 +183,7 @@ export class AgentSystem {
       }
 
       get provider(): Provider {
-        let baseProvider = customProvider;
+        let baseProvider = options?.provider;
         // Set OpenAI (chat completions really) provider if not set
         if (!baseProvider) {
           const apiKey = this.env.LLM_API_KEY;

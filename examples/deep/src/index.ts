@@ -1,5 +1,5 @@
 // Imports
-import { AgentSystem } from "agents/sys";
+import { AgentSystem, subagents } from "agents/sys";
 import {
   getCurrentWindowTool,
   setTimeWindowTool,
@@ -12,12 +12,6 @@ import {
 } from "./prompts";
 
 // Setup
-const system = new AgentSystem({ defaultModel: "gpt-5-2025-08-07" });
-
-system.addTool(getCurrentWindowTool, ["security"]);
-system.addTool(setTimeWindowTool, ["security"]);
-system.addTool(getTimeseriesTextTool, ["security"]);
-system.addTool(getTopNTextTool, ["security"]);
 
 const SECURITY_AGENT_BLUEPRINT = {
   name: "security-agent",
@@ -27,22 +21,20 @@ const SECURITY_AGENT_BLUEPRINT = {
   tags: ["security"]
 };
 
-system.addAgent(SECURITY_AGENT_BLUEPRINT);
-
-system.addAgent({
-  name: "manager-agent",
-  description: "Main agent",
-  prompt: ANOMALY_MAIN_AGENT_PROMPT,
-  tags: ["default"],
-  config: {
-    middleware: {
-      subagents: {
-        subagents: [SECURITY_AGENT_BLUEPRINT]
-      }
-    },
-    tools: {}
-  }
-});
+const system = new AgentSystem({ defaultModel: "gpt-5-2025-08-07" })
+  .defaults()
+  .addTool(getCurrentWindowTool, ["security"])
+  .addTool(setTimeWindowTool, ["security"])
+  .addTool(getTimeseriesTextTool, ["security"])
+  .addTool(getTopNTextTool, ["security"])
+  .addAgent(SECURITY_AGENT_BLUEPRINT)
+  .addAgent({
+    name: "manager-agent",
+    description: "Main agent",
+    prompt: ANOMALY_MAIN_AGENT_PROMPT,
+    tags: ["default"],
+    config: { subagents: { subagents: [SECURITY_AGENT_BLUEPRINT] } }
+  });
 
 // CF setup
 const { SystemAgent, handler } = system.export();

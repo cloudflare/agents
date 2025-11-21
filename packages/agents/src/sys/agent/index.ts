@@ -10,7 +10,8 @@ import type {
   AgentState,
   ParentInfo,
   ThreadRequestContext,
-  RunState
+  RunState,
+  AgentConfig
 } from "../types";
 import { Agent, getAgentByName, type AgentContext } from "../..";
 import { getToolMeta } from "../middleware";
@@ -33,12 +34,6 @@ export type Info = {
   agentType: string;
   parentInfo?: ParentInfo;
   pendingToolCalls?: ToolCall[];
-};
-
-// Per-agent configuration for middleware and tools
-export type AgentConfig = {
-  middleware: Record<string, unknown>;
-  tools: Record<string, unknown>;
 };
 
 export abstract class SystemAgent<

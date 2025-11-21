@@ -1,6 +1,6 @@
 import type { env } from "cloudflare:workers";
 import type { ModelPlanBuilder } from "./middleware/plan";
-import type { AgentConfig, SystemAgent } from "./agent";
+import type { SystemAgent } from "./agent";
 import type { Provider } from "./providers";
 
 export type RunStatus =
@@ -19,6 +19,8 @@ export type RunState = {
   reason?: string; // pause/cancel reason
   nextAlarmAt?: number | null; // ms epoch
 };
+
+export type AgentConfig<T = Record<string, unknown>> = T;
 
 export type AgentState = {
   messages: ChatMessage[];
@@ -119,14 +121,13 @@ export interface SubagentLink {
   toolCallId?: string;
 }
 
-export type AgentBlueprint = {
+export type AgentBlueprint<TConfig = Record<string, unknown>> = {
   name: string;
   description: string;
   prompt: string;
   tags: string[];
   model?: string;
-  middleware?: AgentMiddleware[];
-  config?: AgentConfig;
+  config?: AgentConfig<TConfig>;
 };
 
 export type MWContext = {
@@ -136,8 +137,11 @@ export type MWContext = {
 };
 
 // Middleware lifecycle
-export interface AgentMiddleware {
+export interface AgentMiddleware<TConfig = unknown> {
   name: string;
+  // Helper to infer the config type in the builder, not used at runtime
+  __configType?: TConfig;
+
   // optional, to inject into shared state
   state?: (ctx: MWContext) => Record<string, unknown>;
 

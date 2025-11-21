@@ -29,6 +29,12 @@ import { AgentEventType } from "../events";
 import { getAgentByName } from "../../";
 import type { AgentEnv } from "..";
 
+export function defineMiddleware<TConfig>(
+  mw: Omit<AgentMiddleware<TConfig>, "__configType">
+): AgentMiddleware<TConfig> {
+  return mw as AgentMiddleware<TConfig>;
+}
+
 /* -------------------- Planning: write_todos -------------------- */
 const write_todos = defineTool(
   {
@@ -241,6 +247,11 @@ export const filesystem: AgentMiddleware = {
 };
 
 /* -------------------- Subagents: task -------------------- */
+export type SubagentsConfig = {
+  subagents?: {
+    subagents: AgentBlueprint[];
+  };
+};
 
 type TaskInput = {
   description: string;
@@ -254,17 +265,12 @@ function renderOtherAgents(subagents: AgentBlueprint[]) {
     : "- general-purpose: General-purpose agent for complex tasks (inherits main tools)";
 }
 
-export const subagents: AgentMiddleware = {
+export const subagents = defineMiddleware<SubagentsConfig>({
   name: "subagents",
   async beforeModel(ctx, plan) {
     plan.addSystemPrompt(TASK_SYSTEM_PROMPT);
-    const otherAgents = renderOtherAgents(
-      (
-        ctx.agent.config.middleware["subagents"] as {
-          subagents: AgentBlueprint[];
-        }
-      ).subagents ?? []
-    );
+    const config = ctx.agent.config as SubagentsConfig;
+    const otherAgents = renderOtherAgents(config.subagents?.subagents ?? []);
     const taskDesc = TASK_TOOL_DESCRIPTION.replace(
       "{other_agents}",
       otherAgents
@@ -351,9 +357,15 @@ export const subagents: AgentMiddleware = {
     ctx.registerTool(task);
   },
   tags: ["subagents"]
+});
+
+export type HitlConfig = {
+  hitl?: {
+    tools: string[];
+  };
 };
 
-export const hitl: AgentMiddleware = {
+export const hitl = defineMiddleware<HitlConfig>({
   name: "hitl",
   async onModelResult(ctx, res) {
     const runState = ctx.agent.runState;
@@ -362,11 +374,9 @@ export const hitl: AgentMiddleware = {
       last?.role === "assistant" && "toolCalls" in last
         ? (last.toolCalls ?? [])
         : [];
-    // TODO: find somewhere to add settings for each middleware
+    const config = ctx.agent.config as HitlConfig;
     const risky = calls.find((c: ToolCall) =>
-      (
-        (ctx.agent.config.middleware["hitl"] as { tools: string[] }).tools ?? []
-      ).includes(c.name)
+      config.hitl?.tools.includes(c.name)
     );
     if (risky) {
       runState.status = "paused";
@@ -378,7 +388,7 @@ export const hitl: AgentMiddleware = {
     }
   },
   tags: ["hitl"]
-};
+});
 
 export function defineTool(meta: ToolMeta, handler: ToolHandler): ToolHandler {
   handler.__tool = meta; // stash metadata on the function
