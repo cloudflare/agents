@@ -30,6 +30,13 @@ import { AgentMCPClientStorage } from "./mcp/client-storage";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import { DataKind, type RealtimePipelineComponent } from "./realtime";
+import {
+  isRealtimeRequest,
+  Realtime,
+  REALTIME_WS_TAG
+} from "./realtime-manager";
+import { randomUUID } from "node:crypto";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -300,18 +307,40 @@ function withAgentContext<T extends (...args: any[]) => any>(
  * @template State State type to store within the Agent
  */
 export class Agent<
-  Env = typeof env,
-  State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>
-> extends Server<Env, Props> {
+    Env = typeof env,
+    State = unknown,
+    Props extends Record<string, unknown> = Record<string, unknown>
+  >
+  extends Server<Env, Props>
+  implements RealtimePipelineComponent
+{
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
+  private realtime?: Realtime;
   private _destroyed = false;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
   readonly mcp: MCPClientManager;
+
+  realtimePipelineComponents?: () => RealtimePipelineComponent[];
+
+  input_kind() {
+    return DataKind.Text;
+  }
+
+  output_kind() {
+    return DataKind.Text;
+  }
+
+  schema(): { name: string; type: string; [K: string]: unknown } {
+    return {
+      name: this._ParentClass.name,
+      type: "agent",
+      internal_sdk: true
+    };
+  }
 
   /**
    * Initial state for the Agent
@@ -401,6 +430,7 @@ export class Agent<
       throw this.onError(e);
     }
   }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
@@ -487,6 +517,10 @@ export class Agent<
             return oauthResponse;
           }
 
+          if (this.realtime && isRealtimeRequest(request)) {
+            return this.realtime.handleRequests(request);
+          }
+
           return this._tryCatch(() => _onRequest(request));
         }
       );
@@ -497,6 +531,15 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
+          // TODO: remove this
+          console.log(
+            "incoming connection message",
+            message,
+            "connection",
+            connection,
+            "conn url:",
+            connection.url
+          );
           // TODO: make zod/ai sdk more performant and remove this
           // Late initialization of jsonSchemaFn (needed for getAITools)
           await this.mcp.ensureJsonSchema();
@@ -510,6 +553,10 @@ export class Agent<
           } catch (_e) {
             // silently fail and let the onMessage handler handle it
             return this._tryCatch(() => _onMessage(connection, message));
+          }
+
+          if (this.realtime?.handleWebsocketMessage(parsed)) {
+            return;
           }
 
           if (isStateUpdateMessage(parsed)) {
@@ -638,11 +685,34 @@ export class Agent<
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
             await this.broadcastMcpServers();
+            if (this.realtimePipelineComponents) {
+              const { CF_ACCOUNT_ID, CF_API_TOKEN } = this.env as {
+                CF_ACCOUNT_ID: string;
+                CF_API_TOKEN: string;
+              };
+              if (!CF_ACCOUNT_ID) throw new Error("CF_ACCOUNT_ID is required");
+              if (!CF_API_TOKEN) throw new Error("CF_API_TOKEN is required");
+
+              const agentId = this.name;
+              const agentName = camelCaseToKebabCase(this._ParentClass.name);
+
+              this.realtime = new Realtime(this.realtimePipelineComponents(), {
+                CF_ACCOUNT_ID,
+                CF_API_TOKEN,
+                agentId,
+                agentName
+              });
+            }
             return _onStart(props);
           });
         }
       );
     };
+  }
+
+  getConnectionTags(connection: Connection, ctx: ConnectionContext) {
+    //TODO(itzmanish): check if connection is from realtime runtime websocket
+    return this.realtime?.getConnectionTags(connection, ctx) || [];
   }
 
   private _setStateInternal(
@@ -1342,6 +1412,8 @@ export class Agent<
       this.ctx.abort("destroyed");
     }, 0);
 
+    await this.realtime?.dispose();
+
     this.observability?.emit(
       {
         displayMessage: "Agent destroyed",
@@ -1608,6 +1680,54 @@ export class Agent<
     // Default: redirect to base URL
     return Response.redirect(baseOrigin);
   }
+
+  /**
+   * Send text to the agent to speak
+   * @param text The text to send
+   * @param contextId The context id of the message
+   */
+  async speak(text: string, contextId?: string) {
+    const connections = this.getConnections(REALTIME_WS_TAG);
+    let connCount = 0;
+    for (const conn of connections) {
+      try {
+        connCount++;
+        conn.send(
+          JSON.stringify({
+            type: "media",
+            version: 1,
+            identifier: randomUUID(),
+            payload: {
+              content_type: "text",
+              context_id: contextId,
+              data: text
+            }
+          })
+        );
+      } catch (e) {
+        console.error("failed to send text to agent", e);
+      }
+    }
+    if (connCount === 0)
+      throw new Error("no connections to realtime agent found");
+  }
+
+  /**
+   * Called when the Agent receives a new transcript from the RealtimeWebsocket
+   * @param text The text of the transcript
+   * @param reply A function that the Agent should call to reply to the transcript
+   * @param {string|ReadableStream<Uint8Array>} reply.text The text of the reply or a ReadableStream containing the reply
+   * @param {boolean} reply.canInterrupt Whether the User is allowed to interrupt the Agent
+   */
+  onRealtimeTranscript(
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: this method will be overridden by the user
+    text: string,
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: this method will be overridden by the user
+    reply: (
+      text: string | ReadableStream<Uint8Array>,
+      canInterrupt?: boolean
+    ) => void
+  ) {}
 }
 
 // A set of classes that have been wrapped with agent context

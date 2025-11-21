@@ -26,6 +26,7 @@
   "dependencies": {
     "@ai-sdk/openai": "2.0.64",
     "@cfworker/json-schema": "^4.1.1",
+    "@cloudflare/realtimekit": "1.1.7-agent.1",
     "@modelcontextprotocol/sdk": "^1.21.0",
     "ai": "5.0.89",
     "cron-schedule": "^5.0.4",
@@ -120,6 +121,11 @@
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
       "require": "./dist/react.js"
+    },
+    "./realtime": {
+      "types": "./dist/realtime.d.ts",
+      "import": "./dist/realtime.js",
+      "require": "./dist/realtime.js"
     },
     "./schedule": {
       "types": "./dist/schedule.d.ts",
