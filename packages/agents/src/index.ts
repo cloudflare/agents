@@ -1540,18 +1540,15 @@ export class Agent<
     if (result.authSuccess) {
       this.broadcastMcpServers();
 
-      this.mcp
-        .establishConnection(result.serverId)
-        .catch((error) => {
-          console.error(
-            "[Agent handleMcpOAuthCallback] Connection establishment failed:",
-            error
-          );
-        })
-        .finally(() => {
-          this.broadcastMcpServers();
-        });
+      this.mcp.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
+          error
+        );
+      });
     }
+
+    this.broadcastMcpServers();
 
     // Return the HTTP response for the OAuth callback
     return this.handleOAuthCallbackResponse(result, request);
