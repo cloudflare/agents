@@ -47,8 +47,9 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
     {
       capabilities: {
         logging: {},
-        tools: { listChanged: true },
-        elicitation: { form: {}, url: {} }
+        tools: { listChanged: true }
+        // disable because types started failing in 1.22.0
+        // elicitation: { form: {}, url: {} }
       }
     }
   );
@@ -104,7 +105,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       "elicitName",
       "Test tool that elicits user input for a name",
       {},
-      async (): Promise<CallToolResult> => {
+      async () => {
         const result = await this.server.server.elicitInput({
           message: "What is your name?",
           requestedSchema: {
