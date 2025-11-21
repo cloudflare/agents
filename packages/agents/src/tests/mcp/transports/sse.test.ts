@@ -181,7 +181,7 @@ describe("SSE Transport", () => {
       // The transport filters cf-mcp-method, cf-mcp-message, and upgrade headers
       expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
       expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
-      expect(echoedData.headers["upgrade"]).toBeUndefined();
+      expect(echoedData.headers.upgrade).toBeUndefined();
 
       // Verify standard headers are also present
       expect(echoedData.headers["content-type"]).toBe("application/json");

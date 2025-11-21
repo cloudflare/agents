@@ -623,7 +623,10 @@ describe("Streamable HTTP Transport", () => {
 
       // Extract the echoed request info
       const result = parsed.result as CallToolResult;
-      const echoedData = JSON.parse(result.content?.[0]?.text || "{}");
+      const contentText = result.content?.[0]?.text;
+      const echoedData = JSON.parse(
+        typeof contentText === "string" ? contentText : "{}"
+      );
 
       // Verify custom headers were passed through
       expect(echoedData.hasRequestInfo).toBe(true);
@@ -635,10 +638,10 @@ describe("Streamable HTTP Transport", () => {
       // The transport adds cf-mcp-method and cf-mcp-message internally but should filter them
       expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
       expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
-      expect(echoedData.headers["upgrade"]).toBeUndefined();
+      expect(echoedData.headers.upgrade).toBeUndefined();
 
       // Verify standard headers are also present
-      expect(echoedData.headers["accept"]).toContain("text/event-stream");
+      expect(echoedData.headers.accept).toContain("text/event-stream");
       expect(echoedData.headers["content-type"]).toBe("application/json");
 
       // Verify sessionId is passed through extra data

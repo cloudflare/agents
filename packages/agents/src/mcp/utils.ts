@@ -690,7 +690,7 @@ export const createLegacySseHandler = (
       // Remove internal headers that are not part of the original request
       delete headers[MCP_HTTP_METHOD_HEADER];
       delete headers[MCP_MESSAGE_HEADER];
-      delete headers["upgrade"];
+      delete headers.upgrade;
 
       const extraInfo: MessageExtraInfo = {
         requestInfo: { headers }
