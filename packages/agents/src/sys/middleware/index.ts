@@ -287,7 +287,7 @@ export const subagents: AgentMiddleware = {
 
         // Spawn child
         const subagent = await getAgentByName(
-          (ctx.env as AgentEnv).DEEP_AGENT,
+          (ctx.env as AgentEnv).SYSTEM_AGENT,
           childId
         );
 

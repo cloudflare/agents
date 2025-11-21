@@ -1,5 +1,5 @@
-import type { ModelRequest, ToolMeta } from "../types";
-import type { DeepAgent } from "../agent";
+import type { ModelRequest } from "../types";
+import type { SystemAgent } from "../agent";
 import { getToolMeta } from "..";
 
 export class ModelPlanBuilder {
@@ -11,7 +11,7 @@ export class ModelPlanBuilder {
   private _stop?: string[];
   private _model?: string;
 
-  constructor(private readonly agent: DeepAgent) {}
+  constructor(private readonly agent: SystemAgent) {}
 
   addSystemPrompt(...parts: Array<string | undefined | null>) {
     for (const p of parts) if (p) this.sysParts.push(p);

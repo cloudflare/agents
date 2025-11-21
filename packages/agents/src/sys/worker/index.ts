@@ -73,7 +73,7 @@ async function listThreads(registry: KVNamespace): Promise<ThreadMetadata[]> {
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-type HandlerOpions = {
+export type HandlerOptions = {
   baseUrl?: string;
   /** Secret to use for authorization. Optional means no check. */
   secret?: string;
@@ -100,7 +100,7 @@ type HandlerEnv = {
  * export default createHandler(); // this is the entrypoint to the worker
  * ```
  */
-export const createHandler = (opts: HandlerOpions = {}) => {
+export const createHandler = (opts: HandlerOptions = {}) => {
   return {
     async fetch(req: Request, env: HandlerEnv, _ctx: ExecutionContext) {
       const url = new URL(req.url);

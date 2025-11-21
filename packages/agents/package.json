@@ -131,10 +131,10 @@
       "import": "./dist/mcp/x402.js",
       "require": "./dist/mcp/x402.js"
     },
-    "./deep": {
-      "types": "./dist/deep/index.d.ts",
-      "import": "./dist/deep/index.js",
-      "require": "./dist/deep/index.js"
+    "./sys": {
+      "types": "./dist/sys/index.d.ts",
+      "import": "./dist/sys/index.js",
+      "require": "./dist/sys/index.js"
     }
   },
   "publishConfig": {

@@ -1,4 +1,4 @@
-import { defineTool } from "agents/deep";
+import { defineTool } from "agents/sys";
 import * as z from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { getCustomStatTimeseriesText, getCustomTopNText } from "./analytics";

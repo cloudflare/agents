@@ -1,6 +1,6 @@
 import type { env } from "cloudflare:workers";
 import type { ModelPlanBuilder } from "./middleware/plan";
-import type { AgentConfig, DeepAgent } from "./agent";
+import type { AgentConfig, SystemAgent } from "./agent";
 import type { Provider } from "./providers";
 
 export type RunStatus =
@@ -131,7 +131,7 @@ export type AgentBlueprint = {
 
 export type MWContext = {
   provider: Provider;
-  agent: DeepAgent;
+  agent: SystemAgent;
   registerTool: (handler: ToolHandler) => void;
 };
 
@@ -172,7 +172,7 @@ export type ToolHandler = ((
 ) => Promise<string | object | null>) & { __tool?: ToolMeta };
 
 export type ToolContext = {
-  agent: DeepAgent;
+  agent: SystemAgent;
   env: typeof env;
   callId: string;
 };
