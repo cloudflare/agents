@@ -5,7 +5,6 @@ import type {
   ApproveBody,
   ToolCall,
   InvokeBody,
-  AgentBlueprint,
   MWContext,
   ThreadMetadata,
   AgentState,
@@ -14,7 +13,7 @@ import type {
   RunState
 } from "../types";
 import { Agent, getAgentByName, type AgentContext } from "../..";
-import { subagents, planning, filesystem, getToolMeta } from "../middleware";
+import { getToolMeta } from "../middleware";
 import { type AgentEvent, AgentEventType } from "../events";
 import { step } from "./step";
 import { Store } from "./store";
@@ -361,22 +360,8 @@ export abstract class SystemAgent<
     return out;
   }
 
-  async run() {
-    const runState = this.runState;
-    if (!runState || runState.status !== "running") return;
-
-    // One bounded tick to avoid subrequest limits:
-    //   - at most 1 model call
-    //   - then execute up to N tool calls (N small)
-    const TOOLS_PER_TICK = 25; // we reset this after each tick anyway
-
-    this.emit(AgentEventType.RUN_TICK, {
-      runId: runState.runId,
-      step: runState.step
-    });
-    runState.step += 1;
-
-    const toolBatch = this.popPendingToolCalls(TOOLS_PER_TICK);
+  async executePendingTools(maxTools: number) {
+    const toolBatch = this.popPendingToolCalls(maxTools);
 
     const mws = this.middleware;
     for (const call of toolBatch)
@@ -451,65 +436,92 @@ export abstract class SystemAgent<
         };
       });
     this.store.appendMessages(messages);
+  }
 
-    // If we're still waiting for subagents, we don't proceed to model
+  async run() {
+    const runState = this.runState;
+    if (!runState || runState.status !== "running") return;
+
+    // One bounded tick to avoid subrequest limits:
+    //   - at most 1 model call
+    //   - then execute up to N tool calls (N small)
+    const TOOLS_PER_TICK = 25;
+
+    this.emit(AgentEventType.RUN_TICK, {
+      runId: runState.runId,
+      step: runState.step
+    });
+    runState.step += 1;
+
+    const hasPendingTools = (this.info.pendingToolCalls ?? []).length > 0;
+
+    // Skip calling the model if we have pending tools or waiting for subagents
+    if (!hasPendingTools && !this.isWaitingSubagents) {
+      try {
+        await step(this.middleware, this.mwContext);
+      } catch (error: unknown) {
+        runState.status = "error";
+        runState.reason = String(
+          error instanceof Error ? error.message : error
+        );
+        this.emit(AgentEventType.AGENT_ERROR, {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined
+        });
+        return;
+      }
+
+      if (this.isPaused) return;
+
+      // If the agent didn't call any more tools, we consider the run complete.
+      // If it was a subagent, we also report back to the parent.
+      if (this.isDone) {
+        runState.status = "completed";
+        const last = this.store.lastAssistant();
+        this.emit(AgentEventType.AGENT_COMPLETED, { result: last });
+
+        const parent = this.info.parentInfo;
+        // If it's a subagent, report back to the parent on completion
+        if (parent?.threadId && parent?.token) {
+          const parentAgent = await getAgentByName(
+            this.env.SYSTEM_AGENT,
+            parent.threadId
+          );
+          const final = last && "content" in last ? last.content : "";
+          await this.onDone({ agent: this, final });
+          await parentAgent.fetch(
+            new Request("http://do/child_result", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                token: parent.token,
+                childThreadId: this.info.threadId || this.ctx.id.toString(),
+                report: final
+              })
+            })
+          );
+        }
+
+        return;
+      }
+    }
+
+    // Execute pending tools
+    await this.executePendingTools(TOOLS_PER_TICK);
+
+    // If we're still waiting for subagents, don't proceed further
     if (this.isWaitingSubagents) {
       return;
     }
 
     const pending = this.info.pendingToolCalls ?? [];
-    // If we consumed some but still have pending tool calls, pause to yield and reschedule
+    // If we consumed some but still have pending tool calls, reschedule to continue
     if (pending.length > 0) {
       await this.reschedule();
       return;
     }
 
-    try {
-      await step(this.middleware, this.mwContext);
-    } catch (error: unknown) {
-      runState.status = "error";
-      runState.reason = String(error instanceof Error ? error.message : error);
-      this.emit(AgentEventType.AGENT_ERROR, {
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined
-      });
-      return;
-    }
-
-    if (this.isPaused) return;
-
-    // If the agent didn't call any more tools, we consider the run complete.
-    // If it was a subagent, we also report back to the parent.
-    if (this.isDone) {
-      runState.status = "completed";
-      const last = this.store.lastAssistant();
-      this.emit(AgentEventType.AGENT_COMPLETED, { result: last });
-
-      const parent = this.info.parentInfo;
-      // If it's a subagent, report back to the parent on completion
-      if (parent?.threadId && parent?.token) {
-        const parentAgent = await getAgentByName(
-          this.env.SYSTEM_AGENT,
-          parent.threadId
-        );
-        const final = last && "content" in last ? last.content : "";
-        await this.onDone({ agent: this, final });
-        await parentAgent.fetch(
-          new Request("http://do/child_result", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              token: parent.token,
-              childThreadId: this.info.threadId || this.ctx.id.toString(),
-              report: final
-            })
-          })
-        );
-      }
-
-      return;
-    }
-
+    // Otherwise, reschedule for next model call
     await this.reschedule();
   }
 
