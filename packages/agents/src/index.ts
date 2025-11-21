@@ -1537,14 +1537,20 @@ export class Agent<
     const result = await this.mcp.handleCallbackRequest(request);
 
     // If auth was successful, establish the connection in the background
-    // establishConnection() will fire onServerStateChanged event which triggers another broadcast
     if (result.authSuccess) {
-      this.mcp.establishConnection(result.serverId).catch((error) => {
-        console.error(
-          "[Agent handleMcpOAuthCallback] Background connection failed:",
-          error
-        );
-      });
+      this.broadcastMcpServers();
+
+      this.mcp
+        .establishConnection(result.serverId)
+        .catch((error) => {
+          console.error(
+            "[Agent handleMcpOAuthCallback] Connection establishment failed:",
+            error
+          );
+        })
+        .finally(() => {
+          this.broadcastMcpServers();
+        });
     }
 
     // Return the HTTP response for the OAuth callback
