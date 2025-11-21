@@ -1540,12 +1540,17 @@ export class Agent<
     if (result.authSuccess) {
       this.broadcastMcpServers();
 
-      this.mcp.establishConnection(result.serverId).catch((error) => {
-        console.error(
-          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
-          error
-        );
-      });
+      this.mcp
+        .establishConnection(result.serverId)
+        .catch((error) => {
+          console.error(
+            "[Agent handleMcpOAuthCallback] Connection establishment failed:",
+            error
+          );
+        })
+        .then(() => {
+          this.broadcastMcpServers();
+        });
     }
 
     this.broadcastMcpServers();
