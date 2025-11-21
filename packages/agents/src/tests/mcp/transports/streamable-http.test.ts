@@ -583,4 +583,70 @@ describe("Streamable HTTP Transport", () => {
       expect(tools.some((t) => t.name === "temp-echo")).toBe(false);
     });
   });
+
+  describe("Header and Auth Handling", () => {
+    it("should pass custom headers to transport via requestInfo", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      // Send request with custom headers using the echoRequestInfo tool
+      const echoMessage: JSONRPCMessage = {
+        id: "echo-headers-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "echoRequestInfo",
+          arguments: {}
+        }
+      };
+
+      const request = new Request(baseUrl, {
+        body: JSON.stringify(echoMessage),
+        headers: {
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "mcp-session-id": sessionId,
+          "x-user-id": "test-user-123",
+          "x-request-id": "req-456",
+          "x-custom-header": "custom-value"
+        },
+        method: "POST"
+      });
+
+      const response = await worker.fetch(request, env, ctx);
+      expect(response.status).toBe(200);
+
+      // Parse the SSE response
+      const sseText = await readSSEEvent(response);
+      const parsed = parseSSEData(sseText) as JSONRPCResponse;
+      expect(parsed.id).toBe("echo-headers-1");
+
+      // Extract the echoed request info
+      const result = parsed.result as CallToolResult;
+      const contentText = result.content?.[0]?.text;
+      const echoedData = JSON.parse(
+        typeof contentText === "string" ? contentText : "{}"
+      );
+
+      // Verify custom headers were passed through
+      expect(echoedData.hasRequestInfo).toBe(true);
+      expect(echoedData.headers["x-user-id"]).toBe("test-user-123");
+      expect(echoedData.headers["x-request-id"]).toBe("req-456");
+      expect(echoedData.headers["x-custom-header"]).toBe("custom-value");
+
+      // Verify that certain internal headers that the transport adds are NOT exposed
+      // The transport adds cf-mcp-method and cf-mcp-message internally but should filter them
+      expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
+      expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
+      expect(echoedData.headers.upgrade).toBeUndefined();
+
+      // Verify standard headers are also present
+      expect(echoedData.headers.accept).toContain("text/event-stream");
+      expect(echoedData.headers["content-type"]).toBe("application/json");
+
+      // Verify sessionId is passed through extra data
+      expect(echoedData.sessionId).toBeDefined();
+      expect(echoedData.sessionId).toBe(sessionId);
+    });
+  });
 });

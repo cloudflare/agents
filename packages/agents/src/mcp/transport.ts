@@ -16,16 +16,21 @@ import { MessageType } from "../ai-types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
 export class McpSSETransport implements Transport {
-  sessionId?: string;
+  sessionId: string;
   // Set by the server in `server.connect(transport)`
   onclose?: () => void;
   onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
+  onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
   private _getWebSocket: () => WebSocket | null;
   private _started = false;
-  constructor(getWebSocket: () => WebSocket | null) {
-    this._getWebSocket = getWebSocket;
+  constructor() {
+    const { agent } = getCurrentAgent<McpAgent>();
+    if (!agent)
+      throw new Error("McpAgent was not found in Transport constructor");
+
+    this.sessionId = agent.getSessionId();
+    this._getWebSocket = () => agent.getWebSocket();
   }
 
   async start() {

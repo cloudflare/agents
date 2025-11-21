@@ -1,7 +1,10 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  JSONRPCMessage,
+  MessageExtraInfo
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   JSONRPCMessageSchema,
   isJSONRPCError,
@@ -77,7 +80,7 @@ export abstract class McpAgent<
   }
 
   /** Get the unique WebSocket. SSE transport only. */
-  private getWebSocket() {
+  getWebSocket() {
     const websockets = Array.from(this.getConnections());
     if (websockets.length === 0) {
       return null;
@@ -89,7 +92,7 @@ export abstract class McpAgent<
   private initTransport() {
     switch (this.getTransportType()) {
       case "sse": {
-        return new McpSSETransport(() => this.getWebSocket());
+        return new McpSSETransport();
       }
       case "streamable-http": {
         return new StreamableHTTPServerTransport({});
@@ -188,7 +191,8 @@ export abstract class McpAgent<
   /** Handles MCP Messages for the legacy SSE transport. */
   async onSSEMcpMessage(
     _sessionId: string,
-    messageBody: unknown
+    messageBody: unknown,
+    extraInfo?: MessageExtraInfo
   ): Promise<Error | null> {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
@@ -210,7 +214,7 @@ export abstract class McpAgent<
         return null; // Message was handled by elicitation system
       }
 
-      this._transport?.onmessage?.(parsedMessage);
+      this._transport?.onmessage?.(parsedMessage, extraInfo);
       return null;
     } catch (error) {
       console.error("Error forwarding message to SSE:", error);

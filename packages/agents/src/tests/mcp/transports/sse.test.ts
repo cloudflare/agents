@@ -1,5 +1,9 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type {
+  CallToolResult,
+  JSONRPCResponse
+} from "@modelcontextprotocol/sdk/types.js";
 import worker, { type Env } from "../../worker";
 import { establishSSEConnection } from "../../shared/test-utils";
 
@@ -115,6 +119,79 @@ describe("SSE Transport", () => {
 
       // This demonstrates the SSE pattern: send via POST, receive via SSE
       expect(response.headers.get("Content-Type")).toBe("text/event-stream");
+    });
+  });
+
+  describe("Header and Auth Handling", () => {
+    it("should pass headers and session ID to transport via requestInfo", async () => {
+      const ctx = createExecutionContext();
+      const { sessionId, reader } = await establishSSEConnection(ctx);
+
+      // Send request with custom headers using the echoRequestInfo tool
+      const request = new Request(`${baseUrl}/message?sessionId=${sessionId}`, {
+        method: "POST",
+        body: JSON.stringify({
+          id: "echo-headers-1",
+          jsonrpc: "2.0",
+          method: "tools/call",
+          params: {
+            name: "echoRequestInfo",
+            arguments: {}
+          }
+        }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-id": "test-user-123",
+          "x-request-id": "req-456",
+          "x-custom-header": "custom-value"
+        }
+      });
+
+      const response = await worker.fetch(request, env, ctx);
+      expect(response.status).toBe(202); // SSE returns 202 Accepted
+
+      // Read the response from the SSE stream
+      const { value } = await reader.read();
+      const event = new TextDecoder().decode(value);
+      const lines = event.split("\n");
+      expect(lines[0]).toEqual("event: message");
+
+      // Parse the JSON response from the data line
+      const dataLine = lines.find((line) => line.startsWith("data:"));
+      const parsed = JSON.parse(
+        dataLine!.replace("data: ", "")
+      ) as JSONRPCResponse;
+      expect(parsed.id).toBe("echo-headers-1");
+
+      // Extract the echoed request info
+      const result = parsed.result as CallToolResult;
+      const textContent = result.content?.[0];
+      if (!textContent || textContent.type !== "text") {
+        throw new Error("Expected text content in tool result");
+      }
+      const echoedData = JSON.parse(textContent.text);
+
+      // Verify custom headers were passed through
+      expect(echoedData.hasRequestInfo).toBe(true);
+      expect(echoedData.headers["x-user-id"]).toBe("test-user-123");
+      expect(echoedData.headers["x-request-id"]).toBe("req-456");
+      expect(echoedData.headers["x-custom-header"]).toBe("custom-value");
+
+      // Verify that certain internal headers that the transport adds are NOT exposed
+      // The transport filters cf-mcp-method, cf-mcp-message, and upgrade headers
+      expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
+      expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
+      expect(echoedData.headers.upgrade).toBeUndefined();
+
+      // Verify standard headers are also present
+      expect(echoedData.headers["content-type"]).toBe("application/json");
+
+      // Check what properties are available in extra
+      expect(echoedData.availableExtraKeys).toBeDefined();
+
+      // Verify sessionId is passed through extra data
+      expect(echoedData.sessionId).toBeDefined();
+      expect(echoedData.sessionId).toBe(sessionId);
     });
   });
 });

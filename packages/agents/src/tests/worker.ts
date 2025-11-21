@@ -1,5 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type {
+  CallToolResult,
+  IsomorphicHeaders,
+  ServerNotification,
+  ServerRequest
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { McpAgent } from "../mcp/index.ts";
 import {
@@ -37,6 +43,19 @@ type State = unknown;
 
 type Props = {
   testValue: string;
+};
+
+type ToolExtraInfo = RequestHandlerExtra<ServerRequest, ServerNotification>;
+
+type EchoResponseData = {
+  headers: IsomorphicHeaders;
+  authInfo: ToolExtraInfo["authInfo"] | null;
+  hasRequestInfo: boolean;
+  hasAuthInfo: boolean;
+  requestId: ToolExtraInfo["requestId"];
+  sessionId: string | null;
+  availableExtraKeys: string[];
+  [key: string]: unknown;
 };
 
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
@@ -167,6 +186,55 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
           return { content: [{ type: "text", text: "temp tool removed" }] };
         }
         return { content: [{ type: "text", text: "nothing to remove" }] };
+      }
+    );
+
+    // Echo request info for testing header and auth passthrough
+    this.server.tool(
+      "echoRequestInfo",
+      "Echo back request headers and auth info",
+      {},
+      async (_args, extra: ToolExtraInfo): Promise<CallToolResult> => {
+        // Extract headers from requestInfo, auth from authInfo
+        const headers: IsomorphicHeaders = extra.requestInfo?.headers ?? {};
+        const authInfo = extra.authInfo ?? null;
+
+        // Track non-function properties available in extra
+        const extraRecord = extra as Record<string, unknown>;
+        const extraKeys = Object.keys(extraRecord).filter(
+          (key) => typeof extraRecord[key] !== "function"
+        );
+
+        // Build response object with all available data
+        const responseData: EchoResponseData = {
+          headers,
+          authInfo,
+          hasRequestInfo: !!extra.requestInfo,
+          hasAuthInfo: !!extra.authInfo,
+          requestId: extra.requestId,
+          // Include any sessionId if it exists
+          sessionId: extra.sessionId ?? null,
+          // List all available properties in extra
+          availableExtraKeys: extraKeys
+        };
+
+        // Add any other properties from extra that aren't already included
+        extraKeys.forEach((key) => {
+          if (
+            !["requestInfo", "authInfo", "requestId", "sessionId"].includes(key)
+          ) {
+            responseData[`extra_${key}`] = extraRecord[key];
+          }
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(responseData, null, 2)
+            }
+          ]
+        };
       }
     );
   }
