@@ -1,5 +1,41 @@
 # @cloudflare/agents
 
+## 0.3.0
+
+### Minor Changes
+
+- [#652](https://github.com/cloudflare/agents/pull/652) [`c07b2c0`](https://github.com/cloudflare/agents/commit/c07b2c05ae6a9b5ac4f87f24e80a145e3d2f8aaa) Thanks [@mattzcarey](https://github.com/mattzcarey)! - ### Breaking Changes
+  - **`getMcpServers()` is now async**: Changed from synchronous to asynchronous method to support storage operations
+  - **`DurableObjectOAuthClientProvider` constructor**: Now accepts `OAuthClientStorage` interface instead of `DurableObjectStorage`
+
+  ### New Features
+  - **`MCPClientManager` API changes**:
+    - New `registerServer()` method to register servers (replaces part of `connect()`)
+    - New `connectToServer()` method to establish connection (replaces part of `connect()`)
+    - `connect()` method deprecated (still works for backward compatibility)
+    - Requires `MCPClientStorage` interface implementation (provided via `AgentMCPClientStorage`)
+  - **Storage abstraction layer**: New `MCPClientStorage` and `OAuthClientStorage` interfaces enable custom storage implementations beyond Durable Objects
+  - **Connection state observability**: New `onServerStateChanged()` event for tracking all server state changes
+  - **Improved reconnect logic**: `restoreConnectionsFromStorage()` handles failed connections
+
+  ### Bug Fixes
+  - Fixed failed connections not being recreated on restore
+  - Fixed redundant storage operations during connection restoration
+
+### Patch Changes
+
+- [#665](https://github.com/cloudflare/agents/pull/665) [`4c0838a`](https://github.com/cloudflare/agents/commit/4c0838a28e707b7a69abea14b9df5dd1b78d53ae) Thanks [@threepointone](https://github.com/threepointone)! - Add default JSON schema validator to MCP client
+
+- [#664](https://github.com/cloudflare/agents/pull/664) [`36d03e6`](https://github.com/cloudflare/agents/commit/36d03e63fe51e6bf7296928bfac11ef6d91c3103) Thanks [@threepointone](https://github.com/threepointone)! - Refactor MCP server table management in Agent class
+
+  Moved creation and deletion of the cf_agents_mcp_servers table from AgentMCPClientStorage to the Agent class. Removed redundant create and destroy methods from AgentMCPClientStorage and updated MCPClientManager to reflect these changes. Added comments to clarify usage in demo and test code.
+
+- [#653](https://github.com/cloudflare/agents/pull/653) [`412321b`](https://github.com/cloudflare/agents/commit/412321bc9f8d58e3f8aa11a2aa6d646b7cb6c7ec) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Allow `this.destroy` inside a schedule by including a `destroyed` flag and yielding `ctx.abort` instead of calling it directly
+  Fix issue where schedules would not be able to run for more 30 seconds due to `blockConccurencyWhile`. `alarm()` isn't manually called anymore, getting rid of the bCW.
+  Fix an issue where immediate schedules (e.g. `this.schedule(0, "foo"))`) would not get immediately scheduled.
+
+- [#654](https://github.com/cloudflare/agents/pull/654) [`a315e86`](https://github.com/cloudflare/agents/commit/a315e86693d81a3ad4d8b3acb21f0f67b4b59ef4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - When handling MCP server requests use relatedRequestId in TransportOptions to send the response down a POST stream if supported (streamable-http)
+
 ## 0.2.23
 
 ### Patch Changes
