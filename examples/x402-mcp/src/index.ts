@@ -6,7 +6,6 @@ import { z } from "zod";
 import type { PaymentRequirements } from "x402/types";
 import { privateKeyToAccount } from "viem/accounts";
 import ui from "./ui";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 export class PayAgent extends Agent<Env> {
   confirmations: Record<string, (res: boolean) => void> = {};
@@ -65,19 +64,22 @@ export class PayAgent extends Agent<Env> {
 
               // The first parameter becomes the confirmation callback.
               // We can set it to `null` if we want the agent to pay automatically.
-              const res = (await this.x402Client!.callTool(
+              const res = await this.x402Client!.callTool(
                 this.onPaymentRequired.bind(this),
                 {
                   name: parsed.type,
                   arguments: input
                 }
-              )) as CallToolResult;
+              );
 
               conn.send(
                 JSON.stringify({
                   event: res.isError ? "tool_error" : "tool_result",
                   tool: parsed.type,
-                  output: res.content[0]?.text ?? ""
+                  output:
+                    res.content[0]?.type === "text"
+                      ? (res.content[0]?.text ?? "")
+                      : ""
                 })
               );
             }
@@ -117,10 +119,12 @@ export class PayMCP extends McpAgent<Env> {
     );
 
     // Free tool
-    this.server.tool(
+    this.server.registerTool(
       "echo",
-      "Echo a message",
-      { message: z.string() },
+      {
+        description: "Echo a message",
+        inputSchema: { message: z.string() }
+      },
       async ({ message }) => {
         return { content: [{ type: "text", text: message }] };
       }

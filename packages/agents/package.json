@@ -24,10 +24,10 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.64",
+    "@ai-sdk/openai": "2.0.68",
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/sdk": "^1.21.0",
-    "ai": "5.0.89",
+    "@modelcontextprotocol/sdk": "^1.22.0",
+    "ai": "5.0.93",
     "cron-schedule": "^5.0.4",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
@@ -41,10 +41,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-oauth-provider": "^0.1.0",
-    "@types/yargs": "^17.0.34",
+    "@types/yargs": "^17.0.35",
     "react": "*",
     "vitest-browser-react": "^1.0.1",
-    "x402": "^0.7.1"
+    "x402": "^0.7.2"
   },
   "peerDependencies": {
     "react": "*",

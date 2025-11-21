@@ -258,7 +258,11 @@ describe("Streamable HTTP Transport", () => {
       expect(parsed.id).toBe("unicode-1");
 
       const result = parsed.result as CallToolResult;
-      expect(result.content?.[0]?.text).toBe(`Hello, ${unicodeName}!`);
+      expect(result.content).toBeDefined();
+      expect(
+        result.content?.[0]?.type === "text" &&
+          result.content?.[0]?.text === `Hello, ${unicodeName}!`
+      ).toBe(true);
     });
   });
 
@@ -460,7 +464,10 @@ describe("Streamable HTTP Transport", () => {
       const postJson = parseSSEData(postFrame) as JSONRPCResponse;
       expect(postJson.id).toBe("emit-log-1");
       const result = postJson.result as CallToolResult;
-      expect(result.content?.[0]?.text).toBe("logged:info");
+      expect(
+        result.content?.[0]?.type === "text" &&
+          result.content?.[0]?.text === "logged:info"
+      ).toBe(true);
 
       // Read the standalone SSE for the logging notification
       const pushFrame = await readOneFrame(standaloneReader);
@@ -505,7 +512,10 @@ describe("Streamable HTTP Transport", () => {
       const installJson = parseSSEData(installFrame) as JSONRPCResponse;
       expect(installJson.id).toBe("install-1");
       let result = installJson.result as CallToolResult;
-      expect(result?.content?.[0]?.text).toBe("temp tool installed");
+      expect(
+        result?.content?.[0]?.type === "text" &&
+          result?.content?.[0]?.text === "temp tool installed"
+      ).toBe(true);
 
       // Expect a tools/list_changed notification on the standalone stream
       let listChanged = await readOneFrame(standaloneReader);
@@ -544,7 +554,10 @@ describe("Streamable HTTP Transport", () => {
       const runTempJson = parseSSEData(runTempFrame) as JSONRPCResponse;
       expect(runTempJson.id).toBe("run-temp-1");
       result = runTempJson.result as CallToolResult;
-      expect(result?.content?.[0]?.text).toBe("echo:test");
+      expect(
+        result?.content?.[0]?.type === "text" &&
+          result?.content?.[0]?.text === "echo:test"
+      ).toBe(true);
 
       // Uninstall temp tool so we get another list_changed on standalone stream
       const uninstallMsg = {

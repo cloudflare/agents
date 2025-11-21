@@ -9,10 +9,12 @@ const server = new McpServer({
   version: "1.0.0"
 });
 
-server.tool(
+server.registerTool(
   "hello",
-  "Returns a greeting message",
-  { name: z.string().optional() },
+  {
+    description: "Returns a greeting message",
+    inputSchema: { name: z.string().optional() }
+  },
   async ({ name }) => {
     const auth = getMcpAuthContext();
     const username = auth?.props?.username as string | undefined;
@@ -28,10 +30,11 @@ server.tool(
   }
 );
 
-server.tool(
+server.registerTool(
   "whoami",
-  "Returns information about the authenticated user",
-  {},
+  {
+    description: "Returns information about the authenticated user"
+  },
   async () => {
     const auth = getMcpAuthContext();
 
@@ -40,7 +43,7 @@ server.tool(
         content: [
           {
             text: "No authentication context available",
-            type: "text"
+            type: "text" as const
           }
         ]
       };
@@ -58,7 +61,7 @@ server.tool(
             null,
             2
           ),
-          type: "text"
+          type: "text" as const
         }
       ]
     };

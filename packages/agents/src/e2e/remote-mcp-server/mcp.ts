@@ -14,13 +14,16 @@ export class WhoamiMCP extends McpAgent<Env, State, AuthProps> {
   async init() {
     // Proves we kept the email from the execution context
     const email = this.props?.email;
-    this.server.tool(
+    this.server.registerTool(
       "whoami",
-      "Return the authenticated email (from auth props)",
-      {},
-      async () => ({
-        content: [{ type: "text", text: email ?? "unknown" }]
-      })
+      {
+        description: "Return the authenticated email (from auth props)"
+      },
+      async () => {
+        return {
+          content: [{ type: "text" as const, text: email ?? "unknown" }]
+        };
+      }
     );
   }
 }
@@ -35,19 +38,32 @@ export class AddMCP extends McpAgent<
   async init() {
     // Simple echo tool that's gated behind a feature flag
     if (this.props?.echoAvailable) {
-      this.server.tool("echo", { msg: z.string() }, async ({ msg }) => ({
-        content: [{ type: "text", text: msg }]
-      }));
+      this.server.registerTool(
+        "echo",
+        {
+          description: "Echo a message",
+          inputSchema: { msg: z.string() }
+        },
+        async ({ msg }) => {
+          return {
+            content: [{ type: "text", text: msg }]
+          };
+        }
+      );
     }
 
     // Simple math tool
-    this.server.tool(
+    this.server.registerTool(
       "add",
-      "Add two numbers",
-      { a: z.number(), b: z.number() },
-      async ({ a, b }) => ({
-        content: [{ type: "text", text: String(a + b) }]
-      })
+      {
+        description: "Add two numbers",
+        inputSchema: { a: z.number(), b: z.number() }
+      },
+      async ({ a, b }) => {
+        return {
+          content: [{ type: "text", text: String(a + b) }]
+        };
+      }
     );
   }
 }

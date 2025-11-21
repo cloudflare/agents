@@ -16,13 +16,15 @@ export class TinyMcp extends McpAgent {
   server = new McpServer({ name: "", version: "v1.0.0" });
 
   async init() {
-    this.server.tool(
+    this.server.registerTool(
       "square",
-      "Squares a number",
-      { number: z.number() },
+      {
+        description: "Squares a number",
+        inputSchema: { number: z.number() }
+      },
       async ({ number }) => ({
         content: [{ type: "text", text: String(number ** 2) }]
-      })
+      }
     );
   }
 }
@@ -91,12 +93,14 @@ export class StorageMcp extends McpAgent {
       content: [{ type: "text" as const, text }]
     });
 
-    this.server.tool(
+    this.server.registerTool(
       "writeFile",
-      "Store text as a file with the given path",
       {
-        path: z.string().describe("Absolute path of the file"),
-        content: z.string().describe("The content to store")
+        description: "Store text as a file with the given path",
+        inputSchema: {
+          path: z.string().describe("Absolute path of the file"),
+          content: z.string().describe("The content to store")
+        }
       },
       async ({ path, content }) => {
         try {
@@ -108,11 +112,13 @@ export class StorageMcp extends McpAgent {
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "readFile",
-      "Read the contents of a file",
       {
-        path: z.string().describe("Absolute path of the file to read")
+        description: "Read the contents of a file",
+        inputSchema: {
+          path: z.string().describe("Absolute path of the file to read")
+        }
       },
       async ({ path }) => {
         const obj = await env.BUCKET.get(path);
@@ -126,9 +132,15 @@ export class StorageMcp extends McpAgent {
       }
     );
 
-    this.server.tool("whoami", "Check who the user is", async () => {
-      return textRes(`${this.props?.userId}`);
-    });
+    this.server.registerTool(
+      "whoami",
+      {
+        description: "Check who the user is"
+      },
+      async () => {
+        return textRes(`${this.props?.userId}`);
+      }
+    );
   }
 }
 

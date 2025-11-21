@@ -1,9 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type {
-  CallToolResult,
-  JSONRPCError
-} from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCError } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import { createMcpHandler } from "../../mcp/handler";
 import { z } from "zod";
@@ -24,13 +21,15 @@ describe("createMcpHandler", () => {
       { capabilities: { tools: {} } }
     );
 
-    server.tool(
+    server.registerTool(
       "test-tool",
-      "A test tool",
-      { message: z.string().describe("Test message") },
-      async ({ message }): Promise<CallToolResult> => ({
-        content: [{ text: `Echo: ${message}`, type: "text" }]
-      })
+      {
+        description: "A test tool",
+        inputSchema: { message: z.string().describe("Test message") }
+      },
+      async ({ message }) => {
+        return { content: [{ text: `Echo: ${message}`, type: "text" }] };
+      }
     );
 
     return server;
@@ -398,11 +397,11 @@ describe("createMcpHandler", () => {
       expect(response.status).toBe(500);
       expect(response.headers.get("Content-Type")).toBe("application/json");
 
-      const body = await response.json();
-      expect((body as JSONRPCError)?.jsonrpc).toBe("2.0");
-      expect((body as JSONRPCError)?.error).toBeDefined();
-      expect((body as JSONRPCError)?.error?.code).toBe(-32603);
-      expect((body as JSONRPCError)?.error?.message).toBe("Transport error");
+      const body = (await response.json()) as JSONRPCError;
+      expect(body.jsonrpc).toBe("2.0");
+      expect(body.error).toBeDefined();
+      expect(body.error.code).toBe(-32603);
+      expect(body.error.message).toBe("Transport error");
     });
 
     it("should return generic error message for non-Error exceptions", async () => {
@@ -441,10 +440,8 @@ describe("createMcpHandler", () => {
       const response = await handler(request, env, ctx);
 
       expect(response.status).toBe(500);
-      const body = await response.json();
-      expect((body as JSONRPCError)?.error?.message).toBe(
-        "Internal server error"
-      );
+      const body = (await response.json()) as JSONRPCError;
+      expect(body.error.message).toBe("Internal server error");
     });
   });
 });

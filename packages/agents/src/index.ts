@@ -214,9 +214,9 @@ export type MCPServersState = {
   servers: {
     [id: string]: MCPServer;
   };
-  tools: Tool[];
-  prompts: Prompt[];
-  resources: Resource[];
+  tools: (Tool & { serverId: string })[];
+  prompts: (Prompt & { serverId: string })[];
+  resources: (Resource & { serverId: string })[];
 };
 
 export type MCPServer = {

@@ -70,8 +70,7 @@ export class MyAgent extends Agent<Env, State> {
                   amount: {
                     type: "number",
                     title: "Amount",
-                    description: "The amount to increase the counter by",
-                    minLength: 1
+                    description: "The amount to increase the counter by"
                   }
                 },
                 required: ["amount"]
