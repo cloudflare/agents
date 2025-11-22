@@ -11,7 +11,8 @@ import type {
   ParentInfo,
   ThreadRequestContext,
   RunState,
-  AgentConfig
+  AgentConfig,
+  AgentBlueprint
 } from "../types";
 import { Agent, getAgentByName, type AgentContext } from "../..";
 import { getToolMeta } from "../middleware";
@@ -19,9 +20,11 @@ import { type AgentEvent, AgentEventType } from "../events";
 import { step } from "./step";
 import { Store } from "./store";
 import { PersistedObject } from "./config";
+import type { Agency } from "./agency";
 
 export interface AgentEnv {
   SYSTEM_AGENT: DurableObjectNamespace<SystemAgent>;
+  AGENCY: DurableObjectNamespace<Agency>;
   LLM_API_KEY?: string;
   LLM_API_BASE?: string;
 }
@@ -29,11 +32,13 @@ export interface AgentEnv {
 // I rather name this State but the name's taken
 export type Info = {
   threadId: string;
+  agencyId: string;
   createdAt: string;
   request: ThreadRequestContext;
   agentType: string;
   parentInfo?: ParentInfo;
   pendingToolCalls?: ToolCall[];
+  blueprint?: AgentBlueprint;
 };
 
 export abstract class SystemAgent<
@@ -61,6 +66,7 @@ export abstract class SystemAgent<
     });
   }
 
+  abstract get blueprint(): AgentBlueprint;
   abstract get middleware(): AgentMiddleware[];
   abstract get tools(): Record<string, ToolHandler>;
   abstract get systemPrompt(): string;
@@ -291,7 +297,8 @@ export abstract class SystemAgent<
   }
 
   getState(_req: Request) {
-    const { threadId, agentType, parentInfo, request, createdAt } = this.info;
+    const { threadId, agencyId, agentType, parentInfo, request, createdAt } =
+      this.info;
     const { model } = this;
     const tools = Object.values(this.tools).map((tool) => {
       const meta = getToolMeta(tool);
@@ -310,7 +317,8 @@ export abstract class SystemAgent<
         request,
         parent: parentInfo,
         createdAt,
-        agentType
+        agentType,
+        agencyId
       }
     };
     if (parentInfo) {

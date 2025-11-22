@@ -4,6 +4,7 @@
  */
 
 import { SystemAgent, type AgentEnv } from "./agent";
+import { Agency } from "./agent/agency";
 import { AgentEventType } from "./events";
 import { planning, filesystem, subagents, getToolMeta } from "./middleware";
 import { makeOpenAI, type Provider } from "./providers";
@@ -11,9 +12,11 @@ import type {
   ToolHandler,
   AgentMiddleware,
   AgentBlueprint,
-  AgentConfig
+  AgentConfig,
+  ThreadMetadata
 } from "./types";
 import { createHandler, type HandlerOptions } from "./worker";
+import type { Connection, WSMessage } from "partyserver";
 
 type AgentSystemOptions = {
   defaultModel: string;
@@ -124,20 +127,119 @@ export class AgentSystem<TConfig = Record<string, unknown>> {
 
   export(): {
     SystemAgent: typeof SystemAgent<AgentEnv>;
+    Agency: typeof Agency;
     handler: ReturnType<typeof createHandler>;
   } {
-    const { toolRegistry, middlewareRegistry, agentRegistry, options } = this;
+    const { toolRegistry, middlewareRegistry, agentRegistry } = this;
+    const options = this.options; // biome bug, if I put it above the biome things its not used anywhere
     class ConfiguredAgentSystem extends SystemAgent<AgentEnv> {
       async onDone(ctx: { agent: SystemAgent; final: string }): Promise<void> {
         // throw new Error("Method not implemented.");
       }
 
-      get tools() {
+      async onMessage(
+        connection: Connection,
+        message: WSMessage
+      ): Promise<void> {
+        const parsed =
+          typeof message === "string" ? JSON.parse(message) : message;
+
+        if (parsed.type === "user.message") {
+          const { content } = parsed.data;
+
+          // Notify client that message was received
+          connection.send(
+            JSON.stringify({
+              type: "message.created",
+              data: { role: "user", content }
+            })
+          );
+
+          // Invoke the agent
+          try {
+            const result = await this.provider.invoke(
+              {
+                model: this.model,
+                messages: [{ role: "user", content }]
+              },
+              {
+                // Optional: pass tools if needed
+              }
+            );
+
+            // Send response back
+            connection.send(
+              JSON.stringify({
+                type: "message.created",
+                data: { role: "assistant", content: result.message.content }
+              })
+            );
+          } catch (e) {
+            console.error("Error invoking agent:", e);
+            connection.send(
+              JSON.stringify({
+                type: "error",
+                error: e.message
+              })
+            );
+          }
+        }
+      }
+
+      // Gets local agent blueprint or reads it from static defaults.
+      // Local blueprint is set by Agency on registration.
+      get blueprint(): AgentBlueprint {
+        if (this.info.blueprint) return this.info.blueprint;
         if (!this.info.agentType) throw new Error("Agent type not set");
 
-        const blueprint = agentRegistry.get(this.info.agentType);
-        if (!blueprint) throw new Error("Agent type not found");
+        const staticBp = agentRegistry.get(this.info.agentType);
+        if (staticBp) return staticBp;
 
+        throw new Error(`Agent type ${this.info.agentType} not found`);
+      }
+
+      async onRegister(meta: ThreadMetadata): Promise<void> {
+        const type = meta.agentType;
+        const agencyId = meta.agencyId; // <-- passed from Agency
+
+        if (!agencyId) {
+          throw new Error("Cannot register agent without Agency ID");
+        }
+
+        this.info.agencyId = agencyId;
+
+        let bp: AgentBlueprint | undefined;
+
+        // 1. Ask Agency DO for blueprint
+        try {
+          const agencyStub = this.env.AGENCY.get(
+            this.env.AGENCY.idFromString(agencyId)
+          );
+          const res = await agencyStub.fetch(
+            `http://do/internal/blueprint/${type}`
+          );
+          if (res.ok) {
+            bp = await res.json<AgentBlueprint>();
+          }
+        } catch (e) {
+          console.warn("Failed to fetch blueprint from Agency DO", e);
+        }
+
+        // 2. Fallback to static defaults from agentRegistry
+        if (!bp) bp = agentRegistry.get(type);
+        if (!bp) throw new Error(`Unknown agent type: ${type}`);
+
+        // 3. Persist blueprint locally
+        this.info.blueprint = bp;
+
+        // Initialize middleware for this blueprint
+        for (const m of this.middleware) {
+          await m.onInit?.(this.mwContext);
+        }
+      }
+
+      get tools() {
+        const blueprint = this.blueprint;
         const tools = toolRegistry.select([], blueprint.tags);
         return {
           ...Object.fromEntries(tools.map((t) => [getToolMeta(t)!.name, t])),
@@ -146,40 +248,21 @@ export class AgentSystem<TConfig = Record<string, unknown>> {
       }
 
       get middleware() {
-        if (!this.info.agentType) throw new Error("Agent type not set");
-
-        const blueprint = agentRegistry.get(this.info.agentType);
-        if (!blueprint) throw new Error("Agent type not found");
-
+        const blueprint = this.blueprint;
         const middleware = middlewareRegistry.select([], blueprint.tags);
         return middleware;
       }
 
       get model() {
-        if (!this.info.agentType) throw new Error("Agent type not set");
-
-        const blueprint = agentRegistry.get(this.info.agentType);
-        if (!blueprint) throw new Error("Agent type not found");
-
-        return blueprint.model ?? options.defaultModel;
+        return this.blueprint.model ?? options.defaultModel;
       }
 
       get systemPrompt(): string {
-        if (!this.info.agentType) throw new Error("Agent type not set");
-
-        const blueprint = agentRegistry.get(this.info.agentType);
-        if (!blueprint) throw new Error("Agent type not found");
-
-        return blueprint.prompt;
+        return this.blueprint.prompt;
       }
 
       get config(): AgentConfig {
-        if (!this.info.agentType) throw new Error("Agent type not set");
-
-        const blueprint = agentRegistry.get(this.info.agentType);
-        if (!blueprint) throw new Error("Agent type not found");
-
-        return blueprint.config ?? { middleware: {}, tools: {} };
+        return this.blueprint.config ?? { middleware: {}, tools: {} };
       }
 
       get provider(): Provider {
@@ -229,6 +312,6 @@ export class AgentSystem<TConfig = Record<string, unknown>> {
       handlerOptions.agentDefinitions = Array.from(this.agentRegistry.values());
     }
     const handler = createHandler(handlerOptions);
-    return { SystemAgent: ConfiguredAgentSystem, handler };
+    return { SystemAgent: ConfiguredAgentSystem, Agency, handler };
   }
 }

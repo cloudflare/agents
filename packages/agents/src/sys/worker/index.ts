@@ -1,12 +1,9 @@
-import { getAgentByName, type Agent } from "../..";
+import { getAgentByName } from "../..";
 import html from "./client.html";
-import type {
-  AgentBlueprint,
-  ThreadMetadata,
-  ThreadRequestContext
-} from "../types";
+import type { AgentBlueprint, ThreadRequestContext } from "../types";
 import type { KVNamespace } from "@cloudflare/workers-types";
 import type { SystemAgent } from "../agent";
+import type { Agency } from "../agent/agency";
 
 const CF_CONTEXT_KEYS = [
   "colo",
@@ -42,38 +39,6 @@ function buildRequestContext(req: Request): ThreadRequestContext {
   return context;
 }
 
-async function saveThreadMetadata(
-  registry: KVNamespace,
-  metadata: ThreadMetadata
-) {
-  await registry.put(metadata.id, JSON.stringify(metadata));
-}
-
-async function readThreadMetadata(
-  registry: KVNamespace,
-  id: string
-): Promise<ThreadMetadata | null> {
-  const raw = await registry.get(id);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as ThreadMetadata;
-  } catch (error) {
-    console.error("Failed to parse thread metadata", error);
-    return null;
-  }
-}
-
-async function listThreads(registry: KVNamespace): Promise<ThreadMetadata[]> {
-  const { keys } = await registry.list();
-  if (!keys.length) return [];
-  const items = await Promise.all(
-    keys.map(async (entry) => readThreadMetadata(registry, entry.name))
-  );
-  return items
-    .filter((item): item is ThreadMetadata => item !== null)
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-}
-
 export type HandlerOptions = {
   baseUrl?: string;
   /** Secret to use for authorization. Optional means no check. */
@@ -83,130 +48,170 @@ export type HandlerOptions = {
 
 type HandlerEnv = {
   SYSTEM_AGENT: DurableObjectNamespace<SystemAgent>;
-  AGENT_REGISTRY: KVNamespace;
+  AGENCY: DurableObjectNamespace<Agency>;
+  AGENCY_REGISTRY: KVNamespace;
 };
 
-/**
- * Creates a Worker entrypoint handler. Example usage:
- *
- * ```typescript
- * import { createAgentThread } from "./worker";
- * import { createHandler } from "./handler";
- *
- * const AgentThread = createAgentThread({
- *   provider: makeOpenAI(env.OPENAI_API_KEY, env.OPENAI_BASE_URL),
- * });
- *
- * export AgentThread;
- * export default createHandler(); // this is the entrypoint to the worker
- * ```
- */
 export const createHandler = (opts: HandlerOptions = {}) => {
   return {
     async fetch(req: Request, env: HandlerEnv, _ctx: ExecutionContext) {
       const url = new URL(req.url);
+      const path = url.pathname;
 
-      // Serve dashboard client
-      if (req.method === "GET" && url.pathname === "/") {
+      // 1. Dashboard
+      if (req.method === "GET" && path === "/") {
         return new Response(html, {
           status: 200,
           headers: { "content-type": "text/html" }
         });
       }
 
+      // 2. Auth check
       if (opts.secret && req.headers.get("X-SECRET") !== opts.secret) {
-        return new Response("invalid secret", { status: 401 });
+        return new Response("Unauthorized", { status: 401 });
       }
 
-      if (req.method === "GET" && url.pathname === "/info") {
-        // Transform blueprints into a clean list for the UI
-        const agents = (opts.agentDefinitions || []).map((b) => ({
-          name: b.name,
-          description: b.description
-        }));
-        return Response.json({ agents });
-      }
+      // ======================================================
+      // Root: Agency Management (KV-backed)
+      // ======================================================
 
-      if (req.method === "GET" && url.pathname === "/threads") {
-        const threads = await listThreads(env.AGENT_REGISTRY);
-        return Response.json({ threads });
-      }
+      // GET /agencies -> List all agencies
+      if (req.method === "GET" && path === "/agencies") {
+        const list = await env.AGENCY_REGISTRY.list();
+        const agencies = [];
 
-      if (req.method === "POST" && url.pathname === "/threads") {
-        const body = (await req.json().catch(() => ({}))) as {
-          agentType?: string;
-        };
-
-        // Default to "default" or "base-agent" if not specified
-        const agentType = body.agentType || "default";
-
-        const id = crypto.randomUUID();
-        const metadata: ThreadMetadata = {
-          id,
-          createdAt: new Date().toISOString(),
-          request: buildRequestContext(req),
-          agentType
-        };
-        const stub = await getAgentByName(env.SYSTEM_AGENT, id);
-        const registerRes = await stub.fetch(
-          new Request("http://do/register", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(metadata)
-          })
-        );
-        if (!registerRes.ok) {
-          const err = await registerRes.text();
-          return new Response(`failed to register thread: ${err}`, {
-            status: 500
-          });
+        for (const key of list.keys) {
+          const meta = await env.AGENCY_REGISTRY.get(key.name);
+          agencies.push(meta ? JSON.parse(meta) : { id: key.name });
         }
 
-        await saveThreadMetadata(env.AGENT_REGISTRY, metadata);
-
-        return Response.json(
-          { id, createdAt: metadata.createdAt, agentType },
-          { status: 201 }
-        );
+        return Response.json({ agencies });
       }
 
-      const match = url.pathname.match(/^\/threads\/([^/]+)(?:\/(.*))?$/);
-      if (!match) return new Response("not found", { status: 404 });
-      const [_, threadId, tail] = match;
-      const stub = await getAgentByName(env.SYSTEM_AGENT, threadId);
+      // POST /agencies -> Create a new Agency
+      if (req.method === "POST" && path === "/agencies") {
+        const body = await req
+          .json<{ name?: string }>()
+          .catch(() => ({}) as { name?: string });
 
-      // Create a new request with the path that the DO expects
-      const doUrl = new URL(req.url);
-      doUrl.pathname = `/${tail || ""}`;
+        // Use a proper Durable Object ID
+        const id = env.AGENCY.newUniqueId().toString();
+        const meta = {
+          id,
+          name: body.name || "Untitled Agency",
+          createdAt: new Date().toISOString()
+        };
 
-      // For invoke requests, inject threadId into the body
-      let doReq: Request;
-      if (tail === "invoke" && req.method === "POST") {
-        const body = (await req.json().catch(() => ({}))) as Record<
-          string,
-          unknown
-        >;
-        body.threadId = threadId;
-        doReq = new Request(doUrl, {
-          method: req.method,
-          headers: req.headers,
-          body: JSON.stringify(body)
-        });
-      } else {
-        doReq = new Request(doUrl, req);
+        await env.AGENCY_REGISTRY.put(id, JSON.stringify(meta));
+        return Response.json(meta, { status: 201 });
       }
 
-      if (tail === "invoke" && req.method === "POST") return stub.fetch(doReq);
-      if (tail === "approve" && req.method === "POST") return stub.fetch(doReq);
-      if (tail === "cancel" && req.method === "POST") return stub.fetch(doReq);
-      if (tail === "state" && req.method === "GET") return stub.fetch(doReq);
-      if (tail === "events" && req.method === "GET") return stub.fetch(doReq);
-      if (tail === "ws" && req.headers.get("upgrade") === "websocket")
-        return stub.fetch(doReq);
-      if (tail === "child_result" && req.method === "POST")
-        return stub.fetch(doReq);
+      // ======================================================
+      // Hierarchical Routing: /agency/:agencyId/...
+      // ======================================================
 
-      return new Response("not found", { status: 404 });
+      const matchAgency = path.match(/^\/agency\/([^/]+)(.*)$/);
+      if (matchAgency) {
+        const agencyId = matchAgency[1];
+        const subPath = matchAgency[2] || "/"; // e.g. /agents, /blueprints, /agent/:id
+
+        let agencyStub: DurableObjectStub<Agency>;
+        try {
+          agencyStub = env.AGENCY.get(env.AGENCY.idFromString(agencyId));
+        } catch (e) {
+          return new Response("Invalid Agency ID", { status: 400 });
+        }
+
+        // --------------------------------------
+        // Agency-level operations
+        // --------------------------------------
+
+        // GET /agency/:id/blueprints -> merge defaults + DO overrides
+        if (req.method === "GET" && subPath === "/blueprints") {
+          const res = await agencyStub.fetch(
+            new Request("http://do/blueprints", req)
+          );
+          if (!res.ok) return res;
+
+          const dynamic = await res.json<{ blueprints: AgentBlueprint[] }>();
+          const combined = new Map<string, AgentBlueprint>();
+
+          // 1. Static defaults
+          (opts.agentDefinitions || []).forEach((b) => {
+            combined.set(b.name, b);
+          });
+
+          // 2. Overrides (Agency wins)
+          dynamic.blueprints.forEach((b) => {
+            combined.set(b.name, b);
+          });
+
+          return Response.json({ blueprints: Array.from(combined.values()) });
+        }
+
+        // POST /agency/:id/blueprints -> pass through to Agency DO
+        if (req.method === "POST" && subPath === "/blueprints") {
+          return agencyStub.fetch(new Request("http://do/blueprints", req));
+        }
+
+        // GET /agency/:id/agents
+        if (req.method === "GET" && subPath === "/agents") {
+          return agencyStub.fetch(new Request("http://do/agents", req));
+        }
+
+        // POST /agency/:id/agents -> spawn agent
+        if (req.method === "POST" && subPath === "/agents") {
+          const body = await req.json<any>();
+          body.requestContext = buildRequestContext(req);
+
+          return agencyStub.fetch(
+            new Request("http://do/agents", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body)
+            })
+          );
+        }
+
+        // --------------------------------------
+        // Agent-level operations
+        // /agency/:id/agent/:agentId/*
+        // --------------------------------------
+
+        const matchAgent = subPath.match(/^\/agent\/([^/]+)(.*)$/);
+        if (matchAgent) {
+          const agentId = matchAgent[1];
+          const agentTail = matchAgent[2] || ""; // e.g. /invoke, /state, /ws
+
+          const systemAgentStub = await getAgentByName(
+            env.SYSTEM_AGENT,
+            agentId
+          );
+
+          const doUrl = new URL(req.url);
+          doUrl.pathname = agentTail; // strip /agency/:id/agent/:agentId
+
+          let doReq: Request;
+
+          // POST /invoke -> inject threadId
+          if (agentTail === "/invoke" && req.method === "POST") {
+            const body = await req.json<Record<string, unknown>>();
+            body.threadId = agentId;
+
+            doReq = new Request(doUrl, {
+              method: req.method,
+              headers: req.headers,
+              body: JSON.stringify(body)
+            });
+          } else {
+            doReq = new Request(doUrl, req);
+          }
+
+          return systemAgentStub.fetch(doReq);
+        }
+      }
+
+      return new Response("Not found", { status: 404 });
     }
   };
 };

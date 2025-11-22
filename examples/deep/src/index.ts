@@ -37,6 +37,6 @@ const system = new AgentSystem({ defaultModel: "gpt-5-2025-08-07" })
   });
 
 // CF setup
-const { SystemAgent, handler } = system.export();
-export { SystemAgent };
+const { SystemAgent, Agency, handler } = system.export();
+export { SystemAgent, Agency };
 export default handler;

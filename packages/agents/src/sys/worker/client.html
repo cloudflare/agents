@@ -1171,13 +1171,27 @@
       <div class="dashboard">
         <aside class="card sidebar">
           <div class="sidebar-header">
-            <div>
-              <h3>Threads</h3>
-              <p>Agent conversations</p>
+            <div style="flex: 1">
+              <h3>Agents</h3>
+              <p>Control Plane</p>
+              <select
+                id="agencySelect"
+                style="
+                  width: 100%;
+                  margin-top: 8px;
+                  padding: 4px;
+                  background: rgba(255, 255, 255, 0.1);
+                  color: white;
+                  border: 1px solid rgba(255, 255, 255, 0.2);
+                  border-radius: 4px;
+                "
+              >
+                <option value="" disabled selected>Select Agency...</option>
+              </select>
             </div>
             <div class="sidebar-actions">
-              <button id="btnRefreshThreads" title="Refresh threads">↻</button>
-              <button id="btnNew" class="primary">New</button>
+              <button id="btnNewAgency" title="New Agency">+</button>
+              <button id="btnNewThread" title="New Thread">New</button>
             </div>
           </div>
           <div class="threads-list" id="threadsList">
@@ -1430,6 +1444,92 @@
       const REFRESH_PRIORITY_MS = 40;
       let availableAgents = [];
 
+      // Agency State
+      state.agencies = [];
+      state.currentAgencyId = null;
+
+      async function init() {
+        // Setup listeners that aren't already set up
+        const agencySelect = $("agencySelect");
+        const btnNewAgency = $("btnNewAgency");
+
+        if (agencySelect) {
+          agencySelect.addEventListener("change", (e) =>
+            selectAgency(e.target.value)
+          );
+        }
+        if (btnNewAgency) {
+          btnNewAgency.addEventListener("click", createAgency);
+        }
+
+        await loadAgencies();
+      }
+
+      async function loadAgencies() {
+        try {
+          const res = await fetch("/agencies");
+          const data = await res.json();
+          state.agencies = data.agencies || [];
+          renderAgencySelect();
+          if (state.agencies.length > 0) {
+            selectAgency(state.agencies[0].id);
+          }
+        } catch (e) {
+          console.error("Failed to load agencies", e);
+        }
+      }
+
+      function renderAgencySelect() {
+        const sel = $("agencySelect");
+        if (!sel) return;
+        sel.innerHTML =
+          '<option value="" disabled selected>Select Agency...</option>';
+        state.agencies.forEach((a) => {
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.textContent = a.name;
+          sel.appendChild(opt);
+        });
+        if (state.currentAgencyId) sel.value = state.currentAgencyId;
+      }
+
+      async function createAgency() {
+        const name = prompt("Agency Name:");
+        if (!name) return;
+        try {
+          const res = await fetch("/agencies", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name })
+          });
+          const meta = await res.json();
+          await loadAgencies();
+          selectAgency(meta.id);
+        } catch (e) {
+          alert("Failed to create agency: " + e.message);
+        }
+      }
+
+      async function selectAgency(id) {
+        state.currentAgencyId = id;
+        const sel = $("agencySelect");
+        if (sel) sel.value = id;
+
+        state.currentThreadId = null;
+        selectedThreadId = null;
+
+        // Clear UI
+        const list = $("threadsList");
+        if (list) list.innerHTML = "";
+        const chat = $("chatTranscript");
+        if (chat) chat.innerHTML = "";
+
+        // Load threads for this agency
+        await loadThreads();
+        // Load blueprints for this agency
+        await loadAgentDefinitions();
+      }
+
       function updateAgentPreview() {
         const name = newAgentTypeSelect.value;
         const agent = availableAgents.find((a) => a.name === name);
@@ -1439,10 +1539,13 @@
       }
 
       async function loadAgentDefinitions() {
+        if (!state.currentAgencyId) return;
         try {
-          const res = await fetch("/info"); // The endpoint we created in Step 1
+          const res = await fetch(
+            `/agency/${state.currentAgencyId}/blueprints`
+          );
           const data = await res.json();
-          availableAgents = data.agents || [];
+          availableAgents = data.blueprints || [];
 
           // Populate dropdown
           newAgentTypeSelect.innerHTML = "";
@@ -1464,9 +1567,25 @@
         }
       }
 
+      // ...
+
+      async function loadThreads(selectId = null) {
+        if (!state.currentAgencyId) return;
+        try {
+          const res = await fetch(`/agency/${state.currentAgencyId}/agents`);
+          const data = await res.json();
+          latestThreads = data.agents || [];
+          renderThreadList(latestThreads, selectId || selectedThreadId);
+        } catch (e) {
+          console.error("Failed to load threads", e);
+        }
+      }
+
       newAgentTypeSelect.onchange = updateAgentPreview;
 
-      $("btnNew").onclick = () => {
+      // Fix: Use correct ID
+      $("btnNewThread").onclick = () => {
+        if (!state.currentAgencyId) return alert("Select an agency first");
         newThreadModal.classList.add("open");
         if (availableAgents.length === 0) loadAgentDefinitions();
       };
@@ -1484,7 +1603,7 @@
           btnCreateThread.textContent = "Creating...";
           btnCreateThread.disabled = true;
 
-          const res = await fetch("/threads", {
+          const res = await fetch(`/agency/${state.currentAgencyId}/agents`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ agentType }) // Sending the type from dropdown
@@ -2386,8 +2505,11 @@
       }
 
       async function primeEvents(threadId) {
+        if (!state.currentAgencyId) return [];
         try {
-          const r = await fetch(`/threads/${threadId}/events`);
+          const r = await fetch(
+            `/agency/${state.currentAgencyId}/agent/${threadId}/events`
+          );
           const j = await r.json();
           const foundChildren = new Set();
           primingThreads.add(threadId);
@@ -2435,12 +2557,15 @@
         }
       }
 
+      // ...
+
       function connectThreadWS(threadId) {
+        if (!state.currentAgencyId) return;
         if (lanes.has(threadId) && lanes.get(threadId).ws) return; // already connected
         laneFor(threadId);
         const proto = location.protocol === "https:" ? "wss" : "ws";
         const socket = new WebSocket(
-          `${proto}://${location.host}/threads/${threadId}/ws`
+          `${proto}://${location.host}/agency/${state.currentAgencyId}/agent/${threadId}/ws`
         );
         lanes.get(threadId).ws = socket;
         if (threadId === mainThreadId) ws = socket;
@@ -2467,6 +2592,7 @@
       }
 
       async function send() {
+        if (!state.currentAgencyId) return;
         const id = $("threadId").value.trim();
         const content = $("msg").value;
         if (!id || !content) {
@@ -2475,7 +2601,7 @@
         }
 
         try {
-          await fetch("/threads/" + id + "/invoke", {
+          await fetch(`/agency/${state.currentAgencyId}/agent/${id}/invoke`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ messages: [{ role: "user", content }] })
@@ -2490,6 +2616,7 @@
       }
 
       async function hitl(approved) {
+        if (!state.currentAgencyId) return;
         const id = $("threadId").value.trim();
         if (!id) {
           showNotification("No thread selected", "error");
@@ -2497,7 +2624,7 @@
         }
 
         try {
-          await fetch("/threads/" + id + "/approve", {
+          await fetch(`/agency/${state.currentAgencyId}/agent/${id}/approve`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ approved, modifiedToolCalls: [] })
@@ -2517,6 +2644,7 @@
       }
 
       async function cancelRun() {
+        if (!state.currentAgencyId) return;
         const id = $("threadId").value.trim();
         if (!id) {
           showNotification("No thread selected", "error");
@@ -2524,7 +2652,9 @@
         }
 
         try {
-          await fetch("/threads/" + id + "/cancel", { method: "POST" });
+          await fetch(`/agency/${state.currentAgencyId}/agent/${id}/cancel`, {
+            method: "POST"
+          });
           showNotification("Run cancelled", "success");
           await refreshState(true);
         } catch (error) {
@@ -2534,6 +2664,7 @@
       }
 
       async function refreshState(force = false) {
+        if (!state.currentAgencyId) return;
         if (stateRefreshInFlight && !force) return;
         if (stateRefreshTimer) {
           clearTimeout(stateRefreshTimer);
@@ -2548,15 +2679,17 @@
 
         stateRefreshInFlight = true;
         try {
-          const r = await fetch("/threads/" + id + "/state");
+          const r = await fetch(
+            `/agency/${state.currentAgencyId}/agent/${id}/state`
+          );
           const j = await r.json();
           S.textContent = JSON.stringify(j, null, 2);
-          const state = j.state ?? {};
-          renderChat(state.messages ?? []);
-          renderTodos(state);
-          renderFiles(state);
-          updateRunSummary(j.run, state);
-          renderSubagents(state.subagents ?? []);
+          const threadState = j.state ?? {};
+          renderChat(threadState.messages ?? []);
+          renderTodos(threadState);
+          renderFiles(threadState);
+          updateRunSummary(j.run, threadState);
+          renderSubagents(threadState.subagents ?? []);
         } catch (err) {
           console.error("Failed to refresh state:", err);
           showNotification("Failed to refresh state: " + err.message, "error");
@@ -2779,25 +2912,6 @@
         chatTranscript.scrollTop = chatTranscript.scrollHeight;
       }
 
-      async function loadThreads(activeId) {
-        try {
-          const res = await fetch("/threads");
-          const data = await res.json();
-          const threads = (data.threads ?? []).slice();
-          threads.sort((a, b) => {
-            const ta = Date.parse(a.createdAt ?? "");
-            const tb = Date.parse(b.createdAt ?? "");
-            if (Number.isNaN(ta) || Number.isNaN(tb)) return 0;
-            return tb - ta;
-          });
-          latestThreads = threads;
-          renderThreadList(latestThreads, activeId ?? selectedThreadId);
-        } catch (error) {
-          console.error("Failed to load threads:", error);
-          showNotification("Failed to load threads", "error");
-        }
-      }
-
       function renderThreadList(threads = [], activeId) {
         const combined = new Map();
         for (const meta of threads ?? [])
@@ -2978,22 +3092,22 @@
         });
 
         summary.innerHTML = `
-    <span class="todo-pill pending">Pending: ${counts.pending || 0}</span>
-    <span class="todo-pill in_progress">In progress: ${counts.in_progress || 0}</span>
-    <span class="todo-pill completed">Completed: ${counts.completed || 0}</span>
-    <span class="todo-pill">Total: ${todos.length}</span>
-  `;
+        <span class="todo-pill pending">Pending: ${counts.pending || 0}</span>
+        <span class="todo-pill in_progress">In progress: ${counts.in_progress || 0}</span>
+        <span class="todo-pill completed">Completed: ${counts.completed || 0}</span>
+        <span class="todo-pill">Total: ${todos.length}</span>
+      `;
 
         for (const t of todos) {
           const li = document.createElement("li");
           li.className = "todo-item";
           li.innerHTML = `
-      <span class="todo-status ${t.status}"></span>
-      <div class="todo-content">
-        <div>${escapeHtml(t.content || "")}</div>
-        <div style="margin-top:6px; font-size:12px; color:var(--muted);">Status: ${t.status}</div>
-      </div>
-    `;
+          <span class="todo-status ${t.status}"></span>
+          <div class="todo-content">
+            <div>${escapeHtml(t.content || "")}</div>
+            <div style="margin-top:6px; font-size:12px; color:var(--muted);">Status: ${t.status}</div>
+          </div>
+        `;
           wrap.appendChild(li);
         }
       }
@@ -3023,9 +3137,9 @@
           row.className = "file-row";
           row.onclick = () => selectFile(p, content);
           row.innerHTML = `
-      <span class="file-name" title="${escapeHtml(p)}">${escapeHtml(p)}</span>
-      <span class="file-meta">${lines} lines • ${size} B</span>
-    `;
+          <span class="file-name" title="${escapeHtml(p)}">${escapeHtml(p)}</span>
+          <span class="file-meta">${lines} lines • ${size} B</span>
+        `;
           list.appendChild(row);
         }
 
@@ -3094,7 +3208,7 @@
       function statusLabel(s) {
         return String(s || "").replace(/_/g, " ");
       }
-      loadAgentDefinitions();
+      init();
     </script>
   </body>
 </html>

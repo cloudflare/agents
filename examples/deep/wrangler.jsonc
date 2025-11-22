@@ -6,19 +6,23 @@
       {
         "class_name": "SystemAgent",
         "name": "SYSTEM_AGENT"
+      },
+      {
+        "class_name": "Agency",
+        "name": "AGENCY"
       }
     ]
   },
   "kv_namespaces": [
     {
-      "binding": "AGENT_REGISTRY",
+      "binding": "AGENCY_REGISTRY",
       "id": "deep-soc-demo-registry"
     }
   ],
   "main": "src/index.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["SystemAgent"],
+      "new_sqlite_classes": ["SystemAgent", "Agency"],
       "tag": "v1"
     }
   ],

@@ -102,6 +102,7 @@ export interface ThreadMetadata {
   request: ThreadRequestContext;
   parent?: ParentInfo;
   agentType: string;
+  agencyId: string;
 }
 
 export interface CreateThreadRequest {
