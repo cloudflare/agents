@@ -1,1161 +1,1299 @@
 <!doctype html>
 <html>
-  <meta charset="utf-8" />
-  <title>Agent Dashboard</title>
-  <style>
-    :root {
-      --bg: #050608;
-      --surface: rgba(10, 14, 22, 0.92);
-      --surface-alt: rgba(13, 18, 29, 0.85);
-      --fg: #f5f7fa;
-      --muted: #9da5ba;
-      --accent: #f97316;
-      --accent-soft: rgba(249, 115, 22, 0.14);
-      --border: rgba(255, 255, 255, 0.1);
-      --border-strong: rgba(249, 115, 22, 0.4);
-      --ok: #22c55e;
-      --warn: #facc15;
-      --err: #ef4444;
-      --info: #60a5fa;
-      --tool: #c084fc;
-      --model: #34d399;
-      --pause: #fb923c;
-    }
+  <head>
+    <meta charset="utf-8" />
+    <title>Agent Dashboard</title>
+
+    <!-- External Libraries -->
+    <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+    <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+    <link
+      href="https://unpkg.com/cytoscape-navigator@3.0.0/cytoscape.js-navigator.css"
+      rel="stylesheet"
+    />
+    <script src="https://unpkg.com/cytoscape-navigator@3.0.0/cytoscape-navigator.js"></script>
+    <script src="https://unpkg.com/reconnecting-websocket@4.4.0/dist/reconnecting-websocket-iife.min.js"></script>
+    <link
+      href="https://unpkg.com/prismjs@1.29.0/themes/prism-okaidia.min.css"
+      rel="stylesheet"
+    />
+    <script src="https://unpkg.com/prismjs@1.29.0/prism.min.js"></script>
+    <script>
+      // Load Prism language components after main library is ready
+      if (typeof Prism !== "undefined") {
+        const languages = [
+          "json",
+          "javascript",
+          "typescript",
+          "python",
+          "markdown"
+        ];
+        languages.forEach((lang) => {
+          const script = document.createElement("script");
+          script.src = `https://unpkg.com/prismjs@1.29.0/components/prism-${lang}.min.js`;
+          document.head.appendChild(script);
+        });
+      }
+    </script>
+    <script src="https://unpkg.com/dayjs@1.11.10/dayjs.min.js"></script>
+    <script src="https://unpkg.com/dayjs@1.11.10/plugin/relativeTime.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/notyf@3.10.0/notyf.min.css"
+    />
+    <script src="https://unpkg.com/notyf@3.10.0/notyf.min.js"></script>
+    <script src="https://unpkg.com/ky@1.2.3/distribution/index.umd.js"></script>
+    <script src="https://unpkg.com/markdown-it@14.0.0/dist/markdown-it.min.js"></script>
+
+    <style>
+      :root {
+        --bg: #050608;
+        --surface: rgba(10, 14, 22, 0.92);
+        --surface-alt: rgba(13, 18, 29, 0.85);
+        --fg: #f5f7fa;
+        --muted: #9da5ba;
+        --accent: #f97316;
+        --accent-soft: rgba(249, 115, 22, 0.14);
+        --border: rgba(255, 255, 255, 0.1);
+        --border-strong: rgba(249, 115, 22, 0.4);
+        --ok: #22c55e;
+        --warn: #facc15;
+        --err: #ef4444;
+        --info: #60a5fa;
+        --tool: #c084fc;
+        --model: #34d399;
+        --pause: #fb923c;
+      }
+
+      body {
+        font:
+          14px "Inter",
+          system-ui,
+          sans-serif;
+        margin: 0;
+        padding: 0;
+        color: var(--fg);
+        background-color: #0b101c;
+        background-image:
+          radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 0),
+          radial-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 0);
+        background-size:
+          28px 28px,
+          12px 12px;
+        background-position:
+          0 0,
+          14px 14px;
+        min-height: 100vh;
+      }
+
+      ::selection {
+        background: var(--accent);
+        color: #0b0e1a;
+      }
+
+      .container {
+        box-sizing: border-box;
+        width: 100%;
+        max-width: none;
+        margin: 0;
+        padding: 28px 36px 60px;
+      }
 
-    body {
-      font:
-        14px "Inter",
-        system-ui,
-        sans-serif;
-      margin: 0;
-      padding: 0;
-      color: var(--fg);
-      background-color: #0b101c;
-      background-image:
-        radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 0),
-        radial-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 0);
-      background-size:
-        28px 28px,
-        12px 12px;
-      background-position:
-        0 0,
-        14px 14px;
-      min-height: 100vh;
-    }
-
-    ::selection {
-      background: var(--accent);
-      color: #0b0e1a;
-    }
-
-    .container {
-      box-sizing: border-box;
-      width: 100%;
-      max-width: none;
-      margin: 0;
-      padding: 28px 36px 60px;
-    }
-
-    .dashboard {
-      display: grid;
-      grid-template-columns: 260px minmax(0, 1fr);
-      gap: 24px;
-      align-items: flex-start;
-    }
-
-    .sidebar {
-      display: flex;
-      flex-direction: column;
-      min-height: calc(100vh - 180px);
-      gap: 16px;
-    }
-
-    .sidebar-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 12px;
-    }
-
-    .sidebar-header h3 {
-      margin: 0;
-      font-size: 18px;
-      letter-spacing: 0.02em;
-    }
-
-    .sidebar-header p {
-      margin: 6px 0 0;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .sidebar-actions {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-    .thread-row {
-      display: block;
-    }
-    .thread-row.expanded > .thread-children {
-      display: block;
-    }
-
-    .thread-children {
-      display: none;
-      margin-left: 8px;
-      padding-left: 10px;
-      border-left: 1px dashed var(--border);
-    }
-
-    .threads-list {
-      flex: 1;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      padding-right: 4px;
-    }
-
-    .thread-item {
-      width: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 6px;
-      padding: 12px 14px;
-      padding-left: calc(12px + (var(--depth, 0) * 14px));
-      border-radius: 8px;
-      border: 1px dashed transparent;
-      background: rgba(255, 255, 255, 0.02);
-      color: var(--fg);
-      text-align: left;
-      cursor: pointer;
-      transition:
-        background 0.2s ease,
-        border 0.2s ease,
-        transform 0.2s;
-      padding-left: calc(12px + (var(--depth, 0) * 16px));
-      font-size: calc(14px - (var(--depth, 0) * 0.5px));
-      transform-origin: left center;
-    }
-
-    .thread-item[data-depth]:not([data-depth="0"]) {
-      transform: scale(0.98);
-      opacity: 0.95;
-    }
-
-    .thread-item:hover {
-      background: rgba(249, 115, 22, 0.08);
-      border-color: var(--border);
-      transform: translateX(2px);
-    }
-
-    .thread-item.active {
-      border-color: var(--accent);
-      background: rgba(249, 115, 22, 0.16);
-    }
-
-    .thread-title {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .thread-caret {
-      display: inline-flex;
-      width: 16px;
-      height: 16px;
-      align-items: center;
-      justify-content: center;
-      margin-right: 2px;
-      opacity: 0.85;
-      border-radius: 3px;
-      user-select: none;
-    }
-    .thread-item.has-children .thread-caret {
-      cursor: pointer;
-    }
-
-    .thread-meta {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .thread-prefix {
-      font-family: "JetBrains Mono", Consolas, monospace;
-      font-size: 11px;
-      color: var(--muted);
-      white-space: pre;
-      display: inline-block;
-      min-width: 3ch;
-      text-align: right;
-      margin-right: 6px;
-      opacity: 0.8;
-    }
-
-    .thread-root-dot {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 2.5ch;
-      font-size: 11px;
-      color: var(--accent);
-      margin-right: 6px;
-    }
-
-    .threads-empty {
-      text-align: center;
-      padding: 24px 14px;
-      border-radius: 8px;
-      border: 1px dashed var(--border);
-      background: rgba(255, 255, 255, 0.02);
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .main-area {
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      min-width: 0;
-    }
-
-    .view-tabs {
-      display: flex;
-      gap: 10px;
-    }
-
-    .view-tab {
-      flex: 1;
-      padding: 10px 14px;
-      border-radius: 6px;
-      border: 1px dashed transparent;
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--muted);
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
-
-    .view-tab.active {
-      color: var(--fg);
-      border-color: var(--border-strong);
-      background: rgba(249, 115, 22, 0.14);
-    }
-
-    .view-section {
-      display: none;
-      flex-direction: column;
-      gap: 20px;
-    }
-
-    .view-section.active {
-      display: flex;
-    }
-
-    .view-chat-main {
-      display: flex;
-      gap: 20px;
-      align-items: stretch;
-      flex-wrap: nowrap;
-    }
-
-    .view-chat-main .chat-card {
-      flex: 1;
-    }
-
-    .todos-column {
-      flex: 0 0 260px;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    .todos-column .todos-card {
-      flex: 1;
-    }
-
-    .state-card {
-      margin-top: 8px;
-    }
-
-    .chat-card {
-      grid-area: chat;
-      display: flex;
-      flex-direction: column;
-      gap: 20px;
-      min-height: 580px;
-      max-height: 1000px;
-    }
-
-    .chat-header {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 16px;
-      align-items: flex-end;
-    }
-
-    .chat-header .input-group {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-    }
-
-    .chat-header label {
-      font-size: 13px;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-    }
-
-    .run-summary {
-      margin-top: 16px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      align-items: center;
-    }
-
-    .run-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 12px;
-      border-radius: 999px;
-      border: 1px dashed var(--border);
-      background: rgba(255, 255, 255, 0.04);
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: capitalize;
-    }
-
-    .run-badge.running {
-      color: var(--accent);
-      border-color: var(--border-strong);
-      background: var(--accent-soft);
-    }
-
-    .run-badge.paused {
-      color: var(--pause);
-      border-color: rgba(251, 146, 60, 0.35);
-      background: rgba(251, 146, 60, 0.15);
-    }
-
-    .run-badge.completed {
-      color: var(--ok);
-      border-color: rgba(34, 197, 94, 0.35);
-      background: rgba(34, 197, 94, 0.18);
-    }
-
-    .run-badge.error {
-      color: var(--err);
-      border-color: rgba(239, 68, 68, 0.4);
-      background: rgba(239, 68, 68, 0.18);
-    }
-
-    .run-meta {
-      font-size: 13px;
-      color: var(--muted);
-    }
-
-    .chat-transcript {
-      background: var(--surface-alt);
-      border: 1px dashed var(--border);
-      border-radius: 6px;
-      padding: 18px;
-      margin-top: 16px;
-      min-height: 360px;
-      max-height: none;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-
-    .chat-empty {
-      text-align: center;
-      color: var(--muted);
-      padding: 48px 0;
-    }
-
-    .chat-message {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      padding: 14px 16px;
-      border-radius: 8px;
-      border: 1px dashed rgba(255, 255, 255, 0.08);
-      max-width: 70%;
-      background: rgba(255, 255, 255, 0.02);
-    }
-
-    .chat-message.user {
-      align-self: flex-end;
-      background: rgba(249, 115, 22, 0.2);
-      border-color: rgba(249, 115, 22, 0.5);
-      color: #fff7ed;
-    }
-
-    .chat-message.assistant {
-      align-self: flex-start;
-      background: rgba(34, 197, 94, 0.18);
-      border-color: rgba(34, 197, 94, 0.45);
-    }
-
-    .chat-message.tool {
-      align-self: flex-start;
-      background: rgba(192, 132, 252, 0.16);
-      border-color: rgba(192, 132, 252, 0.45);
-    }
-
-    .chat-role {
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--muted);
-    }
-
-    .chat-content {
-      font-size: 14px;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    .tool-call {
-      margin-top: 10px;
-      border: 1px dashed rgba(255, 255, 255, 0.18);
-      border-radius: 6px;
-      background: rgba(6, 10, 18, 0.92);
-      font-family: "JetBrains Mono", Consolas, monospace;
-      font-size: 12px;
-      overflow: hidden;
-    }
-
-    .tool-call.collapsed .tool-call-body {
-      display: none;
-    }
-
-    .tool-call-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 10px 12px;
-    }
-
-    .tool-call-title {
-      font-weight: 600;
-      color: var(--fg);
-    }
-
-    .tool-call-toggle {
-      border: 1px dashed rgba(255, 255, 255, 0.12);
-      background: rgba(255, 255, 255, 0.06);
-      color: var(--muted);
-      font-family: inherit;
-      font-size: 12px;
-      padding: 4px 8px;
-      border-radius: 4px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .tool-call-toggle:hover {
-      background: rgba(249, 115, 22, 0.16);
-      color: var(--fg);
-    }
-
-    .tool-call-body {
-      padding: 0 12px 12px;
-      max-height: 420px;
-      overflow: auto;
-    }
-
-    .chat-input {
-      margin-top: 16px;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-    }
-
-    .chat-input textarea {
-      flex: 1;
-      min-height: 80px;
-    }
-
-    .chat-actions {
-      margin-top: 12px;
-      display: flex;
-      justify-content: flex-end;
-    }
-
-    .shortcuts-hint {
-      font-size: 12px;
-      color: var(--muted);
-    }
-
-    .shortcut {
-      display: inline-block;
-      padding: 2px 6px;
-      background: rgba(255, 255, 255, 0.08);
-      border-radius: 4px;
-      font-family: monospace;
-      margin: 0 2px;
-    }
-
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 24px;
-      padding-bottom: 16px;
-      border-bottom: 1px dashed var(--border);
-    }
-
-    .header h1 {
-      margin: 0;
-      font-size: 26px;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      color: var(--fg);
-    }
-
-    .status-bar {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .status-indicator {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 12px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 600;
-      border: 1px dashed var(--border);
-      background: rgba(255, 255, 255, 0.03);
-    }
-
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-    }
-
-    .status-indicator.connected {
-      color: var(--ok);
-      border-color: rgba(34, 197, 94, 0.4);
-    }
-    .status-indicator.connected .status-dot {
-      background-color: var(--ok);
-    }
-    .status-indicator.disconnected {
-      color: var(--err);
-      border-color: rgba(239, 68, 68, 0.4);
-    }
-    .status-indicator.disconnected .status-dot {
-      background-color: var(--err);
-    }
-
-    .card {
-      background: var(--surface);
-      border-radius: 8px;
-      padding: 20px;
-      margin-bottom: 16px;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-      border: 1px dashed var(--border);
-    }
-
-    textarea,
-    input {
-      box-sizing: border-box;
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 6px;
-      border: 1px dashed rgba(255, 255, 255, 0.12);
-      background: rgba(6, 10, 18, 0.9);
-      color: var(--fg);
-      font-family: inherit;
-    }
-
-    textarea:focus,
-    input:focus {
-      outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.25);
-    }
-
-    pre {
-      background: rgba(6, 10, 18, 0.9);
-      color: var(--fg);
-      padding: 16px;
-      border-radius: 6px;
-      max-height: 500px;
-      overflow: auto;
-      word-wrap: break-word;
-      white-space: pre-wrap;
-      border: 1px dashed var(--border);
-      font-family: "JetBrains Mono", Consolas, monospace;
-      font-size: 12px;
-    }
-
-    button {
-      padding: 8px 12px;
-      border-radius: 6px;
-      border: 1px dashed var(--border);
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--fg);
-      cursor: pointer;
-      transition:
-        background 0.2s ease,
-        transform 0.2s ease,
-        border-color 0.2s ease;
-    }
-
-    button:hover {
-      background: rgba(255, 255, 255, 0.1);
-      transform: translateY(-1px);
-    }
-
-    button:active {
-      transform: translateY(0);
-    }
-
-    button.primary {
-      background: var(--accent);
-      color: #050608;
-      border-color: var(--border-strong);
-    }
-
-    button.primary:hover {
-      background: #fb8f3c;
-    }
-
-    button.danger {
-      background: rgba(239, 68, 68, 0.15);
-      color: #fecaca;
-      border-color: rgba(239, 68, 68, 0.45);
-    }
-
-    button.danger:hover {
-      background: rgba(239, 68, 68, 0.3);
-    }
-
-    .button-group {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-
-    code {
-      white-space: pre-wrap;
-      font-family: "JetBrains Mono", Consolas, monospace;
-    }
-
-    /* Graph area */
-    .threadline-card {
-      grid-area: thread;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    .threadline-header {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      align-items: center;
-      color: var(--muted);
-      font-size: 12px;
-    }
-
-    .threadline-header .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      border: 1px dashed var(--border);
-      background: rgba(255, 255, 255, 0.03);
-    }
-
-    .threadline-badge-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      display: inline-block;
-    }
-
-    .graph-wrap {
-      position: relative;
-      border: 1px dashed var(--border);
-      border-radius: 6px;
-      padding: 0;
-      background:
-        radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 0),
-        linear-gradient(160deg, rgba(10, 14, 22, 0.85), rgba(13, 18, 29, 0.9));
-      background-size:
-        20px 20px,
-        100% 100%;
-      overflow: hidden;
-      height: calc(90vh - 150px);
-    }
-
-    #graph {
-      display: block;
-      width: 100%;
-      height: 100%;
-      user-select: none;
-      -webkit-user-select: none;
-    }
-
-    .laneLabel {
-      font:
-        11px "Inter",
-        system-ui,
-        sans-serif;
-      fill: var(--muted);
-      font-weight: 600;
-      letter-spacing: 0.06em;
-    }
-
-    .node-circle {
-      cursor: pointer;
-      transition: opacity 0.2s;
-    }
-
-    .node-circle:hover {
-      opacity: 1 !important;
-    }
-
-    .lane-label-card {
-      fill: rgba(8, 12, 20, 0.88);
-      stroke: rgba(255, 255, 255, 0.14);
-      stroke-dasharray: 4 4;
-    }
-
-    .lane-label-title {
-      font:
-        12px "Inter",
-        system-ui,
-        sans-serif;
-      fill: var(--fg);
-      font-weight: 600;
-    }
-
-    .lane-label-meta {
-      font:
-        11px "Inter",
-        system-ui,
-        sans-serif;
-      fill: var(--muted);
-      letter-spacing: 0.04em;
-    }
-
-    /* Modal */
-    .modal {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.78);
-      z-index: 1000;
-      align-items: center;
-      justify-content: center;
-    }
-    .modal.open {
-      display: flex;
-    }
-    .modal-content {
-      background: linear-gradient(
-        135deg,
-        rgba(18, 26, 42, 0.95) 0%,
-        rgba(6, 10, 18, 0.98) 100%
-      );
-      color: var(--fg);
-      padding: 24px;
-      border-radius: 8px;
-      max-width: 760px;
-      max-height: 80vh;
-      overflow: auto;
-      position: relative;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
-      border: 1px dashed var(--border);
-    }
-    .modal-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 16px;
-      padding-bottom: 12px;
-      border-bottom: 1px dashed var(--border);
-    }
-    .modal-title {
-      margin: 0;
-      font-size: 18px;
-      color: var(--accent);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .modal-close {
-      background: rgba(255, 255, 255, 0.1);
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      padding: 6px 12px;
-      cursor: pointer;
-      font-size: 14px;
-      transition: background 0.2s;
-    }
-    .modal-close:hover {
-      background: rgba(255, 255, 255, 0.2);
-    }
-    .modal-json {
-      background: rgba(6, 10, 18, 0.92);
-      padding: 16px;
-      border-radius: 6px;
-      overflow: auto;
-      max-height: 520px;
-      font:
-        12px "JetBrains Mono",
-        monospace;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      overflow-wrap: break-word;
-      border: 1px dashed var(--border);
-    }
-
-    .zoom-controls {
-      position: absolute;
-      bottom: 14px;
-      right: 14px;
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      background: rgba(10, 14, 22, 0.82);
-      border: 1px dashed var(--border);
-      padding: 6px 8px;
-      border-radius: 6px;
-      backdrop-filter: blur(8px);
-    }
-    .zoom-controls button {
-      padding: 4px 10px;
-    }
-    .zoom-controls .zoom-pct {
-      min-width: 52px;
-      text-align: center;
-      font-weight: 600;
-      color: var(--muted);
-    }
-
-    .todos-card,
-    .files-card {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
-
-    .todos-summary {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      margin: 8px 0 12px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .todo-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 4px 8px;
-      border-radius: 999px;
-      border: 1px dashed var(--border);
-      background: rgba(255, 255, 255, 0.03);
-      font-weight: 600;
-    }
-    .todo-pill.pending {
-      color: #a5b1c2;
-    }
-    .todo-pill.in_progress {
-      color: var(--info);
-    }
-    .todo-pill.completed {
-      color: var(--ok);
-    }
-
-    .todo-list {
-      list-style: none;
-      padding: 0;
-      margin: 0;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .todo-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 12px;
-      padding: 10px 12px;
-      border: 1px dashed var(--border);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.02);
-    }
-    .todo-status {
-      min-width: 8px;
-      min-height: 8px;
-      border-radius: 999px;
-      margin-top: 6px;
-    }
-    .todo-status.pending {
-      background: #9ca3af;
-    }
-    .todo-status.in_progress {
-      background: var(--info);
-    }
-    .todo-status.completed {
-      background: var(--ok);
-    }
-    .todo-content {
-      word-break: break-word;
-      font-size: 13px;
-    }
-
-    .files-panel {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .files-list {
-      border: 1px dashed var(--border);
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.02);
-      overflow: auto;
-      max-height: 420px;
-    }
-    .file-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 12px;
-      cursor: pointer;
-      border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
-    }
-    .file-row:last-child {
-      border-bottom: none;
-    }
-    .file-row:hover {
-      background: rgba(249, 115, 22, 0.08);
-    }
-    .file-name {
-      font-family:
-        ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-        "Liberation Mono", "Courier New", monospace;
-      font-size: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 180px;
-    }
-    .file-meta {
-      font-size: 12px;
-      color: var(--muted);
-    }
-    .file-preview {
-      background: rgba(6, 10, 18, 0.9);
-      padding: 12px;
-      border: 1px dashed var(--border);
-      border-radius: 6px;
-      max-height: 65vh;
-      overflow: auto;
-    }
-
-    /* line numbers in preview */
-    .ln {
-      color: #5f6a87;
-      user-select: none;
-      margin-right: 10px;
-      display: inline-block;
-      width: 48px;
-      text-align: right;
-    }
-    .code {
-      white-space: pre;
-      font-size: 12px;
-    }
-
-    .state-card {
-      grid-area: state;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .notification {
-      position: fixed;
-      bottom: 24px;
-      right: 24px;
-      padding: 12px 16px;
-      border-radius: 6px;
-      color: white;
-      font-weight: 600;
-      box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3);
-      z-index: 2000;
-      opacity: 1;
-      transition: opacity 0.3s ease;
-    }
-
-    .notification.success {
-      background: var(--ok);
-    }
-
-    .notification.error {
-      background: var(--err);
-    }
-
-    .notification.info {
-      background: var(--info);
-    }
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 2px 8px;
-      border-radius: 999px;
-      border: 1px dashed var(--border);
-      background: rgba(255, 255, 255, 0.03);
-      font-size: 11px;
-      font-weight: 700;
-    }
-
-    .status-pill.s-running {
-      color: var(--accent);
-      border-color: var(--border-strong);
-      background: var(--accent-soft);
-    }
-    .status-pill.s-completed {
-      color: var(--ok);
-      border-color: rgba(34, 197, 94, 0.35);
-      background: rgba(34, 197, 94, 0.18);
-    }
-    .status-pill.s-paused {
-      color: var(--pause);
-      border-color: rgba(251, 146, 60, 0.35);
-      background: rgba(251, 146, 60, 0.15);
-    }
-    .status-pill.s-error {
-      color: var(--err);
-      border-color: rgba(239, 68, 68, 0.4);
-      background: rgba(239, 68, 68, 0.18);
-    }
-    .status-pill.s-listening {
-      color: var(--info);
-      border-color: rgba(96, 165, 250, 0.35);
-      background: rgba(96, 165, 250, 0.16);
-    }
-    .status-pill.s-offline {
-      color: var(--muted);
-      background: rgba(255, 255, 255, 0.02);
-    }
-    .form-group {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-bottom: 20px;
-    }
-
-    .form-group label {
-      font-size: 12px;
-      color: var(--muted);
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .form-select {
-      appearance: none;
-      background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239da5ba%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E");
-      background-repeat: no-repeat;
-      background-position: right 0.7em top 50%;
-      background-size: 0.65em auto;
-      padding-right: 2em;
-      cursor: pointer;
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 6px;
-      border: 1px dashed rgba(255, 255, 255, 0.12);
-      background-color: rgba(6, 10, 18, 0.9);
-      color: var(--fg);
-      font-family: inherit;
-    }
-
-    .agent-desc-preview {
-      font-size: 13px;
-      color: var(--muted);
-      padding: 12px;
-      background: rgba(255, 255, 255, 0.03);
-      border-radius: 6px;
-      border: 1px dashed var(--border);
-      min-height: 40px;
-      line-height: 1.4;
-    }
-
-    @media (max-width: 1280px) {
       .dashboard {
-        grid-template-columns: 1fr;
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        gap: 24px;
+        align-items: flex-start;
       }
 
       .sidebar {
-        min-height: auto;
-      }
-    }
-
-    @media (max-width: 1024px) {
-      .view-tabs {
+        display: flex;
         flex-direction: column;
+        min-height: calc(100vh - 180px);
+        gap: 16px;
+      }
+
+      .sidebar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+      }
+
+      .sidebar-header h3 {
+        margin: 0;
+        font-size: 18px;
+        letter-spacing: 0.02em;
+      }
+
+      .sidebar-header p {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .sidebar-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .thread-row {
+        display: block;
+      }
+      .thread-row.expanded > .thread-children {
+        display: block;
+      }
+
+      .thread-children {
+        display: none;
+        margin-left: 8px;
+        padding-left: 10px;
+        border-left: 1px dashed var(--border);
+      }
+
+      .threads-list {
+        flex: 1;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding-right: 4px;
+      }
+
+      .thread-item {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 12px 14px;
+        padding-left: calc(12px + (var(--depth, 0) * 16px));
+        border-radius: 8px;
+        border: 1px dashed transparent;
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--fg);
+        text-align: left;
+        cursor: pointer;
+        transition:
+          background 0.2s ease,
+          border 0.2s ease,
+          transform 0.2s;
+        font-size: calc(14px - (var(--depth, 0) * 0.5px));
+        transform-origin: left center;
+      }
+
+      .thread-item[data-depth]:not([data-depth="0"]) {
+        transform: scale(0.98);
+        opacity: 0.95;
+      }
+
+      .thread-item:hover {
+        background: rgba(249, 115, 22, 0.08);
+        border-color: var(--border);
+        transform: translateX(2px);
+      }
+
+      .thread-item.active {
+        border-color: var(--accent);
+        background: rgba(249, 115, 22, 0.16);
+      }
+
+      .thread-title {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .thread-caret {
+        display: inline-flex;
+        width: 16px;
+        height: 16px;
+        align-items: center;
+        justify-content: center;
+        margin-right: 2px;
+        opacity: 0.85;
+        border-radius: 3px;
+        user-select: none;
+      }
+      .thread-item.has-children .thread-caret {
+        cursor: pointer;
+      }
+
+      .thread-meta {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .thread-prefix {
+        font-family: "JetBrains Mono", Consolas, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        white-space: pre;
+        display: inline-block;
+        min-width: 3ch;
+        text-align: right;
+        margin-right: 6px;
+        opacity: 0.8;
+      }
+
+      .thread-root-dot {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.5ch;
+        font-size: 11px;
+        color: var(--accent);
+        margin-right: 6px;
+      }
+
+      .threads-empty {
+        text-align: center;
+        padding: 24px 14px;
+        border-radius: 8px;
+        border: 1px dashed var(--border);
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .main-area {
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        min-width: 0;
+      }
+
+      .view-tabs {
+        display: flex;
+        gap: 10px;
       }
 
       .view-tab {
-        width: 100%;
+        flex: 1;
+        padding: 10px 14px;
+        border-radius: 6px;
+        border: 1px dashed transparent;
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .view-tab.active {
+        color: var(--fg);
+        border-color: var(--border-strong);
+        background: rgba(249, 115, 22, 0.14);
+      }
+
+      .view-section {
+        display: none;
+        flex-direction: column;
+        gap: 20px;
+      }
+
+      .view-section.active {
+        display: flex;
       }
 
       .view-chat-main {
-        flex-direction: column;
+        display: flex;
+        gap: 20px;
+        align-items: stretch;
+        flex-wrap: nowrap;
+      }
+
+      .view-chat-main .chat-card {
+        flex: 1;
       }
 
       .todos-column {
-        flex: 1 1 auto;
+        flex: 0 0 260px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
       }
-    }
 
-    @media (max-width: 768px) {
-      .container {
-        padding: 20px 16px 40px;
+      .todos-column .todos-card {
+        flex: 1;
+      }
+
+      .state-card {
+        margin-top: 8px;
       }
 
       .chat-card {
-        min-height: 420px;
+        grid-area: chat;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        min-height: 580px;
+        max-height: 1000px;
+      }
+
+      .chat-header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: flex-end;
+      }
+
+      .chat-header .input-group {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .chat-header label {
+        font-size: 13px;
+        color: var(--muted);
+        letter-spacing: 0.04em;
+      }
+
+      .run-summary {
+        margin-top: 16px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .run-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        border-radius: 999px;
+        border: 1px dashed var(--border);
+        background: rgba(255, 255, 255, 0.04);
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: capitalize;
+      }
+
+      .run-badge.running {
+        color: var(--accent);
+        border-color: var(--border-strong);
+        background: var(--accent-soft);
+      }
+
+      .run-badge.paused {
+        color: var(--pause);
+        border-color: rgba(251, 146, 60, 0.35);
+        background: rgba(251, 146, 60, 0.15);
+      }
+
+      .run-badge.completed {
+        color: var(--ok);
+        border-color: rgba(34, 197, 94, 0.35);
+        background: rgba(34, 197, 94, 0.18);
+      }
+
+      .run-badge.error {
+        color: var(--err);
+        border-color: rgba(239, 68, 68, 0.4);
+        background: rgba(239, 68, 68, 0.18);
+      }
+
+      .run-meta {
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .chat-transcript {
+        background: var(--surface-alt);
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        padding: 18px;
+        margin-top: 16px;
+        min-height: 360px;
+        max-height: none;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+
+      .chat-empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 48px 0;
+      }
+
+      .chat-message {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 14px 16px;
+        border-radius: 8px;
+        border: 1px dashed rgba(255, 255, 255, 0.08);
+        max-width: 70%;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .chat-message.user {
+        align-self: flex-end;
+        background: rgba(249, 115, 22, 0.2);
+        border-color: rgba(249, 115, 22, 0.5);
+        color: #fff7ed;
+      }
+
+      .chat-message.assistant {
+        align-self: flex-start;
+        background: rgba(34, 197, 94, 0.18);
+        border-color: rgba(34, 197, 94, 0.45);
+      }
+
+      .chat-message.tool {
+        align-self: flex-start;
+        background: rgba(192, 132, 252, 0.16);
+        border-color: rgba(192, 132, 252, 0.45);
+      }
+
+      .chat-role {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: var(--muted);
+      }
+
+      .chat-content {
+        font-size: 14px;
+        line-height: 1.6;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .tool-call {
+        margin-top: 10px;
+        border: 1px dashed rgba(255, 255, 255, 0.18);
+        border-radius: 6px;
+        background: rgba(6, 10, 18, 0.92);
+        font-family: "JetBrains Mono", Consolas, monospace;
+        font-size: 12px;
+        overflow: hidden;
+      }
+
+      .tool-call.collapsed .tool-call-body {
+        display: none;
+      }
+
+      .tool-call-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+      }
+
+      .tool-call-title {
+        font-weight: 600;
+        color: var(--fg);
+      }
+
+      .tool-call-toggle {
+        border: 1px dashed rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--muted);
+        font-family: inherit;
+        font-size: 12px;
+        padding: 4px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .tool-call-toggle:hover {
+        background: rgba(249, 115, 22, 0.16);
+        color: var(--fg);
+      }
+
+      .tool-call-body {
+        padding: 0 12px 12px;
+        max-height: 420px;
+        overflow: auto;
+      }
+
+      .chat-input {
+        margin-top: 16px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+
+      .chat-input textarea {
+        flex: 1;
+        min-height: 80px;
+      }
+
+      .chat-actions {
+        margin-top: 12px;
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .shortcuts-hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .shortcut {
+        display: inline-block;
+        padding: 2px 6px;
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 4px;
+        font-family: monospace;
+        margin: 0 2px;
+      }
+
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 24px;
+        padding-bottom: 16px;
+        border-bottom: 1px dashed var(--border);
+      }
+
+      .header h1 {
+        margin: 0;
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: var(--fg);
+      }
+
+      .status-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .status-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 600;
+        border: 1px dashed var(--border);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+      }
+
+      .status-indicator.connected {
+        color: var(--ok);
+        border-color: rgba(34, 197, 94, 0.4);
+      }
+      .status-indicator.connected .status-dot {
+        background-color: var(--ok);
+      }
+      .status-indicator.disconnected {
+        color: var(--err);
+        border-color: rgba(239, 68, 68, 0.4);
+      }
+      .status-indicator.disconnected .status-dot {
+        background-color: var(--err);
+      }
+
+      .card {
+        background: var(--surface);
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 16px;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        border: 1px dashed var(--border);
+      }
+
+      textarea,
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px dashed rgba(255, 255, 255, 0.12);
+        background: rgba(6, 10, 18, 0.9);
+        color: var(--fg);
+        font-family: inherit;
+      }
+
+      textarea:focus,
+      input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.25);
+      }
+
+      pre {
+        background: rgba(6, 10, 18, 0.9);
+        color: var(--fg);
+        padding: 16px;
+        border-radius: 6px;
+        max-height: 500px;
+        overflow: auto;
+        word-wrap: break-word;
+        white-space: pre-wrap;
+        border: 1px dashed var(--border);
+        font-family: "JetBrains Mono", Consolas, monospace;
+        font-size: 12px;
+      }
+
+      button {
+        padding: 8px 12px;
+        border-radius: 6px;
+        border: 1px dashed var(--border);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--fg);
+        cursor: pointer;
+        transition:
+          background 0.2s ease,
+          transform 0.2s ease,
+          border-color 0.2s ease;
+      }
+
+      button:hover {
+        background: rgba(255, 255, 255, 0.1);
+        transform: translateY(-1px);
+      }
+
+      button:active {
+        transform: translateY(0);
+      }
+
+      button.primary {
+        background: var(--accent);
+        color: #050608;
+        border-color: var(--border-strong);
+      }
+
+      button.primary:hover {
+        background: #fb8f3c;
+      }
+
+      button.danger {
+        background: rgba(239, 68, 68, 0.15);
+        color: #fecaca;
+        border-color: rgba(239, 68, 68, 0.45);
+      }
+
+      button.danger:hover {
+        background: rgba(239, 68, 68, 0.3);
+      }
+
+      .button-group {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      code {
+        white-space: pre-wrap;
+        font-family: "JetBrains Mono", Consolas, monospace;
+      }
+
+      /* Graph area */
+      .threadline-card {
+        grid-area: thread;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .threadline-header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .threadline-header .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px dashed var(--border);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .threadline-badge-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
       }
 
       .graph-wrap {
-        height: 420px;
+        position: relative;
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        padding: 0;
+        background:
+          radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 0),
+          linear-gradient(160deg, rgba(10, 14, 22, 0.85), rgba(13, 18, 29, 0.9));
+        background-size:
+          20px 20px,
+          100% 100%;
+        overflow: hidden;
+        height: calc(90vh - 150px);
       }
 
-      .modal-content {
-        max-width: 90%;
-        padding: 18px;
+      #graph {
+        display: block;
+        width: 100%;
+        height: 100%;
+        user-select: none;
+        -webkit-user-select: none;
       }
-    }
-  </style>
+
+      /* Cytoscape navigator (minimap) styles */
+      .cytoscape-navigator {
+        position: absolute;
+        bottom: 60px;
+        right: 14px;
+        width: 200px;
+        height: 150px;
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        background: rgba(10, 14, 22, 0.92);
+        backdrop-filter: blur(8px);
+        overflow: hidden;
+      }
+
+      .laneLabel {
+        font:
+          11px "Inter",
+          system-ui,
+          sans-serif;
+        fill: var(--muted);
+        font-weight: 600;
+        letter-spacing: 0.06em;
+      }
+
+      .node-circle {
+        cursor: pointer;
+        transition: opacity 0.2s;
+      }
+
+      .node-circle:hover {
+        opacity: 1 !important;
+      }
+
+      .lane-label-card {
+        fill: rgba(8, 12, 20, 0.88);
+        stroke: rgba(255, 255, 255, 0.14);
+        stroke-dasharray: 4 4;
+      }
+
+      .lane-label-title {
+        font:
+          12px "Inter",
+          system-ui,
+          sans-serif;
+        fill: var(--fg);
+        font-weight: 600;
+      }
+
+      .lane-label-meta {
+        font:
+          11px "Inter",
+          system-ui,
+          sans-serif;
+        fill: var(--muted);
+        letter-spacing: 0.04em;
+      }
+
+      /* Modal */
+      .modal {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.78);
+        z-index: 1000;
+        align-items: center;
+        justify-content: center;
+      }
+      .modal.open {
+        display: flex;
+      }
+      .modal-content {
+        background: linear-gradient(
+          135deg,
+          rgba(18, 26, 42, 0.95) 0%,
+          rgba(6, 10, 18, 0.98) 100%
+        );
+        color: var(--fg);
+        padding: 24px;
+        border-radius: 8px;
+        max-width: 760px;
+        max-height: 80vh;
+        overflow: auto;
+        position: relative;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+        border: 1px dashed var(--border);
+      }
+      .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+        padding-bottom: 12px;
+        border-bottom: 1px dashed var(--border);
+      }
+      .modal-title {
+        margin: 0;
+        font-size: 18px;
+        color: var(--accent);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .modal-close {
+        background: rgba(255, 255, 255, 0.1);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 6px 12px;
+        cursor: pointer;
+        font-size: 14px;
+        transition: background 0.2s;
+      }
+      .modal-close:hover {
+        background: rgba(255, 255, 255, 0.2);
+      }
+      .modal-json {
+        background: rgba(6, 10, 18, 0.92);
+        padding: 16px;
+        border-radius: 6px;
+        overflow: auto;
+        max-height: 520px;
+        font:
+          12px "JetBrains Mono",
+          monospace;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+        border: 1px dashed var(--border);
+      }
+
+      .zoom-controls {
+        position: absolute;
+        bottom: 14px;
+        right: 14px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        background: rgba(10, 14, 22, 0.82);
+        border: 1px dashed var(--border);
+        padding: 6px 8px;
+        border-radius: 6px;
+        backdrop-filter: blur(8px);
+      }
+      .zoom-controls button {
+        padding: 4px 10px;
+      }
+      .zoom-controls .zoom-pct {
+        min-width: 52px;
+        text-align: center;
+        font-weight: 600;
+        color: var(--muted);
+      }
+
+      .todos-card,
+      .files-card {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+
+      .todos-summary {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 8px 0 12px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .todo-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        border: 1px dashed var(--border);
+        background: rgba(255, 255, 255, 0.03);
+        font-weight: 600;
+      }
+      .todo-pill.pending {
+        color: #a5b1c2;
+      }
+      .todo-pill.in_progress {
+        color: var(--info);
+      }
+      .todo-pill.completed {
+        color: var(--ok);
+      }
+
+      .todo-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .todo-item {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 10px 12px;
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .todo-status {
+        min-width: 8px;
+        min-height: 8px;
+        border-radius: 999px;
+        margin-top: 6px;
+      }
+      .todo-status.pending {
+        background: #9ca3af;
+      }
+      .todo-status.in_progress {
+        background: var(--info);
+      }
+      .todo-status.completed {
+        background: var(--ok);
+      }
+      .todo-content {
+        word-break: break-word;
+        font-size: 13px;
+      }
+
+      .files-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .files-list {
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.02);
+        overflow: auto;
+        max-height: 420px;
+      }
+      .file-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 12px;
+        cursor: pointer;
+        border-bottom: 1px dashed rgba(255, 255, 255, 0.06);
+      }
+      .file-row:last-child {
+        border-bottom: none;
+      }
+      .file-row:hover {
+        background: rgba(249, 115, 22, 0.08);
+      }
+      .file-name {
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 180px;
+      }
+      .file-meta {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .file-preview {
+        background: rgba(6, 10, 18, 0.9);
+        padding: 12px;
+        border: 1px dashed var(--border);
+        border-radius: 6px;
+        max-height: 65vh;
+        overflow: auto;
+      }
+
+      /* Markdown rendering styles in file preview */
+      .file-preview h1,
+      .file-preview h2,
+      .file-preview h3 {
+        color: var(--accent);
+        margin-top: 1.5em;
+        margin-bottom: 0.5em;
+      }
+      .file-preview h1 {
+        font-size: 1.8em;
+        border-bottom: 2px solid var(--border);
+        padding-bottom: 0.3em;
+      }
+      .file-preview h2 {
+        font-size: 1.5em;
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0.3em;
+      }
+      .file-preview h3 {
+        font-size: 1.2em;
+      }
+      .file-preview p {
+        margin: 1em 0;
+      }
+      .file-preview a {
+        color: var(--info);
+        text-decoration: none;
+      }
+      .file-preview a:hover {
+        text-decoration: underline;
+      }
+      .file-preview code {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-size: 0.9em;
+      }
+      .file-preview pre {
+        background: rgba(0, 0, 0, 0.4);
+        padding: 12px;
+        border-radius: 6px;
+        overflow-x: auto;
+        margin: 1em 0;
+      }
+      .file-preview pre code {
+        background: none;
+        padding: 0;
+      }
+      .file-preview ul,
+      .file-preview ol {
+        margin: 1em 0;
+        padding-left: 2em;
+      }
+      .file-preview li {
+        margin: 0.5em 0;
+      }
+      .file-preview blockquote {
+        border-left: 4px solid var(--accent);
+        padding-left: 1em;
+        margin: 1em 0;
+        color: var(--muted);
+      }
+      .file-preview table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 1em 0;
+      }
+      .file-preview th,
+      .file-preview td {
+        border: 1px solid var(--border);
+        padding: 8px 12px;
+        text-align: left;
+      }
+      .file-preview th {
+        background: rgba(255, 255, 255, 0.05);
+        font-weight: 600;
+      }
+
+      /* line numbers in preview */
+      .ln {
+        color: #5f6a87;
+        user-select: none;
+        margin-right: 10px;
+        display: inline-block;
+        width: 48px;
+        text-align: right;
+      }
+      .code {
+        white-space: pre;
+        font-size: 12px;
+      }
+
+      .state-card {
+        grid-area: state;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .notification {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        padding: 12px 16px;
+        border-radius: 6px;
+        color: white;
+        font-weight: 600;
+        box-shadow: 0 12px 34px rgba(0, 0, 0, 0.3);
+        z-index: 2000;
+        opacity: 1;
+        transition: opacity 0.3s ease;
+      }
+
+      .notification.success {
+        background: var(--ok);
+      }
+
+      .notification.error {
+        background: var(--err);
+      }
+
+      .notification.info {
+        background: var(--info);
+      }
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px dashed var(--border);
+        background: rgba(255, 255, 255, 0.03);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .status-pill.s-running {
+        color: var(--accent);
+        border-color: var(--border-strong);
+        background: var(--accent-soft);
+      }
+      .status-pill.s-completed {
+        color: var(--ok);
+        border-color: rgba(34, 197, 94, 0.35);
+        background: rgba(34, 197, 94, 0.18);
+      }
+      .status-pill.s-paused {
+        color: var(--pause);
+        border-color: rgba(251, 146, 60, 0.35);
+        background: rgba(251, 146, 60, 0.15);
+      }
+      .status-pill.s-error {
+        color: var(--err);
+        border-color: rgba(239, 68, 68, 0.4);
+        background: rgba(239, 68, 68, 0.18);
+      }
+      .status-pill.s-listening {
+        color: var(--info);
+        border-color: rgba(96, 165, 250, 0.35);
+        background: rgba(96, 165, 250, 0.16);
+      }
+      .status-pill.s-offline {
+        color: var(--muted);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 20px;
+      }
+
+      .form-group label {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .form-select {
+        appearance: none;
+        background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%239da5ba%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E");
+        background-repeat: no-repeat;
+        background-position: right 0.7em top 50%;
+        background-size: 0.65em auto;
+        cursor: pointer;
+        width: 100%;
+        padding-top: 10px;
+        padding-right: 2em;
+        padding-bottom: 10px;
+        padding-left: 12px;
+        border-radius: 6px;
+        border: 1px dashed rgba(255, 255, 255, 0.12);
+        background-color: rgba(6, 10, 18, 0.9);
+        color: var(--fg);
+        font-family: inherit;
+      }
+
+      .agent-desc-preview {
+        font-size: 13px;
+        color: var(--muted);
+        padding: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 6px;
+        border: 1px dashed var(--border);
+        min-height: 40px;
+        line-height: 1.4;
+      }
+
+      @media (max-width: 1280px) {
+        .dashboard {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          min-height: auto;
+        }
+      }
+
+      @media (max-width: 1024px) {
+        .view-tabs {
+          flex-direction: column;
+        }
+
+        .view-tab {
+          width: 100%;
+        }
+
+        .view-chat-main {
+          flex-direction: column;
+        }
+
+        .todos-column {
+          flex: 1 1 auto;
+        }
+      }
+
+      @media (max-width: 768px) {
+        .container {
+          padding: 20px 16px 40px;
+        }
+
+        .chat-card {
+          min-height: 420px;
+        }
+
+        .graph-wrap {
+          height: 420px;
+        }
+
+        .modal-content {
+          max-width: 90%;
+          padding: 18px;
+        }
+      }
+    </style>
+  </head>
   <body>
     <div class="container">
       <div class="header">
@@ -1169,13 +1307,18 @@
       </div>
 
       <div class="dashboard">
-        <aside class="card sidebar">
+        <aside
+          class="card sidebar"
+          role="complementary"
+          aria-label="Agent management sidebar"
+        >
           <div class="sidebar-header">
             <div style="flex: 1">
               <h3>Agents</h3>
               <p>Control Plane</p>
               <select
                 id="agencySelect"
+                aria-label="Select agency"
                 style="
                   width: 100%;
                   margin-top: 8px;
@@ -1190,48 +1333,105 @@
               </select>
             </div>
             <div class="sidebar-actions">
-              <button id="btnNewAgency" title="New Agency">+</button>
-              <button id="btnNewThread" title="New Thread">New</button>
+              <button
+                id="btnNewAgency"
+                title="New Agency"
+                aria-label="Create new agency"
+              >
+                +
+              </button>
+              <button
+                id="btnNewThread"
+                title="New Thread"
+                aria-label="Create new thread"
+              >
+                New
+              </button>
             </div>
           </div>
-          <div class="threads-list" id="threadsList">
-            <div class="threads-empty">
+          <div
+            class="threads-list"
+            id="threadsList"
+            role="list"
+            aria-label="Thread list"
+          >
+            <div class="threads-empty" id="threadsEmptyState">
               No threads yet. Create one to get started.
             </div>
           </div>
         </aside>
 
-        <div class="main-area">
-          <div class="view-tabs">
-            <button class="view-tab active" data-view-target="viewChat">
+        <div class="main-area" role="main">
+          <nav class="view-tabs" role="tablist" aria-label="View selection">
+            <button
+              class="view-tab active"
+              data-view-target="viewChat"
+              role="tab"
+              aria-selected="true"
+              aria-controls="viewChat"
+            >
               Chat &amp; Todos
             </button>
-            <button class="view-tab" data-view-target="viewGraph">Graph</button>
-            <button class="view-tab" data-view-target="viewFiles">Files</button>
-          </div>
+            <button
+              class="view-tab"
+              data-view-target="viewGraph"
+              role="tab"
+              aria-selected="false"
+              aria-controls="viewGraph"
+            >
+              Graph
+            </button>
+            <button
+              class="view-tab"
+              data-view-target="viewFiles"
+              role="tab"
+              aria-selected="false"
+              aria-controls="viewFiles"
+            >
+              Files
+            </button>
+          </nav>
 
-          <div id="viewChat" class="view-section active">
+          <div
+            id="viewChat"
+            class="view-section active"
+            role="tabpanel"
+            aria-labelledby="viewChat"
+          >
             <div class="view-chat-main">
-              <section class="card chat-card">
+              <section class="card chat-card" aria-label="Chat interface">
                 <div class="chat-header">
                   <div class="input-group">
                     <label for="threadId">Thread ID</label>
                     <input
                       id="threadId"
                       placeholder="Select or create a thread…"
+                      aria-label="Thread ID input"
                     />
                   </div>
                 </div>
 
-                <div class="run-summary">
+                <div
+                  class="run-summary"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
                   <span class="run-badge" id="runStatusBadge">Idle</span>
                   <span class="run-meta" id="runStep"></span>
                   <span class="run-meta" id="runModel"></span>
                 </div>
 
-                <div class="chat-transcript" id="chatTranscript">
-                  <div class="chat-empty">
-                    Select a thread to load the conversation.
+                <div
+                  class="chat-transcript"
+                  id="chatTranscript"
+                  role="log"
+                  aria-label="Chat messages"
+                  aria-live="polite"
+                >
+                  <div class="chat-empty" id="chatEmptyState">
+                    Select a thread from the sidebar or create a new one to
+                    start chatting.
                   </div>
                 </div>
 
@@ -1240,42 +1440,83 @@
                     id="msg"
                     rows="3"
                     placeholder="Type a user message…"
+                    aria-label="Message input"
                   ></textarea>
-                  <button id="btnSend" class="primary">Send</button>
+                  <button
+                    id="btnSend"
+                    class="primary"
+                    aria-label="Send message"
+                  >
+                    Send
+                  </button>
                 </div>
 
                 <div class="chat-actions">
-                  <div class="button-group">
-                    <button id="btnApprove">Approve (HITL)</button>
-                    <button id="btnReject">Reject (HITL)</button>
-                    <button id="btnCancel" class="danger">Cancel Run</button>
-                    <button id="btnState">Refresh State</button>
+                  <div
+                    class="button-group"
+                    id="hitlButtons"
+                    style="display: none"
+                    role="group"
+                    aria-label="Human-in-the-loop actions"
+                  >
+                    <button id="btnApprove" aria-label="Approve tool calls">
+                      Approve (HITL)
+                    </button>
+                    <button id="btnReject" aria-label="Reject tool calls">
+                      Reject (HITL)
+                    </button>
+                  </div>
+                  <div
+                    class="button-group"
+                    role="group"
+                    aria-label="Run control"
+                  >
+                    <button
+                      id="btnCancel"
+                      class="danger"
+                      aria-label="Cancel current run"
+                    >
+                      Cancel Run
+                    </button>
                   </div>
                 </div>
 
-                <div class="shortcuts-hint">
-                  Press <span class="shortcut">Ctrl+Enter</span> to send,
-                  <span class="shortcut">Ctrl+N</span> for new thread
+                <div class="shortcuts-hint" title="Keyboard shortcuts">
+                  Press
+                  <span class="shortcut" title="Send message">Ctrl+Enter</span>
+                  to send,
+                  <span class="shortcut" title="Create new thread">Ctrl+N</span>
+                  for new thread
                 </div>
               </section>
 
               <div class="todos-column">
-                <section class="card todos-card">
+                <section class="card todos-card" aria-label="Todo list">
                   <h3>Todos</h3>
-                  <div class="todos-summary" id="todosSummary"></div>
-                  <ul class="todo-list" id="todosList"></ul>
+                  <div
+                    class="todos-summary"
+                    id="todosSummary"
+                    role="status"
+                    aria-live="polite"
+                  ></div>
+                  <ul class="todo-list" id="todosList" role="list"></ul>
                 </section>
               </div>
             </div>
 
-            <section class="card state-card">
+            <section class="card state-card" aria-label="Agent state">
               <h3>State</h3>
-              <pre id="state"></pre>
+              <pre id="state" role="log" aria-label="Current agent state"></pre>
             </section>
           </div>
 
-          <div id="viewGraph" class="view-section">
-            <section class="card threadline-card">
+          <div
+            id="viewGraph"
+            class="view-section"
+            role="tabpanel"
+            aria-labelledby="viewGraph"
+          >
+            <section class="card threadline-card" aria-label="Execution graph">
               <div class="threadline-header">
                 <span class="badge"
                   ><span
@@ -1320,24 +1561,34 @@
                   >Run Tick</span
                 >
                 <span class="badge">Dashed path = linked agent</span>
-                <span class="badge" style="margin-left: auto"
+                <span
+                  class="badge"
+                  style="margin-left: auto"
+                  title="Interactive graph controls"
                   >💡 Drag to pan • Ctrl/Cmd + scroll to zoom</span
                 >
               </div>
               <div class="graph-wrap">
-                <svg id="graph"></svg>
+                <div id="graph"></div>
                 <div class="zoom-controls">
                   <button id="zoomOut">-</button>
                   <span class="zoom-pct" id="zoomPct">100%</span>
                   <button id="zoomIn">+</button>
                   <button id="zoomReset">Reset</button>
+                  <button id="fitGraph">Fit</button>
+                  <button id="exportGraph">Export PNG</button>
                 </div>
               </div>
             </section>
           </div>
 
-          <div id="viewFiles" class="view-section">
-            <section class="card files-card">
+          <div
+            id="viewFiles"
+            class="view-section"
+            role="tabpanel"
+            aria-labelledby="viewFiles"
+          >
+            <section class="card files-card" aria-label="File browser">
               <h3>Files</h3>
               <div class="files-panel">
                 <div class="files-list" id="filesList"></div>
@@ -1360,6 +1611,31 @@
         <div class="modal-json" id="modalJson"></div>
       </div>
     </div>
+    <div id="newAgencyModal" class="modal">
+      <div class="modal-content" style="width: 400px">
+        <div class="modal-header">
+          <h3 class="modal-title">New Agency</h3>
+          <button class="modal-close" id="newAgencyClose">✕</button>
+        </div>
+
+        <div class="form-group">
+          <label for="newAgencyName">Agency Name</label>
+          <input
+            id="newAgencyName"
+            type="text"
+            placeholder="Enter agency name..."
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="chat-actions" style="margin-top: 24px">
+          <button id="btnCreateAgency" class="primary" style="width: 100%">
+            Create Agency
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div id="newThreadModal" class="modal">
       <div class="modal-content" style="width: 400px">
         <div class="modal-header">
@@ -1390,6 +1666,74 @@
     </div>
 
     <script>
+      // Initialize Cytoscape instance (will be created later)
+      let cy = null;
+
+      // Initialize Day.js with relativeTime plugin
+      if (typeof dayjs !== "undefined" && dayjs.extend) {
+        dayjs.extend(window.dayjs_plugin_relativeTime);
+      }
+
+      // Initialize Notyf for notifications
+      const notyf =
+        typeof Notyf !== "undefined"
+          ? new Notyf({
+              duration: 3000,
+              position: { x: "right", y: "bottom" },
+              dismissible: true,
+              ripple: true
+            })
+          : null;
+
+      // Initialize markdown-it for rich text rendering
+      const md =
+        typeof window.markdownit !== "undefined"
+          ? window.markdownit({
+              html: false,
+              linkify: true,
+              breaks: true,
+              highlight: function (str, lang) {
+                if (
+                  lang &&
+                  typeof Prism !== "undefined" &&
+                  Prism.languages[lang]
+                ) {
+                  try {
+                    return Prism.highlight(str, Prism.languages[lang], lang);
+                  } catch (e) {
+                    console.warn("Prism highlight failed:", e);
+                  }
+                }
+                return "";
+              }
+            })
+          : null;
+
+      // Initialize ky HTTP client with retry and timeout
+      const http =
+        typeof ky !== "undefined"
+          ? ky.create({
+              timeout: 30000,
+              retry: {
+                limit: 2,
+                methods: ["get", "post"],
+                statusCodes: [408, 413, 429, 500, 502, 503, 504]
+              },
+              hooks: {
+                beforeError: [
+                  (error) => {
+                    const { response } = error;
+                    if (response && response.body) {
+                      error.name = "HTTPError";
+                      error.message = `${response.status} ${response.statusText}`;
+                    }
+                    return error;
+                  }
+                ]
+              }
+            })
+          : null;
+
       const $ = (id) => document.getElementById(id);
       const S = $("state");
       const G = $("graph");
@@ -1404,13 +1748,16 @@
       const runModelLabel = $("runModel");
       const chatTranscript = $("chatTranscript");
       const threadInput = $("threadId");
-      const btnRefreshThreads = $("btnRefreshThreads");
       const viewTabs = Array.from(document.querySelectorAll(".view-tab"));
       const viewSections = new Map(
         Array.from(document.querySelectorAll(".view-section")).map(
           (section) => [section.id, section]
         )
       );
+      const newAgencyModal = $("newAgencyModal");
+      const newAgencyClose = $("newAgencyClose");
+      const newAgencyName = $("newAgencyName");
+      const btnCreateAgency = $("btnCreateAgency");
       const newThreadModal = $("newThreadModal");
       const newThreadClose = $("newThreadClose");
       const newAgentTypeSelect = $("newAgentType");
@@ -1422,7 +1769,9 @@
           const target = btn.getAttribute("data-view-target");
           if (!target || !viewSections.has(target)) return;
           for (const other of viewTabs) {
-            other.classList.toggle("active", other === btn);
+            const isActive = other === btn;
+            other.classList.toggle("active", isActive);
+            other.setAttribute("aria-selected", String(isActive));
           }
           for (const [id, section] of viewSections) {
             section.classList.toggle("active", id === target);
@@ -1430,22 +1779,76 @@
         });
       }
 
-      let mainThreadId = "";
-      let ws; // main ws
-      let selectedThreadId = "";
-      let latestThreads = [];
-      const extraThreads = new Map();
-      const expandedThreads = new Set();
-      let stateRefreshTimer = null;
-      let stateRefreshInFlight = false;
+      // Constants
       const REFRESH_DEBOUNCE_MS = 220;
       const REFRESH_PRIORITY_MS = 40;
-      let availableAgents = [];
+      const NOTIFICATION_DURATION_MS = 3000;
+      const NOTIFICATION_FADE_MS = 300;
+      const MAX_CHARS_PER_LINE = 32;
+      const MIN_LABEL_WIDTH = 160;
+      const LABEL_HEIGHT = 50;
+      const LABEL_PADDING = 24;
+      const LABEL_GUIDE_OFFSET = 20;
 
-      // Agency State
-      state = {};
-      state.agencies = [];
-      state.currentAgencyId = null;
+      // Centralized State Manager (easier to migrate to Zustand/React later)
+      const AppState = {
+        // Connection state
+        mainThreadId: "",
+        ws: null,
+        selectedThreadId: "",
+
+        // Thread state
+        latestThreads: [],
+        extraThreads: new Map(),
+        expandedThreads: new Set(),
+
+        // Agency state
+        agencies: [],
+        currentAgencyId: null,
+        availableAgents: [],
+
+        // UI state
+        stateRefreshTimer: null,
+        stateRefreshInFlight: false,
+
+        // Getters for backward compatibility
+        get mainThread() {
+          return this.mainThreadId;
+        },
+        set mainThread(val) {
+          this.mainThreadId = val;
+        },
+
+        get currentAgency() {
+          return this.currentAgencyId;
+        },
+        set currentAgency(val) {
+          this.currentAgencyId = val;
+        },
+
+        // Helper methods
+        reset() {
+          this.mainThreadId = "";
+          this.ws = null;
+          this.selectedThreadId = "";
+          this.extraThreads.clear();
+          this.expandedThreads.clear();
+        }
+      };
+
+      // Map old state references to AppState
+      const state = AppState;
+
+      // Create local references for backward compatibility (will be removed during React migration)
+      let mainThreadId = AppState.mainThreadId;
+      let ws = AppState.ws;
+      let selectedThreadId = AppState.selectedThreadId;
+      let latestThreads = AppState.latestThreads;
+      let extraThreads = AppState.extraThreads;
+      let expandedThreads = AppState.expandedThreads;
+      let stateRefreshTimer = AppState.stateRefreshTimer;
+      let stateRefreshInFlight = AppState.stateRefreshInFlight;
+      let availableAgents = AppState.availableAgents;
 
       async function init() {
         // Setup listeners that aren't already set up
@@ -1460,14 +1863,33 @@
         if (btnNewAgency) {
           btnNewAgency.addEventListener("click", createAgency);
         }
+        if (newAgencyClose) {
+          newAgencyClose.onclick = () =>
+            newAgencyModal.classList.remove("open");
+        }
+        if (btnCreateAgency) {
+          btnCreateAgency.onclick = handleCreateAgency;
+        }
+        if (newAgencyName) {
+          newAgencyName.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              handleCreateAgency();
+            }
+            if (e.key === "Escape") {
+              newAgencyModal.classList.remove("open");
+            }
+          });
+        }
 
         await loadAgencies();
       }
 
       async function loadAgencies() {
         try {
-          const res = await fetch("/agencies");
-          const data = await res.json();
+          const data = http
+            ? await http.get("/agencies").json()
+            : await fetch("/agencies").then((r) => r.json());
           state.agencies = data.agencies || [];
           renderAgencySelect();
           if (state.agencies.length > 0) {
@@ -1493,19 +1915,44 @@
       }
 
       async function createAgency() {
-        const name = prompt("Agency Name:");
-        if (!name) return;
+        newAgencyModal.classList.add("open");
+        newAgencyName.value = "";
+        newAgencyName.focus();
+      }
+
+      async function handleCreateAgency() {
+        const name = newAgencyName.value.trim();
+        if (!name) {
+          showNotification("Please enter an agency name", "error");
+          return;
+        }
+
         try {
-          const res = await fetch("/agencies", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name })
-          });
-          const meta = await res.json();
+          btnCreateAgency.textContent = "Creating...";
+          btnCreateAgency.disabled = true;
+
+          const meta = http
+            ? await http.post("/agencies", { json: { name } }).json()
+            : await fetch("/agencies", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name })
+              }).then(async (res) => {
+                if (!res.ok) {
+                  const errorText = await res.text();
+                  throw new Error(errorText || "Failed to create agency");
+                }
+                return res.json();
+              });
+          newAgencyModal.classList.remove("open");
+          showNotification(`Agency "${name}" created`, "success");
           await loadAgencies();
           selectAgency(meta.id);
         } catch (e) {
-          alert("Failed to create agency: " + e.message);
+          showNotification("Failed to create agency: " + e.message, "error");
+        } finally {
+          btnCreateAgency.textContent = "Create Agency";
+          btnCreateAgency.disabled = false;
         }
       }
 
@@ -1540,10 +1987,13 @@
       async function loadAgentDefinitions() {
         if (!state.currentAgencyId) return;
         try {
-          const res = await fetch(
-            `/agency/${state.currentAgencyId}/blueprints`
-          );
-          const data = await res.json();
+          const data = http
+            ? await http
+                .get(`/agency/${state.currentAgencyId}/blueprints`)
+                .json()
+            : await fetch(`/agency/${state.currentAgencyId}/blueprints`).then(
+                (r) => r.json()
+              );
           availableAgents = data.blueprints || [];
 
           // Populate dropdown
@@ -1569,12 +2019,26 @@
       async function loadThreads(selectId = null) {
         if (!state.currentAgencyId) return;
         try {
-          const res = await fetch(`/agency/${state.currentAgencyId}/agents`);
-          const data = await res.json();
+          const list = $("threadsList");
+          if (list && latestThreads.length === 0) {
+            list.innerHTML =
+              '<div class="threads-empty">Loading threads...</div>';
+          }
+
+          const data = http
+            ? await http.get(`/agency/${state.currentAgencyId}/agents`).json()
+            : await fetch(`/agency/${state.currentAgencyId}/agents`).then((r) =>
+                r.json()
+              );
           latestThreads = data.agents || [];
           renderThreadList(latestThreads, selectId || selectedThreadId);
         } catch (e) {
           console.error("Failed to load threads", e);
+          const list = $("threadsList");
+          if (list) {
+            list.innerHTML =
+              '<div class="threads-empty">Failed to load threads</div>';
+          }
         }
       }
 
@@ -1582,7 +2046,10 @@
 
       // Fix: Use correct ID
       $("btnNewThread").onclick = () => {
-        if (!state.currentAgencyId) return alert("Select an agency first");
+        if (!state.currentAgencyId) {
+          showNotification("Select an agency first", "error");
+          return;
+        }
         newThreadModal.classList.add("open");
         if (availableAgents.length === 0) loadAgentDefinitions();
       };
@@ -1600,15 +2067,20 @@
           btnCreateThread.textContent = "Creating...";
           btnCreateThread.disabled = true;
 
-          const res = await fetch(`/agency/${state.currentAgencyId}/agents`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ agentType }) // Sending the type from dropdown
-          });
-
-          if (!res.ok) throw new Error(await res.text());
-
-          const json = await res.json();
+          const json = http
+            ? await http
+                .post(`/agency/${state.currentAgencyId}/agents`, {
+                  json: { agentType }
+                })
+                .json()
+            : await fetch(`/agency/${state.currentAgencyId}/agents`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ agentType })
+              }).then(async (res) => {
+                if (!res.ok) throw new Error(await res.text());
+                return res.json();
+              });
 
           // Success: Close modal, notify, load
           newThreadModal.classList.remove("open");
@@ -1635,96 +2107,220 @@
         "#0ea5e9",
         "#059669"
       ];
-      const lanes = new Map(); // threadId -> { lane, color, ws?, nodes:[], lastNodeKey?:string, label?:{...} }
+      const lanes = new Map(); // threadId -> { lane, color, ws?, nodes:[] }
       const laneMeta = new Map(); // threadId -> meta info
       const laneOrder = []; // threadIds in display order
-      const nodeMap = new Map(); // nodeKey -> {x,y,type,elCircle,elText,threadId}
-      const lastNodePerLane = new Map(); // lane -> nodeKey
+      const nodeMap = new Map(); // nodeId -> {type, threadId, data}
       const childSpawnMap = new Map(); // childId -> spawnNodeKey (in parent)
-      const firstNodeInLane = new Map(); // threadId -> first nodeKey
-      const lastNodeInLane = new Map(); // threadId -> last nodeKey
       const pendingEdges = new Map();
       const primingThreads = new Set();
-      const threadCursors = new Map(); // Track X-index cursor per thread
+      const threadCursors = new Map(); // Track node sequence per thread
+      const firstNodeInLane = new Map(); // threadId -> first nodeKey
+      const lastNodeInLane = new Map(); // threadId -> last nodeKey
+      const lastNodePerLane = new Map(); // lane number -> nodeKey
+      const lastCompletionX = new Map(); // threadId -> last child completion X position
+      const childFinalX = new Map(); // childThreadId -> X position where child completed
+      let layoutDebounce = null;
 
-      const margin = { left: 220, top: 50, xStep: 140, yStep: 120 };
-      const arrowId = "arrowHead";
+      function initCytoscape() {
+        if (cy) {
+          cy.destroy();
+        }
 
-      // Pan/drag state
-      let panState = {
-        isPanning: false,
-        startX: 0,
-        startY: 0,
-        offsetX: 0,
-        offsetY: 0
-      };
-      let graphGroup; // Main group element that gets transformed
-      let zoom = 1;
-      const minZoom = 0.5,
-        maxZoom = 4;
+        cy = cytoscape({
+          container: G,
+          style: [
+            {
+              selector: "node",
+              style: {
+                "background-color": "data(color)",
+                "border-width": 3,
+                "border-color": "data(borderColor)",
+                label: "data(label)",
+                color: "#9da5ba",
+                "text-valign": "bottom",
+                "text-halign": "center",
+                "text-margin-y": 5,
+                "font-size": "11px",
+                "font-family": "monospace",
+                width: "data(size)",
+                height: "data(size)",
+                "text-wrap": "wrap",
+                "text-max-width": "80px"
+              }
+            },
+            {
+              selector: 'node[type="tick"]',
+              style: {
+                width: 20,
+                height: 20
+              }
+            },
+            {
+              selector: "node:selected",
+              style: {
+                "border-width": 4,
+                "border-color": "#f97316",
+                "overlay-opacity": 0.2,
+                "overlay-color": "#f97316"
+              }
+            },
+            {
+              selector: "edge",
+              style: {
+                width: 3,
+                "line-color": "data(color)",
+                "target-arrow-color": "data(color)",
+                "target-arrow-shape": "triangle",
+                "curve-style": "bezier",
+                "arrow-scale": 1.2
+              }
+            },
+            {
+              selector: 'edge[type="spawn"]',
+              style: {
+                "line-style": "dashed",
+                "line-dash-pattern": [6, 4],
+                "line-color": "#c084fc",
+                "target-arrow-color": "#c084fc"
+              }
+            }
+          ],
+          layout: {
+            name: "preset"
+          },
+          minZoom: 0.3,
+          maxZoom: 3,
+          wheelSensitivity: 0.2
+        });
 
-      function initSVG() {
-        G.innerHTML = "";
-        const defs = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "defs"
-        );
-        const marker = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "marker"
-        );
-        marker.setAttribute("id", arrowId);
-        marker.setAttribute("viewBox", "0 0 10 10");
-        marker.setAttribute("refX", "10");
-        marker.setAttribute("refY", "5");
-        marker.setAttribute("markerWidth", "6");
-        marker.setAttribute("markerHeight", "6");
-        marker.setAttribute("orient", "auto-start-reverse");
-        marker.setAttribute("markerUnits", "userSpaceOnUse"); // keep size stable on zoom
-        const path = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "path"
-        );
-        path.setAttribute("d", "M 0 0 L 10 5 L 0 10 z");
-        path.setAttribute("fill", "rgba(148, 163, 184, 0.7)");
-        marker.appendChild(path);
-        defs.appendChild(marker);
-        G.appendChild(defs);
+        // Click handler for nodes
+        cy.on("tap", "node", function (evt) {
+          const node = evt.target;
+          const data = node.data();
+          openModal(data.payload, data.label, data.type);
+        });
 
-        // Create main group for all graph elements
-        graphGroup = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "g"
-        );
-        graphGroup.setAttribute("id", "graphGroup");
-        G.appendChild(graphGroup);
+        // Double-click to focus and zoom to node
+        cy.on("dbltap", "node", function (evt) {
+          const node = evt.target;
+          cy.animate({
+            fit: {
+              eles: node,
+              padding: 100
+            },
+            duration: 500,
+            easing: "ease-out"
+          });
+        });
 
-        // Reset pan state
-        panState = {
-          isPanning: false,
-          startX: 0,
-          startY: 0,
-          offsetX: 0,
-          offsetY: 0
-        };
-        applyTransform();
+        // Hover effects for nodes
+        cy.on("mouseover", "node", function (evt) {
+          const node = evt.target;
+          node.style({
+            "border-width": 5,
+            "z-index": 999
+          });
+        });
+
+        cy.on("mouseout", "node", function (evt) {
+          const node = evt.target;
+          node.style({
+            "border-width": 3,
+            "z-index": 1
+          });
+        });
+
+        // Hover effects for edges
+        cy.on("mouseover", "edge", function (evt) {
+          const edge = evt.target;
+          edge.style({
+            width: 5,
+            opacity: 1
+          });
+        });
+
+        cy.on("mouseout", "edge", function (evt) {
+          const edge = evt.target;
+          edge.style({
+            width: 3,
+            opacity: 0.6
+          });
+        });
+
+        // Initialize navigator (minimap)
+        if (typeof cy.navigator === "function") {
+          cy.navigator({
+            container: false,
+            viewLiveFramerate: 30,
+            thumbnailEventFramerate: 30,
+            thumbnailLiveFramerate: false,
+            dblClickDelay: 200,
+            removeCustomContainer: true,
+            rerenderDelay: 100
+          });
+        }
+
+        updateZoomDisplay();
       }
-      initSVG();
+
+      function updateZoomDisplay() {
+        if (cy) {
+          const zp = $("zoomPct");
+          if (zp) zp.textContent = Math.round(cy.zoom() * 100) + "%";
+        }
+      }
+
+      initCytoscape();
 
       function resetGraphState() {
         closeAllSockets();
-        initSVG();
+        if (cy) {
+          cy.elements().remove();
+        }
         lanes.clear();
         laneMeta.clear();
         laneOrder.splice(0);
         nodeMap.clear();
-        lastNodePerLane.clear();
         childSpawnMap.clear();
-        firstNodeInLane.clear();
-        lastNodeInLane.clear();
         pendingEdges.clear();
         primingThreads.clear();
         threadCursors.clear();
+        firstNodeInLane.clear();
+        lastNodeInLane.clear();
+        lastNodePerLane.clear();
+        lastCompletionX.clear();
+        childFinalX.clear();
+      }
+
+      function runGraphLayout(immediate = false) {
+        if (!cy) return;
+
+        // Debounce layout to avoid too frequent updates (unless immediate)
+        if (layoutDebounce) clearTimeout(layoutDebounce);
+
+        const doLayout = () => {
+          try {
+            // Use preset layout to honor our manual positioning
+            // This preserves the cursor-based X positions we calculated
+            const layout = cy.layout({
+              name: "preset",
+              animate: false,
+              fit: false,
+              padding: 50
+            });
+
+            layout.run();
+          } catch (e) {
+            console.warn("Layout error:", e);
+          }
+        };
+
+        if (immediate) {
+          doLayout();
+        } else {
+          layoutDebounce = setTimeout(doLayout, 100);
+        }
       }
 
       function scheduleStateRefresh(priority = false) {
@@ -1815,17 +2411,22 @@
 
       function closeAllSockets() {
         for (const lane of lanes.values()) {
-          if (lane.ws && lane.ws.readyState === WebSocket.OPEN) {
+          if (lane.ws) {
             try {
-              lane.ws.close(1000, "reset");
+              // ReconnectingWebSocket compatible close
+              if (typeof lane.ws.close === "function") {
+                lane.ws.close(1000, "reset");
+              }
             } catch (err) {
               console.warn("Failed to close lane socket", err);
             }
           }
         }
-        if (ws && ws.readyState === WebSocket.OPEN) {
+        if (ws) {
           try {
-            ws.close(1000, "reset");
+            if (typeof ws.close === "function") {
+              ws.close(1000, "reset");
+            }
           } catch (err) {
             console.warn("Failed to close main socket", err);
           }
@@ -1834,74 +2435,48 @@
         ws = undefined;
       }
 
-      // Pan/drag handlers
-      G.addEventListener("mousedown", (e) => {
-        panState.isPanning = true;
-        panState.startX = e.clientX - panState.offsetX;
-        panState.startY = e.clientY - panState.offsetY;
-        G.style.cursor = "grabbing";
-      });
-
-      G.addEventListener("mousemove", (e) => {
-        if (!panState.isPanning) return;
-        panState.offsetX = e.clientX - panState.startX;
-        panState.offsetY = e.clientY - panState.startY;
-        applyTransform();
-      });
-
-      G.addEventListener("mouseup", () => {
-        panState.isPanning = false;
-        G.style.cursor = "grab";
-      });
-
-      G.addEventListener("mouseleave", () => {
-        panState.isPanning = false;
-        G.style.cursor = "grab";
-      });
-
-      G.addEventListener(
-        "wheel",
-        (e) => {
-          // Use pinch-zoom gesture (Ctrl/Cmd on most platforms).
-          if (!e.ctrlKey && !e.metaKey) return;
-          e.preventDefault();
-
-          const factor = Math.pow(1.0015, -e.deltaY); // smooth
-          const newZoom = Math.max(minZoom, Math.min(maxZoom, zoom * factor));
-          if (newZoom === zoom) return;
-
-          zoom = newZoom;
-          applyTransform();
-        },
-        { passive: false }
-      );
-
+      // Cytoscape zoom controls
       $("zoomIn").onclick = () => {
-        zoom = Math.min(maxZoom, zoom * 1.2);
-        applyTransform();
+        if (cy) {
+          cy.zoom(cy.zoom() * 1.2);
+          cy.center();
+          updateZoomDisplay();
+        }
       };
       $("zoomOut").onclick = () => {
-        zoom = Math.max(minZoom, zoom / 1.2);
-        applyTransform();
+        if (cy) {
+          cy.zoom(cy.zoom() / 1.2);
+          cy.center();
+          updateZoomDisplay();
+        }
       };
       $("zoomReset").onclick = () => {
-        zoom = 1;
-        panState.offsetX = 0;
-        panState.offsetY = 0;
-        applyTransform();
+        if (cy) {
+          cy.zoom(1);
+          cy.center();
+          updateZoomDisplay();
+        }
+      };
+      $("fitGraph").onclick = () => {
+        if (cy) {
+          cy.fit(null, 50);
+          updateZoomDisplay();
+        }
+      };
+      $("exportGraph").onclick = () => {
+        if (cy) {
+          const png = cy.png({ full: true, scale: 2 });
+          const link = document.createElement("a");
+          link.download = `agent-graph-${Date.now()}.png`;
+          link.href = png;
+          link.click();
+          showNotification("Graph exported as PNG", "success");
+        }
       };
 
-      // Set initial cursor
-      G.style.cursor = "grab";
-
-      function applyTransform() {
-        // translate, then scale (standard pattern used by D3)
-        graphGroup.setAttribute(
-          "transform",
-          `translate(${panState.offsetX}, ${panState.offsetY}) scale(${zoom})`
-        );
-        const zp = $("zoomPct");
-        if (zp) zp.textContent = Math.round(zoom * 100) + "%";
+      // Update zoom display on zoom events
+      if (cy) {
+        cy.on("zoom", updateZoomDisplay);
       }
 
       function laneFor(threadId) {
@@ -1914,71 +2489,6 @@
         };
         lanes.set(threadId, laneObj);
         laneOrder.push(threadId);
-
-        const y = margin.top + lane * margin.yStep;
-        const labelX = Math.max(8, margin.left - 260);
-
-        const labelGroup = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "g"
-        );
-        labelGroup.setAttribute("transform", `translate(${labelX}, ${y - 52})`);
-
-        const rect = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "rect"
-        );
-        rect.setAttribute("x", "0");
-        rect.setAttribute("y", "0");
-        rect.setAttribute("rx", "6");
-        rect.setAttribute("class", "lane-label-card");
-        rect.setAttribute("width", "1");
-        rect.setAttribute("height", "1");
-        labelGroup.appendChild(rect);
-
-        const titleText = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "text"
-        );
-        titleText.setAttribute("x", 12);
-        titleText.setAttribute("y", 20);
-        titleText.setAttribute("class", "lane-label-title");
-        titleText.textContent = short(threadId);
-        labelGroup.appendChild(titleText);
-
-        const metaText = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "text"
-        );
-        metaText.setAttribute("x", 12);
-        metaText.setAttribute("y", 38);
-        metaText.setAttribute("class", "lane-label-meta");
-        metaText.textContent = "connecting…";
-        labelGroup.appendChild(metaText);
-
-        graphGroup.appendChild(labelGroup);
-
-        const guide = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "line"
-        );
-        guide.setAttribute("stroke", "rgba(249, 115, 22, 0.35)");
-        guide.setAttribute("stroke-width", "1.5");
-        guide.setAttribute("stroke-dasharray", "4 2");
-        guide.setAttribute("vector-effect", "non-scaling-stroke");
-        graphGroup.insertBefore(guide, labelGroup);
-
-        laneObj.label = {
-          group: labelGroup,
-          rectEl: rect,
-          titleEl: titleText,
-          metaEl: metaText,
-          guideEl: guide
-        };
-
-        layoutLaneLabel(threadId);
-
-        resizeSVG();
         return lane;
       }
 
@@ -1986,286 +2496,169 @@
         if (!threadId) return;
         const current = laneMeta.get(threadId) || {};
         laneMeta.set(threadId, { ...current, ...meta });
-        if (lanes.has(threadId)) applyLaneMeta(threadId);
-      }
-
-      function applyLaneMeta(threadId) {
-        const laneObj = lanes.get(threadId);
-        if (!laneObj?.label) return;
-        const meta = laneMeta.get(threadId) || {};
-
-        const baseTitle =
-          meta.title ||
-          meta.agentName ||
-          meta.agentType ||
-          (threadId === mainThreadId
-            ? "Root Agent"
-            : meta.isSubagent
-              ? "Subagent"
-              : "Agent");
-        laneObj.label.titleEl.textContent = baseTitle;
-
-        const detailParts = [short(threadId)];
-        if (meta.status)
-          detailParts.push(String(meta.status).replace(/_/g, " "));
-        if (meta.model) detailParts.push(meta.model);
-        if (meta.createdAt)
-          detailParts.push(formatRelativeTime(meta.createdAt));
-
-        const lines = [];
-        const maxChars = 32;
-        let current = "";
-        for (const part of detailParts) {
-          if (!part) continue;
-          if (!current) {
-            current = part;
-            continue;
-          }
-          const candidate = `${current} • ${part}`;
-          if (candidate.length > maxChars) {
-            lines.push(current);
-            current = part;
-          } else {
-            current = candidate;
-          }
-        }
-        if (current) lines.push(current);
-        if (!lines.length) lines.push("listening…");
-
-        const metaEl = laneObj.label.metaEl;
-        while (metaEl.firstChild) metaEl.removeChild(metaEl.firstChild);
-        metaEl.setAttribute("x", 12);
-        metaEl.setAttribute("y", 38);
-
-        lines.forEach((line, index) => {
-          const tspan = document.createElementNS(
-            "http://www.w3.org/2000/svg",
-            "tspan"
-          );
-          tspan.setAttribute("x", "12");
-          tspan.setAttribute("dy", index === 0 ? "0" : "14");
-          tspan.textContent = line;
-          metaEl.appendChild(tspan);
-        });
-
-        layoutLaneLabel(threadId);
-      }
-
-      function layoutLaneLabel(threadId) {
-        const laneObj = lanes.get(threadId);
-        if (!laneObj?.label) return;
-        const { group, rectEl, titleEl, metaEl, guideEl } = laneObj.label;
-        const laneIndex = laneObj.lane;
-        const y = margin.top + laneIndex * margin.yStep;
-
-        const titleBox = titleEl.getBBox();
-        const metaBox = metaEl.getBBox();
-        const contentWidth = Math.max(titleBox.width, metaBox.width);
-
-        const width = Math.max(160, contentWidth + 24);
-        const height = 50;
-
-        // Find anchor X (start of first node in lane)
-        let anchorX = margin.left;
-        const firstKey = firstNodeInLane.get(threadId);
-        if (firstKey && nodeMap.has(firstKey)) {
-          anchorX = nodeMap.get(firstKey).x;
-        }
-
-        // Position card to the left of the anchor
-        const labelX = anchorX - width - 24;
-        const topY = y - height / 2;
-
-        group.setAttribute("transform", `translate(${labelX}, ${topY})`);
-        rectEl.setAttribute("width", String(width));
-        rectEl.setAttribute("height", String(height));
-
-        // Connect label to node
-        guideEl.setAttribute("x1", String(labelX + width));
-        guideEl.setAttribute("y1", y);
-        guideEl.setAttribute("x2", String(anchorX - 20)); // connect to circle edge roughly
-        guideEl.setAttribute("y2", y);
-      }
-
-      function resizeSVG() {
-        const width = Math.max(900, G.clientWidth || 900); // keep viewport stable
-        const height = Math.max(
-          300,
-          margin.top + Math.max(1, lanes.size) * margin.yStep
-        );
-        G.setAttribute("viewBox", `0 0 ${width} ${height}`);
-        G.setAttribute("preserveAspectRatio", "xMinYMin meet");
-      }
-
-      function globalMaxIndex() {
-        let m = 0;
-        for (const tid of laneOrder) {
-          const arr = lanes.get(tid).nodes;
-          if (arr) m = Math.max(m, arr.length);
-        }
-        return m;
       }
 
       function addNode(threadId, type, label, payload, minIdx = -1) {
+        if (!cy) return null;
+
         const lane = laneFor(threadId);
         const laneObj = lanes.get(threadId);
 
         let currentCursor = threadCursors.get(threadId);
         if (currentCursor === undefined) currentCursor = -1;
 
-        // Gap logic: Jump ahead if minIdx is provided
-        const startBasis = Math.max(currentCursor, minIdx - 1);
-        const nextIdx = startBasis + 1;
-        threadCursors.set(threadId, nextIdx);
+        // Calculate next position
+        let nextIdx;
+        if (minIdx >= 0) {
+          // This is a completion node - use the exact position provided
+          nextIdx = minIdx;
+          console.log(
+            `[addNode] Placing completion node for ${short(threadId)} at X=${nextIdx} (minIdx provided, current cursor=${currentCursor})`
+          );
+        } else {
+          // Normal sequential positioning - must advance past any jump-ahead nodes
+          nextIdx = currentCursor + 1;
+        }
 
-        const x = margin.left + nextIdx * margin.xStep;
-        const y = margin.top + lane * margin.yStep;
+        // Always update cursor to highest position used (to avoid overlaps)
+        const newCursor = Math.max(currentCursor, nextIdx);
+        threadCursors.set(threadId, newCursor);
+
+        console.log(
+          `[addNode] Adding ${type} "${label}" to ${short(threadId)} at X=${nextIdx}, Y=${lane}, cursor updated to ${newCursor}`
+        );
+
+        // Manual node positioning - preserved by preset layout
+        // This ensures parent-child return nodes align horizontally
+        const x = nextIdx * 150;
+        const y = lane * 120;
 
         // shape/color by type
         const colorMap = {
           tick: "#5aa7ff",
-          model: "var(--model)",
-          tool: "var(--tool)",
-          done: "var(--ok)",
-          paused: "var(--warn)",
-          error: "var(--err)"
+          model: "#34d399",
+          tool: "#c084fc",
+          done: "#22c55e",
+          paused: "#facc15",
+          error: "#ef4444"
         };
-        const fill = colorMap[type] || "#94a3b8";
-        const radius = type === "tick" ? 10 : 20;
-
-        const group = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "g"
-        );
-
-        // edge to previous
-        const prevKey = lastNodePerLane.get(lane);
-        if (prevKey) {
-          const prev = nodeMap.get(prevKey);
-          drawEdge(prev.x, prev.y, x, y, false);
-        }
-
-        if (type !== "tick") {
-          const glow = document.createElementNS(
-            "http://www.w3.org/2000/svg",
-            "circle"
-          );
-          glow.setAttribute("cx", x);
-          glow.setAttribute("cy", y);
-          glow.setAttribute("r", radius + 4);
-          glow.setAttribute("fill", "none");
-          glow.setAttribute("stroke", fill);
-          glow.setAttribute("stroke-width", "2");
-          glow.setAttribute("opacity", "0.3");
-          group.appendChild(glow);
-        }
-
-        // circle
-        const c = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "circle"
-        );
-        c.setAttribute("cx", x);
-        c.setAttribute("cy", y);
-        c.setAttribute("r", radius);
-        c.setAttribute("fill", "#0b101c");
-        c.setAttribute("stroke", fill);
-        c.setAttribute("stroke-width", "3");
-        c.setAttribute("class", "node-circle");
-        c.setAttribute("vector-effect", "non-scaling-stroke");
-
-        // Make node clickable
-        c.style.cursor = "pointer";
-        c.addEventListener("click", () => openModal(payload, label, type));
-
-        // label
-        const t = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "text"
-        );
-        t.setAttribute("x", x);
-        t.setAttribute("y", y + radius + 16);
-        t.setAttribute("text-anchor", "middle");
-        t.setAttribute("font-size", "11");
-        t.setAttribute("fill", "var(--muted)");
-        t.setAttribute("font-family", "monospace");
-        t.textContent = label;
-
-        // tooltip
-        const title = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "title"
-        );
-        title.textContent = "Click for details";
-        c.appendChild(title);
-
-        group.appendChild(c);
-        group.appendChild(t);
-        graphGroup.appendChild(group);
+        const borderColorMap = {
+          tick: "#5aa7ff",
+          model: "#34d399",
+          tool: "#c084fc",
+          done: "#22c55e",
+          paused: "#facc15",
+          error: "#ef4444"
+        };
+        const color = colorMap[type] || "#94a3b8";
+        const borderColor = borderColorMap[type] || "#94a3b8";
+        const size = type === "tick" ? 20 : 40;
 
         const nodeKey = `${threadId}-${payload.seq ?? Date.now()}-${nextIdx}`;
-        nodeMap.set(nodeKey, { x, y, type, elCircle: c, elText: t, threadId });
-        lastNodePerLane.set(lane, nodeKey);
+
+        // Add node to Cytoscape
+        cy.add({
+          group: "nodes",
+          data: {
+            id: nodeKey,
+            label: label,
+            type: type,
+            threadId: threadId,
+            color: "#0b101c",
+            borderColor: borderColor,
+            size: size,
+            payload: payload,
+            lane: lane,
+            index: nextIdx
+          },
+          position: { x, y }
+        });
+
+        // Add edge from previous node in this thread
+        const prevNodes = laneObj.nodes;
+        if (prevNodes.length > 0) {
+          const prevKey = prevNodes[prevNodes.length - 1];
+          cy.add({
+            group: "edges",
+            data: {
+              id: `${prevKey}-${nodeKey}`,
+              source: prevKey,
+              target: nodeKey,
+              type: "flow",
+              color: "rgba(56, 189, 248, 0.4)"
+            }
+          });
+        }
+
+        nodeMap.set(nodeKey, { type, threadId, data: payload });
         laneObj.nodes.push(nodeKey);
+
+        // Track first and last nodes
         if (!firstNodeInLane.has(threadId)) {
           firstNodeInLane.set(threadId, nodeKey);
-          // If this is the first node, update the label position to anchor to this node
-          layoutLaneLabel(threadId);
         }
         lastNodeInLane.set(threadId, nodeKey);
+        lastNodePerLane.set(lane, nodeKey);
 
-        setTimeout(() => {
-          c.style.transition = "all 0.3s ease";
-          group.style.opacity = "1";
-        }, 50);
+        // Run layout (skip during priming for performance)
+        if (!primingThreads.has(threadId)) {
+          runGraphLayout();
+        }
 
-        resizeSVG();
         return nodeKey;
       }
 
-      function drawEdge(x1, y1, x2, y2, dashed) {
-        const path = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "path"
-        );
-
-        let d = "";
-        if (y1 === y2) {
-          // Straight horizontal
-          d = `M ${x1 + 20} ${y1} L ${x2 - 20} ${y2}`;
-        } else {
-          // Branching / Merging "Sigmoid" curve
-          const midX = (x1 + x2) / 2;
-          d = `M ${x1} ${y1} C ${x1 + 60} ${y1}, ${x2 - 60} ${y2}, ${x2} ${y2}`;
-        }
-
-        path.setAttribute("d", d);
-        path.setAttribute("fill", "none");
-        path.setAttribute(
-          "stroke",
-          dashed ? "var(--tool)" : "rgba(148, 163, 184, 0.4)"
-        );
-        path.setAttribute("stroke-width", dashed ? "2" : "4");
-
-        if (dashed) {
-          path.setAttribute("stroke-dasharray", "6 4");
-          path.setAttribute("opacity", "0.6");
-        } else {
-          // Main flow lines
-          path.setAttribute("stroke", "rgba(56, 189, 248, 0.25)"); // Blue-ish glow
-        }
-        path.setAttribute("stroke-linecap", "round");
-        path.setAttribute("vector-effect", "non-scaling-stroke");
-
-        // Insert before nodes so lines are behind circles
-        graphGroup.insertBefore(path, graphGroup.firstChild || null);
-      }
-
       function connectLanes(fromNodeKey, toNodeKey) {
-        const from = nodeMap.get(fromNodeKey);
-        const to = nodeMap.get(toNodeKey);
-        if (!from || !to) return;
-        drawEdge(from.x, from.y, to.x, to.y, true);
+        if (!cy) return;
+        if (!fromNodeKey || !toNodeKey) return;
+
+        // Check if both nodes exist
+        const fromNode = cy.getElementById(fromNodeKey);
+        const toNode = cy.getElementById(toNodeKey);
+
+        if (fromNode.length === 0 || toNode.length === 0) {
+          console.warn(
+            "Cannot connect nodes - one or both do not exist:",
+            fromNodeKey,
+            toNodeKey
+          );
+          return;
+        }
+
+        // Get node data and positions for verification
+        const fromData = fromNode.data();
+        const toData = toNode.data();
+        const fromPos = fromNode.position();
+        const toPos = toNode.position();
+
+        // Log connection for debugging
+        console.log(
+          `[connectLanes] ${fromData.label} (X=${fromData.index}, pos=${fromPos.x},${fromPos.y}) → ${toData.label} (X=${toData.index}, pos=${toPos.x},${toPos.y})`
+        );
+
+        // Check if edge will be vertical
+        if (Math.abs(fromPos.x - toPos.x) < 1) {
+          console.log(`  ✓ Vertical edge (X positions match)`);
+        } else {
+          console.warn(
+            `  ✗ DIAGONAL edge (X positions differ by ${Math.abs(fromPos.x - toPos.x)}px)`
+          );
+        }
+
+        // Add spawn/completion edge (dashed) - will be vertical if X positions match
+        const edgeId = `spawn-${fromNodeKey}-${toNodeKey}`;
+        if (cy.getElementById(edgeId).length === 0) {
+          cy.add({
+            group: "edges",
+            data: {
+              id: edgeId,
+              source: fromNodeKey,
+              target: toNodeKey,
+              type: "spawn",
+              color: "#c084fc"
+            }
+          });
+        }
       }
 
       function flushPendingEdgesForLane(threadId) {
@@ -2280,7 +2673,20 @@
 
       function openModal(payload, label, type) {
         modalTitle.textContent = label + " - " + type;
-        modalJson.textContent = JSON.stringify(payload, null, 2);
+        const jsonString = JSON.stringify(payload, null, 2);
+
+        // Use Prism.js for syntax highlighting
+        if (typeof Prism !== "undefined") {
+          const highlighted = Prism.highlight(
+            jsonString,
+            Prism.languages.json,
+            "json"
+          );
+          modalJson.innerHTML = `<pre class="language-json"><code class="language-json">${highlighted}</code></pre>`;
+        } else {
+          modalJson.textContent = jsonString;
+        }
+
         modal.classList.add("open");
       }
 
@@ -2367,7 +2773,19 @@
           }
           case "agent.completed": {
             updateLaneMeta(threadId, { status: "completed" });
-            addNode(threadId, "done", "done ✓", ev);
+            const completionKey = addNode(threadId, "done", "done ✓", ev);
+
+            // Explicitly update last node tracking for this thread
+            if (completionKey) {
+              lastNodeInLane.set(threadId, completionKey);
+            }
+
+            // Store this thread's final X position for parent alignment
+            const finalX = threadCursors.get(threadId) || 0;
+            childFinalX.set(threadId, finalX);
+            console.log(
+              `[agent.completed] Thread ${short(threadId)} completed at X=${finalX}`
+            );
             break;
           }
           case "agent.error": {
@@ -2398,19 +2816,72 @@
           }
           case "subagent.completed": {
             const child = ev.data?.childThreadId;
+
+            if (!child) {
+              console.error(
+                `[subagent.completed] Missing childThreadId in event:`,
+                ev
+              );
+              break;
+            }
+
             updateLaneMeta(child, { status: "completed" });
 
-            // GAP LOGIC: Force parent cursor to jump to child's end position
-            const childFinalCursor = threadCursors.get(child) || 0;
+            // Read child's FINAL X position from stored map (set when agent.completed was processed)
+            // Fallback to threadCursor if not yet available
+            let childEndX = childFinalX.get(child);
+            const childCursor = threadCursors.get(child) || 0;
 
+            console.log(
+              `[subagent.completed] Child ${short(child)}: finalX=${childEndX}, cursor=${childCursor}`
+            );
+
+            if (childEndX === undefined) {
+              childEndX = childCursor;
+              console.warn(
+                `[subagent.completed] ⚠️  Child ${short(child)} final X not yet recorded, using cursor=${childEndX}`
+              );
+            } else {
+              console.log(
+                `[subagent.completed] ✓ Child ${short(child)} completed at X=${childEndX} (from stored value)`
+              );
+            }
+
+            const parentCursor = threadCursors.get(threadId) || 0;
+            const lastCompletion = lastCompletionX.get(threadId) || -1;
+
+            console.log(
+              `[subagent.completed] Parent ${short(threadId)} cursor=${parentCursor}, last completion=${lastCompletion}, will align with child at X=${childEndX}`
+            );
+
+            // Calculate where parent completion should go to avoid conflicts
+            let parentCompletionX = Math.max(
+              parentCursor + 1,
+              lastCompletion + 1
+            );
+
+            // Prefer to align with child's EXACT position if possible (creates vertical edge)
+            if (childEndX >= parentCompletionX) {
+              parentCompletionX = childEndX;
+            }
+
+            console.log(
+              `[subagent.completed] Parent completion will be at X=${parentCompletionX}`
+            );
+
+            // Track this completion position
+            lastCompletionX.set(threadId, parentCompletionX);
+
+            // Add parent completion node at EXACT same X index as child's last node
             const doneKey = addNode(
               threadId,
               "tool",
               `child ${short(child)} ✓`,
               ev,
-              childFinalCursor // minIdx
+              parentCompletionX
             );
 
+            // Connect from child's last node (will be resolved when edge is created)
             const childLast = lastNodeInLane.get(child);
             if (childLast && !primingThreads.has(child)) {
               connectLanes(childLast, doneKey);
@@ -2423,20 +2894,9 @@
           }
           default:
             if (t === "checkpoint.saved") {
-              const lane = laneFor(threadId);
-              const prevKey = lastNodePerLane.get(lane);
-              const prev = prevKey && nodeMap.get(prevKey);
-              if (prev) {
-                const dot = document.createElementNS(
-                  "http://www.w3.org/2000/svg",
-                  "circle"
-                );
-                dot.setAttribute("cx", prev.x + 10);
-                dot.setAttribute("cy", prev.y - 14);
-                dot.setAttribute("r", 3);
-                dot.setAttribute("fill", "#64748b");
-                graphGroup.appendChild(dot);
-              }
+              // Checkpoint indicator - we could add a badge to the last node
+              // For now, just log it
+              console.log("Checkpoint saved for thread:", threadId);
             }
         }
 
@@ -2463,6 +2923,29 @@
 
       // --- Notification system ---
       function showNotification(message, type = "info") {
+        // Use Notyf if available
+        if (notyf) {
+          try {
+            if (type === "success") {
+              notyf.success(message);
+            } else if (type === "error") {
+              notyf.error(message);
+            } else {
+              // Notyf doesn't have built-in "info", so use success with custom styling
+              notyf.open({
+                type: "info",
+                message: message,
+                background: "#60a5fa",
+                icon: false
+              });
+            }
+            return;
+          } catch (e) {
+            console.warn("Notyf notification failed, using fallback:", e);
+          }
+        }
+
+        // Fallback to custom notification
         const notification = document.createElement("div");
         notification.className = `notification ${type}`;
         notification.textContent = message;
@@ -2471,8 +2954,8 @@
 
         setTimeout(() => {
           notification.style.opacity = "0";
-          setTimeout(() => notification.remove(), 300);
-        }, 3000);
+          setTimeout(() => notification.remove(), NOTIFICATION_FADE_MS);
+        }, NOTIFICATION_DURATION_MS);
       }
 
       // --- Connection status ---
@@ -2490,6 +2973,11 @@
           showNotification("Please enter a thread ID", "error");
           return;
         }
+        // Basic validation: thread IDs should be non-empty strings
+        if (typeof id !== "string" || id.length === 0) {
+          showNotification("Invalid thread ID", "error");
+          return;
+        }
 
         try {
           const switching = id !== mainThreadId;
@@ -2498,6 +2986,12 @@
           if (switching) {
             resetGraphState();
             resetThreadView();
+            // Show loading state
+            const chat = $("chatTranscript");
+            if (chat) {
+              chat.innerHTML =
+                '<div class="chat-empty">Connecting to thread...</div>';
+            }
           }
           mainThreadId = id;
           renderThreadList(latestThreads, id);
@@ -2508,59 +3002,170 @@
         } catch (error) {
           console.error("Connection error:", error);
           showNotification("Failed to connect: " + error.message, "error");
+          const chat = $("chatTranscript");
+          if (chat) {
+            chat.innerHTML =
+              '<div class="chat-empty">Failed to connect. Please try again.</div>';
+          }
         }
       }
 
-      async function primeEvents(threadId) {
+      async function fetchEventsForThread(threadId) {
         if (!state.currentAgencyId) return [];
         try {
-          const r = await fetch(
-            `/agency/${state.currentAgencyId}/agent/${threadId}/events`
-          );
-          const j = await r.json();
-          const foundChildren = new Set();
-          primingThreads.add(threadId);
-          try {
-            (j.events || []).forEach((ev) => {
-              handleEvent(threadId, ev);
-              if (
-                ev?.type === "subagent.spawned" ||
-                ev?.type === "subagent.completed"
-              ) {
-                const cid = ev?.data?.childThreadId;
-                if (cid) foundChildren.add(cid);
-              }
-            });
-          } finally {
-            primingThreads.delete(threadId);
-            flushPendingEdgesForLane(threadId);
-          }
-          return [...foundChildren];
-        } catch (e) {
-          console.error("Failed to prime events:", e);
-          showNotification("Failed to load thread events", "error");
+          const j = http
+            ? await http
+                .get(
+                  `/agency/${state.currentAgencyId}/agent/${threadId}/events`
+                )
+                .json()
+            : await fetch(
+                `/agency/${state.currentAgencyId}/agent/${threadId}/events`
+              ).then((r) => r.json());
+          return j.events || [];
+        } catch (err) {
+          console.error(`Failed to fetch events for ${threadId}:`, err);
           return [];
         }
       }
 
       async function primeEventsDeep(rootId) {
-        const visited = new Set();
-        const q = [rootId];
-        while (q.length) {
-          const id = q.shift();
-          if (visited.has(id)) continue;
-          visited.add(id);
+        try {
+          // Step 1: Discover all threads by following spawn events
+          console.log(
+            `[primeEventsDeep] Discovering threads starting from ${short(rootId)}`
+          );
+          const visited = new Set();
+          const q = [rootId];
+          const allThreadIds = [];
 
-          // Prime this thread's past events first
-          const children = await primeEvents(id);
+          while (q.length) {
+            const id = q.shift();
+            if (visited.has(id)) continue;
+            visited.add(id);
+            allThreadIds.push(id);
 
-          // Ensure we get live updates going forward
-          connectThreadWS(id);
-
-          // Prime each child, and let their own histories reveal grandchildren, etc.
-          for (const c of children) {
-            if (!visited.has(c)) q.push(c);
+            // Fetch events to find children
+            const events = await fetchEventsForThread(id);
+            for (const ev of events) {
+              if (
+                ev?.type === "subagent.spawned" ||
+                ev?.type === "subagent.completed"
+              ) {
+                const cid = ev?.data?.childThreadId;
+                if (cid && !visited.has(cid)) {
+                  q.push(cid);
+                }
+              }
+            }
           }
+
+          console.log(
+            `[primeEventsDeep] Found ${allThreadIds.length} threads:`,
+            allThreadIds.map(short)
+          );
+
+          // Step 2: Fetch ALL events from ALL threads
+          const allEventsWithThread = [];
+          for (const threadId of allThreadIds) {
+            const events = await fetchEventsForThread(threadId);
+            events.forEach((ev) => {
+              allEventsWithThread.push({ threadId, ev });
+            });
+          }
+
+          console.log(
+            `[primeEventsDeep] Fetched ${allEventsWithThread.length} total events`
+          );
+
+          // Step 3: Sort ALL events by timestamp (chronological order)
+          allEventsWithThread.sort((a, b) => {
+            const timeA = new Date(a.ev.timestamp || 0).getTime();
+            const timeB = new Date(b.ev.timestamp || 0).getTime();
+            return timeA - timeB;
+          });
+
+          console.log(
+            `[primeEventsDeep] Processing in TWO passes: pre-compute then render`
+          );
+
+          // Step 4: PRE-PASS - Calculate all thread cursors and final positions (no graph changes)
+          // Iterate multiple times until positions stabilize (handles forward references)
+          console.log(`[primeEventsDeep] Pre-pass: Computing thread positions`);
+          const tempCursors = new Map();
+
+          // Single pass: calculate natural positions WITHOUT applying alignment logic
+          allEventsWithThread.forEach(({ threadId, ev }) => {
+            const t = ev?.type;
+
+            // Track cursor position for each thread
+            let cursor = tempCursors.get(threadId);
+            if (cursor === undefined) cursor = -1;
+
+            // Events that advance the cursor (simple sequential, no alignment jumps)
+            if (
+              t === "run.tick" ||
+              t === "model.started" ||
+              t === "tool.output" ||
+              t === "tool.error" ||
+              t === "run.paused" ||
+              t === "run.resumed" ||
+              t === "agent.error" ||
+              t === "subagent.completed" // Just advance by 1 in pre-pass, no alignment
+            ) {
+              cursor++;
+              tempCursors.set(threadId, cursor);
+            } else if (t === "agent.completed") {
+              cursor++;
+              tempCursors.set(threadId, cursor);
+              // Store this thread's final position (RELATIVE to its start)
+              childFinalX.set(threadId, cursor);
+              console.log(
+                `[pre-pass] Thread ${short(threadId)} will complete at X=${cursor}`
+              );
+            } else if (t === "subagent.spawned") {
+              cursor++;
+              tempCursors.set(threadId, cursor);
+              // Initialize child cursor one position BEFORE spawn so first node lands ON spawn X
+              const childId = ev.data?.childThreadId;
+              if (childId && tempCursors.get(childId) === undefined) {
+                tempCursors.set(childId, cursor - 1);
+                console.log(
+                  `[pre-pass] Child ${short(childId)} spawned, cursor=${cursor - 1}, first node will be at X=${cursor}`
+                );
+              }
+            }
+          });
+
+          console.log(
+            `[primeEventsDeep] Pre-pass complete. Found ${childFinalX.size} thread completions`
+          );
+
+          // Step 5: Mark all threads as priming
+          allThreadIds.forEach((id) => primingThreads.add(id));
+
+          // Step 6: MAIN PASS - Process all events in chronological order (with pre-computed data)
+          console.log(
+            `[primeEventsDeep] Main pass: Processing ${allEventsWithThread.length} events in order`
+          );
+          allEventsWithThread.forEach(({ threadId, ev }) => {
+            handleEvent(threadId, ev);
+          });
+
+          // Step 7: Flush pending edges and cleanup
+          allThreadIds.forEach((id) => {
+            primingThreads.delete(id);
+            flushPendingEdgesForLane(id);
+            connectThreadWS(id); // Connect websockets for live updates
+          });
+
+          // Run final layout once after all threads are primed
+          runGraphLayout(true);
+
+          console.log(`[primeEventsDeep] Priming complete`);
+        } catch (err) {
+          console.error("Failed to prime events:", err);
+          showNotification("Failed to load thread events", "error");
         }
       }
 
@@ -2571,23 +3176,46 @@
         if (lanes.has(threadId) && lanes.get(threadId).ws) return; // already connected
         laneFor(threadId);
         const proto = location.protocol === "https:" ? "wss" : "ws";
-        const socket = new WebSocket(
-          `${proto}://${location.host}/agency/${state.currentAgencyId}/agent/${threadId}/ws`
-        );
+        const url = `${proto}://${location.host}/agency/${state.currentAgencyId}/agent/${threadId}/ws`;
+
+        // Use ReconnectingWebSocket for automatic reconnection
+        const socket = new ReconnectingWebSocket(url, [], {
+          maxRetries: 10,
+          maxReconnectionDelay: 10000,
+          minReconnectionDelay: 1000,
+          reconnectionDelayGrowFactor: 1.3,
+          connectionTimeout: 4000,
+          debug: false
+        });
+
         lanes.get(threadId).ws = socket;
         if (threadId === mainThreadId) ws = socket;
 
-        socket.onopen = () => {
+        socket.addEventListener("open", () => {
           console.log(`[ws] ${threadId} connected`);
           updateLaneMeta(threadId, { status: "listening" });
-          if (threadId === mainThreadId) updateConnectionStatus(true);
-        };
-        socket.onclose = () => {
+          if (threadId === mainThreadId) {
+            updateConnectionStatus(true);
+            showNotification("WebSocket connected", "success");
+          }
+        });
+
+        socket.addEventListener("close", () => {
           console.log(`[ws] ${threadId} closed`);
           updateLaneMeta(threadId, { status: "offline" });
-          if (threadId === mainThreadId) updateConnectionStatus(false);
-        };
-        socket.onmessage = (m) => {
+          if (threadId === mainThreadId) {
+            updateConnectionStatus(false);
+          }
+        });
+
+        socket.addEventListener("error", (error) => {
+          console.error(`[ws] ${threadId} error:`, error);
+          if (threadId === mainThreadId) {
+            showNotification("WebSocket connection error", "error");
+          }
+        });
+
+        socket.addEventListener("message", (m) => {
           try {
             const ev = JSON.parse(m.data);
             const tid = ev.threadId || threadId;
@@ -2595,30 +3223,54 @@
           } catch (err) {
             console.error("WS message error:", err, m.data);
           }
-        };
+        });
       }
 
       async function send() {
-        if (!state.currentAgencyId) return;
+        if (!state.currentAgencyId) {
+          showNotification("Please select an agency first", "error");
+          return;
+        }
         const id = $("threadId").value.trim();
-        const content = $("msg").value;
-        if (!id || !content) {
+        const content = $("msg").value.trim();
+        if (!id) {
+          showNotification("Please enter a thread ID", "error");
+          return;
+        }
+        if (!content) {
           showNotification("Please enter a message", "error");
           return;
         }
 
+        const btnSend = $("btnSend");
+        const originalText = btnSend.textContent;
         try {
-          await fetch(`/agency/${state.currentAgencyId}/agent/${id}/invoke`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ messages: [{ role: "user", content }] })
-          });
+          btnSend.textContent = "Sending...";
+          btnSend.disabled = true;
+
+          if (http) {
+            await http.post(
+              `/agency/${state.currentAgencyId}/agent/${id}/invoke`,
+              {
+                json: { messages: [{ role: "user", content }] }
+              }
+            );
+          } else {
+            await fetch(`/agency/${state.currentAgencyId}/agent/${id}/invoke`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ messages: [{ role: "user", content }] })
+            });
+          }
           $("msg").value = "";
           showNotification("Message sent", "success");
           await refreshState(true);
         } catch (error) {
           console.error("Failed to send message:", error);
           showNotification("Failed to send message: " + error.message, "error");
+        } finally {
+          btnSend.textContent = originalText;
+          btnSend.disabled = false;
         }
       }
 
@@ -2631,11 +3283,23 @@
         }
 
         try {
-          await fetch(`/agency/${state.currentAgencyId}/agent/${id}/approve`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ approved, modifiedToolCalls: [] })
-          });
+          if (http) {
+            await http.post(
+              `/agency/${state.currentAgencyId}/agent/${id}/approve`,
+              {
+                json: { approved, modifiedToolCalls: [] }
+              }
+            );
+          } else {
+            await fetch(
+              `/agency/${state.currentAgencyId}/agent/${id}/approve`,
+              {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ approved, modifiedToolCalls: [] })
+              }
+            );
+          }
           showNotification(
             (approved ? "Approved" : "Rejected") + " HITL request",
             "success"
@@ -2658,10 +3322,25 @@
           return;
         }
 
+        // Confirmation dialog
+        if (
+          !confirm(
+            "Are you sure you want to cancel the current run? This action cannot be undone."
+          )
+        ) {
+          return;
+        }
+
         try {
-          await fetch(`/agency/${state.currentAgencyId}/agent/${id}/cancel`, {
-            method: "POST"
-          });
+          if (http) {
+            await http.post(
+              `/agency/${state.currentAgencyId}/agent/${id}/cancel`
+            );
+          } else {
+            await fetch(`/agency/${state.currentAgencyId}/agent/${id}/cancel`, {
+              method: "POST"
+            });
+          }
           showNotification("Run cancelled", "success");
           await refreshState(true);
         } catch (error) {
@@ -2686,10 +3365,13 @@
 
         stateRefreshInFlight = true;
         try {
-          const r = await fetch(
-            `/agency/${state.currentAgencyId}/agent/${id}/state`
-          );
-          const j = await r.json();
+          const j = http
+            ? await http
+                .get(`/agency/${state.currentAgencyId}/agent/${id}/state`)
+                .json()
+            : await fetch(
+                `/agency/${state.currentAgencyId}/agent/${id}/state`
+              ).then((r) => r.json());
           S.textContent = JSON.stringify(j, null, 2);
           const threadState = j.state ?? {};
           renderChat(threadState.messages ?? []);
@@ -2697,6 +3379,14 @@
           renderFiles(threadState);
           updateRunSummary(j.run, threadState);
           renderSubagents(threadState.subagents ?? []);
+
+          // Show/hide HITL buttons based on pending tool calls
+          const hitlButtons = $("hitlButtons");
+          const hasPendingToolCalls =
+            (threadState.pendingToolCalls?.length ?? 0) > 0;
+          if (hitlButtons) {
+            hitlButtons.style.display = hasPendingToolCalls ? "flex" : "none";
+          }
         } catch (err) {
           console.error("Failed to refresh state:", err);
           showNotification("Failed to refresh state: " + err.message, "error");
@@ -2712,26 +3402,65 @@
       };
       document.addEventListener("keydown", (e) => {
         if (e.key === "Escape") closeModal();
+
         // Ctrl/Cmd + Enter to send message
         if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
           e.preventDefault();
           send();
         }
+
         // Ctrl/Cmd + N for new thread
         if ((e.ctrlKey || e.metaKey) && e.key === "n") {
           e.preventDefault();
-          // newThread();
+          if (!state.currentAgencyId) {
+            showNotification("Select an agency first", "error");
+            return;
+          }
+          newThreadModal.classList.add("open");
+          if (availableAgents.length === 0) loadAgentDefinitions();
+        }
+
+        // Graph navigation shortcuts (when graph view is active)
+        const graphView = document.getElementById("viewGraph");
+        if (graphView && graphView.classList.contains("active") && cy) {
+          // Ctrl/Cmd + F to fit graph
+          if ((e.ctrlKey || e.metaKey) && e.key === "f") {
+            e.preventDefault();
+            cy.fit(null, 50);
+            updateZoomDisplay();
+          }
+
+          // Ctrl/Cmd + 0 to reset zoom
+          if ((e.ctrlKey || e.metaKey) && e.key === "0") {
+            e.preventDefault();
+            cy.zoom(1);
+            cy.center();
+            updateZoomDisplay();
+          }
+
+          // Ctrl/Cmd + Plus to zoom in
+          if ((e.ctrlKey || e.metaKey) && (e.key === "+" || e.key === "=")) {
+            e.preventDefault();
+            cy.zoom(cy.zoom() * 1.2);
+            cy.center();
+            updateZoomDisplay();
+          }
+
+          // Ctrl/Cmd + Minus to zoom out
+          if ((e.ctrlKey || e.metaKey) && e.key === "-") {
+            e.preventDefault();
+            cy.zoom(cy.zoom() / 1.2);
+            cy.center();
+            updateZoomDisplay();
+          }
         }
       });
 
       // Button handlers
-      // $("btnNew").onclick = () => newThread();
-      if (btnRefreshThreads) btnRefreshThreads.onclick = () => loadThreads();
       $("btnSend").onclick = send;
       $("btnApprove").onclick = () => hitl(true);
       $("btnReject").onclick = () => hitl(false);
       $("btnCancel").onclick = cancelRun;
-      $("btnState").onclick = refreshState;
       if (threadInput) {
         threadInput.addEventListener("keydown", (event) => {
           if (event.key === "Enter") {
@@ -2742,13 +3471,23 @@
         });
       }
 
-      // Initial load
+      // Initial load - wait for agency selection
       resetThreadView();
-      loadThreads();
 
       // Thread & chat helpers
       function formatRelativeTime(iso) {
         if (!iso) return "";
+
+        // Use Day.js if available
+        if (typeof dayjs !== "undefined") {
+          try {
+            return dayjs(iso).fromNow();
+          } catch (e) {
+            console.warn("Day.js formatting failed:", e);
+          }
+        }
+
+        // Fallback to manual implementation
         const ts = Date.parse(iso);
         if (Number.isNaN(ts)) return iso;
         const diff = Date.now() - ts;
@@ -2763,7 +3502,10 @@
       }
 
       async function selectThread(id, { connectThread = true } = {}) {
-        if (!id) return;
+        if (!id || typeof id !== "string") {
+          showNotification("Invalid thread ID", "error");
+          return;
+        }
         selectedThreadId = id;
         if (threadInput) threadInput.value = id;
         renderThreadList(latestThreads, id);
@@ -2832,8 +3574,10 @@
         if (!messages.length) {
           const empty = document.createElement("div");
           empty.className = "chat-empty";
-          empty.textContent =
-            "No messages yet. Send a user prompt to get started.";
+          empty.id = "chatEmptyState";
+          empty.textContent = selectedThreadId
+            ? "No messages yet. Type a message below to start the conversation."
+            : "Select a thread to load the conversation.";
           chatTranscript.appendChild(empty);
           return;
         }
@@ -2909,7 +3653,18 @@
                 : JSON.stringify(msg.content ?? "", null, 2);
             content.appendChild(buildToolCall(title, body));
           } else {
-            content.textContent = msg.content ?? "";
+            // Use markdown rendering if available
+            const msgContent = msg.content ?? "";
+            if (md && msgContent) {
+              try {
+                content.innerHTML = md.render(msgContent);
+              } catch (e) {
+                console.warn("Markdown rendering failed, using plain text:", e);
+                content.textContent = msgContent;
+              }
+            } else {
+              content.textContent = msgContent;
+            }
           }
 
           bubble.appendChild(content);
@@ -2976,8 +3731,10 @@
 
         threadsListEl.innerHTML = "";
         if (!nodeMap.size) {
-          threadsListEl.innerHTML =
-            '<div class="threads-empty">No threads yet. Create one to get started.</div>';
+          const emptyMsg = state.currentAgencyId
+            ? "No threads yet. Click 'New' to create a thread."
+            : "Select an agency to view threads.";
+          threadsListEl.innerHTML = `<div class="threads-empty">${emptyMsg}</div>`;
           return;
         }
 
@@ -3000,6 +3757,13 @@
             (hasChildren ? " has-children" : "");
           btn.dataset.depth = String(depth);
           btn.style.setProperty("--depth", String(depth));
+          btn.setAttribute(
+            "aria-label",
+            `Thread ${short8(meta.id)}${isActive ? ", currently selected" : ""}`
+          );
+          if (hasChildren) {
+            btn.setAttribute("aria-expanded", String(expanded));
+          }
 
           const titleWrap = document.createElement("div");
           titleWrap.className = "thread-title";
@@ -3009,6 +3773,12 @@
           caret.className = "thread-caret";
           caret.textContent = hasChildren ? (expanded ? "▾" : "▸") : " ";
           if (hasChildren) {
+            caret.setAttribute("role", "button");
+            caret.setAttribute(
+              "aria-label",
+              expanded ? "Collapse thread" : "Expand thread"
+            );
+            caret.setAttribute("tabindex", "0");
             caret.title = expanded ? "Collapse" : "Expand";
             caret.onclick = (e) => {
               e.stopPropagation();
@@ -3016,6 +3786,15 @@
               else expandedThreads.add(meta.id);
               renderThreadList(latestThreads, activeId ?? selectedThreadId);
             };
+            caret.addEventListener("keydown", (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                if (expanded) expandedThreads.delete(meta.id);
+                else expandedThreads.add(meta.id);
+                renderThreadList(latestThreads, activeId ?? selectedThreadId);
+              }
+            });
           }
           titleWrap.appendChild(caret);
 
@@ -3163,12 +3942,73 @@
       function selectFile(path, content) {
         _selectedFile = path;
         const code = document.getElementById("filePreview");
-        code.innerHTML = renderWithLineNumbers(content || "");
+        const ext = path.split(".").pop()?.toLowerCase();
+
+        // Render markdown files with markdown-it
+        if (ext === "md" && md && content) {
+          try {
+            code.innerHTML = md.render(content);
+            code.style.padding = "20px";
+            code.style.lineHeight = "1.6";
+          } catch (e) {
+            console.warn(
+              "Markdown rendering failed, using syntax highlighting:",
+              e
+            );
+            code.innerHTML = renderWithLineNumbers(content, path);
+            code.style.padding = "";
+            code.style.lineHeight = "";
+          }
+        } else {
+          code.innerHTML = renderWithLineNumbers(content || "", path);
+          code.style.padding = "";
+          code.style.lineHeight = "";
+        }
       }
 
       // helpers
-      function renderWithLineNumbers(text) {
+      function renderWithLineNumbers(text, filename = "") {
         const lines = (text ?? "").split(/\r?\n/);
+
+        // Detect language from file extension for Prism.js
+        const ext = filename.split(".").pop()?.toLowerCase();
+        const langMap = {
+          js: "javascript",
+          ts: "typescript",
+          json: "json",
+          py: "python",
+          md: "markdown",
+          html: "html",
+          css: "css",
+          tsx: "typescript",
+          jsx: "javascript"
+        };
+        const lang = langMap[ext] || "javascript";
+
+        // Try to use Prism for syntax highlighting
+        if (typeof Prism !== "undefined" && Prism.languages[lang]) {
+          try {
+            const highlighted = Prism.highlight(
+              text,
+              Prism.languages[lang],
+              lang
+            );
+            const highlightedLines = highlighted.split(/\r?\n/);
+            return highlightedLines
+              .map((line, i) => {
+                const ln = String(i + 1).padStart(4, " ");
+                return `<span class="ln">${ln}</span>${line}\n`;
+              })
+              .join("");
+          } catch (e) {
+            console.warn(
+              "Prism highlighting failed, falling back to plain text:",
+              e
+            );
+          }
+        }
+
+        // Fallback to escaped HTML
         return lines
           .map((line, i) => {
             const ln = String(i + 1).padStart(4, " ");
@@ -3191,6 +4031,22 @@
 
       function formatTinyTime(iso) {
         if (!iso) return "";
+
+        // Use Day.js if available
+        if (typeof dayjs !== "undefined") {
+          try {
+            const date = dayjs(iso);
+            const diffHours = Math.abs(date.diff(dayjs(), "hour"));
+
+            if (diffHours < 1) return date.fromNow();
+            if (diffHours < 24) return date.fromNow();
+            return date.format("MMM D");
+          } catch (e) {
+            console.warn("Day.js formatting failed:", e);
+          }
+        }
+
+        // Fallback to manual implementation
         const ts = Date.parse(iso);
         if (Number.isNaN(ts)) return "";
         const diff = Date.now() - ts;
