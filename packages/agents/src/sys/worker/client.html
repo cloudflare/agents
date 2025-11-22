@@ -1351,7 +1351,6 @@
       </div>
     </div>
 
-    <!-- Event Details Modal -->
     <div id="modal" class="modal">
       <div class="modal-content">
         <div class="modal-header">
@@ -1361,7 +1360,6 @@
         <div class="modal-json" id="modalJson"></div>
       </div>
     </div>
-    <!-- New Thread Modal -->
     <div id="newThreadModal" class="modal">
       <div class="modal-content" style="width: 400px">
         <div class="modal-header">
@@ -1445,6 +1443,7 @@
       let availableAgents = [];
 
       // Agency State
+      state = {};
       state.agencies = [];
       state.currentAgencyId = null;
 
@@ -1567,8 +1566,6 @@
         }
       }
 
-      // ...
-
       async function loadThreads(selectId = null) {
         if (!state.currentAgencyId) return;
         try {
@@ -1646,10 +1643,12 @@
       const childSpawnMap = new Map(); // childId -> spawnNodeKey (in parent)
       const firstNodeInLane = new Map(); // threadId -> first nodeKey
       const lastNodeInLane = new Map(); // threadId -> last nodeKey
-      const margin = { left: 220, top: 40, xStep: 140, yStep: 110 };
-      const arrowId = "arrowHead";
       const pendingEdges = new Map();
       const primingThreads = new Set();
+      const threadCursors = new Map(); // Track X-index cursor per thread
+
+      const margin = { left: 220, top: 50, xStep: 140, yStep: 120 };
+      const arrowId = "arrowHead";
 
       // Pan/drag state
       let panState = {
@@ -1725,6 +1724,7 @@
         lastNodeInLane.clear();
         pendingEdges.clear();
         primingThreads.clear();
+        threadCursors.clear();
       }
 
       function scheduleStateRefresh(priority = false) {
@@ -1964,7 +1964,7 @@
         );
         guide.setAttribute("stroke", "rgba(249, 115, 22, 0.35)");
         guide.setAttribute("stroke-width", "1.5");
-        guide.setAttribute("stroke-dasharray", "6 6");
+        guide.setAttribute("stroke-dasharray", "4 2");
         guide.setAttribute("vector-effect", "non-scaling-stroke");
         graphGroup.insertBefore(guide, labelGroup);
 
@@ -2060,27 +2060,30 @@
 
         const titleBox = titleEl.getBBox();
         const metaBox = metaEl.getBBox();
-        const contentWidth = Math.max(
-          titleBox.x + titleBox.width,
-          metaBox.x + metaBox.width
-        );
-        const contentHeight = Math.max(
-          titleBox.y + titleBox.height,
-          metaBox.y + metaBox.height
-        );
+        const contentWidth = Math.max(titleBox.width, metaBox.width);
 
-        const width = Math.max(180, contentWidth + 20);
-        const height = Math.max(52, contentHeight + 14);
-        const labelX = Math.max(8, margin.left - width - 44);
-        const topY = y - height - 14;
+        const width = Math.max(160, contentWidth + 24);
+        const height = 50;
+
+        // Find anchor X (start of first node in lane)
+        let anchorX = margin.left;
+        const firstKey = firstNodeInLane.get(threadId);
+        if (firstKey && nodeMap.has(firstKey)) {
+          anchorX = nodeMap.get(firstKey).x;
+        }
+
+        // Position card to the left of the anchor
+        const labelX = anchorX - width - 24;
+        const topY = y - height / 2;
 
         group.setAttribute("transform", `translate(${labelX}, ${topY})`);
         rectEl.setAttribute("width", String(width));
         rectEl.setAttribute("height", String(height));
 
-        guideEl.setAttribute("x1", String(labelX + width + 18));
+        // Connect label to node
+        guideEl.setAttribute("x1", String(labelX + width));
         guideEl.setAttribute("y1", y);
-        guideEl.setAttribute("x2", String(margin.left - 20));
+        guideEl.setAttribute("x2", String(anchorX - 20)); // connect to circle edge roughly
         guideEl.setAttribute("y2", y);
       }
 
@@ -2103,12 +2106,19 @@
         return m;
       }
 
-      function addNode(threadId, type, label, payload) {
+      function addNode(threadId, type, label, payload, minIdx = -1) {
         const lane = laneFor(threadId);
         const laneObj = lanes.get(threadId);
-        const idx = laneObj.nodes.length;
 
-        const x = margin.left + idx * margin.xStep;
+        let currentCursor = threadCursors.get(threadId);
+        if (currentCursor === undefined) currentCursor = -1;
+
+        // Gap logic: Jump ahead if minIdx is provided
+        const startBasis = Math.max(currentCursor, minIdx - 1);
+        const nextIdx = startBasis + 1;
+        threadCursors.set(threadId, nextIdx);
+
+        const x = margin.left + nextIdx * margin.xStep;
         const y = margin.top + lane * margin.yStep;
 
         // shape/color by type
@@ -2121,7 +2131,7 @@
           error: "var(--err)"
         };
         const fill = colorMap[type] || "#94a3b8";
-        const radius = type === "tick" ? 10 : 18;
+        const radius = type === "tick" ? 10 : 20;
 
         const group = document.createElementNS(
           "http://www.w3.org/2000/svg",
@@ -2135,6 +2145,21 @@
           drawEdge(prev.x, prev.y, x, y, false);
         }
 
+        if (type !== "tick") {
+          const glow = document.createElementNS(
+            "http://www.w3.org/2000/svg",
+            "circle"
+          );
+          glow.setAttribute("cx", x);
+          glow.setAttribute("cy", y);
+          glow.setAttribute("r", radius + 4);
+          glow.setAttribute("fill", "none");
+          glow.setAttribute("stroke", fill);
+          glow.setAttribute("stroke-width", "2");
+          glow.setAttribute("opacity", "0.3");
+          group.appendChild(glow);
+        }
+
         // circle
         const c = document.createElementNS(
           "http://www.w3.org/2000/svg",
@@ -2143,10 +2168,9 @@
         c.setAttribute("cx", x);
         c.setAttribute("cy", y);
         c.setAttribute("r", radius);
-        c.setAttribute("fill", fill);
-        c.setAttribute("stroke", "#1e293b");
-        c.setAttribute("stroke-width", "1");
-        c.setAttribute("opacity", "0");
+        c.setAttribute("fill", "#0b101c");
+        c.setAttribute("stroke", fill);
+        c.setAttribute("stroke-width", "3");
         c.setAttribute("class", "node-circle");
         c.setAttribute("vector-effect", "non-scaling-stroke");
 
@@ -2160,10 +2184,11 @@
           "text"
         );
         t.setAttribute("x", x);
-        t.setAttribute("y", y + (type === "tick" ? -18 : 36));
+        t.setAttribute("y", y + radius + 16);
         t.setAttribute("text-anchor", "middle");
         t.setAttribute("font-size", "11");
         t.setAttribute("fill", "var(--muted)");
+        t.setAttribute("font-family", "monospace");
         t.textContent = label;
 
         // tooltip
@@ -2178,76 +2203,62 @@
         group.appendChild(t);
         graphGroup.appendChild(group);
 
-        const nodeKey = `${threadId}-${payload.seq ?? Date.now()}-${idx}`;
+        const nodeKey = `${threadId}-${payload.seq ?? Date.now()}-${nextIdx}`;
         nodeMap.set(nodeKey, { x, y, type, elCircle: c, elText: t, threadId });
         lastNodePerLane.set(lane, nodeKey);
         laneObj.nodes.push(nodeKey);
-        if (!firstNodeInLane.has(threadId))
+        if (!firstNodeInLane.has(threadId)) {
           firstNodeInLane.set(threadId, nodeKey);
+          // If this is the first node, update the label position to anchor to this node
+          layoutLaneLabel(threadId);
+        }
         lastNodeInLane.set(threadId, nodeKey);
 
-        // Animate in
         setTimeout(() => {
-          c.style.transition = "opacity 0.3s ease-in-out";
-          group.style.transition = "opacity 0.3s ease-in-out";
-          c.style.opacity = "0.95";
+          c.style.transition = "all 0.3s ease";
           group.style.opacity = "1";
         }, 50);
-
-        // Add pulse animation for important nodes
-        if (["error", "paused"].includes(type)) {
-          const animate = document.createElementNS(
-            "http://www.w3.org/2000/svg",
-            "animate"
-          );
-          animate.setAttribute("attributeName", "r");
-          animate.setAttribute("values", `${radius};${radius + 3};${radius}`);
-          animate.setAttribute("dur", "2s");
-          animate.setAttribute("repeatCount", "indefinite");
-          c.appendChild(animate);
-        }
 
         resizeSVG();
         return nodeKey;
       }
 
       function drawEdge(x1, y1, x2, y2, dashed) {
-        if (dashed) {
-          const path = document.createElementNS(
-            "http://www.w3.org/2000/svg",
-            "path"
-          );
+        const path = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "path"
+        );
+
+        let d = "";
+        if (y1 === y2) {
+          // Straight horizontal
+          d = `M ${x1 + 20} ${y1} L ${x2 - 20} ${y2}`;
+        } else {
+          // Branching / Merging "Sigmoid" curve
           const midX = (x1 + x2) / 2;
-          const curve = Math.max(40, Math.abs(y1 - y2) * 0.6);
-          const c1y = y1 < y2 ? y1 + curve : y1 - curve;
-          const c2y = y2 > y1 ? y2 - curve : y2 + curve;
-          path.setAttribute(
-            "d",
-            `M ${x1} ${y1} C ${midX} ${c1y}, ${midX} ${c2y}, ${x2} ${y2}`
-          );
-          path.setAttribute("fill", "none");
-          path.setAttribute("stroke", "rgba(249, 115, 22, 0.7)");
-          path.setAttribute("stroke-width", "3");
-          path.setAttribute("stroke-linecap", "round");
-          path.setAttribute("stroke-dasharray", "10 6");
-          path.setAttribute("vector-effect", "non-scaling-stroke");
-          graphGroup.insertBefore(path, graphGroup.firstChild || null);
-          return;
+          d = `M ${x1} ${y1} C ${x1 + 60} ${y1}, ${x2 - 60} ${y2}, ${x2} ${y2}`;
         }
 
-        const line = document.createElementNS(
-          "http://www.w3.org/2000/svg",
-          "line"
+        path.setAttribute("d", d);
+        path.setAttribute("fill", "none");
+        path.setAttribute(
+          "stroke",
+          dashed ? "var(--tool)" : "rgba(148, 163, 184, 0.4)"
         );
-        line.setAttribute("x1", x1);
-        line.setAttribute("y1", y1);
-        line.setAttribute("x2", x2);
-        line.setAttribute("y2", y2);
-        line.setAttribute("stroke", "rgba(148, 163, 184, 0.6)");
-        line.setAttribute("stroke-width", "1.5");
-        line.setAttribute("vector-effect", "non-scaling-stroke");
-        line.setAttribute("marker-end", `url(#${arrowId})`);
-        graphGroup.insertBefore(line, graphGroup.firstChild || null);
+        path.setAttribute("stroke-width", dashed ? "2" : "4");
+
+        if (dashed) {
+          path.setAttribute("stroke-dasharray", "6 4");
+          path.setAttribute("opacity", "0.6");
+        } else {
+          // Main flow lines
+          path.setAttribute("stroke", "rgba(56, 189, 248, 0.25)"); // Blue-ish glow
+        }
+        path.setAttribute("stroke-linecap", "round");
+        path.setAttribute("vector-effect", "non-scaling-stroke");
+
+        // Insert before nodes so lines are behind circles
+        graphGroup.insertBefore(path, graphGroup.firstChild || null);
       }
 
       function connectLanes(fromNodeKey, toNodeKey) {
@@ -2365,27 +2376,41 @@
             break;
           }
           case "subagent.spawned": {
-            const child = ev.data?.childThreadId;
-            updateLaneMeta(child, { status: "spawning", isSubagent: true });
+            const childId = ev.data?.childThreadId;
             const spawnKey = addNode(
               threadId,
               "tool",
-              `spawn ${short(child)}`,
+              `spawn ${short(childId)}`,
               ev
             );
-            childSpawnMap.set(child, spawnKey);
-            if (child) connectThreadWS(child);
+
+            // GAP LOGIC: Align child start with parent current cursor
+            const parentCursor = threadCursors.get(threadId);
+            if (childId) {
+              // Child starts at (parentCursor - 1) so its first node is at parentCursor
+              threadCursors.set(childId, (parentCursor || 0) - 1);
+              connectThreadWS(childId);
+            }
+
+            updateLaneMeta(childId, { status: "spawning", isSubagent: true });
+            childSpawnMap.set(childId, spawnKey);
             break;
           }
           case "subagent.completed": {
             const child = ev.data?.childThreadId;
             updateLaneMeta(child, { status: "completed" });
+
+            // GAP LOGIC: Force parent cursor to jump to child's end position
+            const childFinalCursor = threadCursors.get(child) || 0;
+
             const doneKey = addNode(
               threadId,
               "tool",
               `child ${short(child)} ✓`,
-              ev
+              ev,
+              childFinalCursor // minIdx
             );
+
             const childLast = lastNodeInLane.get(child);
             if (childLast && !primingThreads.has(child)) {
               connectLanes(childLast, doneKey);
@@ -2458,24 +2483,6 @@
           ? "Connected"
           : "Disconnected";
       }
-
-      // async function newThread() {
-      //   try {
-      //     const res = await fetch("/threads", { method: "POST" });
-      //     const json = await res.json();
-      //     const id = json.id;
-      //     if (!id) throw new Error("Thread creation missing id");
-      //     showNotification("New thread created", "success");
-      //     await loadThreads(id);
-      //     await selectThread(id);
-      //   } catch (error) {
-      //     console.error("Failed to create new thread:", error);
-      //     showNotification(
-      //       "Failed to create new thread: " + error.message,
-      //       "error"
-      //     );
-      //   }
-      // }
 
       async function connect(idOverride) {
         const id = (idOverride ?? $("threadId").value ?? "").trim();
