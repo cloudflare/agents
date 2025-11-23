@@ -1,0 +1,20 @@
+{
+  "author": "",
+  "description": "A resumable real-time AI streaming chat with automatic reconnection and history replay using Durable Objects",
+  "keywords": [
+    "agents",
+    "streaming",
+    "websockets",
+    "durable-objects",
+    "ai",
+    "chat"
+  ],
+  "license": "ISC",
+  "name": "@cloudflare/agents-resumable-stream-chat",
+  "private": true,
+  "scripts": {
+    "start": "vite dev"
+  },
+  "type": "module",
+  "version": "0.0.0"
+}
