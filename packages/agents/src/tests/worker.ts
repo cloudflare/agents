@@ -142,25 +142,25 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
     this.server.registerTool(
       "installTempTool",
       {
-        description: "Register a temporary tool that echoes input",
-        inputSchema: { what: z.string().describe("Text to echo") }
+        description: "Register a temp tool",
+        inputSchema: {}
       },
-      async ({ what }) => {
-        return { content: [{ type: "text", text: `echo:${what}` }] };
+      async () => {
+        if (!this.tempToolHandle) {
+          this.tempToolHandle = this.server.registerTool(
+            "temp-echo",
+            {
+              description: "Echo text (temporary tool)",
+              inputSchema: { what: z.string().describe("Text to echo") }
+            },
+            async ({ what }) => {
+              return { content: [{ type: "text", text: `echo:${what}` }] };
+            }
+          );
+        }
+        return { content: [{ type: "text", text: "temp tool installed" }] };
       }
     );
-    if (!this.tempToolHandle) {
-      this.tempToolHandle = this.server.registerTool(
-        "temp-echo",
-        {
-          description: "Echo text (temporary tool)",
-          inputSchema: { what: z.string().describe("Text to echo") }
-        },
-        async ({ what }) => {
-          return { content: [{ type: "text", text: `echo:${what}` }] };
-        }
-      );
-    }
 
     // Remove the dynamically added tool.
     this.server.registerTool(
