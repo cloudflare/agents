@@ -315,7 +315,7 @@ export class MCPClientManager {
       );
     }
 
-    // Initialize connection first
+    // Initialize connection first. this will try connect
     await this.mcpConnections[id].init();
 
     // Handle OAuth completion if we have a reconnect code
@@ -324,7 +324,9 @@ export class MCPClientManager {
         await this.mcpConnections[id].completeAuthorization(
           options.reconnect.oauthCode
         );
-        await this.mcpConnections[id].establishConnection();
+
+        // Reinitialize connection
+        await this.mcpConnections[id].init();
       } catch (error) {
         this._onObservabilityEvent.fire({
           type: "mcp:client:connect",
@@ -356,6 +358,16 @@ export class MCPClientManager {
         clientId: options.transport?.authProvider?.clientId,
         id
       };
+    }
+
+    // If connection is connected, then try discovery
+    if (
+      this.mcpConnections[id].connectionState === MCPConnectionState.CONNECTED
+    ) {
+      this.mcpConnections[id].connectionState = MCPConnectionState.DISCOVERING;
+      this._onServerStateChanged.fire();
+      await this.mcpConnections[id].discoverAndRegister();
+      this._onServerStateChanged.fire();
     }
 
     return {
@@ -629,7 +641,7 @@ export class MCPClientManager {
 
   /**
    * Establish connection in the background after OAuth completion
-   * This method is called asynchronously and doesn't block the OAuth callback response
+   * This method should be called asynchronously and to not block the OAuth callback response
    * @param serverId The server ID to establish connection for
    */
   async establishConnection(serverId: string): Promise<void> {
@@ -645,23 +657,14 @@ export class MCPClientManager {
       return;
     }
 
-    try {
-      await conn.establishConnection();
+    await conn.init();
+    this._onServerStateChanged.fire();
+
+    if (conn.connectionState == MCPConnectionState.CONNECTING) {
+      conn.connectionState = MCPConnectionState.DISCOVERING;
       this._onServerStateChanged.fire();
-    } catch (error) {
-      const url = conn.url.toString();
-      this._onObservabilityEvent.fire({
-        type: "mcp:client:connect",
-        displayMessage: `Failed to establish connection to server ${serverId} with url ${url}`,
-        payload: {
-          url,
-          transport: conn.options.transport.type ?? "auto",
-          state: conn.connectionState,
-          error: toErrorMessage(error)
-        },
-        timestamp: Date.now(),
-        id: nanoid()
-      });
+
+      await conn.discoverAndRegister();
       this._onServerStateChanged.fire();
     }
   }

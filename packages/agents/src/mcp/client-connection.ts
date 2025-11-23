@@ -52,6 +52,8 @@ export const MCPConnectionState = {
   AUTHENTICATING: "authenticating",
   /** Establishing transport connection to MCP server */
   CONNECTING: "connecting",
+  /** Transport connection established */
+  CONNECTED: "connected",
   /** Discovering server capabilities (tools, resources, prompts) */
   DISCOVERING: "discovering",
   /** Fully connected and ready to use */
@@ -72,6 +74,11 @@ export type MCPTransportOptions = (
 ) & {
   authProvider?: AgentsOAuthProvider;
   type?: TransportType;
+};
+
+export type MCPClientConnectionResult = {
+  state: MCPConnectionState;
+  error?: Error;
 };
 
 export class MCPClientConnection {
@@ -119,33 +126,16 @@ export class MCPClientConnection {
       throw new Error("Transport type must be specified");
     }
 
-    try {
-      await this.tryConnect(transportType);
-    } catch (e) {
-      if (isUnauthorized(e)) {
-        // unauthorized, we should wait for the user to authenticate
-        this.connectionState = MCPConnectionState.AUTHENTICATING;
-        return;
-      }
-      // For explicit transport mismatches or other errors, mark as failed
-      // and do not throw to avoid bubbling errors to the client runtime.
-      this._onObservabilityEvent.fire({
-        type: "mcp:client:connect",
-        displayMessage: `Connection initialization failed for ${this.url.toString()}`,
-        payload: {
-          url: this.url.toString(),
-          transport: transportType,
-          state: this.connectionState,
-          error: toErrorMessage(e)
-        },
-        timestamp: Date.now(),
-        id: nanoid()
-      });
+    const res = await this.tryConnect(transportType);
+
+    if (res.error) {
       this.connectionState = MCPConnectionState.FAILED;
-      return;
+      // TODO: emit observability event
     }
 
-    await this.discoverAndRegister();
+    this.connectionState = res.state;
+
+    return;
   }
 
   /**
@@ -208,34 +198,14 @@ export class MCPClientConnection {
   }
 
   /**
-   * Establish connection after successful authorization
-   */
-  async establishConnection(): Promise<void> {
-    if (this.connectionState !== MCPConnectionState.CONNECTING) {
-      throw new Error(
-        "Connection must be in connecting state to establish connection"
-      );
-    }
-
-    try {
-      const transportType = this.options.transport.type;
-      if (!transportType) {
-        throw new Error("Transport type must be specified");
-      }
-
-      await this.tryConnect(transportType);
-      await this.discoverAndRegister();
-    } catch (error) {
-      this.connectionState = MCPConnectionState.FAILED;
-      throw error;
-    }
-  }
-
-  /**
    * Discover server capabilities and register tools, resources, prompts, and templates
    */
-  private async discoverAndRegister(): Promise<void> {
-    this.connectionState = MCPConnectionState.DISCOVERING;
+  async discoverAndRegister(): Promise<void> {
+    if (this.connectionState !== MCPConnectionState.DISCOVERING) {
+      throw new Error(
+        "Connection must be in discovering state to discover and register, the parent should set this and trigger observability events"
+      );
+    }
 
     this.serverCapabilities = this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
@@ -272,30 +242,33 @@ export class MCPClientConnection {
       operationNames.push("resource templates");
     }
 
-    const results = await Promise.all(operations);
+    try {
+      const results = await Promise.all(operations);
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        const name = operationNames[i];
 
-    // Assign results to properties
-    for (let i = 0; i < results.length; i++) {
-      const result = results[i];
-      const name = operationNames[i];
-
-      switch (name) {
-        case "instructions":
-          this.instructions = result;
-          break;
-        case "tools":
-          this.tools = result;
-          break;
-        case "resources":
-          this.resources = result;
-          break;
-        case "prompts":
-          this.prompts = result;
-          break;
-        case "resource templates":
-          this.resourceTemplates = result;
-          break;
+        switch (name) {
+          case "instructions":
+            this.instructions = result;
+            break;
+          case "tools":
+            this.tools = result;
+            break;
+          case "resources":
+            this.resources = result;
+            break;
+          case "prompts":
+            this.prompts = result;
+            break;
+          case "resource templates":
+            this.resourceTemplates = result;
+            break;
+        }
       }
+    } catch (error) {
+      this.connectionState = MCPConnectionState.FAILED;
+      throw error;
     }
 
     this.connectionState = MCPConnectionState.READY;
@@ -456,7 +429,9 @@ export class MCPClientConnection {
     }
   }
 
-  private async tryConnect(transportType: TransportType) {
+  private async tryConnect(
+    transportType: TransportType
+  ): Promise<MCPClientConnectionResult> {
     const transports: BaseTransportType[] =
       transportType === "auto" ? ["streamable-http", "sse"] : [transportType];
 
@@ -473,30 +448,35 @@ export class MCPClientConnection {
       try {
         await this.client.connect(transport);
         this.lastConnectedTransport = currentTransportType;
-        const url = this.url.toString();
+
         this._onObservabilityEvent.fire({
           type: "mcp:client:connect",
-          displayMessage: `Connected successfully using ${currentTransportType} transport for ${url}`,
+          displayMessage: `Connected successfully using ${currentTransportType} transport for ${this.url.toString()}`,
           payload: {
-            url,
+            url: this.url.toString(),
             transport: currentTransportType,
             state: this.connectionState
           },
           timestamp: Date.now(),
           id: nanoid()
         });
-        break;
+
+        return {
+          state: MCPConnectionState.CONNECTED
+        };
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
 
-        // If unauthorized, bubble up for proper auth handling
         if (isUnauthorized(error)) {
-          throw e;
+          return {
+            state: MCPConnectionState.AUTHENTICATING
+          };
         }
 
-        if (hasFallback && isTransportNotImplemented(error)) {
+        if (isTransportNotImplemented(error) && hasFallback) {
           // Try the next transport silently
           const url = this.url.toString();
+
           this._onObservabilityEvent.fire({
             type: "mcp:client:connect",
             displayMessage: `${currentTransportType} transport not available, trying ${transports[transports.indexOf(currentTransportType) + 1]} for ${url}`,
@@ -508,10 +488,14 @@ export class MCPClientConnection {
             timestamp: Date.now(),
             id: nanoid()
           });
+
           continue;
         }
 
-        throw e;
+        return {
+          state: MCPConnectionState.FAILED,
+          error
+        };
       }
     }
 
@@ -522,6 +506,10 @@ export class MCPClientConnection {
         return await this.handleElicitationRequest(request);
       }
     );
+
+    return {
+      state: MCPConnectionState.CONNECTED
+    };
   }
 
   private _capabilityErrorHandler<T>(empty: T, method: string) {
