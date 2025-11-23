@@ -49,7 +49,7 @@ export interface ResumableStreamAgent<
   State extends ResumableStreamState = ResumableStreamState
 > extends Agent<Env, State> {
   generateAIResponse(options: GenerateAIResponseOptions): Promise<string>;
-  _rsm_generateResponse(
+  _handleStreamGeneration(
     payload: { userMessageId: string; streamId: string },
     queueItem?: QueueItem
   ): Promise<void>;
@@ -182,7 +182,7 @@ export class ResumableStreamManager<
     const streamId = nanoid();
     console.log("🔄 Queueing AI response generation with streamId:", streamId);
 
-    await this.agent.queue("_rsm_generateResponse", {
+    await this.agent.queue("_handleStreamGeneration", {
       userMessageId,
       streamId
     });

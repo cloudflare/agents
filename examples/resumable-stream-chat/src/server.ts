@@ -73,7 +73,7 @@ export class ResumableStreamingChat extends Agent<
   /**
    * Queue callback for background processing
    */
-  async _rsm_generateResponse(
+  async _handleStreamGeneration(
     payload: { userMessageId: string; streamId: string },
     _queueItem?: QueueItem
   ) {
