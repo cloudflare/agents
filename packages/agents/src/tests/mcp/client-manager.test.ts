@@ -611,6 +611,78 @@ describe("MCPClientManager OAuth Integration", () => {
         )
       ).toBe(false);
     });
+
+    it("should gracefully handle OAuth callback when connection is already in connected state", async () => {
+      const serverId = "test-server";
+      const callbackUrl = `http://localhost:3000/callback/${serverId}`;
+      const authUrl = "https://auth.example.com/authorize";
+
+      // Save server with auth_url and callback_url
+      await (
+        manager as unknown as MCPClientManagerInternal
+      )._storage.saveServer({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: authUrl,
+        server_options: null
+      });
+
+      // Create connection that's already in CONNECTED state
+      // This can happen if OAuth completed and connection established before callback was processed
+      const mockAuthProvider = {
+        authUrl: undefined,
+        clientId: undefined,
+        serverId: undefined,
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          client_uri: "http://localhost:3000",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn()
+      };
+
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+
+      connection.connectionState = "connected"; // Already connected!
+      connection.lastConnectedTransport = "sse";
+      connection.client.close = vi.fn().mockResolvedValue(undefined);
+
+      manager.mcpConnections[serverId] = connection;
+
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      // Handle callback - should not throw error
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test-code&state=test-state`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      // Should succeed
+      expect(result.authSuccess).toBe(true);
+      expect(result.serverId).toBe(serverId);
+
+      // auth_url should be cleared
+      const server = mockStorageData.get(serverId);
+      expect(server?.auth_url).toBe(null);
+    });
   });
 
   describe("OAuth Connection Restoration", () => {
@@ -1982,6 +2054,202 @@ describe("MCPClientManager OAuth Integration", () => {
       const servers = await manager.listServers();
       const server = servers.find((s) => s.id === serverId);
       expect(server?.auth_url).toBe(authUrl);
+    });
+  });
+
+  describe("discoverIfConnected()", () => {
+    it("should skip discovery when connection not found", async () => {
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      await manager.discoverIfConnected("non-existent-server");
+
+      // Should fire observability event about missing connection
+      expect(observabilitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "mcp:client:discover",
+          displayMessage: expect.stringContaining("connection not found")
+        })
+      );
+    });
+
+    it("should skip discovery when connection is not in CONNECTED or READY state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connecting";
+
+      manager.mcpConnections[serverId] = connection;
+
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should fire observability event about skipping
+      expect(observabilitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "mcp:client:discover",
+          displayMessage: expect.stringContaining("skipped")
+        })
+      );
+
+      // Should not have changed state
+      expect(connection.connectionState).toBe("connecting");
+    });
+
+    it("should successfully discover when connection is in CONNECTED state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connected";
+
+      // Mock discoverAndRegister to succeed
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId] = connection;
+
+      const stateChangedSpy = vi.fn();
+      manager.onServerStateChanged(stateChangedSpy);
+
+      const observabilitySpy = vi.fn();
+      manager.onObservabilityEvent(observabilitySpy);
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should have called discoverAndRegister
+      expect(connection.discoverAndRegister).toHaveBeenCalledTimes(1);
+
+      // Should have transitioned through discovering to ready
+      expect(connection.connectionState).toBe("ready");
+
+      // Should have fired state changed twice (discovering + ready)
+      expect(stateChangedSpy).toHaveBeenCalledTimes(2);
+
+      // Should have fired completion observability event
+      expect(observabilitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "mcp:client:discover",
+          displayMessage: expect.stringContaining("Discovery completed")
+        })
+      );
+    });
+
+    it("should re-discover when connection is already in READY state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "ready";
+
+      // Mock discoverAndRegister to succeed
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId] = connection;
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should allow re-discovery even when already ready
+      expect(connection.discoverAndRegister).toHaveBeenCalledTimes(1);
+      expect(connection.connectionState).toBe("ready");
+    });
+
+    it("should handle discovery failure and maintain failed state", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connected";
+
+      // Mock discoverAndRegister to fail
+      const error = new Error("Discovery failed");
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "failed";
+        throw error;
+      });
+
+      manager.mcpConnections[serverId] = connection;
+
+      // Should throw the error
+      await expect(manager.discoverIfConnected(serverId)).rejects.toThrow(
+        "Discovery failed"
+      );
+
+      // Connection should be in failed state
+      expect(connection.connectionState).toBe("failed");
+    });
+
+    it("should fire observability events in correct order", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "connected";
+
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId] = connection;
+
+      const observabilityEvents: string[] = [];
+      manager.onObservabilityEvent((event) => {
+        if (event.displayMessage) {
+          observabilityEvents.push(event.displayMessage);
+        }
+      });
+
+      await manager.discoverIfConnected(serverId);
+
+      // Should have completion event
+      expect(observabilityEvents).toContainEqual(
+        expect.stringContaining("Discovery completed")
+      );
+    });
+
+    it("should work as a manual refresh for tools", async () => {
+      const serverId = "test-server";
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test", version: "1.0" },
+        { transport: { type: "sse" }, client: {} }
+      );
+      connection.connectionState = "ready";
+      connection.tools = [
+        { name: "old-tool", inputSchema: { type: "object" } } as any
+      ];
+
+      // Mock discoverAndRegister to update tools
+      connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        connection.tools = [
+          { name: "new-tool", inputSchema: { type: "object" } } as any
+        ];
+        connection.connectionState = "ready";
+      });
+
+      manager.mcpConnections[serverId] = connection;
+
+      await manager.discoverIfConnected(serverId);
+
+      // Tools should be refreshed
+      expect(connection.tools).toHaveLength(1);
+      expect(connection.tools[0].name).toBe("new-tool");
     });
   });
 });

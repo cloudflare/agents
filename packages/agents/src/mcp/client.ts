@@ -575,10 +575,16 @@ export class MCPClientManager {
       throw new Error(`Could not find serverId: ${serverId}`);
     }
 
-    // If connection is already ready, this is likely a duplicate callback
+    // If connection is already ready/connected, this is likely a duplicate callback
     if (
-      this.mcpConnections[serverId].connectionState === MCPConnectionState.READY
+      this.mcpConnections[serverId].connectionState ===
+        MCPConnectionState.READY ||
+      this.mcpConnections[serverId].connectionState ===
+        MCPConnectionState.CONNECTED
     ) {
+      // make sure auth_url is cleared
+      await this._storage.clearAuthUrl(serverId);
+
       // Already authenticated and ready, treat as success
       return {
         serverId,
