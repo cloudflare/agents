@@ -651,29 +651,33 @@ export class MCPClientManager {
       return;
     }
 
-    if (conn.connectionState === MCPConnectionState.CONNECTED) {
-      conn.connectionState = MCPConnectionState.DISCOVERING;
-      this._onServerStateChanged.fire();
-
-      await conn.discoverAndRegister();
-      this._onServerStateChanged.fire();
-
+    if (
+      conn.connectionState !== MCPConnectionState.CONNECTED &&
+      conn.connectionState !== MCPConnectionState.READY
+    ) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
-        displayMessage: `Discovery completed for ${serverId}, final state: ${conn.connectionState}`,
+        displayMessage: `discoverIfConnected skipped for ${serverId}, state is ${conn.connectionState} (not CONNECTED or READY)`,
         payload: {},
         timestamp: Date.now(),
         id: nanoid()
       });
-    } else {
-      this._onObservabilityEvent.fire({
-        type: "mcp:client:discover",
-        displayMessage: `discoverIfConnected skipped for ${serverId}, state is ${conn.connectionState} (not CONNECTED)`,
-        payload: {},
-        timestamp: Date.now(),
-        id: nanoid()
-      });
+      return;
     }
+
+    conn.connectionState = MCPConnectionState.DISCOVERING;
+    this._onServerStateChanged.fire();
+
+    await conn.discoverAndRegister();
+    this._onServerStateChanged.fire();
+
+    this._onObservabilityEvent.fire({
+      type: "mcp:client:discover",
+      displayMessage: `Discovery completed for ${serverId}, final state: ${conn.connectionState}`,
+      payload: {},
+      timestamp: Date.now(),
+      id: nanoid()
+    });
   }
 
   /**
