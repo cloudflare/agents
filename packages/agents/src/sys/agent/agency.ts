@@ -7,6 +7,16 @@ import type {
 import { getAgentByName } from "../..";
 import type { AgentEnv } from "./index";
 
+function validateBlueprint(bp: AgentBlueprint): string | null {
+  if (!bp.name || !/^[a-zA-Z0-9_-]+$/.test(bp.name)) {
+    return "Blueprint name must be alphanumeric with - or _";
+  }
+  if (!bp.prompt || typeof bp.prompt !== "string") {
+    return "Blueprint must have a prompt";
+  }
+  return null;
+}
+
 export class Agency extends DurableObject<AgentEnv> {
   sql: SqlStorage;
 
@@ -51,15 +61,41 @@ export class Agency extends DurableObject<AgentEnv> {
       const bp = (await req.json()) as AgentBlueprint;
       if (!bp.name) return new Response("Missing name", { status: 400 });
 
+      const now = new Date().toISOString();
+      const existing = this.sql
+        .exec("SELECT data FROM blueprints WHERE name = ?", bp.name)
+        .one();
+
+      let merged = { ...bp };
+      if (existing) {
+        const prev = JSON.parse(existing.data as string);
+        merged = {
+          ...prev,
+          ...bp,
+          createdAt: prev.createdAt ?? now,
+          updatedAt: now
+        };
+      } else {
+        merged = {
+          ...bp,
+          status: bp.status ?? "active",
+          createdAt: now,
+          updatedAt: now
+        };
+      }
+
+      const err = validateBlueprint(merged);
+      if (err) return new Response(err, { status: 400 });
+
       this.sql.exec(
         `INSERT OR REPLACE INTO blueprints (name, data, updated_at)
-         VALUES (?, ?, ?)`,
-        bp.name,
-        JSON.stringify(bp),
+   VALUES (?, ?, ?)`,
+        merged.name,
+        JSON.stringify(merged),
         Date.now()
       );
 
-      return Response.json({ ok: true, name: bp.name });
+      return Response.json({ ok: true, name: merged.name });
     }
 
     // --------------------------------------------------

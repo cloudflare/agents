@@ -137,55 +137,6 @@ export class AgentSystem<TConfig = Record<string, unknown>> {
         // throw new Error("Method not implemented.");
       }
 
-      async onMessage(
-        connection: Connection,
-        message: WSMessage
-      ): Promise<void> {
-        const parsed =
-          typeof message === "string" ? JSON.parse(message) : message;
-
-        if (parsed.type === "user.message") {
-          const { content } = parsed.data;
-
-          // Notify client that message was received
-          connection.send(
-            JSON.stringify({
-              type: "message.created",
-              data: { role: "user", content }
-            })
-          );
-
-          // Invoke the agent
-          try {
-            const result = await this.provider.invoke(
-              {
-                model: this.model,
-                messages: [{ role: "user", content }]
-              },
-              {
-                // Optional: pass tools if needed
-              }
-            );
-
-            // Send response back
-            connection.send(
-              JSON.stringify({
-                type: "message.created",
-                data: { role: "assistant", content: result.message.content }
-              })
-            );
-          } catch (e) {
-            console.error("Error invoking agent:", e);
-            connection.send(
-              JSON.stringify({
-                type: "error",
-                error: e.message
-              })
-            );
-          }
-        }
-      }
-
       // Gets local agent blueprint or reads it from static defaults.
       // Local blueprint is set by Agency on registration.
       get blueprint(): AgentBlueprint {

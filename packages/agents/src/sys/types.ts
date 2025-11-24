@@ -122,6 +122,8 @@ export interface SubagentLink {
   toolCallId?: string;
 }
 
+type BlueprintStatus = "active" | "draft" | "disabled";
+
 export type AgentBlueprint<TConfig = Record<string, unknown>> = {
   name: string;
   description: string;
@@ -129,6 +131,9 @@ export type AgentBlueprint<TConfig = Record<string, unknown>> = {
   tags: string[];
   model?: string;
   config?: AgentConfig<TConfig>;
+  status?: BlueprintStatus;
+  createdAt?: string; // ISO
+  updatedAt?: string; // ISO
 };
 
 export type MWContext = {
