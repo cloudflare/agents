@@ -347,9 +347,6 @@ export class TestOAuthAgent extends Agent<Env> {
       conn.completeAuthorization = async (_code: string) => {
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       };
-      conn.establishConnection = async () => {
-        this.mcp.mcpConnections[serverId].connectionState = "ready";
-      };
     }
   }
 

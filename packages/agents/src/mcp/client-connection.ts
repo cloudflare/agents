@@ -248,7 +248,14 @@ export class MCPClientConnection {
     }
 
     // Build list of operations to perform based on server capabilities
-    const operations: Promise<any>[] = [];
+    type DiscoveryResult =
+      | string
+      | undefined
+      | Tool[]
+      | Resource[]
+      | Prompt[]
+      | ResourceTemplate[];
+    const operations: Promise<DiscoveryResult>[] = [];
     const operationNames: string[] = [];
 
     // Instructions (always try to fetch if available)
@@ -284,19 +291,19 @@ export class MCPClientConnection {
 
         switch (name) {
           case "instructions":
-            this.instructions = result;
+            this.instructions = result as string | undefined;
             break;
           case "tools":
-            this.tools = result;
+            this.tools = result as Tool[];
             break;
           case "resources":
-            this.resources = result;
+            this.resources = result as Resource[];
             break;
           case "prompts":
-            this.prompts = result;
+            this.prompts = result as Prompt[];
             break;
           case "resource templates":
-            this.resourceTemplates = result;
+            this.resourceTemplates = result as ResourceTemplate[];
             break;
         }
       }

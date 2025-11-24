@@ -700,16 +700,6 @@ describe("MCP Client Connection Integration", () => {
           return "streamable-http"; // Return the successful transport
         });
 
-      connection.establishConnection = vi.fn().mockImplementation(async () => {
-        connection.connectionState = "connected";
-        connection.serverCapabilities = {};
-        connection.instructions = "Test instructions";
-        connection.tools = [];
-        connection.resources = [];
-        connection.prompts = [];
-        connection.resourceTemplates = [];
-      });
-
       // Mock client methods needed for discovery
       connection.client.getServerCapabilities = vi.fn().mockReturnValue({});
       connection.client.getInstructions = vi
@@ -736,7 +726,11 @@ describe("MCP Client Connection Integration", () => {
       await connection.completeAuthorization(authCode);
       expect(connection.connectionState).toBe("connecting");
 
-      await connection.establishConnection();
+      // After completing OAuth, call init again to establish the actual connection
+      connection.init = vi.fn().mockImplementation(async () => {
+        connection.connectionState = "connected";
+      });
+      await connection.init();
 
       expect(connection.connectionState).toBe("connected");
 

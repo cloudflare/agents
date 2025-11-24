@@ -1211,7 +1211,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       try {
         await manager.establishConnection(id);
-      } catch (e) {
+      } catch (_e) {
         // Expected to throw
       }
 
