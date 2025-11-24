@@ -487,13 +487,15 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
           if (!resume) return;
+          // Clear any previous incomplete resumed stream to prevent memory leak
+          resumedStreamRef.current = null;
           // Initialize resumed stream state with unique ID
           resumedStreamRef.current = {
             id: data.id,
             messageId: nanoid(),
             parts: []
           };
-          // Send ACK to server; we're ready to receive chunks
+          // Send ACK to server - we're ready to receive chunks
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
@@ -602,7 +604,8 @@ export function useAgentChat<
             }
           }
 
-          if (data.done) {
+          // Clear on completion or error
+          if (data.done || data.error) {
             resumedStreamRef.current = null;
           }
           break;
@@ -612,6 +615,8 @@ export function useAgentChat<
     agent.addEventListener("message", onAgentMessage);
     return () => {
       agent.removeEventListener("message", onAgentMessage);
+      // Clear resumed stream state on cleanup to prevent memory leak
+      resumedStreamRef.current = null;
     };
   }, [agent, useChatHelpers.setMessages, resume]);
 

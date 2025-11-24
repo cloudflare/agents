@@ -285,7 +285,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * This reduces write overhead by batching multiple chunks together.
    */
   private _flushChunkBuffer() {
-    this._flushTimeout = null;
+    // Clear pending timeout to prevent duplicate flushes
+    if (this._flushTimeout) {
+      clearTimeout(this._flushTimeout);
+      this._flushTimeout = null;
+    }
 
     if (this._chunkBuffer.length === 0) {
       return;
