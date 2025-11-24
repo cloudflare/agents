@@ -1,105 +1,45 @@
 import { openai } from "@ai-sdk/openai";
+import { type AgentNamespace, routeAgentRequest } from "agents";
+import { AIChatAgent } from "agents/ai-chat-agent";
 import {
-  Agent,
-  type AgentNamespace,
-  callable,
-  routeAgentRequest,
-  ResumableStreamManager,
-  type GenerateAIResponseOptions,
-  type QueueItem,
-  type ResumableStreamState
-} from "agents";
-import { streamText } from "ai";
+  streamText,
+  convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse
+} from "ai";
 
 type Env = {
   OPENAI_API_KEY: string;
   ResumableStreamingChat: AgentNamespace<ResumableStreamingChat>;
 };
 
-export interface ResumableStreamingChatState extends ResumableStreamState {
-  // Inherits: messages, activeStreamId
-}
-
-export class ResumableStreamingChat extends Agent<
-  Env,
-  ResumableStreamingChatState
-> {
-  private streams = new ResumableStreamManager(this, this.ctx);
-
-  initialState: ResumableStreamingChatState = {
-    messages: [],
-    activeStreamId: null
-  };
-
-  async onStart() {
-    await super.onStart();
-    await this.streams.initializeTables();
-    await this.streams.loadAndSyncMessages();
-  }
-
-  @callable()
-  async sendMessage(
-    content: string
-  ): Promise<{ messageId: string; streamId: string }> {
-    return this.streams.sendMessage(content);
-  }
-
+/**
+ * Resumable Streaming Chat Agent
+ *
+ * This example demonstrates automatic resumable streaming built into AIChatAgent.
+ * When a client disconnects and reconnects during streaming:
+ * 1. The server automatically detects the active stream
+ * 2. Sends CF_AGENT_STREAM_RESUMING notification
+ * 3. Client ACKs and receives all buffered chunks
+ *
+ * No special setup required - just use onChatMessage() as usual.
+ */
+export class ResumableStreamingChat extends AIChatAgent<Env> {
   /**
-   * Generate AI response using streaming
+   * Handle incoming chat messages.
    */
-  async generateAIResponse(
-    options: GenerateAIResponseOptions
-  ): Promise<string> {
-    const messages = options.messages.map((msg) => ({
-      role: msg.role,
-      content: msg.content
-    }));
+  async onChatMessage() {
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        const result = streamText({
+          model: openai("gpt-4o"),
+          messages: convertToModelMessages(this.messages)
+        });
 
-    const result = streamText({
-      model: openai("gpt-4o"),
-      messages
+        writer.merge(result.toUIMessageStream());
+      }
     });
-
-    let fullContent = "";
-    // Stream and broadcast each chunk
-    for await (const chunk of result.textStream) {
-      fullContent += chunk;
-      await options.processChunk(chunk);
-    }
-
-    return fullContent;
-  }
-
-  /**
-   * Queue callback for background processing
-   */
-  async _handleStreamGeneration(
-    payload: { userMessageId: string; streamId: string },
-    _queueItem?: QueueItem
-  ) {
-    await this.streams.generateResponseCallback(payload);
-  }
-
-  @callable()
-  async getStreamHistory(streamId: string) {
-    return this.streams.getStreamHistory(streamId);
-  }
-
-  @callable()
-  async clearHistory() {
-    await this.streams.clearHistory();
-    this.setState(this.initialState);
-  }
-
-  @callable()
-  async getActiveStream(): Promise<string | null> {
-    return this.state.activeStreamId;
-  }
-
-  @callable()
-  async cleanupOldStreams(olderThanDays = 7): Promise<number> {
-    const olderThanMs = olderThanDays * 24 * 60 * 60 * 1000;
-    return this.streams.cleanupOldStreams(olderThanMs);
+    return createUIMessageStreamResponse({ stream });
   }
 }
 

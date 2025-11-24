@@ -1,108 +1,29 @@
 import type React from "react";
-import { useEffect, useState, useRef } from "react";
+import { Suspense, useState, useRef, useEffect } from "react";
 import { useAgent } from "agents/react";
-import type { ResumableMessage } from "agents";
-import type { ResumableStreamingChatState } from "./server";
+import { useAgentChat } from "agents/ai-react";
+import type { UIMessage } from "ai";
 
-type StreamingMessage = {
-  id: string;
-  role: "assistant";
-  content: string;
-  isStreaming: boolean;
-  streamId: string;
-};
-
-export default function App() {
-  const [messages, setMessages] = useState<ResumableMessage[]>([]);
-  const [streamingMessage, setStreamingMessage] =
-    useState<StreamingMessage | null>(null);
-  const [input, setInput] = useState("");
+/**
+ * Resumable Streaming Chat Client
+ *
+ * This example demonstrates automatic resumable streaming with useAgentChat.
+ * When you disconnect and reconnect during streaming:
+ * 1. useAgentChat automatically detects the active stream
+ * 2. Sends ACK to server
+ * 3. Receives all buffered chunks and continues streaming
+ *
+ * Try it: Start a long response, refresh the page, and watch it resume!
+ */
+function Chat() {
   const [isConnected, setIsConnected] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
-  const [isSending, setIsSending] = useState(false);
+  const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const activeStreamIdRef = useRef<string | null>(null);
-  const replayedStreamsRef = useRef<Set<string>>(new Set());
 
-  const agent = useAgent<ResumableStreamingChatState>({
+  const agent = useAgent({
     agent: "ResumableStreamingChat",
     name: "demo",
-    host: import.meta.env.DEV
-      ? "http://localhost:8787"
-      : `https://${window.location.host}`,
-    onStateUpdate: (state, source) => {
-      console.log("📡 State update received:", {
-        source,
-        messageCount: state.messages.length,
-        activeStreamId: state.activeStreamId,
-        messages: state.messages
-      });
-      setMessages(state.messages);
-
-      // If there's an active stream, replay its history
-      if (
-        state.activeStreamId &&
-        !replayedStreamsRef.current.has(state.activeStreamId)
-      ) {
-        console.log("🔄 Active stream detected, fetching history...");
-        replayedStreamsRef.current.add(state.activeStreamId);
-        replayStream(state.activeStreamId);
-      }
-    },
-    onMessage: (event) => {
-      try {
-        const data = JSON.parse(event.data);
-
-        switch (data.type) {
-          case "stream_start":
-            activeStreamIdRef.current = data.data.streamId;
-            setStreamingMessage({
-              id: data.data.messageId,
-              role: "assistant",
-              content: "",
-              isStreaming: true,
-              streamId: data.data.streamId
-            });
-            break;
-
-          case "stream_chunk":
-            if (data.data.streamId === activeStreamIdRef.current) {
-              setStreamingMessage((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      content: prev.content + data.data.chunk
-                    }
-                  : {
-                      id: data.data.messageId,
-                      role: "assistant",
-                      content: data.data.chunk,
-                      isStreaming: true,
-                      streamId: data.data.streamId
-                    }
-              );
-            }
-            break;
-
-          case "stream_complete":
-            if (data.data.streamId === activeStreamIdRef.current) {
-              setStreamingMessage(null);
-              activeStreamIdRef.current = null;
-            }
-            break;
-
-          case "stream_error":
-            if (data.data.streamId === activeStreamIdRef.current) {
-              console.error("Stream error:", data.data.error);
-              setStreamingMessage(null);
-              activeStreamIdRef.current = null;
-            }
-            break;
-        }
-      } catch (_error) {
-        // Ignore JSON parse errors for non-JSON messages
-      }
-    },
     onOpen: () => {
       const connectMsg = isReconnecting
         ? "WebSocket reconnected"
@@ -127,45 +48,16 @@ export default function App() {
     }
   });
 
-  // this is how we replay stream history
-  const replayStream = async (streamId: string) => {
-    try {
-      console.log("Replaying stream history for:", streamId);
-      const { chunks, metadata } = await agent.call<{
-        chunks: Array<{ content: string; index: number }>;
-        metadata: { status: string; messageId: string } | null;
-      }>("getStreamHistory", [streamId]);
+  // useAgentChat handles everything:
+  // - Message persistence
+  // - Streaming
+  // - Automatic resume on reconnect (via resume: true default)
+  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+    agent
+    // resume: true is the default - streams automatically resume on reconnect
+  });
 
-      if (!metadata) {
-        console.warn("No metadata found for stream:", streamId);
-        return;
-      }
-
-      // Reconstruct the streaming message from chunks
-      const fullContent = chunks
-        .sort((a, b) => a.index - b.index)
-        .map((c) => c.content)
-        .join("");
-
-      if (metadata.status === "streaming") {
-        // Stream is still active, show it as streaming
-        activeStreamIdRef.current = streamId;
-        setStreamingMessage({
-          id: metadata.messageId,
-          role: "assistant",
-          content: fullContent,
-          isStreaming: true,
-          streamId
-        });
-      } else if (metadata.status === "completed") {
-        // Stream completed while disconnected
-        setStreamingMessage(null);
-        activeStreamIdRef.current = null;
-      }
-    } catch (error) {
-      console.error("Error replaying stream:", error);
-    }
-  };
+  const isStreaming = status === "streaming";
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -173,48 +65,39 @@ export default function App() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages, streamingMessage]);
+  }, [messages]);
 
-  const handleSend = async () => {
-    if (!input.trim() || isSending) return;
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+  };
 
-    setIsSending(true);
-    const messageText = input;
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!input.trim() || isStreaming) return;
+
+    const message = input;
     setInput("");
 
-    try {
-      const { messageId, streamId } = await agent.call<{
-        messageId: string;
-        streamId: string;
-      }>("sendMessage", [messageText]);
-
-      console.log("Message sent:", messageId, "Stream ID:", streamId);
-      activeStreamIdRef.current = streamId;
-    } catch (error) {
-      console.error("Error sending message:", error);
-      // Restore input on error
-      setInput(messageText);
-    } finally {
-      setIsSending(false);
-    }
+    // Send message to agent
+    await sendMessage({
+      role: "user",
+      parts: [{ type: "text", text: message }]
+    });
   };
 
-  const handleClear = async () => {
-    try {
-      await agent.call("clearHistory", []);
-      setMessages([]);
-      setStreamingMessage(null);
-      activeStreamIdRef.current = null;
-    } catch (error) {
-      console.error("Error clearing history:", error);
-    }
-  };
-
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      handleSubmit(e as unknown as React.FormEvent);
     }
+  };
+
+  // Extract text content from message parts
+  const getMessageText = (message: UIMessage): string => {
+    return message.parts
+      .filter((part) => part.type === "text")
+      .map((part) => (part as { type: "text"; text: string }).text)
+      .join("");
   };
 
   return (
@@ -276,7 +159,7 @@ export default function App() {
           </div>
           <button
             type="button"
-            onClick={handleClear}
+            onClick={clearHistory}
             style={{
               padding: "0.5rem 1rem",
               backgroundColor: "#ef4444",
@@ -302,7 +185,7 @@ export default function App() {
           backgroundColor: "#ffffff"
         }}
       >
-        {messages.length === 0 && !streamingMessage && (
+        {messages.length === 0 && (
           <div
             style={{
               textAlign: "center",
@@ -311,99 +194,95 @@ export default function App() {
               fontSize: "0.875rem"
             }}
           >
-            Send a message to start the conversation
+            Send a message to start the conversation.
+            <br />
+            <span
+              style={{
+                fontSize: "0.75rem",
+                marginTop: "0.5rem",
+                display: "block"
+              }}
+            >
+              Try refreshing during a response to see automatic resume!
+            </span>
           </div>
         )}
 
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            style={{
-              display: "flex",
-              justifyContent:
-                message.role === "user" ? "flex-end" : "flex-start",
-              marginBottom: "1rem"
-            }}
-          >
+        {messages.map((message, index) => {
+          const isLastAssistant =
+            message.role === "assistant" && index === messages.length - 1;
+          const text = getMessageText(message);
+
+          return (
             <div
+              key={message.id}
               style={{
-                maxWidth: "70%",
-                padding: "0.75rem 1rem",
-                borderRadius: "0.5rem",
-                backgroundColor:
-                  message.role === "user" ? "#3b82f6" : "#f3f4f6",
-                color: message.role === "user" ? "white" : "#1f2937"
+                display: "flex",
+                justifyContent:
+                  message.role === "user" ? "flex-end" : "flex-start",
+                marginBottom: "1rem"
               }}
             >
               <div
                 style={{
-                  fontSize: "0.75rem",
-                  marginBottom: "0.25rem",
-                  opacity: 0.8
+                  maxWidth: "70%",
+                  padding: "0.75rem 1rem",
+                  borderRadius: "0.5rem",
+                  backgroundColor:
+                    message.role === "user" ? "#3b82f6" : "#f3f4f6",
+                  color: message.role === "user" ? "white" : "#1f2937"
                 }}
               >
-                {message.role === "user" ? "You" : "Assistant"}
-              </div>
-              <div style={{ whiteSpace: "pre-wrap" }}>{message.content}</div>
-            </div>
-          </div>
-        ))}
-
-        {streamingMessage && (
-          <div style={{ display: "flex", marginBottom: "1rem" }}>
-            <div
-              style={{
-                maxWidth: "70%",
-                padding: "0.75rem 1rem",
-                borderRadius: "0.5rem",
-                backgroundColor: "#f3f4f6",
-                color: "#1f2937"
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "0.75rem",
-                  marginBottom: "0.25rem",
-                  opacity: 0.8,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.5rem"
-                }}
-              >
-                <span>Assistant</span>
-                <span
+                <div
                   style={{
-                    display: "inline-block",
-                    width: "6px",
-                    height: "6px",
-                    borderRadius: "50%",
-                    backgroundColor: "#3b82f6",
-                    animation: "pulse 1.5s ease-in-out infinite"
+                    fontSize: "0.75rem",
+                    marginBottom: "0.25rem",
+                    opacity: 0.8,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem"
                   }}
-                />
-              </div>
-              <div style={{ whiteSpace: "pre-wrap" }}>
-                {streamingMessage.content}
-                <span
-                  style={{
-                    display: "inline-block",
-                    width: "2px",
-                    height: "1em",
-                    backgroundColor: "#3b82f6",
-                    marginLeft: "2px",
-                    animation: "blink 1s step-end infinite"
-                  }}
-                />
+                >
+                  <span>{message.role === "user" ? "You" : "Assistant"}</span>
+                  {isLastAssistant && isStreaming && (
+                    <span
+                      style={{
+                        display: "inline-block",
+                        width: "6px",
+                        height: "6px",
+                        borderRadius: "50%",
+                        backgroundColor: "#3b82f6",
+                        animation: "pulse 1.5s ease-in-out infinite"
+                      }}
+                    />
+                  )}
+                </div>
+                <div style={{ whiteSpace: "pre-wrap" }}>
+                  {text}
+                  {isLastAssistant && isStreaming && (
+                    <span
+                      style={{
+                        display: "inline-block",
+                        width: "2px",
+                        height: "1em",
+                        backgroundColor: "#3b82f6",
+                        marginLeft: "2px",
+                        animation: "blink 1s step-end infinite"
+                      }}
+                    />
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })}
 
         <div ref={messagesEndRef} />
       </div>
 
       {/* Input */}
-      <div
+      <form
+        onSubmit={handleSubmit}
         style={{
           padding: "1rem",
           borderTop: "1px solid #e5e7eb",
@@ -413,10 +292,10 @@ export default function App() {
         <div style={{ display: "flex", gap: "0.5rem" }}>
           <textarea
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
             onKeyPress={handleKeyPress}
             placeholder="Type your message... (Press Enter to send, Shift+Enter for new line)"
-            disabled={!isConnected || isSending}
+            disabled={!isConnected || isStreaming}
             style={{
               flex: 1,
               padding: "0.75rem",
@@ -429,20 +308,19 @@ export default function App() {
             }}
           />
           <button
-            type="button"
-            onClick={handleSend}
-            disabled={!input.trim() || !isConnected || isSending}
+            type="submit"
+            disabled={!input.trim() || !isConnected || isStreaming}
             style={{
               padding: "0.75rem 1.5rem",
               backgroundColor:
-                !input.trim() || !isConnected || isSending
+                !input.trim() || !isConnected || isStreaming
                   ? "#d1d5db"
                   : "#3b82f6",
               color: "white",
               border: "none",
               borderRadius: "0.375rem",
               cursor:
-                !input.trim() || !isConnected || isSending
+                !input.trim() || !isConnected || isStreaming
                   ? "not-allowed"
                   : "pointer",
               fontSize: "0.875rem",
@@ -450,10 +328,10 @@ export default function App() {
               minWidth: "80px"
             }}
           >
-            {isSending ? "Sending..." : "Send"}
+            {isStreaming ? "Streaming..." : "Send"}
           </button>
         </div>
-      </div>
+      </form>
 
       <style>{`
         @keyframes pulse {
@@ -467,5 +345,17 @@ export default function App() {
         }
       `}</style>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <Suspense
+      fallback={
+        <div style={{ padding: "2rem", textAlign: "center" }}>Loading...</div>
+      }
+    >
+      <Chat />
+    </Suspense>
   );
 }

@@ -9,15 +9,51 @@ import type {
   ToolUIPart,
   UIMessageChunk
 } from "ai";
-import { Agent, type AgentContext, type Connection, type WSMessage } from "./";
+import {
+  Agent,
+  type AgentContext,
+  type Connection,
+  type ConnectionContext,
+  type WSMessage
+} from "./";
 import {
   MessageType,
   type IncomingMessage,
   type OutgoingMessage
 } from "./ai-types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
+import { nanoid } from "nanoid";
+
+/** Default interval for flushing buffered stream chunks to SQLite (ms) */
+const CHUNK_FLUSH_INTERVAL_MS = 100;
+/** Default cleanup interval for old streams (ms) - every 10 minutes */
+const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+/** Default age threshold for cleaning up completed streams (ms) - 24 hours */
+const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 
 const decoder = new TextDecoder();
+
+/**
+ * Stored stream chunk for resumable streaming
+ */
+type StreamChunk = {
+  id: string;
+  stream_id: string;
+  body: string;
+  chunk_index: number;
+  created_at: number;
+};
+
+/**
+ * Stream metadata for tracking active streams
+ */
+type StreamMetadata = {
+  id: string;
+  request_id: string;
+  status: "streaming" | "completed" | "error";
+  created_at: number;
+  completed_at: number | null;
+};
 
 /**
  * Extension of Agent with built-in chat capabilities
@@ -32,8 +68,47 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * useful to propagate request cancellation signals for any external calls made by the agent
    */
   private _chatMessageAbortControllers: Map<string, AbortController>;
+
+  /**
+   * Currently active stream ID for resumable streaming.
+   * Stored in memory for quick access; persisted in stream_metadata table.
+   */
+  private _activeStreamId: string | null = null;
+
+  /**
+   * Request ID associated with the active stream.
+   */
+  private _activeRequestId: string | null = null;
+
+  /**
+   * Current chunk index for the active stream
+   */
+  private _streamChunkIndex = 0;
+
+  /**
+   * Buffer for stream chunks pending write to SQLite.
+   * Chunks are batched and flushed periodically to reduce write overhead.
+   */
+  private _chunkBuffer: Array<{
+    id: string;
+    streamId: string;
+    body: string;
+    index: number;
+  }> = [];
+
+  /**
+   * Timeout handle for the chunk flush operation
+   */
+  private _flushTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Timestamp of the last cleanup operation for old streams
+   */
+  private _lastCleanupTime = 0;
+
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.sql`create table if not exists cf_ai_chat_agent_messages (
@@ -42,6 +117,26 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       created_at datetime default current_timestamp
     )`;
 
+    // Create tables for automatic resumable streaming
+    this.sql`create table if not exists cf_ai_chat_stream_chunks (
+      id text primary key,
+      stream_id text not null,
+      body text not null,
+      chunk_index integer not null,
+      created_at integer not null
+    )`;
+
+    this.sql`create table if not exists cf_ai_chat_stream_metadata (
+      id text primary key,
+      request_id text not null,
+      status text not null,
+      created_at integer not null,
+      completed_at integer
+    )`;
+
+    this.sql`create index if not exists idx_stream_chunks_stream_id 
+      on cf_ai_chat_stream_chunks(stream_id, chunk_index)`;
+
     // Load messages and automatically transform them to v5 format
     const rawMessages = this._loadMessagesFromDb();
 
@@ -49,6 +144,230 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     this.messages = autoTransformMessages(rawMessages);
 
     this._chatMessageAbortControllers = new Map();
+
+    // Check for any active streams from a previous session
+    this._restoreActiveStream();
+  }
+
+  /**
+   * Restore active stream state if the agent was restarted during streaming.
+   * Called during construction to recover any interrupted streams.
+   * This allows clients to resume streams even after a Durable Object restart.
+   */
+  private _restoreActiveStream() {
+    const activeStreams = this.sql<StreamMetadata>`
+      select * from cf_ai_chat_stream_metadata 
+      where status = 'streaming' 
+      order by created_at desc 
+      limit 1
+    `;
+    if (activeStreams && activeStreams.length > 0) {
+      this._activeStreamId = activeStreams[0].id;
+      this._activeRequestId = activeStreams[0].request_id;
+      // Get the last chunk index
+      const lastChunk = this.sql<{ max_index: number }>`
+        select max(chunk_index) as max_index 
+        from cf_ai_chat_stream_chunks 
+        where stream_id = ${this._activeStreamId}
+      `;
+      this._streamChunkIndex =
+        lastChunk && lastChunk[0]?.max_index != null
+          ? lastChunk[0].max_index + 1
+          : 0;
+    }
+  }
+
+  /**
+   * Override onConnect to notify clients about active streams that can be resumed.
+   * Stream chunks are sent only after the client acknowledges with CF_AGENT_STREAM_RESUME_ACK.
+   */
+  override async onConnect(connection: Connection, ctx: ConnectionContext) {
+    await super.onConnect(connection, ctx);
+
+    // If there's an active stream, notify the client so they can resume
+    if (this._activeStreamId) {
+      this._notifyStreamResuming(connection);
+    }
+  }
+
+  /**
+   * Notify a connection about an active stream that can be resumed.
+   * The client should respond with CF_AGENT_STREAM_RESUME_ACK to receive chunks.
+   * Uses in-memory state for request ID - no extra DB lookup needed.
+   * @param connection - The WebSocket connection to notify
+   */
+  private _notifyStreamResuming(connection: Connection) {
+    if (!this._activeStreamId || !this._activeRequestId) {
+      return;
+    }
+
+    // Notify client - they will send ACK when ready
+    connection.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUMING,
+        id: this._activeRequestId
+      })
+    );
+  }
+
+  /**
+   * Send stream chunks to a connection after receiving ACK.
+   * @param connection - The WebSocket connection
+   * @param streamId - The stream to replay
+   * @param requestId - The original request ID
+   */
+  private _sendStreamChunks(
+    connection: Connection,
+    streamId: string,
+    requestId: string
+  ) {
+    // Flush any pending chunks first to ensure we have the latest
+    this._flushChunkBuffer();
+
+    const chunks = this.sql<StreamChunk>`
+      select * from cf_ai_chat_stream_chunks 
+      where stream_id = ${streamId} 
+      order by chunk_index asc
+    `;
+
+    // Send all stored chunks
+    for (const chunk of chunks || []) {
+      connection.send(
+        JSON.stringify({
+          body: chunk.body,
+          done: false,
+          id: requestId,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        })
+      );
+    }
+
+    // If the stream is no longer active (completed), send done signal
+    // We track active state in memory, no need to query DB
+    if (this._activeStreamId !== streamId) {
+      connection.send(
+        JSON.stringify({
+          body: "",
+          done: true,
+          id: requestId,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+        })
+      );
+    }
+  }
+
+  /**
+   * Buffer a stream chunk for later batch write to SQLite.
+   * Chunks are flushed periodically to reduce write overhead.
+   * @param streamId - The stream this chunk belongs to
+   * @param body - The serialized chunk body
+   */
+  private _storeStreamChunk(streamId: string, body: string) {
+    this._chunkBuffer.push({
+      id: nanoid(),
+      streamId,
+      body,
+      index: this._streamChunkIndex
+    });
+    this._streamChunkIndex++;
+
+    // Schedule flush if not already scheduled
+    if (!this._flushTimeout) {
+      this._flushTimeout = setTimeout(
+        () => this._flushChunkBuffer(),
+        CHUNK_FLUSH_INTERVAL_MS
+      );
+    }
+  }
+
+  /**
+   * Flush buffered chunks to SQLite in a single transaction.
+   * This reduces write overhead by batching multiple chunks together.
+   */
+  private _flushChunkBuffer() {
+    this._flushTimeout = null;
+
+    if (this._chunkBuffer.length === 0) {
+      return;
+    }
+
+    const chunks = this._chunkBuffer;
+    this._chunkBuffer = [];
+
+    // Batch insert all chunks
+    const now = Date.now();
+    for (const chunk of chunks) {
+      this.sql`
+        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+        values (${chunk.id}, ${chunk.streamId}, ${chunk.body}, ${chunk.index}, ${now})
+      `;
+    }
+  }
+
+  /**
+   * Start tracking a new stream for resumable streaming.
+   * Creates metadata entry in SQLite and sets up tracking state.
+   * @param requestId - The unique ID of the chat request
+   * @returns The generated stream ID
+   */
+  private _startStream(requestId: string): string {
+    const streamId = nanoid();
+    this._activeStreamId = streamId;
+    this._activeRequestId = requestId;
+    this._streamChunkIndex = 0;
+
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      values (${streamId}, ${requestId}, 'streaming', ${Date.now()})
+    `;
+
+    return streamId;
+  }
+
+  /**
+   * Mark a stream as completed and flush any pending chunks.
+   * @param streamId - The stream to mark as completed
+   */
+  private _completeStream(streamId: string) {
+    // Flush any pending chunks before completing
+    this._flushChunkBuffer();
+
+    this.sql`
+      update cf_ai_chat_stream_metadata 
+      set status = 'completed', completed_at = ${Date.now()} 
+      where id = ${streamId}
+    `;
+    this._activeStreamId = null;
+    this._activeRequestId = null;
+    this._streamChunkIndex = 0;
+
+    // Periodically clean up old streams (not on every completion)
+    this._maybeCleanupOldStreams();
+  }
+
+  /**
+   * Clean up old completed streams if enough time has passed since last cleanup.
+   * This prevents database growth while avoiding cleanup overhead on every stream completion.
+   */
+  private _maybeCleanupOldStreams() {
+    const now = Date.now();
+    if (now - this._lastCleanupTime < CLEANUP_INTERVAL_MS) {
+      return;
+    }
+    this._lastCleanupTime = now;
+
+    const cutoff = now - CLEANUP_AGE_THRESHOLD_MS;
+    this.sql`
+      delete from cf_ai_chat_stream_chunks 
+      where stream_id in (
+        select id from cf_ai_chat_stream_metadata 
+        where status = 'completed' and completed_at < ${cutoff}
+      )
+    `;
+    this.sql`
+      delete from cf_ai_chat_stream_metadata 
+      where status = 'completed' and completed_at < ${cutoff}
+    `;
   }
 
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
@@ -169,6 +488,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
         this._destroyAbortControllers();
         this.sql`delete from cf_ai_chat_agent_messages`;
+        // Also clear stream data
+        this.sql`delete from cf_ai_chat_stream_chunks`;
+        this.sql`delete from cf_ai_chat_stream_metadata`;
+        this._activeStreamId = null;
+        this._activeRequestId = null;
+        this._streamChunkIndex = 0;
         this.messages = [];
         this._broadcastChatMessage(
           {
@@ -183,17 +508,31 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       } else if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
         // propagate an abort signal for the associated request
         this._cancelChatRequest(data.id);
+      } else if (data.type === MessageType.CF_AGENT_STREAM_RESUME_ACK) {
+        // Client is ready to receive stream chunks - verify request ID matches
+        if (
+          this._activeStreamId &&
+          this._activeRequestId &&
+          this._activeRequestId === data.id
+        ) {
+          this._sendStreamChunks(
+            connection,
+            this._activeStreamId,
+            this._activeRequestId
+          );
+        }
       }
     }
   }
 
   override async onRequest(request: Request): Promise<Response> {
-    return this._tryCatchChat(() => {
+    return this._tryCatchChat(async () => {
       const url = new URL(request.url);
       if (url.pathname.endsWith("/get-messages")) {
         const messages = this._loadMessagesFromDb();
         return Response.json(messages);
       }
+
       return super.onRequest(request);
     });
   }
@@ -271,6 +610,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         });
         return;
       }
+
+      // Start tracking this stream for resumability
+      const streamId = this._startStream(id);
 
       /* Lazy loading ai sdk, because putting it in module scope is
        * causing issues with startup time.
@@ -464,6 +806,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         while (true) {
           const { done, value } = await reader.read();
           if (done) {
+            // Mark the stream as completed
+            this._completeStream(streamId);
             // Send final completion signal
             this._broadcastChatMessage({
               body: "",
@@ -850,14 +1194,18 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                     // Do we want to handle data parts?
                   }
 
+                  // Store chunk for replay on reconnection
+                  const chunkBody = JSON.stringify(data);
+                  this._storeStreamChunk(streamId, chunkBody);
+
                   // Always forward the raw part to the client
                   this._broadcastChatMessage({
-                    body: JSON.stringify(data),
+                    body: chunkBody,
                     done: false,
                     id,
                     type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
                   });
-                } catch (_e) {
+                } catch (_error) {
                   // Skip malformed JSON lines silently
                 }
               }
@@ -868,8 +1216,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             if (chunk.length > 0) {
               message.parts.push({ type: "text", text: chunk });
               // Synthesize a text-delta event so clients can stream-render
+              const chunkBody = JSON.stringify({
+                type: "text-delta",
+                delta: chunk
+              });
+              // Store chunk for replay on reconnection
+              this._storeStreamChunk(streamId, chunkBody);
               this._broadcastChatMessage({
-                body: JSON.stringify({ type: "text-delta", delta: chunk }),
+                body: chunkBody,
                 done: false,
                 id,
                 type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
@@ -934,10 +1288,28 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
-   * When the DO is destroyed, cancel all pending requests
+   * When the DO is destroyed, cancel all pending requests and clean up resources
    */
   async destroy() {
     this._destroyAbortControllers();
+
+    // Clear pending flush timeout to prevent memory leaks
+    if (this._flushTimeout) {
+      clearTimeout(this._flushTimeout);
+      this._flushTimeout = null;
+    }
+
+    // Flush any remaining chunks before cleanup
+    this._flushChunkBuffer();
+
+    // Clean up stream tables
+    this.sql`drop table if exists cf_ai_chat_stream_chunks`;
+    this.sql`drop table if exists cf_ai_chat_stream_metadata`;
+
+    // Clear active stream state
+    this._activeStreamId = null;
+    this._activeRequestId = null;
+
     await super.destroy();
   }
 }

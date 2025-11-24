@@ -67,6 +67,11 @@ type UseAgentChatOptions<
    * @default true
    */
   autoSendAfterAllConfirmationsResolved?: boolean;
+  /**
+   * Set to false to disable automatic stream resumption.
+   * @default true
+   */
+  resume?: boolean;
 };
 
 const requestCache = new Map<string, Promise<Message[]>>();
@@ -108,6 +113,7 @@ export function useAgentChat<
     tools,
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
     autoSendAfterAllConfirmationsResolved = true,
+    resume = true, // Enable stream resumption by default
     ...rest
   } = options;
 
@@ -332,17 +338,7 @@ export function useAgentChat<
         });
         return transport.sendMessages(options);
       },
-      reconnectToStream: async (
-        options: Parameters<
-          typeof DefaultChatTransport.prototype.reconnectToStream
-        >[0]
-      ) => {
-        const transport = new DefaultChatTransport<ChatMessage>({
-          api: agentUrlString,
-          fetch: aiFetch
-        });
-        return transport.reconnectToStream(options);
-      }
+      reconnectToStream: async () => null
     }),
     [agentUrlString, aiFetch]
   );
@@ -352,6 +348,9 @@ export function useAgentChat<
     messages: initialMessages,
     transport: customTransport,
     id: agent._pk
+    // Note: We handle stream resumption via WebSocket instead of HTTP,
+    // so we don't pass 'resume' to useChat. The onStreamResuming handler
+    // automatically resumes active streams when the WebSocket reconnects.
   });
 
   const processedToolCalls = useRef(new Set<string>());
@@ -453,41 +452,168 @@ export function useAgentChat<
     toolsRequiringConfirmation
   ]);
 
-  useEffect(() => {
-    function onClearHistory(event: MessageEvent) {
-      if (typeof event.data !== "string") return;
-      let data: OutgoingMessage;
-      try {
-        data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (_error) {
-        return;
-      }
-      if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
-        useChatHelpers.setMessages([]);
-      }
-    }
+  /**
+   * Contains the request ID, accumulated message parts, and a unique message ID.
+   */
+  const resumedStreamRef = useRef<{
+    id: string;
+    messageId: string;
+    parts: ChatMessage["parts"];
+  } | null>(null);
 
-    function onMessages(event: MessageEvent) {
+  useEffect(() => {
+    /**
+     * Unified message handler that parses JSON once and dispatches based on type.
+     * Avoids duplicate parsing overhead from separate listeners.
+     */
+    function onAgentMessage(event: MessageEvent) {
       if (typeof event.data !== "string") return;
+
       let data: OutgoingMessage<ChatMessage>;
       try {
         data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
       } catch (_error) {
         return;
       }
-      if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
-        useChatHelpers.setMessages(data.messages);
+
+      switch (data.type) {
+        case MessageType.CF_AGENT_CHAT_CLEAR:
+          useChatHelpers.setMessages([]);
+          break;
+
+        case MessageType.CF_AGENT_CHAT_MESSAGES:
+          useChatHelpers.setMessages(data.messages);
+          break;
+
+        case MessageType.CF_AGENT_STREAM_RESUMING:
+          if (!resume) return;
+          // Initialize resumed stream state with unique ID
+          resumedStreamRef.current = {
+            id: data.id,
+            messageId: nanoid(),
+            parts: []
+          };
+          // Send ACK to server; we're ready to receive chunks
+          agentRef.current.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+              id: data.id
+            })
+          );
+          break;
+
+        case MessageType.CF_AGENT_USE_CHAT_RESPONSE:
+          // Handle resumed stream chunks
+          if (!resume || !resumedStreamRef.current) return;
+          if (data.id !== resumedStreamRef.current.id) return;
+
+          if (data.body?.trim()) {
+            try {
+              const chunkData = JSON.parse(data.body);
+              const resumedMsg = resumedStreamRef.current;
+
+              // Handle different chunk types
+              switch (chunkData.type) {
+                case "text-start": {
+                  resumedMsg.parts.push({
+                    type: "text",
+                    text: "",
+                    state: "streaming"
+                  });
+                  break;
+                }
+                case "text-delta": {
+                  const lastTextPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "text");
+                  if (lastTextPart && lastTextPart.type === "text") {
+                    lastTextPart.text += chunkData.delta;
+                  } else {
+                    resumedMsg.parts.push({
+                      type: "text",
+                      text: chunkData.delta
+                    });
+                  }
+                  break;
+                }
+                case "text-end": {
+                  const lastTextPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "text");
+                  if (lastTextPart && "state" in lastTextPart) {
+                    lastTextPart.state = "done";
+                  }
+                  break;
+                }
+                case "reasoning-start": {
+                  resumedMsg.parts.push({
+                    type: "reasoning",
+                    text: "",
+                    state: "streaming"
+                  });
+                  break;
+                }
+                case "reasoning-delta": {
+                  const lastReasoningPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "reasoning");
+                  if (
+                    lastReasoningPart &&
+                    lastReasoningPart.type === "reasoning"
+                  ) {
+                    lastReasoningPart.text += chunkData.delta;
+                  }
+                  break;
+                }
+                case "reasoning-end": {
+                  const lastReasoningPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "reasoning");
+                  if (lastReasoningPart && "state" in lastReasoningPart) {
+                    lastReasoningPart.state = "done";
+                  }
+                  break;
+                }
+              }
+
+              // Update messages with the partial response
+              useChatHelpers.setMessages((prevMessages: ChatMessage[]) => {
+                if (!resumedMsg) return prevMessages;
+
+                const existingIdx = prevMessages.findIndex(
+                  (m) => m.id === resumedMsg.messageId
+                );
+
+                const partialMessage = {
+                  id: resumedMsg.messageId,
+                  role: "assistant" as const,
+                  parts: [...resumedMsg.parts]
+                } as unknown as ChatMessage;
+
+                if (existingIdx >= 0) {
+                  const updated = [...prevMessages];
+                  updated[existingIdx] = partialMessage;
+                  return updated;
+                }
+                return [...prevMessages, partialMessage];
+              });
+            } catch (_error) {
+              // Not JSON, might be plain text
+            }
+          }
+
+          if (data.done) {
+            resumedStreamRef.current = null;
+          }
+          break;
       }
     }
 
-    agent.addEventListener("message", onClearHistory);
-    agent.addEventListener("message", onMessages);
-
+    agent.addEventListener("message", onAgentMessage);
     return () => {
-      agent.removeEventListener("message", onClearHistory);
-      agent.removeEventListener("message", onMessages);
+      agent.removeEventListener("message", onAgentMessage);
     };
-  }, [agent, useChatHelpers.setMessages]);
+  }, [agent, useChatHelpers.setMessages, resume]);
 
   // Wrapper that sends only when the last pending confirmation is resolved
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
