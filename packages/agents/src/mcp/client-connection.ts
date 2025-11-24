@@ -79,6 +79,7 @@ export type MCPTransportOptions = (
 export type MCPClientConnectionResult = {
   state: MCPConnectionState;
   error?: Error;
+  transport?: BaseTransportType;
 };
 
 export class MCPClientConnection {
@@ -117,6 +118,7 @@ export class MCPClientConnection {
 
   /**
    * Initialize a client connection, if authentication is required, the connection will be in the AUTHENTICATING state
+   * Sets connection state based on the result and emits observability events
    *
    * @returns
    */
@@ -128,14 +130,46 @@ export class MCPClientConnection {
 
     const res = await this.tryConnect(transportType);
 
-    if (res.error) {
-      this.connectionState = MCPConnectionState.FAILED;
-      // TODO: emit observability event
-    }
-
+    // Set the connection state
     this.connectionState = res.state;
 
-    return;
+    // Handle the result and emit appropriate events
+    if (res.state === MCPConnectionState.CONNECTED && res.transport) {
+      // Set up elicitation request handler after successful connection
+      this.client.setRequestHandler(
+        ElicitRequestSchema,
+        async (request: ElicitRequest) => {
+          return await this.handleElicitationRequest(request);
+        }
+      );
+
+      this.lastConnectedTransport = res.transport;
+
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:connect",
+        displayMessage: `Connected successfully using ${res.transport} transport for ${this.url.toString()}`,
+        payload: {
+          url: this.url.toString(),
+          transport: res.transport,
+          state: this.connectionState
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+    } else if (res.state === MCPConnectionState.FAILED && res.error) {
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:connect",
+        displayMessage: `Failed to connect to ${this.url.toString()}: ${toErrorMessage(res.error)}`,
+        payload: {
+          url: this.url.toString(),
+          transport: transportType,
+          state: this.connectionState,
+          error: toErrorMessage(res.error)
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+    }
   }
 
   /**
@@ -266,12 +300,24 @@ export class MCPClientConnection {
             break;
         }
       }
+
+      this.connectionState = MCPConnectionState.READY;
     } catch (error) {
       this.connectionState = MCPConnectionState.FAILED;
+
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:discover",
+        displayMessage: `Failed to discover capabilities for ${this.url.toString()}: ${toErrorMessage(error)}`,
+        payload: {
+          url: this.url.toString(),
+          error: toErrorMessage(error)
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+
       throw error;
     }
-
-    this.connectionState = MCPConnectionState.READY;
   }
 
   /**
@@ -447,22 +493,10 @@ export class MCPClientConnection {
 
       try {
         await this.client.connect(transport);
-        this.lastConnectedTransport = currentTransportType;
-
-        this._onObservabilityEvent.fire({
-          type: "mcp:client:connect",
-          displayMessage: `Connected successfully using ${currentTransportType} transport for ${this.url.toString()}`,
-          payload: {
-            url: this.url.toString(),
-            transport: currentTransportType,
-            state: this.connectionState
-          },
-          timestamp: Date.now(),
-          id: nanoid()
-        });
 
         return {
-          state: MCPConnectionState.CONNECTED
+          state: MCPConnectionState.CONNECTED,
+          transport: currentTransportType
         };
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
@@ -474,21 +508,7 @@ export class MCPClientConnection {
         }
 
         if (isTransportNotImplemented(error) && hasFallback) {
-          // Try the next transport silently
-          const url = this.url.toString();
-
-          this._onObservabilityEvent.fire({
-            type: "mcp:client:connect",
-            displayMessage: `${currentTransportType} transport not available, trying ${transports[transports.indexOf(currentTransportType) + 1]} for ${url}`,
-            payload: {
-              url,
-              transport: currentTransportType,
-              state: this.connectionState
-            },
-            timestamp: Date.now(),
-            id: nanoid()
-          });
-
+          // Try the next transport
           continue;
         }
 
@@ -499,16 +519,10 @@ export class MCPClientConnection {
       }
     }
 
-    // Set up elicitation request handler
-    this.client.setRequestHandler(
-      ElicitRequestSchema,
-      async (request: ElicitRequest) => {
-        return await this.handleElicitationRequest(request);
-      }
-    );
-
+    // Should never reach here
     return {
-      state: MCPConnectionState.CONNECTED
+      state: MCPConnectionState.FAILED,
+      error: new Error("No transports available")
     };
   }
 

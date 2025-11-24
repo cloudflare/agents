@@ -68,11 +68,12 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   }, [mcpState?.state]);
 
   // Update isConnecting based on mcpState
-  // SDK states: "discovering" | "authenticating" | "connecting" | "ready" | "failed"
+  // SDK states: "connected" | "discovering" | "authenticating" | "connecting" | "ready" | "failed"
   useEffect(() => {
     if (
       mcpState?.state === "discovering" ||
       mcpState?.state === "connecting" ||
+      mcpState?.state === "connected" ||
       mcpState?.state === "authenticating"
     ) {
       setIsConnecting(true);
@@ -218,7 +219,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
 
   // Generate status badge based on connection state
   const getStatusBadge = () => {
-    // SDK connection states: "discovering" | "authenticating" | "connecting" | "ready" | "failed"
+    // SDK connection states: "connected" | "discovering" | "authenticating" | "connecting" | "ready" | "failed"
     const states: Record<string, { colors: string; label: string }> = {
       discovering: {
         colors: "bg-blue-100 text-blue-800",
@@ -232,9 +233,13 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         colors: "bg-yellow-100 text-yellow-800",
         label: "Connecting"
       },
+      connected: {
+        colors: "bg-cyan-100 text-cyan-800",
+        label: "Connected"
+      },
       ready: {
         colors: "bg-green-100 text-green-800",
-        label: "Connected"
+        label: "Ready"
       },
       failed: {
         colors: "bg-red-100 text-red-800",
@@ -570,6 +575,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                     : log.status === "ready"
                       ? "info"
                       : log.status === "connecting" ||
+                          log.status === "connected" ||
                           log.status === "discovering" ||
                           log.status === "authenticating"
                         ? "info"
@@ -600,15 +606,56 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
           </div>
         )}
 
-        {/* Display tools when connected */}
-        {isActive &&
-          mcpState?.tools &&
-          Array.isArray(mcpState.tools) &&
-          mcpState.tools.length > 0 && (
-            <div className="mt-4 border border-green-200 rounded-md bg-green-50 p-3">
-              <div className="text-sm font-medium text-green-900 mb-2">
-                Available Tools ({mcpState.tools.length})
+        {/* Display tools when connected or ready */}
+        {(mcpState?.state === "connected" ||
+          mcpState?.state === "ready" ||
+          mcpState?.state === "discovering") && (
+          <div className="mt-4 border border-green-200 rounded-md bg-green-50 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm font-medium text-green-900">
+                Available Tools (
+                {mcpState?.tools && Array.isArray(mcpState.tools)
+                  ? mcpState.tools.length
+                  : 0}
+                )
               </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (mcpState?.id) {
+                    try {
+                      await agent.stub.refreshMcpTools(mcpState.id);
+                    } catch (err) {
+                      console.error(
+                        "[McpServers] Failed to refresh tools:",
+                        err
+                      );
+                    }
+                  }
+                }}
+                className="p-1.5 hover:bg-green-200 text-green-900 rounded-md transition-colors"
+                title="Refresh server capabilities"
+                aria-label="Refresh server capabilities"
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <title>Refresh</title>
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                  />
+                </svg>
+              </button>
+            </div>
+            {mcpState?.tools &&
+            Array.isArray(mcpState.tools) &&
+            mcpState.tools.length > 0 ? (
               <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
                 {mcpState.tools.map((tool: Tool) => {
                   const isExpanded = expandedTools.has(tool.name);
@@ -653,8 +700,15 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                   );
                 })}
               </div>
-            </div>
-          )}
+            ) : (
+              <div className="text-sm text-gray-600 text-center py-4">
+                {mcpState?.state === "discovering"
+                  ? "Discovering tools..."
+                  : "No tools available. Click refresh to discover."}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <LocalhostWarningModal

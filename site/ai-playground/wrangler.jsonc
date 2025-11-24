@@ -27,8 +27,6 @@
       "tag": "v1"
     }
   ],
-  "account_id": "85d0c02b57ed75faf9b18f92d5c01602",
-
   "observability": {
     "logs": {
       "enabled": true

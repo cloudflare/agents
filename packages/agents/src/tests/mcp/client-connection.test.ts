@@ -118,6 +118,13 @@ describe("MCP Client Connection Integration", () => {
 
       await connection.init();
 
+      // After init, connection should be in CONNECTED state
+      expect(connection.connectionState).toBe("connected");
+
+      // Manually trigger discovery
+      connection.connectionState = "discovering";
+      await connection.discoverAndRegister();
+
       expect(connection.connectionState).toBe("ready");
       expect(connection.serverCapabilities).toBeDefined();
       expect(connection.tools).toBeDefined();
@@ -180,7 +187,12 @@ describe("MCP Client Connection Integration", () => {
       connection.client.getServerCapabilities = mockGetCapabilities;
       connection.client.connect = vi.fn().mockResolvedValue(undefined);
 
-      await expect(connection.init()).rejects.toThrow(
+      await connection.init();
+      expect(connection.connectionState).toBe("connected");
+
+      // Now try to discover - this should fail due to missing capabilities
+      connection.connectionState = "discovering";
+      await expect(connection.discoverAndRegister()).rejects.toThrow(
         "The MCP Server failed to return server capabilities"
       );
     });
@@ -226,6 +238,11 @@ describe("MCP Client Connection Integration", () => {
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
+      expect(connection.connectionState).toBe("connected");
+
+      // Manually trigger discovery
+      connection.connectionState = "discovering";
+      await connection.discoverAndRegister();
 
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toHaveLength(1);
@@ -263,6 +280,11 @@ describe("MCP Client Connection Integration", () => {
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
+      expect(connection.connectionState).toBe("connected");
+
+      // Manually trigger discovery
+      connection.connectionState = "discovering";
+      await connection.discoverAndRegister();
 
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toEqual([]);
@@ -304,6 +326,11 @@ describe("MCP Client Connection Integration", () => {
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
+      expect(connection.connectionState).toBe("connected");
+
+      // Manually trigger discovery
+      connection.connectionState = "discovering";
+      await connection.discoverAndRegister();
 
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toEqual([]);
@@ -348,6 +375,11 @@ describe("MCP Client Connection Integration", () => {
       newConnection.client.setNotificationHandler = vi.fn();
 
       await newConnection.init();
+      expect(newConnection.connectionState).toBe("connected");
+
+      // Manually trigger discovery
+      newConnection.connectionState = "discovering";
+      await newConnection.discoverAndRegister();
 
       // Now verify the observability event was fired (filter for discover events only)
       const discoverEvents = observabilityEvents.filter(
@@ -361,8 +393,8 @@ describe("MCP Client Connection Integration", () => {
     });
   });
 
-  describe("Promise.allSettled Resilience", () => {
-    it("should continue initialization when some capabilities fail", async () => {
+  describe("Discovery Failure Handling", () => {
+    it("should fail discovery when any capability fails", async () => {
       const connection = new MCPClientConnection(
         new URL(serverUrl),
         { name: "test-client", version: "1.0.0" },
@@ -413,22 +445,18 @@ describe("MCP Client Connection Integration", () => {
         .mockResolvedValue({ resourceTemplates: [] });
 
       await connection.init();
+      expect(connection.connectionState).toBe("connected");
 
-      // Connection should still be ready despite partial failures
-      expect(connection.connectionState).toBe("ready");
+      // Manually trigger discovery - should fail
+      connection.connectionState = "discovering";
+      await expect(connection.discoverAndRegister()).rejects.toThrow(
+        "Instructions service down"
+      );
 
-      // Failed capabilities should have fallback values
-      expect(connection.instructions).toBeUndefined();
-      expect(connection.resources).toEqual([]);
+      // Connection should be in failed state
+      expect(connection.connectionState).toBe("failed");
 
-      // Successful capabilities should be populated
-      expect(connection.tools).toHaveLength(1);
-      expect(connection.tools[0].name).toBe("working-tool");
-      expect(connection.prompts).toHaveLength(1);
-      expect(connection.prompts[0].name).toBe("working-prompt");
-      expect(connection.resourceTemplates).toEqual([]);
-
-      // Verify observability events for failures
+      // Verify observability event for failure
       const testConnection = new MCPClientConnection(
         new URL(serverUrl),
         { name: "test-client", version: "1.0.0" },
@@ -475,30 +503,21 @@ describe("MCP Client Connection Integration", () => {
 
       await testConnection.init();
 
-      // Should have fired events for the two failures (filter for discover events)
+      // Manually trigger discovery - should fail
+      testConnection.connectionState = "discovering";
+      await expect(testConnection.discoverAndRegister()).rejects.toThrow();
+
+      // Should have fired observability event for the failure
       const discoverEvents = observabilityEvents.filter(
         (e) => e.type === "mcp:client:discover"
       );
-      expect(discoverEvents).toHaveLength(2);
-
-      const instructionsEvent = discoverEvents.find(
-        (e) => e.payload?.capability === "instructions"
-      );
-      expect(instructionsEvent).toBeDefined();
-      expect(instructionsEvent?.displayMessage).toContain(
-        "Failed to discover instructions"
-      );
-
-      const resourcesEvent = discoverEvents.find(
-        (e) => e.payload?.capability === "resources"
-      );
-      expect(resourcesEvent).toBeDefined();
-      expect(resourcesEvent?.displayMessage).toContain(
-        "Failed to discover resources"
+      expect(discoverEvents).toHaveLength(1);
+      expect(discoverEvents[0].displayMessage).toContain(
+        "Failed to discover capabilities"
       );
     });
 
-    it("should handle all capabilities failing", async () => {
+    it("should fail and set connection to failed state when discovery fails", async () => {
       const connection = new MCPClientConnection(
         new URL(serverUrl),
         { name: "test-client", version: "1.0.0" },
@@ -529,16 +548,18 @@ describe("MCP Client Connection Integration", () => {
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
+      expect(connection.connectionState).toBe("connected");
 
-      // Connection should still be ready with all fallback values
-      expect(connection.connectionState).toBe("ready");
-      expect(connection.instructions).toBeUndefined();
-      expect(connection.tools).toEqual([]);
-      expect(connection.resources).toEqual([]);
-      expect(connection.prompts).toEqual([]);
-      expect(connection.resourceTemplates).toEqual([]);
+      // Manually trigger discovery - should fail
+      connection.connectionState = "discovering";
+      await expect(connection.discoverAndRegister()).rejects.toThrow(
+        "All services down"
+      );
 
-      // Verify all failures are reported via observability events
+      // Connection should be in failed state
+      expect(connection.connectionState).toBe("failed");
+
+      // Verify observability event for failure
       const testConn = new MCPClientConnection(
         new URL(serverUrl),
         { name: "test-client", version: "1.0.0" },
@@ -575,28 +596,21 @@ describe("MCP Client Connection Integration", () => {
 
       await testConn.init();
 
-      // Should have events for all 5 failures (filter for discover events)
+      // Manually trigger discovery - should fail
+      testConn.connectionState = "discovering";
+      await expect(testConn.discoverAndRegister()).rejects.toThrow();
+
+      // Should have fired observability event for the failure
       const discoverEvents = events.filter(
         (e) => e.type === "mcp:client:discover"
       );
-      expect(discoverEvents).toHaveLength(5);
-
-      // Check each capability failure was reported
-      const capabilities = [
-        "instructions",
-        "tools",
-        "resources",
-        "prompts",
-        "resource templates"
-      ];
-      capabilities.forEach((cap) => {
-        const event = discoverEvents.find((e) => e.payload?.capability === cap);
-        expect(event).toBeDefined();
-        expect(event?.displayMessage).toContain(`Failed to discover ${cap}`);
-      });
+      expect(discoverEvents).toHaveLength(1);
+      expect(discoverEvents[0].displayMessage).toContain(
+        "Failed to discover capabilities"
+      );
     });
 
-    it("should handle mixed error types gracefully", async () => {
+    it("should fail on first error during discovery", async () => {
       const connection = new MCPClientConnection(
         new URL(serverUrl),
         { name: "test-client", version: "1.0.0" },
@@ -612,7 +626,7 @@ describe("MCP Client Connection Integration", () => {
         resources: { listChanged: true }
       });
 
-      // Different types of errors
+      // First operation succeeds, but second fails
       connection.client.getInstructions = vi
         .fn()
         .mockResolvedValue("Working instructions");
@@ -631,75 +645,14 @@ describe("MCP Client Connection Integration", () => {
       connection.client.setNotificationHandler = vi.fn();
 
       await connection.init();
+      expect(connection.connectionState).toBe("connected");
 
-      expect(connection.connectionState).toBe("ready");
-      expect(connection.instructions).toBe("Working instructions");
-      expect(connection.tools).toEqual([]);
-      expect(connection.resources).toEqual([]);
-      expect(connection.prompts).toEqual([]);
+      // Manually trigger discovery - should fail on first error
+      connection.connectionState = "discovering";
+      await expect(connection.discoverAndRegister()).rejects.toThrow();
 
-      // Verify mixed error types are reported correctly via observability
-      const mixedErrorConn = new MCPClientConnection(
-        new URL(serverUrl),
-        { name: "test-client", version: "1.0.0" },
-        {
-          transport: { type: "streamable-http" },
-          client: {}
-        }
-      );
-
-      const collectedEvents: MCPObservabilityEvent[] = [];
-      mixedErrorConn.onObservabilityEvent((event) => {
-        collectedEvents.push(event);
-      });
-
-      mixedErrorConn.client.connect = vi.fn().mockResolvedValue(undefined);
-      mixedErrorConn.client.getServerCapabilities = vi.fn().mockReturnValue({
-        tools: { listChanged: true },
-        resources: { listChanged: true }
-      });
-      mixedErrorConn.client.getInstructions = vi
-        .fn()
-        .mockResolvedValue("Working instructions");
-      mixedErrorConn.client.listTools = vi
-        .fn()
-        .mockRejectedValue({ code: -32601, message: "Method not found" });
-      mixedErrorConn.client.listResources = vi
-        .fn()
-        .mockRejectedValue(new Error("Network error"));
-      mixedErrorConn.client.listPrompts = vi
-        .fn()
-        .mockResolvedValue({ prompts: [] });
-      mixedErrorConn.client.listResourceTemplates = vi
-        .fn()
-        .mockResolvedValue({ resourceTemplates: [] });
-      mixedErrorConn.client.setNotificationHandler = vi.fn();
-
-      await mixedErrorConn.init();
-
-      // Should have events for both error types (filter for discover events)
-      const discoverEvents = collectedEvents.filter(
-        (e) => e.type === "mcp:client:discover"
-      );
-      expect(discoverEvents).toHaveLength(2);
-
-      // Method not found error should have specific message
-      const toolsEvent = discoverEvents.find(
-        (e) => e.payload?.capability === "tools"
-      );
-      expect(toolsEvent).toBeDefined();
-      expect(toolsEvent?.displayMessage).toContain(
-        "The server advertised support for the capability tools"
-      );
-
-      // Regular error for resources
-      const resourcesEvent = discoverEvents.find(
-        (e) => e.payload?.capability === "resources"
-      );
-      expect(resourcesEvent).toBeDefined();
-      expect(resourcesEvent?.displayMessage).toContain(
-        "Failed to discover resources"
-      );
+      // Connection should be in failed state
+      expect(connection.connectionState).toBe("failed");
     });
   });
 
@@ -748,7 +701,7 @@ describe("MCP Client Connection Integration", () => {
         });
 
       connection.establishConnection = vi.fn().mockImplementation(async () => {
-        connection.connectionState = "ready";
+        connection.connectionState = "connected";
         connection.serverCapabilities = {};
         connection.instructions = "Test instructions";
         connection.tools = [];
@@ -756,6 +709,23 @@ describe("MCP Client Connection Integration", () => {
         connection.prompts = [];
         connection.resourceTemplates = [];
       });
+
+      // Mock client methods needed for discovery
+      connection.client.getServerCapabilities = vi.fn().mockReturnValue({});
+      connection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Test instructions");
+      connection.client.listTools = vi.fn().mockResolvedValue({ tools: [] });
+      connection.client.listResources = vi
+        .fn()
+        .mockResolvedValue({ resources: [] });
+      connection.client.listPrompts = vi
+        .fn()
+        .mockResolvedValue({ prompts: [] });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockResolvedValue({ resourceTemplates: [] });
+      connection.client.setNotificationHandler = vi.fn();
 
       const authCode = "test-auth-code";
 
@@ -767,6 +737,13 @@ describe("MCP Client Connection Integration", () => {
       expect(connection.connectionState).toBe("connecting");
 
       await connection.establishConnection();
+
+      expect(connection.connectionState).toBe("connected");
+
+      // Manually trigger discovery
+      connection.connectionState = "discovering";
+      await connection.discoverAndRegister();
+
       expect(connection.connectionState).toBe("ready");
     });
 

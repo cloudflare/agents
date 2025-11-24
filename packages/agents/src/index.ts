@@ -1449,9 +1449,10 @@ export class Agent<
       }
     });
 
-    // Connect to server (updates storage with auth URL if OAuth)
-    // This fires onServerStateChanged event which triggers broadcast
     const result = await this.mcp.connectToServer(id);
+
+    // If state is connected then this is an non oauth connection and we should try discovery.
+    await this.mcp.discoverIfConnected(id);
 
     return {
       id,

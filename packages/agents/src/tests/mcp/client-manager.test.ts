@@ -950,10 +950,10 @@ describe("MCPClientManager OAuth Integration", () => {
         transport: { type: "auto" }
       });
 
-      // Mock connection to reach ready state
+      // Mock connection to reach connected state
       const conn = manager.mcpConnections[id];
       conn.init = vi.fn().mockImplementation(async () => {
-        conn.connectionState = "ready";
+        conn.connectionState = "connected";
       });
 
       // Clear previous calls from registerServer
@@ -961,8 +961,8 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.connectToServer(id);
 
-      // Should fire when connection reaches ready state
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+      // Should fire twice: once after init(), once at the end
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(2);
     });
 
     it("should fire onServerStateChanged when connecting to OAuth server (authenticating state)", async () => {
@@ -1010,8 +1010,8 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.connectToServer(id);
 
-      // Should fire when OAuth is initialized
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+      // Should fire twice: once after init(), once after saving auth URL
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(2);
     });
 
     it("should fire onServerStateChanged when OAuth callback succeeds", async () => {
@@ -1168,16 +1168,20 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       const conn = manager.mcpConnections[id];
-      conn.connectionState = "connecting";
-      conn.establishConnection = vi.fn().mockResolvedValue(undefined);
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+      });
+      conn.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "ready";
+      });
 
       // Clear previous calls from registerServer
       onStateChangedSpy.mockClear();
 
       await manager.establishConnection(id);
 
-      // Should fire on successful establishment
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+      // Should fire 5 times: 2 from connectToServer (after init + at end), 1 explicit in establishConnection, 2 from discoverIfConnected (discovering + ready)
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(5);
     });
 
     it("should fire onServerStateChanged when establishConnection fails", async () => {
@@ -1194,18 +1198,25 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       const conn = manager.mcpConnections[id];
-      conn.connectionState = "connecting";
-      conn.establishConnection = vi
-        .fn()
-        .mockRejectedValue(new Error("Connection failed"));
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+      });
+      conn.discoverAndRegister = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "failed";
+        throw new Error("Discovery failed");
+      });
 
       // Clear previous calls from registerServer
       onStateChangedSpy.mockClear();
 
-      await manager.establishConnection(id);
+      try {
+        await manager.establishConnection(id);
+      } catch (e) {
+        // Expected to throw
+      }
 
-      // Should fire even on failure
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+      // Should fire 4 times: 2 from connectToServer (after init + at end), 1 explicit in establishConnection, 1 from discoverIfConnected (when setting to discovering before it fails)
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
     });
 
     it("should fire onServerStateChanged when removing a server", async () => {

@@ -360,15 +360,8 @@ export class MCPClientManager {
       };
     }
 
-    // If connection is connected, then try discovery
-    if (
-      this.mcpConnections[id].connectionState === MCPConnectionState.CONNECTED
-    ) {
-      this.mcpConnections[id].connectionState = MCPConnectionState.DISCOVERING;
-      this._onServerStateChanged.fire();
-      await this.mcpConnections[id].discoverAndRegister();
-      this._onServerStateChanged.fire();
-    }
+    // If connection is connected, discover capabilities
+    await this.discoverIfConnected(id);
 
     return {
       id
@@ -640,8 +633,52 @@ export class MCPClientManager {
   }
 
   /**
+   * Discover server capabilities if connection is in CONNECTED state
+   * Transitions from CONNECTED to DISCOVERING to READY
+   * Can be called to refresh server capabilities (e.g., from a UI refresh button)
+   * @param serverId The server ID to discover
+   */
+  async discoverIfConnected(serverId: string): Promise<void> {
+    const conn = this.mcpConnections[serverId];
+    if (!conn) {
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:discover",
+        displayMessage: `discoverIfConnected called but connection not found for ${serverId}`,
+        payload: {},
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+      return;
+    }
+
+    if (conn.connectionState === MCPConnectionState.CONNECTED) {
+      conn.connectionState = MCPConnectionState.DISCOVERING;
+      this._onServerStateChanged.fire();
+
+      await conn.discoverAndRegister();
+      this._onServerStateChanged.fire();
+
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:discover",
+        displayMessage: `Discovery completed for ${serverId}, final state: ${conn.connectionState}`,
+        payload: {},
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+    } else {
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:discover",
+        displayMessage: `discoverIfConnected skipped for ${serverId}, state is ${conn.connectionState} (not CONNECTED)`,
+        payload: {},
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+    }
+  }
+
+  /**
    * Establish connection in the background after OAuth completion
-   * This method should be called asynchronously and to not block the OAuth callback response
+   * This method connects to the server and discovers its capabilities
    * @param serverId The server ID to establish connection for
    */
   async establishConnection(serverId: string): Promise<void> {
@@ -657,16 +694,22 @@ export class MCPClientManager {
       return;
     }
 
-    await conn.init();
+    await this.connectToServer(serverId);
     this._onServerStateChanged.fire();
 
-    if (conn.connectionState == MCPConnectionState.CONNECTING) {
-      conn.connectionState = MCPConnectionState.DISCOVERING;
-      this._onServerStateChanged.fire();
+    await this.discoverIfConnected(serverId);
 
-      await conn.discoverAndRegister();
-      this._onServerStateChanged.fire();
-    }
+    this._onObservabilityEvent.fire({
+      type: "mcp:client:connect",
+      displayMessage: `establishConnection completed for ${serverId}, final state: ${conn.connectionState}`,
+      payload: {
+        url: conn.url.toString(),
+        transport: conn.options.transport.type || "unknown",
+        state: conn.connectionState
+      },
+      timestamp: Date.now(),
+      id: nanoid()
+    });
   }
 
   /**
