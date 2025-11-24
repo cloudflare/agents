@@ -514,7 +514,7 @@ export function useAgentChat<
               const chunkData = JSON.parse(data.body);
               const resumedMsg = resumedStreamRef.current;
 
-              // Handle different chunk types
+              // Handle all chunk types for complete message reconstruction
               switch (chunkData.type) {
                 case "text-start": {
                   resumedMsg.parts.push({
@@ -531,6 +531,7 @@ export function useAgentChat<
                   if (lastTextPart && lastTextPart.type === "text") {
                     lastTextPart.text += chunkData.delta;
                   } else {
+                    // Handle plain text responses (no text-start)
                     resumedMsg.parts.push({
                       type: "text",
                       text: chunkData.delta
@@ -576,6 +577,64 @@ export function useAgentChat<
                   }
                   break;
                 }
+                case "file": {
+                  resumedMsg.parts.push({
+                    type: "file",
+                    mediaType: chunkData.mediaType,
+                    url: chunkData.url
+                  });
+                  break;
+                }
+                case "source-url": {
+                  resumedMsg.parts.push({
+                    type: "source-url",
+                    sourceId: chunkData.sourceId,
+                    url: chunkData.url,
+                    title: chunkData.title
+                  });
+                  break;
+                }
+                case "source-document": {
+                  resumedMsg.parts.push({
+                    type: "source-document",
+                    sourceId: chunkData.sourceId,
+                    mediaType: chunkData.mediaType,
+                    title: chunkData.title,
+                    filename: chunkData.filename
+                  });
+                  break;
+                }
+                case "tool-input-available": {
+                  // Add tool call part when input is available
+                  resumedMsg.parts.push({
+                    type: `tool-${chunkData.toolName}`,
+                    toolCallId: chunkData.toolCallId,
+                    toolName: chunkData.toolName,
+                    state: "input-available",
+                    input: chunkData.input
+                  } as ChatMessage["parts"][number]);
+                  break;
+                }
+                case "tool-output-available": {
+                  // Update existing tool part with output
+                  const toolPart = resumedMsg.parts.find(
+                    (p) =>
+                      "toolCallId" in p && p.toolCallId === chunkData.toolCallId
+                  );
+                  if (toolPart && "state" in toolPart) {
+                    (toolPart as Record<string, unknown>).state =
+                      "output-available";
+                    (toolPart as Record<string, unknown>).output =
+                      chunkData.output;
+                  }
+                  break;
+                }
+                case "step-start": {
+                  resumedMsg.parts.push({ type: "step-start" });
+                  break;
+                }
+                // Other chunk types (tool-input-start, tool-input-delta, etc.)
+                // are intermediate states - the final state will be captured above
               }
 
               // Update messages with the partial response

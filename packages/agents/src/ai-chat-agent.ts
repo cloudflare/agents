@@ -806,12 +806,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         }
       }
 
+      let streamCompleted = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) {
             // Mark the stream as completed
             this._completeStream(streamId);
+            streamCompleted = true;
             // Send final completion signal
             this._broadcastChatMessage({
               body: "",
@@ -1235,6 +1237,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             }
           }
         }
+      } catch (error) {
+        // Mark stream as error if not already completed
+        if (!streamCompleted) {
+          this._markStreamError(streamId);
+          // Notify clients of the error
+          this._broadcastChatMessage({
+            body: error instanceof Error ? error.message : "Stream error",
+            done: true,
+            error: true,
+            id,
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          });
+        }
+        throw error;
       } finally {
         reader.releaseLock();
       }
@@ -1243,6 +1259,24 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         await this.persistMessages([...this.messages, message]);
       }
     });
+  }
+
+  /**
+   * Mark a stream as errored and clean up state.
+   * @param streamId - The stream to mark as errored
+   */
+  private _markStreamError(streamId: string) {
+    // Flush any pending chunks before marking error
+    this._flushChunkBuffer();
+
+    this.sql`
+      update cf_ai_chat_stream_metadata 
+      set status = 'error', completed_at = ${Date.now()} 
+      where id = ${streamId}
+    `;
+    this._activeStreamId = null;
+    this._activeRequestId = null;
+    this._streamChunkIndex = 0;
   }
 
   /**
