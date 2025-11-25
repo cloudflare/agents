@@ -636,7 +636,9 @@ describe("Streamable HTTP Transport", () => {
 
       // Extract the echoed request info
       const result = parsed.result as CallToolResult;
-      const contentText = result.content?.[0]?.text;
+      const firstContent = result.content?.[0];
+      const contentText =
+        firstContent?.type === "text" ? firstContent.text : undefined;
       const echoedData = JSON.parse(
         typeof contentText === "string" ? contentText : "{}"
       );
