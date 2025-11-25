@@ -1,5 +1,4 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { McpAgent } from "../mcp/index.ts";
 import {
@@ -30,6 +29,7 @@ export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
+  TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
 };
 
 type State = unknown;
@@ -39,41 +39,57 @@ type Props = {
 };
 
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
+  observability = undefined;
   private tempToolHandle?: { remove: () => void };
 
   server = new McpServer(
     { name: "test-server", version: "1.0.0" },
-    { capabilities: { logging: {}, tools: { listChanged: true } } }
+    {
+      capabilities: {
+        logging: {},
+        tools: { listChanged: true }
+        // disable because types started failing in 1.22.0
+        // elicitation: { form: {}, url: {} }
+      }
+    }
   );
 
   async init() {
-    this.server.tool(
+    this.server.registerTool(
       "greet",
-      "A simple greeting tool",
-      { name: z.string().describe("Name to greet") },
-      async ({ name }): Promise<CallToolResult> => {
+      {
+        description: "A simple greeting tool",
+        inputSchema: { name: z.string().describe("Name to greet") }
+      },
+      async ({ name }) => {
         return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "getPropsTestValue",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Get the test value"
+      },
+      async () => {
         return {
-          content: [{ text: this.props?.testValue ?? "unknown", type: "text" }]
+          content: [
+            { text: this.props?.testValue ?? "unknown", type: "text" as const }
+          ]
         };
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "emitLog",
-      "Emit a logging/message notification",
       {
-        level: z.enum(["debug", "info", "warning", "error"]),
-        message: z.string()
+        description: "Emit a logging/message notification",
+        inputSchema: {
+          level: z.enum(["debug", "info", "warning", "error"]),
+          message: z.string()
+        }
       },
-      async ({ level, message }): Promise<CallToolResult> => {
+      async ({ level, message }) => {
         // Force a logging message to be sent when the tool is called
         await this.server.server.sendLoggingMessage({
           level,
@@ -85,44 +101,84 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       }
     );
 
+    this.server.tool(
+      "elicitName",
+      "Test tool that elicits user input for a name",
+      {},
+      async () => {
+        const result = await this.server.server.elicitInput({
+          message: "What is your name?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Your name"
+              }
+            },
+            required: ["name"]
+          }
+        });
+
+        if (result.action === "accept" && result.content?.name) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `You said your name is: ${result.content.name}`
+              }
+            ]
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: "Elicitation cancelled" }]
+        };
+      }
+    );
+
     // Use `registerTool` so we can later remove it.
     // Triggers notifications/tools/list_changed
-    this.server.tool(
+    this.server.registerTool(
       "installTempTool",
-      "Register a temporary tool that echoes input",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Register a temp tool",
+        inputSchema: {}
+      },
+      async () => {
         if (!this.tempToolHandle) {
-          // Prefer modern registerTool(name, description, schema, handler)
           this.tempToolHandle = this.server.registerTool(
             "temp-echo",
             {
               description: "Echo text (temporary tool)",
               inputSchema: { what: z.string().describe("Text to echo") }
             },
-            async ({ what }: { what: string }): Promise<CallToolResult> => {
+            async ({ what }) => {
               return { content: [{ type: "text", text: `echo:${what}` }] };
             }
           );
         }
-        // Most SDKs auto-send notifications/tools/list_changed here.
         return { content: [{ type: "text", text: "temp tool installed" }] };
       }
     );
 
     // Remove the dynamically added tool.
-    // Triggers notifications/tools/list_changed
-    this.server.tool(
+    this.server.registerTool(
       "uninstallTempTool",
-      "Remove the temporary tool if present",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Remove the temporary tool if present"
+      },
+      async () => {
         if (this.tempToolHandle?.remove) {
           this.tempToolHandle.remove();
           this.tempToolHandle = undefined;
-          return { content: [{ type: "text", text: "temp tool removed" }] };
+          return {
+            content: [{ type: "text" as const, text: "temp tool removed" }]
+          };
         }
-        return { content: [{ type: "text", text: "nothing to remove" }] };
+        return {
+          content: [{ type: "text" as const, text: "nothing to remove" }]
+        };
       }
     );
   }
@@ -130,6 +186,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
 
 // Test email agents
 export class TestEmailAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -144,6 +201,7 @@ export class TestEmailAgent extends Agent<Env> {
 }
 
 export class TestCaseSensitiveAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -156,6 +214,7 @@ export class TestCaseSensitiveAgent extends Agent<Env> {
 }
 
 export class TestUserNotificationAgent extends Agent<Env> {
+  observability = undefined;
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -167,11 +226,29 @@ export class TestUserNotificationAgent extends Agent<Env> {
   }
 }
 
+export class TestDestroyScheduleAgent extends Agent<Env, { status: string }> {
+  observability = undefined;
+  initialState = {
+    status: "unscheduled"
+  };
+
+  async scheduleSelfDestructingAlarm() {
+    this.setState({ status: "scheduled" });
+    await this.schedule(0, "destroy");
+  }
+
+  getStatus() {
+    return this.state.status;
+  }
+}
+
 // An Agent that tags connections in onConnect,
 // then echoes whether the tag was observed in onMessage
 export class TestRaceAgent extends Agent<Env> {
   initialState = { hello: "world" };
   static options = { hibernate: true };
+
+  observability = undefined;
 
   async onConnect(conn: Connection<{ tagged: boolean }>) {
     // Simulate real async setup to widen the window a bit
@@ -187,6 +264,8 @@ export class TestRaceAgent extends Agent<Env> {
 
 // Test Agent for OAuth client side flows
 export class TestOAuthAgent extends Agent<Env> {
+  observability = undefined;
+
   async onRequest(_request: Request): Promise<Response> {
     return new Response("Test OAuth Agent");
   }
@@ -232,11 +311,22 @@ export class TestOAuthAgent extends Agent<Env> {
 
   async setupMockMcpConnection(
     serverId: string,
-    _serverName: string,
+    serverName: string,
     serverUrl: string,
-    callbackUrl: string
+    callbackUrl: string,
+    clientId?: string | null
   ): Promise<void> {
-    this.mcp.registerCallbackUrl(`${callbackUrl}/${serverId}`);
+    // Save server to database with callback URL
+    // biome-ignore lint/suspicious/noExplicitAny: just a test
+    await (this.mcp as any)._storage.saveServer({
+      id: serverId,
+      name: serverName,
+      server_url: serverUrl,
+      callback_url: `${callbackUrl}/${serverId}`,
+      client_id: clientId ?? null,
+      auth_url: null,
+      server_options: null
+    });
     this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
       serverId,
       serverUrl,
@@ -292,8 +382,8 @@ export class TestOAuthAgent extends Agent<Env> {
     return servers.length > 0 ? servers[0] : null;
   }
 
-  isCallbackUrlRegistered(callbackUrl: string): boolean {
-    return this.mcp.isCallbackRequest(new Request(callbackUrl));
+  async isCallbackUrlRegistered(callbackUrl: string): Promise<boolean> {
+    return await this.mcp.isCallbackRequest(new Request(callbackUrl));
   }
 
   removeMcpConnection(serverId: string): void {
@@ -306,11 +396,13 @@ export class TestOAuthAgent extends Agent<Env> {
 
   resetMcpStateRestoredFlag(): void {
     // @ts-expect-error - accessing private property for testing
-    this._mcpStateRestored = false;
+    this._mcpConnectionsInitialized = false;
   }
 }
 
 export class TestChatAgent extends AIChatAgent<Env> {
+  observability = undefined;
+
   async onChatMessage() {
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
@@ -471,19 +563,23 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
 // Test MCP Agent for jurisdiction feature
 export class TestMcpJurisdiction extends McpAgent<Env> {
+  observability = undefined;
+
   server = new McpServer(
     { name: "test-jurisdiction-server", version: "1.0.0" },
     { capabilities: { tools: {} } }
   );
 
   async init() {
-    this.server.tool(
+    this.server.registerTool(
       "test-tool",
-      "A test tool",
-      { message: z.string().describe("Test message") },
-      async ({ message }): Promise<CallToolResult> => ({
-        content: [{ text: `Echo: ${message}`, type: "text" }]
-      })
+      {
+        description: "A test tool",
+        inputSchema: { message: z.string().describe("Test message") }
+      },
+      async ({ message }) => {
+        return { content: [{ text: `Echo: ${message}`, type: "text" }] };
+      }
     );
   }
 }

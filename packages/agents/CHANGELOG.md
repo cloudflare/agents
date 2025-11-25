@@ -1,5 +1,19 @@
 # @cloudflare/agents
 
+## 0.2.23
+
+### Patch Changes
+
+- [#649](https://github.com/cloudflare/agents/pull/649) [`e135cf5`](https://github.com/cloudflare/agents/commit/e135cf5539eb0a4557fda5cf27730818ab2c664d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - fix auth url not being cleared on a successful oauth callback causing endless reconnection
+
+## 0.2.22
+
+### Patch Changes
+
+- [#637](https://github.com/cloudflare/agents/pull/637) [`1e3b8c9`](https://github.com/cloudflare/agents/commit/1e3b8c9d7ffcec623d3eb95863959e25de109abe) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Removed client edge transports and added deprecation warnings to update imports to the mcp typescript sdk
+
+- [#641](https://github.com/cloudflare/agents/pull/641) [`b2187b4`](https://github.com/cloudflare/agents/commit/b2187b44269f5568d79f269848e0eb98aa781d16) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
 ## 0.2.21
 
 ### Patch Changes

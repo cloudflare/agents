@@ -1,4 +1,5 @@
 ---
+"hono-agents": patch
 "agents": patch
 ---
 

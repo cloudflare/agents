@@ -253,7 +253,6 @@ export function useAgentChat<
         //   type: MessageType.CF_AGENT_CHAT_MESSAGES,
         //   messages: ... /* some way of getting current messages ref? */
         // }))
-
         abortController.abort();
         // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
         controller.close();
@@ -296,6 +295,13 @@ export function useAgentChat<
       const stream = new ReadableStream({
         start(c) {
           controller = c;
+        },
+        cancel(reason?: unknown) {
+          console.warn(
+            "[agents/ai-react] cancelling stream",
+            id,
+            reason || "no reason"
+          );
         }
       });
 

@@ -39,10 +39,12 @@ export class MyMCP extends McpAgent<Env, State, {}> {
 
     // Register tool - Note: Current MCP SDK doesn't support icons in tool method yet
     // Icons are supported at the server implementation level
-    this.server.tool(
+    this.server.registerTool(
       "add",
-      "Add to the counter, stored in the MCP",
-      { a: z.number() },
+      {
+        description: "Add to the counter, stored in the MCP",
+        inputSchema: { a: z.number() }
+      },
       async ({ a }) => {
         this.setState({ ...this.state, counter: this.state.counter + a });
 

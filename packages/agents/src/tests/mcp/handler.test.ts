@@ -1,6 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { JSONRPCError } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import { createMcpHandler } from "../../mcp/handler";
 import { z } from "zod";
@@ -21,13 +21,15 @@ describe("createMcpHandler", () => {
       { capabilities: { tools: {} } }
     );
 
-    server.tool(
+    server.registerTool(
       "test-tool",
-      "A test tool",
-      { message: z.string().describe("Test message") },
-      async ({ message }): Promise<CallToolResult> => ({
-        content: [{ text: `Echo: ${message}`, type: "text" }]
-      })
+      {
+        description: "A test tool",
+        inputSchema: { message: z.string().describe("Test message") }
+      },
+      async ({ message }) => {
+        return { content: [{ text: `Echo: ${message}`, type: "text" }] };
+      }
     );
 
     return server;
@@ -395,7 +397,7 @@ describe("createMcpHandler", () => {
       expect(response.status).toBe(500);
       expect(response.headers.get("Content-Type")).toBe("application/json");
 
-      const body = (await response.json()) as any;
+      const body = (await response.json()) as JSONRPCError;
       expect(body.jsonrpc).toBe("2.0");
       expect(body.error).toBeDefined();
       expect(body.error.code).toBe(-32603);
@@ -438,7 +440,7 @@ describe("createMcpHandler", () => {
       const response = await handler(request, env, ctx);
 
       expect(response.status).toBe(500);
-      const body = (await response.json()) as any;
+      const body = (await response.json()) as JSONRPCError;
       expect(body.error.message).toBe("Internal server error");
     });
   });

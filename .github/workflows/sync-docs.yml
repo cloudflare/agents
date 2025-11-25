@@ -7,11 +7,20 @@ on:
 jobs:
   sync-docs:
     runs-on: ubuntu-latest
+    if: "!startsWith(github.event.pull_request.title, 'Version Packages')"
     permissions:
       contents: write
       pull-requests: write
       id-token: write
     steps:
+      - name: Generate GitHub App token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: cloudflare
+
       - name: Checkout source repository
         uses: actions/checkout@v4
         with:
@@ -22,37 +31,18 @@ jobs:
         id: changed-files
         run: |
           git fetch origin ${{ github.event.pull_request.base.ref }}
-          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD > changed_files.txt
-          echo "Changed files:"
-          cat changed_files.txt
-          grep '^docs/.*\.md$' changed_files.txt > docs_changed.txt || echo "No docs changed"
-
-      - name: Get file contents and diffs
-        id: get-diffs
-        run: |
-          mkdir -p /tmp/diffs
-          touch /tmp/diffs/changes.txt
-
-          # Capture all changed files and their diffs
-          while IFS= read -r file; do
-            echo "=== $file ===" >> /tmp/diffs/changes.txt
-            git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- "$file" >> /tmp/diffs/changes.txt
-            echo -e "\n\n" >> /tmp/diffs/changes.txt
-          done < changed_files.txt
-
-          # Always run - let Claude decide if docs are needed
-          echo "skip=false" >> $GITHUB_OUTPUT
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD | tr '\n' ',' | sed 's/,$//')
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "Changed files: $CHANGED_FILES"
 
       - name: Checkout cloudflare-docs repository
-        if: steps.get-diffs.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: cloudflare/cloudflare-docs
-          token: ${{ secrets.AGENTS_GITHUB_TOKEN }}
+          token: ${{ steps.generate-token.outputs.token }}
           path: cloudflare-docs
 
       - name: Create branch in cloudflare-docs
-        if: steps.get-diffs.outputs.skip != 'true'
         run: |
           cd cloudflare-docs
           git config user.name "github-actions[bot]"
@@ -60,7 +50,6 @@ jobs:
           git checkout -b sync-docs-pr-${{ github.event.pull_request.number }}
 
       - name: Create prompt for Claude Code
-        if: steps.get-diffs.outputs.skip != 'true'
         id: create-prompt
         run: |
           # Store PR metadata in environment variables to avoid shell escaping issues
@@ -71,22 +60,24 @@ jobs:
           cat > /tmp/claude_prompt.md << EOF
           # Intelligent Documentation Sync Task
 
-          ⚠️ **CRITICAL INSTRUCTION**: All PR metadata is provided in the Context section below. 
-          DO NOT run \`gh pr view\`, \`gh api\`, or any other command to fetch PR information from GitHub.
-          The PR number, title, and URL below are the ONLY source of truth. Use them EXACTLY as written.
-
           ## Context
           - **Source Repository:** ${{ github.repository }}
           - **Original PR Number:** ${PR_NUMBER}
           - **Original PR Title:** ${PR_TITLE}
           - **Original PR URL:** ${PR_URL}
+          - **Changed Files:** ${{ steps.changed-files.outputs.changed_files }}
           - **PR Description:**
           ${{ github.event.pull_request.body }}
 
-          ## Changed Files and Diffs
-          $(cat /tmp/diffs/changes.txt)
+          ⚠️ **IMPORTANT**: All PR metadata above is the ONLY source of truth. Use these values EXACTLY as written.
+          DO NOT fetch PR title/URL from GitHub APIs.
 
           ## Your Task: Evaluate and Act
+
+          **First, gather the information you need:**
+          1. Review the list of changed files above
+          2. Use \`gh pr diff ${PR_NUMBER}\` to see the full diff for this PR
+          3. Use the Read tool to examine specific files if needed
 
           You have access to two repositories:
           1. The current directory (our main repo at ${{ github.repository }})
@@ -94,7 +85,7 @@ jobs:
 
           **Step 1: Evaluate if Documentation Sync is Needed**
 
-          Please review the changes in this PR and determine if they require documentation updates in cloudflare-docs:
+          Review the changes and determine if they require documentation updates in cloudflare-docs:
 
           - **ALWAYS sync if ANY of these are true:**
             - Documentation files in docs/ were directly changed (even if other non-doc files also changed)
@@ -129,20 +120,23 @@ jobs:
              Run exactly: `cd cloudflare-docs && git push origin sync-docs-pr-${PR_NUMBER}`
 
           7. **CRITICAL - Create or update PR in cloudflare-docs:**
-             ⚠️ **CRITICAL**: 
-             - DO NOT fetch PR data from GitHub API to get title/description
-             - DO NOT add your own description or summary
-             - Use ONLY the PR_NUMBER, PR_TITLE, and PR_URL from the Context section above
-             
-             First check if PR already exists, then create or update:
+             ⚠️ **CRITICAL**: Use the exact PR_NUMBER, PR_TITLE, and PR_URL values from the Context section above.
+
+             Copy and run this EXACT script (replace PLACEHOLDER values with actual values from Context):
              ```bash
+             # Set variables from Context section above
+             PR_NUMBER="PLACEHOLDER_PR_NUMBER"
+             PR_TITLE="PLACEHOLDER_PR_TITLE"
+             PR_URL="PLACEHOLDER_PR_URL"
+
              # Check if PR already exists
              EXISTING_PR=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json number --jq '.[0].number')
-             
+
+             # Create PR title and body
              PR_TITLE_TEXT="📚 Sync docs from cloudflare/agents#${PR_NUMBER}: ${PR_TITLE}"
              PR_BODY_TEXT="Syncs documentation changes from [cloudflare/agents#${PR_NUMBER}](${PR_URL}): **${PR_TITLE}**"
-             
-             if [ -n "$EXISTING_PR" ]; then
+
+             if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
                # Update existing PR
                echo "Updating existing PR #$EXISTING_PR"
                gh pr edit $EXISTING_PR --repo cloudflare/cloudflare-docs --title "$PR_TITLE_TEXT" --body "$PR_BODY_TEXT"
@@ -152,32 +146,8 @@ jobs:
                gh pr create --repo cloudflare/cloudflare-docs --base main --head sync-docs-pr-${PR_NUMBER} --title "$PR_TITLE_TEXT" --body "$PR_BODY_TEXT"
              fi
              ```
-             
-             DO NOT modify the PR_TITLE_TEXT or PR_BODY_TEXT variables.
 
-          8. **CRITICAL - Comment on original PR (or edit existing comment):**
-             Get the docs PR URL, then create or update comment using PR_NUMBER from context:
-             ```bash
-             DOCS_PR_URL=$(gh pr list --repo cloudflare/cloudflare-docs --head sync-docs-pr-${PR_NUMBER} --json url --jq '.[0].url')
-             
-             # Check if bot comment already exists (look for unique marker)
-             EXISTING_COMMENT_ID=$(gh api repos/cloudflare/agents/issues/${PR_NUMBER}/comments --jq '.[] | select(.body | contains("docs-sync-bot-comment-marker")) | .id' | head -1)
-             
-             # Create comment body with proper newlines using printf
-             COMMENT_BODY=$(printf '<!-- docs-sync-bot-comment-marker -->\n\n📚 **Documentation sync PR:** %s\n\n_This comment will be updated as the PR changes._' "$DOCS_PR_URL")
-             
-             if [ -n "$EXISTING_COMMENT_ID" ]; then
-               # Update existing comment
-               echo "Updating existing comment ID: $EXISTING_COMMENT_ID"
-               gh api --method PATCH /repos/cloudflare/agents/issues/comments/$EXISTING_COMMENT_ID -f body="$COMMENT_BODY"
-             else
-               # Create new comment
-               echo "Creating new comment on PR #${PR_NUMBER}"
-               gh pr comment ${PR_NUMBER} --repo cloudflare/agents --body "$COMMENT_BODY"
-             fi
-             ```
-
-          ⚠️ THE TASK IS NOT COMPLETE UNTIL ALL 8 STEPS ARE DONE. Do not stop after editing files.
+          ⚠️ THE TASK IS NOT COMPLETE UNTIL ALL 7 STEPS ARE DONE. Do not stop after editing files.
 
           ## Documentation Writing Guidelines (Diátaxis Framework)
 
@@ -205,6 +175,38 @@ jobs:
           - Keep reference neutral and factual
           - Don't overexplain simple functions
 
+          ## Cloudflare Docs Style Requirements
+
+          **CRITICAL**: Follow all rules from the [Cloudflare Style Guide](https://developers.cloudflare.com/style-guide/) and these specific requirements:
+
+          **Grammar & Formatting:**
+          - Do not use contractions, exclamation marks, or non-standard quotes like \`''""\`
+          - Fix common spelling errors, specifically misspellings of "wrangler"
+          - Remove whitespace characters from the end of lines
+          - Remove duplicate words
+          - Do not use HTML for ordered lists
+
+          **Links:**
+          - Use full relative links (\`/agents/configuration/\`) instead of full URLs, local dev links, or dot notation
+          - Always use trailing slashes for links without anchors
+          - Use meaningful link words (page titles) - avoid "here", "this page", "read more"
+          - Add cross-links to relevant documentation pages where appropriate
+
+          **Components (MUST USE):**
+          - All components need to be imported below frontmatter: \`import { ComponentName } from "~/components";\`
+          - **WranglerConfig component**: Replace \`toml\` or \`json\` code blocks showing Wrangler configuration with the [\`WranglerConfig\` component](https://developers.cloudflare.com/style-guide/components/wrangler-config/). This is CRITICAL - always use this component for wrangler.toml/wrangler.jsonc examples.
+          - **DashButton component**: Replace \`https://dash.cloudflare.com\` in steps with the [\`DashButton\` component](https://developers.cloudflare.com/style-guide/components/dash-button/)
+          - **APIRequest component**: Replace \`sh\` code blocks with API requests to \`https://api.cloudflare.com\` with the [\`APIRequest\` component](https://developers.cloudflare.com/style-guide/components/api-request/)
+          - **FileTree component**: Replace \`txt\` blocks showing file trees with the [\`FileTree\` component](https://developers.cloudflare.com/style-guide/components/file-tree/)
+          - **PackageManagers component**: Replace \`sh\` blocks with npm commands using the [\`PackageManagers\` component](https://developers.cloudflare.com/style-guide/components/package-managers/)
+          - **TypeScriptExample component**: Replace \`ts\`/\`typescript\` code blocks with the [\`TypeScriptExample\` component](https://developers.cloudflare.com/style-guide/components/typescript-example/) (except in step-by-step TypeScript-specific tutorials)
+
+          **JSX & Partials:**
+          - When using JSX fragments for conditional rendering, use props variable to account for reusability
+          - Only use \`<Markdown />\` component in JSX conditionals, and only if needed
+          - Do not duplicate content in ternary/binary conditions
+          - For variables in links, use HTML instead of Markdown
+
           **Step 3: Provide Clear Output**
 
           Clearly state your decision:
@@ -225,12 +227,11 @@ jobs:
           echo "PROMPT_EOF" >> $GITHUB_OUTPUT
 
       - name: Run Claude Code to create adapted PR
-        if: steps.get-diffs.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.generate-token.outputs.token }}
           prompt: ${{ steps.create-prompt.outputs.prompt }}
-          claude_args: "--allowed-tools Bash,Edit,Write"
+          claude_args: '--allowed-tools "Read,Edit,Write,Bash"'
         env:
-          GH_TOKEN: ${{ secrets.AGENTS_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
