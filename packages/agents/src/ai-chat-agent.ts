@@ -24,8 +24,8 @@ import {
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import { nanoid } from "nanoid";
 
-/** Default interval for flushing buffered stream chunks to SQLite (ms) */
-const CHUNK_FLUSH_INTERVAL_MS = 100;
+/** Number of chunks to buffer before flushing to SQLite */
+const CHUNK_BUFFER_SIZE = 10;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /** Default age threshold for cleaning up completed streams (ms) - 24 hours */
@@ -87,7 +87,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   /**
    * Buffer for stream chunks pending write to SQLite.
-   * Chunks are batched and flushed periodically to reduce write overhead.
+   * Chunks are batched and flushed when buffer reaches CHUNK_BUFFER_SIZE.
    */
   private _chunkBuffer: Array<{
     id: string;
@@ -95,11 +95,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     body: string;
     index: number;
   }> = [];
-
-  /**
-   * Timeout handle for the chunk flush operation
-   */
-  private _flushTimeout: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Timestamp of the last cleanup operation for old streams
@@ -257,8 +252,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
-   * Buffer a stream chunk for later batch write to SQLite.
-   * Chunks are flushed periodically to reduce write overhead.
+   * Buffer a stream chunk for batch write to SQLite.
    * @param streamId - The stream this chunk belongs to
    * @param body - The serialized chunk body
    */
@@ -271,26 +265,17 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     });
     this._streamChunkIndex++;
 
-    // Schedule flush if not already scheduled
-    if (!this._flushTimeout) {
-      this._flushTimeout = setTimeout(
-        () => this._flushChunkBuffer(),
-        CHUNK_FLUSH_INTERVAL_MS
-      );
+    // Flush when buffer is full
+    if (this._chunkBuffer.length >= CHUNK_BUFFER_SIZE) {
+      this._flushChunkBuffer();
     }
   }
 
   /**
-   * Flush buffered chunks to SQLite in a single transaction.
+   * Flush buffered chunks to SQLite in a single batch.
    * This reduces write overhead by batching multiple chunks together.
    */
   private _flushChunkBuffer() {
-    // Clear pending timeout to prevent duplicate flushes
-    if (this._flushTimeout) {
-      clearTimeout(this._flushTimeout);
-      this._flushTimeout = null;
-    }
-
     if (this._chunkBuffer.length === 0) {
       return;
     }
@@ -1330,12 +1315,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async destroy() {
     this._destroyAbortControllers();
-
-    // Clear pending flush timeout to prevent memory leaks
-    if (this._flushTimeout) {
-      clearTimeout(this._flushTimeout);
-      this._flushTimeout = null;
-    }
 
     // Flush any remaining chunks before cleanup
     this._flushChunkBuffer();
