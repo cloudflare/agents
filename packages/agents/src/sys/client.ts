@@ -560,7 +560,3 @@ export type {
   AgentEvent,
   AgentEventType
 };
-const client = new AgentSystemClient({
-  baseUrl: "https://my-agent.workers.dev",
-  secret: "optional-auth-secret"
-});
