@@ -17,7 +17,7 @@
     "react-dom": "^19.2.0",
     "react-hotkeys-hook": "^5.2.1",
     "react-textarea-autosize": "^8.5.9",
-    "streamdown": "^1.5.1",
+    "streamdown": "^1.6.8",
     "workers-ai-provider": "^2.0.0",
     "zod": "^3.25.76"
   },
