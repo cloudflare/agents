@@ -413,11 +413,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
     return (
-      this.sql`
-      select body, chunk_index from cf_ai_chat_stream_chunks 
-      where stream_id = ${streamId} 
-      order by chunk_index asc
-    ` || []
+      this.sql<{ body: string; chunk_index: number }>`
+        select body, chunk_index from cf_ai_chat_stream_chunks 
+        where stream_id = ${streamId} 
+        order by chunk_index asc
+      ` || []
     );
   }
 
@@ -425,7 +425,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
-    const result = this.sql`
+    const result = this.sql<{ status: string; request_id: string }>`
       select status, request_id from cf_ai_chat_stream_metadata 
       where id = ${streamId}
     `;
@@ -440,8 +440,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
     created_at: number;
   }> {
     return (
-      this
-        .sql`select id, status, request_id, created_at from cf_ai_chat_stream_metadata` ||
+      this.sql<{
+        id: string;
+        status: string;
+        request_id: string;
+        created_at: number;
+      }>`select id, status, request_id, created_at from cf_ai_chat_stream_metadata` ||
       []
     );
   }
