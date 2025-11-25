@@ -65,7 +65,12 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     _options?: { abortSignal?: AbortSignal }
   ) {
-    const tools = this.mcp.getAITools();
+    let tools: ToolSet = {};
+    try {
+      tools = this.mcp.getAITools();
+    } catch (e) {
+      console.error("Failed to get AI tools", e);
+    }
 
     const workersai = createWorkersAI({
       binding: this.env.AI,
