@@ -1246,6 +1246,39 @@
         line-height: 1.4;
       }
 
+      /* Blueprint card hover effect */
+      .blueprint-card {
+        transition:
+          border-color 0.2s ease,
+          background 0.2s ease;
+      }
+      .blueprint-card:hover {
+        border-color: var(--accent) !important;
+        background: rgba(249, 115, 22, 0.05) !important;
+      }
+
+      /* Improved form inputs */
+      .form-group textarea {
+        resize: vertical;
+        min-height: 80px;
+      }
+
+      /* Modal backdrop animation */
+      .modal {
+        transition: opacity 0.2s ease;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .modal.open {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      /* Graph node glow effect */
+      .cy-node-glow {
+        box-shadow: 0 0 20px currentColor;
+      }
+
       @media (max-width: 1280px) {
         .dashboard {
           grid-template-columns: 1fr;
@@ -1339,6 +1372,14 @@
                 aria-label="Create new agency"
               >
                 +
+              </button>
+              <button
+                id="btnBlueprints"
+                title="Manage Blueprints"
+                aria-label="Manage agent blueprints"
+                style="font-size: 12px"
+              >
+                🧬
               </button>
               <button
                 id="btnNewThread"
@@ -1521,51 +1562,63 @@
                 <span class="badge"
                   ><span
                     class="threadline-badge-dot"
-                    style="background: var(--model)"
+                    style="background: #60a5fa"
+                  ></span
+                  >Tick</span
+                >
+                <span class="badge"
+                  ><span
+                    class="threadline-badge-dot"
+                    style="background: #34d399"
                   ></span
                   >Model</span
                 >
                 <span class="badge"
                   ><span
                     class="threadline-badge-dot"
-                    style="background: var(--tool)"
+                    style="background: #a78bfa"
                   ></span
                   >Tool</span
                 >
                 <span class="badge"
                   ><span
                     class="threadline-badge-dot"
-                    style="background: var(--ok)"
+                    style="background: #f472b6"
                   ></span
-                  >Completed</span
+                  >Spawn ◇</span
                 >
                 <span class="badge"
                   ><span
                     class="threadline-badge-dot"
-                    style="background: var(--warn)"
+                    style="background: #4ade80"
+                  ></span
+                  >Done</span
+                >
+                <span class="badge"
+                  ><span
+                    class="threadline-badge-dot"
+                    style="background: #fbbf24"
                   ></span
                   >Paused</span
                 >
                 <span class="badge"
                   ><span
                     class="threadline-badge-dot"
-                    style="background: var(--err)"
+                    style="background: #f87171"
                   ></span
                   >Error</span
                 >
-                <span class="badge"
-                  ><span
-                    class="threadline-badge-dot"
-                    style="background: var(--info)"
-                  ></span
-                  >Run Tick</span
+                <span
+                  class="badge"
+                  style="border-style: dashed; border-color: #f472b6"
                 >
-                <span class="badge">Dashed path = linked agent</span>
+                  ┊ Parent↔Child
+                </span>
                 <span
                   class="badge"
                   style="margin-left: auto"
                   title="Interactive graph controls"
-                  >💡 Drag to pan • Ctrl/Cmd + scroll to zoom</span
+                  >💡 Drag to pan • Scroll to zoom • Double-click to focus</span
                 >
               </div>
               <div class="graph-wrap">
@@ -1661,6 +1714,119 @@
           <button id="btnCreateThread" class="primary" style="width: 100%">
             Create Thread
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Blueprint Management Modal -->
+    <div id="blueprintsModal" class="modal">
+      <div class="modal-content" style="width: 600px; max-height: 80vh">
+        <div class="modal-header">
+          <h3 class="modal-title">🧬 Blueprints</h3>
+          <button class="modal-close" id="blueprintsClose">✕</button>
+        </div>
+
+        <div style="display: flex; gap: 12px; margin-bottom: 16px">
+          <button id="btnShowBlueprintList" class="primary" style="flex: 1">
+            View All
+          </button>
+          <button id="btnShowBlueprintCreate" style="flex: 1">
+            + Create New
+          </button>
+        </div>
+
+        <!-- Blueprint List View -->
+        <div id="blueprintListView">
+          <div
+            id="blueprintsList"
+            style="
+              max-height: 400px;
+              overflow-y: auto;
+              display: flex;
+              flex-direction: column;
+              gap: 10px;
+            "
+          ></div>
+        </div>
+
+        <!-- Blueprint Create View -->
+        <div id="blueprintCreateView" style="display: none">
+          <div class="form-group">
+            <label for="bpName">Name *</label>
+            <input
+              id="bpName"
+              type="text"
+              placeholder="e.g., customer-support"
+              autocomplete="off"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="bpDescription">Description</label>
+            <input
+              id="bpDescription"
+              type="text"
+              placeholder="Brief description of this agent type"
+              autocomplete="off"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="bpPrompt">System Prompt *</label>
+            <textarea
+              id="bpPrompt"
+              rows="6"
+              placeholder="You are a helpful assistant..."
+              style="font-family: monospace; font-size: 12px"
+            ></textarea>
+          </div>
+
+          <div class="form-group">
+            <label for="bpModel">Model</label>
+            <select id="bpModel" class="form-select">
+              <option value="">Default (from env)</option>
+              <option value="gpt-4o">gpt-4o</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="gpt-4-turbo">gpt-4-turbo</option>
+              <option value="claude-sonnet-4-20250514">
+                claude-sonnet-4-20250514
+              </option>
+              <option value="claude-3-5-sonnet-20241022">
+                claude-3-5-sonnet
+              </option>
+              <option value="claude-3-5-haiku-20241022">
+                claude-3-5-haiku
+              </option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="bpTags">Tags (comma-separated)</label>
+            <input
+              id="bpTags"
+              type="text"
+              placeholder="default, support"
+              autocomplete="off"
+            />
+            <div style="font-size: 11px; color: var(--muted); margin-top: 4px">
+              Include "default" tag to make this the default agent type
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="bpStatus">Status</label>
+            <select id="bpStatus" class="form-select">
+              <option value="active">Active</option>
+              <option value="draft">Draft</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </div>
+
+          <div class="chat-actions" style="margin-top: 24px">
+            <button id="btnSaveBlueprint" class="primary" style="width: 100%">
+              Save Blueprint
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -2096,6 +2262,176 @@
         }
       };
 
+      // --- Blueprint Management ---
+      const blueprintsModal = $("blueprintsModal");
+      const blueprintsClose = $("blueprintsClose");
+      const blueprintListView = $("blueprintListView");
+      const blueprintCreateView = $("blueprintCreateView");
+      const blueprintsList = $("blueprintsList");
+
+      $("btnBlueprints").onclick = () => {
+        if (!state.currentAgencyId) {
+          showNotification("Select an agency first", "error");
+          return;
+        }
+        blueprintsModal.classList.add("open");
+        showBlueprintList();
+        loadBlueprintsForModal();
+      };
+
+      blueprintsClose.onclick = () => blueprintsModal.classList.remove("open");
+
+      $("btnShowBlueprintList").onclick = () => showBlueprintList();
+      $("btnShowBlueprintCreate").onclick = () => showBlueprintCreate();
+
+      function showBlueprintList() {
+        blueprintListView.style.display = "block";
+        blueprintCreateView.style.display = "none";
+        $("btnShowBlueprintList").classList.add("primary");
+        $("btnShowBlueprintCreate").classList.remove("primary");
+      }
+
+      function showBlueprintCreate() {
+        blueprintListView.style.display = "none";
+        blueprintCreateView.style.display = "block";
+        $("btnShowBlueprintList").classList.remove("primary");
+        $("btnShowBlueprintCreate").classList.add("primary");
+        // Clear form
+        $("bpName").value = "";
+        $("bpDescription").value = "";
+        $("bpPrompt").value = "";
+        $("bpModel").value = "";
+        $("bpTags").value = "";
+        $("bpStatus").value = "active";
+      }
+
+      async function loadBlueprintsForModal() {
+        blueprintsList.innerHTML =
+          '<div style="text-align: center; color: var(--muted);">Loading...</div>';
+        try {
+          const data = http
+            ? await http
+                .get(`/agency/${state.currentAgencyId}/blueprints`)
+                .json()
+            : await fetch(`/agency/${state.currentAgencyId}/blueprints`).then(
+                (r) => r.json()
+              );
+
+          const blueprints = data.blueprints || [];
+          if (blueprints.length === 0) {
+            blueprintsList.innerHTML =
+              '<div style="text-align: center; color: var(--muted); padding: 20px;">No blueprints found. Create one to get started.</div>';
+            return;
+          }
+
+          blueprintsList.innerHTML = "";
+          blueprints.forEach((bp) => {
+            const card = document.createElement("div");
+            card.className = "blueprint-card";
+            card.style.cssText = `
+              background: rgba(255,255,255,0.03);
+              border: 1px dashed var(--border);
+              border-radius: 8px;
+              padding: 14px;
+            `;
+
+            const isDefault = bp.tags?.includes("default");
+            const statusColor =
+              bp.status === "active"
+                ? "#4ade80"
+                : bp.status === "draft"
+                  ? "#fbbf24"
+                  : "#94a3b8";
+
+            card.innerHTML = `
+              <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                <div>
+                  <strong style="font-size: 14px;">${escapeHtml(bp.name)}</strong>
+                  ${isDefault ? '<span style="margin-left: 8px; font-size: 10px; background: var(--accent); color: #000; padding: 2px 6px; border-radius: 4px;">DEFAULT</span>' : ""}
+                </div>
+                <span style="font-size: 11px; color: ${statusColor}; text-transform: uppercase;">${bp.status || "active"}</span>
+              </div>
+              <div style="font-size: 12px; color: var(--muted); margin-bottom: 8px;">${escapeHtml(bp.description || "No description")}</div>
+              <div style="font-size: 11px; color: var(--muted);">
+                ${bp.model ? `<span style="margin-right: 12px;">Model: ${escapeHtml(bp.model)}</span>` : ""}
+                ${bp.tags?.length ? `<span>Tags: ${bp.tags.map((t) => escapeHtml(t)).join(", ")}</span>` : ""}
+              </div>
+              ${bp.prompt ? `<div style="margin-top: 10px; font-size: 11px; font-family: monospace; color: var(--muted); max-height: 60px; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(bp.prompt.slice(0, 150))}${bp.prompt.length > 150 ? "..." : ""}</div>` : ""}
+            `;
+            blueprintsList.appendChild(card);
+          });
+        } catch (e) {
+          console.error("Failed to load blueprints:", e);
+          blueprintsList.innerHTML =
+            '<div style="text-align: center; color: var(--err);">Failed to load blueprints</div>';
+        }
+      }
+
+      $("btnSaveBlueprint").onclick = async () => {
+        const name = $("bpName").value.trim();
+        const prompt = $("bpPrompt").value.trim();
+
+        if (!name) {
+          showNotification("Name is required", "error");
+          return;
+        }
+        if (!prompt) {
+          showNotification("System prompt is required", "error");
+          return;
+        }
+
+        const tagsRaw = $("bpTags").value.trim();
+        const tags = tagsRaw
+          ? tagsRaw
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean)
+          : [];
+
+        const blueprint = {
+          name,
+          description: $("bpDescription").value.trim() || undefined,
+          prompt,
+          model: $("bpModel").value || undefined,
+          tags,
+          status: $("bpStatus").value
+        };
+
+        try {
+          $("btnSaveBlueprint").textContent = "Saving...";
+          $("btnSaveBlueprint").disabled = true;
+
+          if (http) {
+            await http
+              .post(`/agency/${state.currentAgencyId}/blueprints`, {
+                json: blueprint
+              })
+              .json();
+          } else {
+            const res = await fetch(
+              `/agency/${state.currentAgencyId}/blueprints`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(blueprint)
+              }
+            );
+            if (!res.ok) throw new Error(await res.text());
+          }
+
+          showNotification(`Blueprint "${name}" saved`, "success");
+          showBlueprintList();
+          loadBlueprintsForModal();
+          loadAgentDefinitions(); // Refresh agent type dropdown
+        } catch (e) {
+          console.error("Failed to save blueprint:", e);
+          showNotification("Failed to save blueprint: " + e.message, "error");
+        } finally {
+          $("btnSaveBlueprint").textContent = "Save Blueprint";
+          $("btnSaveBlueprint").disabled = false;
+        }
+      };
+
       // --- Graph state ---
       const palette = [
         "#2563eb",
@@ -2120,6 +2456,19 @@
       const lastNodePerLane = new Map(); // lane number -> nodeKey
       const lastCompletionX = new Map(); // threadId -> last child completion X position
       const childFinalX = new Map(); // childThreadId -> X position where child completed
+      const childToParent = new Map(); // childId -> parentId (track parent-child relationships)
+      const pendingCompletions = new Map(); // parentId -> Set of childIds waiting for completion
+
+      // Track spawn batches - each pause creates a new batch
+      const currentBatchChildren = new Map(); // parentId -> Set of childIds in current batch
+      const childBatchPauseX = new Map(); // childId -> pause X position for this child's batch
+      const batchLastCompletionX = new Map(); // "parentId:pauseX" -> last completion X in this batch
+      const batchPendingCount = new Map(); // "parentId:pauseX" -> count of pending children
+      const deferredResumed = new Map(); // "parentId:pauseX" -> deferred resumed event
+
+      // Track parent blocking state - defer ALL events until batch completes
+      const parentBlockedAtPause = new Map(); // parentId -> pauseX (which pause is blocking)
+      const deferredParentEvents = new Map(); // parentId -> array of deferred events
       let layoutDebounce = null;
 
       function initCytoscape() {
@@ -2137,52 +2486,95 @@
                 "border-width": 3,
                 "border-color": "data(borderColor)",
                 label: "data(label)",
-                color: "#9da5ba",
+                color: "#e2e8f0",
                 "text-valign": "bottom",
                 "text-halign": "center",
-                "text-margin-y": 5,
-                "font-size": "11px",
-                "font-family": "monospace",
+                "text-margin-y": 8,
+                "font-size": "10px",
+                "font-family": "'JetBrains Mono', Consolas, monospace",
                 width: "data(size)",
                 height: "data(size)",
                 "text-wrap": "wrap",
-                "text-max-width": "80px"
+                "text-max-width": "90px",
+                "transition-property":
+                  "border-width, border-color, width, height",
+                "transition-duration": "0.15s"
               }
             },
             {
               selector: 'node[type="tick"]',
               style: {
-                width: 20,
-                height: 20
+                "font-size": "9px",
+                color: "#94a3b8"
+              }
+            },
+            {
+              selector: 'node[type="spawn"]',
+              style: {
+                shape: "diamond",
+                "font-weight": "600"
+              }
+            },
+            {
+              selector: 'node[type="done"]',
+              style: {
+                shape: "round-rectangle",
+                "font-weight": "600"
+              }
+            },
+            {
+              selector: 'node[type="error"]',
+              style: {
+                shape: "round-octagon"
               }
             },
             {
               selector: "node:selected",
               style: {
-                "border-width": 4,
+                "border-width": 5,
                 "border-color": "#f97316",
-                "overlay-opacity": 0.2,
+                "overlay-opacity": 0.15,
                 "overlay-color": "#f97316"
               }
             },
             {
               selector: "edge",
               style: {
-                width: 3,
+                width: 2,
                 "line-color": "data(color)",
                 "target-arrow-color": "data(color)",
                 "target-arrow-shape": "triangle",
                 "curve-style": "bezier",
-                "arrow-scale": 1.2
+                "arrow-scale": 1,
+                opacity: 0.7,
+                "transition-property": "width, opacity",
+                "transition-duration": "0.15s"
               }
             },
             {
               selector: 'edge[type="spawn"]',
               style: {
                 "line-style": "dashed",
-                "line-dash-pattern": [6, 4],
-                "line-color": "#c084fc",
-                "target-arrow-color": "#c084fc"
+                "line-dash-pattern": [8, 4],
+                "line-color": "#f472b6",
+                "target-arrow-color": "#f472b6",
+                width: 2.5,
+                opacity: 0.9,
+                "curve-style": "straight" // Straight vertical lines for spawn/completion edges
+              }
+            },
+            {
+              selector: 'edge[type="flow"]',
+              style: {
+                "curve-style": "straight", // Straight horizontal lines for flow edges
+                opacity: 0.6
+              }
+            },
+            {
+              selector: "edge:selected",
+              style: {
+                width: 4,
+                opacity: 1
               }
             }
           ],
@@ -2291,6 +2683,15 @@
         lastNodePerLane.clear();
         lastCompletionX.clear();
         childFinalX.clear();
+        childToParent.clear();
+        pendingCompletions.clear();
+        currentBatchChildren.clear();
+        childBatchPauseX.clear();
+        batchLastCompletionX.clear();
+        batchPendingCount.clear();
+        deferredResumed.clear();
+        parentBlockedAtPause.clear();
+        deferredParentEvents.clear();
       }
 
       function runGraphLayout(immediate = false) {
@@ -2533,26 +2934,24 @@
         const x = nextIdx * 150;
         const y = lane * 120;
 
-        // shape/color by type
-        const colorMap = {
-          tick: "#5aa7ff",
-          model: "#34d399",
-          tool: "#c084fc",
-          done: "#22c55e",
-          paused: "#facc15",
-          error: "#ef4444"
+        // Node styling by type - vibrant colors for better visual distinction
+        const nodeStyles = {
+          tick: { border: "#60a5fa", bg: "#1e3a5f", size: 18 },
+          model: { border: "#34d399", bg: "#064e3b", size: 36 },
+          tool: { border: "#a78bfa", bg: "#4c1d95", size: 32 },
+          spawn: { border: "#f472b6", bg: "#831843", size: 34 },
+          done: { border: "#4ade80", bg: "#14532d", size: 36 },
+          paused: { border: "#fbbf24", bg: "#78350f", size: 32 },
+          error: { border: "#f87171", bg: "#7f1d1d", size: 32 }
         };
-        const borderColorMap = {
-          tick: "#5aa7ff",
-          model: "#34d399",
-          tool: "#c084fc",
-          done: "#22c55e",
-          paused: "#facc15",
-          error: "#ef4444"
+        const style = nodeStyles[type] || {
+          border: "#94a3b8",
+          bg: "#1f2937",
+          size: 32
         };
-        const color = colorMap[type] || "#94a3b8";
-        const borderColor = borderColorMap[type] || "#94a3b8";
-        const size = type === "tick" ? 20 : 40;
+        const borderColor = style.border;
+        const color = style.bg;
+        const size = style.size;
 
         const nodeKey = `${threadId}-${payload.seq ?? Date.now()}-${nextIdx}`;
 
@@ -2564,7 +2963,7 @@
             label: label,
             type: type,
             threadId: threadId,
-            color: "#0b101c",
+            color: color,
             borderColor: borderColor,
             size: size,
             payload: payload,
@@ -2618,35 +3017,39 @@
 
         if (fromNode.length === 0 || toNode.length === 0) {
           console.warn(
-            "Cannot connect nodes - one or both do not exist:",
+            "[connectLanes] Cannot connect - node(s) missing:",
             fromNodeKey,
             toNodeKey
           );
           return;
         }
 
-        // Get node data and positions for verification
         const fromData = fromNode.data();
         const toData = toNode.data();
-        const fromPos = fromNode.position();
-        const toPos = toNode.position();
+        const fromIdx = fromData.index;
+        const toIdx = toData.index;
 
-        // Log connection for debugging
-        console.log(
-          `[connectLanes] ${fromData.label} (X=${fromData.index}, pos=${fromPos.x},${fromPos.y}) → ${toData.label} (X=${toData.index}, pos=${toPos.x},${toPos.y})`
-        );
-
-        // Check if edge will be vertical
-        if (Math.abs(fromPos.x - toPos.x) < 1) {
-          console.log(`  ✓ Vertical edge (X positions match)`);
-        } else {
+        // Verify alignment - nodes should be at same X index for vertical edge
+        if (fromIdx !== toIdx) {
+          // Misalignment detected! Align both to the maximum position
+          const alignedX = Math.max(fromIdx, toIdx);
           console.warn(
-            `  ✗ DIAGONAL edge (X positions differ by ${Math.abs(fromPos.x - toPos.x)}px)`
+            `[connectLanes] ⚠️ Misaligned: ${fromData.label}(X=${fromIdx}) → ${toData.label}(X=${toIdx}). Aligning both to X=${alignedX}`
           );
+
+          // Move both nodes to aligned position
+          if (fromIdx !== alignedX) {
+            fromNode.data("index", alignedX);
+            fromNode.position({ x: alignedX * 150, y: fromNode.position().y });
+          }
+          if (toIdx !== alignedX) {
+            toNode.data("index", alignedX);
+            toNode.position({ x: alignedX * 150, y: toNode.position().y });
+          }
         }
 
-        // Add spawn/completion edge (dashed) - will be vertical if X positions match
-        const edgeId = `spawn-${fromNodeKey}-${toNodeKey}`;
+        // Add spawn/completion edge (dashed, vertical)
+        const edgeId = `lane-${fromNodeKey}-${toNodeKey}`;
         if (cy.getElementById(edgeId).length === 0) {
           cy.add({
             group: "edges",
@@ -2655,7 +3058,7 @@
               source: fromNodeKey,
               target: toNodeKey,
               type: "spawn",
-              color: "#c084fc"
+              color: "#f472b6"
             }
           });
         }
@@ -2736,6 +3139,25 @@
         if (!t) return;
         const isPriming = primingThreads.has(threadId);
 
+        // Check if this parent is blocked waiting for children
+        // Only defer parent events, not child completion notifications
+        if (parentBlockedAtPause.has(threadId)) {
+          const blockedPauseX = parentBlockedAtPause.get(threadId);
+          // Only allow subagent.completed (child completion notifications) through
+          // Parent's own agent.completed should be deferred!
+          if (t !== "subagent.completed") {
+            // Defer this event until batch completes
+            if (!deferredParentEvents.has(threadId)) {
+              deferredParentEvents.set(threadId, []);
+            }
+            deferredParentEvents.get(threadId).push(ev);
+            console.log(
+              `[handleEvent] Deferring ${t} for blocked parent ${short(threadId)} (pauseX=${blockedPauseX})`
+            );
+            return;
+          }
+        }
+
         // Map event to node
         switch (t) {
           case "run.tick": {
@@ -2764,10 +3186,41 @@
             const r = ev.data?.reason ?? "paused";
             updateLaneMeta(threadId, { status: "paused" });
             addNode(threadId, "paused", `paused (${r})`, ev);
+
+            // Track if paused waiting for subagents
+            if (r === "subagent" || r === "subagents") {
+              const pauseX = threadCursors.get(threadId) || 0;
+              const currentBatch = currentBatchChildren.get(threadId);
+
+              if (currentBatch && currentBatch.size > 0) {
+                // Associate this pause position with all children in current batch
+                const batchKey = `${threadId}:${pauseX}`;
+                let pendingCount = 0;
+
+                for (const childId of currentBatch) {
+                  childBatchPauseX.set(childId, pauseX);
+                  pendingCount++;
+                }
+
+                batchPendingCount.set(batchKey, pendingCount);
+
+                // BLOCK this parent until all children in this batch complete
+                parentBlockedAtPause.set(threadId, pauseX);
+
+                console.log(
+                  `[run.paused] Parent ${short(threadId)} BLOCKED at X=${pauseX} with ${pendingCount} children in batch`
+                );
+
+                // Clear current batch for next spawn cycle
+                currentBatchChildren.set(threadId, new Set());
+              }
+            }
             break;
           }
           case "run.resumed": {
             updateLaneMeta(threadId, { status: "running" });
+            // Note: If parent is blocked, this event was already deferred by handleEvent()
+            // If we get here, we can add the node
             addNode(threadId, "tick", "resumed", ev);
             break;
           }
@@ -2775,17 +3228,124 @@
             updateLaneMeta(threadId, { status: "completed" });
             const completionKey = addNode(threadId, "done", "done ✓", ev);
 
-            // Explicitly update last node tracking for this thread
             if (completionKey) {
               lastNodeInLane.set(threadId, completionKey);
             }
 
-            // Store this thread's final X position for parent alignment
             const finalX = threadCursors.get(threadId) || 0;
             childFinalX.set(threadId, finalX);
             console.log(
               `[agent.completed] Thread ${short(threadId)} completed at X=${finalX}`
             );
+
+            // If this thread is a child, create parent's completion node
+            const parentId = childToParent.get(threadId);
+            if (parentId && completionKey) {
+              console.log(
+                `[agent.completed] Creating parent completion for ${short(parentId)} <- child ${short(threadId)}`
+              );
+
+              // Remove from pending
+              const pending = pendingCompletions.get(parentId);
+              if (pending) pending.delete(threadId);
+
+              // Get this child's BATCH-SPECIFIC pause position
+              const pauseX = childBatchPauseX.get(threadId);
+              const batchKey =
+                pauseX !== undefined ? `${parentId}:${pauseX}` : null;
+
+              // Get batch-specific last completion position
+              const lastCompletion = batchKey
+                ? batchLastCompletionX.get(batchKey) || -1
+                : lastCompletionX.get(parentId) || -1;
+
+              // Target position is where the child naturally completed
+              // BUT if that conflicts with a previous completion, shift right
+              let targetX = finalX;
+
+              // Minimum X is after previous completions in this batch
+              const minX = lastCompletion + 1;
+              if (targetX <= lastCompletion) {
+                targetX = minX;
+                console.log(
+                  `[agent.completed] Collision: child at X=${finalX}, last completion at X=${lastCompletion}. Shifting to X=${targetX}`
+                );
+
+                // Move child's done node to new position
+                if (cy) {
+                  const childDoneNode = cy.getElementById(completionKey);
+                  if (childDoneNode.length > 0) {
+                    childDoneNode.data("index", targetX);
+                    childDoneNode.position({
+                      x: targetX * 150,
+                      y: childDoneNode.position().y
+                    });
+                    threadCursors.set(threadId, targetX);
+                    childFinalX.set(threadId, targetX);
+                  }
+                }
+              }
+
+              console.log(
+                `[agent.completed] Child done at X=${finalX}, completion at X=${targetX}`
+              );
+
+              // Track completion position for this batch
+              if (batchKey) {
+                batchLastCompletionX.set(batchKey, targetX);
+              }
+              lastCompletionX.set(parentId, targetX);
+
+              // Update parent cursor to be after this completion
+              threadCursors.set(
+                parentId,
+                Math.max(threadCursors.get(parentId) || 0, targetX)
+              );
+
+              // Create parent's completion node at child's done position
+              const parentCompletionKey = addNode(
+                parentId,
+                "done",
+                `← ${short(threadId)}`,
+                { ...ev, childThreadId: threadId },
+                targetX
+              );
+
+              console.log(
+                `[agent.completed] Parent ${short(parentId)} completion at X=${targetX}`
+              );
+
+              if (parentCompletionKey) {
+                connectLanes(completionKey, parentCompletionKey);
+              }
+
+              // Decrement batch pending count and check if complete
+              if (batchKey) {
+                const remaining = (batchPendingCount.get(batchKey) || 1) - 1;
+                batchPendingCount.set(batchKey, remaining);
+
+                if (remaining === 0) {
+                  console.log(
+                    `[agent.completed] Batch ${batchKey} complete, unblocking parent`
+                  );
+
+                  // Unblock the parent
+                  parentBlockedAtPause.delete(parentId);
+
+                  // Process deferred events in order
+                  const deferred = deferredParentEvents.get(parentId) || [];
+                  deferredParentEvents.delete(parentId);
+
+                  console.log(
+                    `[agent.completed] Processing ${deferred.length} deferred events for ${short(parentId)}`
+                  );
+
+                  for (const deferredEv of deferred) {
+                    handleEvent(parentId, deferredEv);
+                  }
+                }
+              }
+            }
             break;
           }
           case "agent.error": {
@@ -2795,22 +3355,45 @@
           }
           case "subagent.spawned": {
             const childId = ev.data?.childThreadId;
-            const spawnKey = addNode(
-              threadId,
-              "tool",
-              `spawn ${short(childId)}`,
-              ev
-            );
+            const agentType = ev.data?.agentType || "";
+            const spawnLabel = agentType
+              ? `→ ${agentType}`
+              : `→ ${short(childId)}`;
 
-            // GAP LOGIC: Align child start with parent current cursor
+            const spawnKey = addNode(threadId, "spawn", spawnLabel, ev);
+
+            // Get parent cursor AFTER spawn node was added
             const parentCursor = threadCursors.get(threadId);
+
             if (childId) {
-              // Child starts at (parentCursor - 1) so its first node is at parentCursor
+              // Child starts at (parentCursor - 1) so its first node aligns with spawn
               threadCursors.set(childId, (parentCursor || 0) - 1);
+              console.log(
+                `[subagent.spawned] Parent ${short(threadId)} at X=${parentCursor}, child ${short(childId)} cursor set to ${(parentCursor || 0) - 1}`
+              );
               connectThreadWS(childId);
+
+              // Track parent-child relationship
+              childToParent.set(childId, threadId);
+
+              // Track pending completions
+              if (!pendingCompletions.has(threadId)) {
+                pendingCompletions.set(threadId, new Set());
+              }
+              pendingCompletions.get(threadId).add(childId);
+
+              // Add to current batch (will be finalized when pause happens)
+              if (!currentBatchChildren.has(threadId)) {
+                currentBatchChildren.set(threadId, new Set());
+              }
+              currentBatchChildren.get(threadId).add(childId);
             }
 
-            updateLaneMeta(childId, { status: "spawning", isSubagent: true });
+            updateLaneMeta(childId, {
+              status: "spawning",
+              isSubagent: true,
+              agentType
+            });
             childSpawnMap.set(childId, spawnKey);
             break;
           }
@@ -2825,70 +3408,125 @@
               break;
             }
 
+            // Check if already handled by agent.completed
+            const pending = pendingCompletions.get(threadId);
+            if (pending && !pending.has(child)) {
+              console.log(
+                `[subagent.completed] Child ${short(child)} already completed, skipping`
+              );
+              break;
+            }
+
             updateLaneMeta(child, { status: "completed" });
 
-            // Read child's FINAL X position from stored map (set when agent.completed was processed)
-            // Fallback to threadCursor if not yet available
-            let childEndX = childFinalX.get(child);
-            const childCursor = threadCursors.get(child) || 0;
-
-            console.log(
-              `[subagent.completed] Child ${short(child)}: finalX=${childEndX}, cursor=${childCursor}`
-            );
-
-            if (childEndX === undefined) {
-              childEndX = childCursor;
+            const childLastKey = lastNodeInLane.get(child);
+            if (!childLastKey) {
               console.warn(
-                `[subagent.completed] ⚠️  Child ${short(child)} final X not yet recorded, using cursor=${childEndX}`
+                `[subagent.completed] Child ${short(child)} has no nodes, skipping`
               );
-            } else {
+              break;
+            }
+
+            if (pending) pending.delete(child);
+
+            // Get child's done position
+            let childEndX = childFinalX.get(child);
+            let childLastNode = null;
+
+            if (cy) {
+              childLastNode = cy.getElementById(childLastKey);
+              if (childLastNode.length > 0) {
+                const idx = childLastNode.data("index");
+                if (typeof idx === "number") childEndX = idx;
+              }
+            }
+            if (childEndX === undefined) {
+              childEndX = threadCursors.get(child) || 0;
+            }
+
+            // Use BATCH-SPECIFIC tracking
+            const pauseX = childBatchPauseX.get(child);
+            const batchKey =
+              pauseX !== undefined ? `${threadId}:${pauseX}` : null;
+            const lastCompletion = batchKey
+              ? batchLastCompletionX.get(batchKey) || -1
+              : lastCompletionX.get(threadId) || -1;
+
+            // Target is where child naturally completed, unless collision
+            let targetX = childEndX;
+            if (targetX <= lastCompletion) {
+              targetX = lastCompletion + 1;
               console.log(
-                `[subagent.completed] ✓ Child ${short(child)} completed at X=${childEndX} (from stored value)`
+                `[subagent.completed] Collision: child at X=${childEndX}, shifting to X=${targetX}`
               );
-            }
 
-            const parentCursor = threadCursors.get(threadId) || 0;
-            const lastCompletion = lastCompletionX.get(threadId) || -1;
-
-            console.log(
-              `[subagent.completed] Parent ${short(threadId)} cursor=${parentCursor}, last completion=${lastCompletion}, will align with child at X=${childEndX}`
-            );
-
-            // Calculate where parent completion should go to avoid conflicts
-            let parentCompletionX = Math.max(
-              parentCursor + 1,
-              lastCompletion + 1
-            );
-
-            // Prefer to align with child's EXACT position if possible (creates vertical edge)
-            if (childEndX >= parentCompletionX) {
-              parentCompletionX = childEndX;
+              if (childLastNode && childLastNode.length > 0) {
+                childLastNode.data("index", targetX);
+                childLastNode.position({
+                  x: targetX * 150,
+                  y: childLastNode.position().y
+                });
+                threadCursors.set(child, targetX);
+                childFinalX.set(child, targetX);
+              }
             }
 
             console.log(
-              `[subagent.completed] Parent completion will be at X=${parentCompletionX}`
+              `[subagent.completed] Child done at X=${childEndX}, completion at X=${targetX}`
             );
 
-            // Track this completion position
-            lastCompletionX.set(threadId, parentCompletionX);
-
-            // Add parent completion node at EXACT same X index as child's last node
-            const doneKey = addNode(
+            if (batchKey) batchLastCompletionX.set(batchKey, targetX);
+            lastCompletionX.set(threadId, targetX);
+            threadCursors.set(
               threadId,
-              "tool",
-              `child ${short(child)} ✓`,
-              ev,
-              parentCompletionX
+              Math.max(threadCursors.get(threadId) || 0, targetX)
             );
 
-            // Connect from child's last node (will be resolved when edge is created)
-            const childLast = lastNodeInLane.get(child);
-            if (childLast && !primingThreads.has(child)) {
-              connectLanes(childLast, doneKey);
+            const completionKey = addNode(
+              threadId,
+              "done",
+              `← ${short(child)}`,
+              ev,
+              targetX
+            );
+
+            console.log(
+              `[subagent.completed] Parent ${short(threadId)}: completion at X=${targetX}`
+            );
+
+            if (childLastKey && !primingThreads.has(child)) {
+              connectLanes(childLastKey, completionKey);
             } else {
-              const arr = pendingEdges.get(child) || [];
-              arr.push(doneKey);
-              pendingEdges.set(child, arr);
+              const pendingList = pendingEdges.get(child) || [];
+              pendingList.push(completionKey);
+              pendingEdges.set(child, pendingList);
+            }
+
+            // Decrement batch pending count and check if complete
+            if (batchKey) {
+              const remaining = (batchPendingCount.get(batchKey) || 1) - 1;
+              batchPendingCount.set(batchKey, remaining);
+
+              if (remaining === 0) {
+                console.log(
+                  `[subagent.completed] Batch ${batchKey} complete, unblocking parent`
+                );
+
+                // Unblock the parent
+                parentBlockedAtPause.delete(threadId);
+
+                // Process deferred events
+                const deferred = deferredParentEvents.get(threadId) || [];
+                deferredParentEvents.delete(threadId);
+
+                console.log(
+                  `[subagent.completed] Processing ${deferred.length} deferred events`
+                );
+
+                for (const deferredEv of deferred) {
+                  handleEvent(threadId, deferredEv);
+                }
+              }
             }
             break;
           }
@@ -2900,9 +3538,31 @@
             }
         }
 
+        // Connect spawn node to child's first node (should be vertical)
         const firstKey = firstNodeInLane.get(threadId);
         if (firstKey && childSpawnMap.has(threadId)) {
-          connectLanes(childSpawnMap.get(threadId), firstKey);
+          const spawnKey = childSpawnMap.get(threadId);
+
+          // Verify alignment before connecting
+          if (cy) {
+            const spawnNode = cy.getElementById(spawnKey);
+            const firstNode = cy.getElementById(firstKey);
+            if (spawnNode.length > 0 && firstNode.length > 0) {
+              const spawnX = spawnNode.data("index");
+              const firstX = firstNode.data("index");
+              if (spawnX !== firstX) {
+                // Misalignment detected - adjust child's first node to match spawn
+                console.log(
+                  `[spawn→child] Adjusting child first node from X=${firstX} to X=${spawnX} to align with spawn`
+                );
+                const oldY = firstNode.position().y;
+                firstNode.data("index", spawnX);
+                firstNode.position({ x: spawnX * 150, y: oldY });
+              }
+            }
+          }
+
+          connectLanes(spawnKey, firstKey);
           childSpawnMap.delete(threadId);
         }
 
@@ -3078,67 +3738,76 @@
             `[primeEventsDeep] Fetched ${allEventsWithThread.length} total events`
           );
 
-          // Step 3: Sort ALL events by timestamp (chronological order)
+          // Step 3: Sort ALL events by timestamp with dependency-aware secondary sort
+          // This ensures agent.completed for a child comes BEFORE subagent.completed for parent
           allEventsWithThread.sort((a, b) => {
             const timeA = new Date(a.ev.timestamp || 0).getTime();
             const timeB = new Date(b.ev.timestamp || 0).getTime();
-            return timeA - timeB;
+
+            // Primary sort by timestamp
+            if (timeA !== timeB) return timeA - timeB;
+
+            // Secondary sort: ensure correct dependency order for same-timestamp events
+            const aType = a.ev?.type || "";
+            const bType = b.ev?.type || "";
+
+            // agent.completed must come before subagent.completed that references it
+            if (aType === "agent.completed" && bType === "subagent.completed") {
+              const childId = b.ev?.data?.childThreadId;
+              if (childId === a.threadId) {
+                return -1; // a (agent.completed) comes first
+              }
+            }
+            if (bType === "agent.completed" && aType === "subagent.completed") {
+              const childId = a.ev?.data?.childThreadId;
+              if (childId === b.threadId) {
+                return 1; // b (agent.completed) comes first
+              }
+            }
+
+            // subagent.spawned must come before child's first event
+            if (aType === "subagent.spawned") {
+              const childId = a.ev?.data?.childThreadId;
+              if (childId === b.threadId) {
+                return -1; // spawn comes before child's events
+              }
+            }
+            if (bType === "subagent.spawned") {
+              const childId = b.ev?.data?.childThreadId;
+              if (childId === a.threadId) {
+                return 1; // spawn comes before child's events
+              }
+            }
+
+            return 0;
           });
 
           console.log(
             `[primeEventsDeep] Processing in TWO passes: pre-compute then render`
           );
 
-          // Step 4: PRE-PASS - Calculate all thread cursors and final positions (no graph changes)
-          // Iterate multiple times until positions stabilize (handles forward references)
-          console.log(`[primeEventsDeep] Pre-pass: Computing thread positions`);
-          const tempCursors = new Map();
+          // Step 4: PRE-PASS - Set up parent-child relationships only
+          // Batch tracking happens during main pass when we know X positions
+          console.log(
+            `[primeEventsDeep] Pre-pass: Setting up parent-child relationships`
+          );
 
-          // Single pass: calculate natural positions WITHOUT applying alignment logic
           allEventsWithThread.forEach(({ threadId, ev }) => {
-            const t = ev?.type;
-
-            // Track cursor position for each thread
-            let cursor = tempCursors.get(threadId);
-            if (cursor === undefined) cursor = -1;
-
-            // Events that advance the cursor (simple sequential, no alignment jumps)
-            if (
-              t === "run.tick" ||
-              t === "model.started" ||
-              t === "tool.output" ||
-              t === "tool.error" ||
-              t === "run.paused" ||
-              t === "run.resumed" ||
-              t === "agent.error" ||
-              t === "subagent.completed" // Just advance by 1 in pre-pass, no alignment
-            ) {
-              cursor++;
-              tempCursors.set(threadId, cursor);
-            } else if (t === "agent.completed") {
-              cursor++;
-              tempCursors.set(threadId, cursor);
-              // Store this thread's final position (RELATIVE to its start)
-              childFinalX.set(threadId, cursor);
-              console.log(
-                `[pre-pass] Thread ${short(threadId)} will complete at X=${cursor}`
-              );
-            } else if (t === "subagent.spawned") {
-              cursor++;
-              tempCursors.set(threadId, cursor);
-              // Initialize child cursor one position BEFORE spawn so first node lands ON spawn X
+            if (ev?.type === "subagent.spawned") {
               const childId = ev.data?.childThreadId;
-              if (childId && tempCursors.get(childId) === undefined) {
-                tempCursors.set(childId, cursor - 1);
-                console.log(
-                  `[pre-pass] Child ${short(childId)} spawned, cursor=${cursor - 1}, first node will be at X=${cursor}`
-                );
+              if (childId) {
+                // Track parent-child relationship
+                childToParent.set(childId, threadId);
+                if (!pendingCompletions.has(threadId)) {
+                  pendingCompletions.set(threadId, new Set());
+                }
+                pendingCompletions.get(threadId).add(childId);
               }
             }
           });
 
           console.log(
-            `[primeEventsDeep] Pre-pass complete. Found ${childFinalX.size} thread completions`
+            `[primeEventsDeep] Pre-pass complete. Found ${childToParent.size} parent-child relationships`
           );
 
           // Step 5: Mark all threads as priming
