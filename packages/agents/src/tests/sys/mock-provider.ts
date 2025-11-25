@@ -108,7 +108,7 @@ export function createMockProvider(options: MockProviderOptions = {}) {
   }
 
   async function processResponse(
-    req: ModelRequest,
+    _req: ModelRequest,
     response: MockResponse
   ): Promise<ModelResult> {
     // Simulate delay if configured

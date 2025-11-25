@@ -232,8 +232,8 @@ export const setTimeWindowTool = defineTool(
       if (
         !(s instanceof Date) ||
         !(e instanceof Date) ||
-        isNaN(+s) ||
-        isNaN(+e) ||
+        Number.isNaN(+s) ||
+        Number.isNaN(+e) ||
         s >= e
       ) {
         throw new Error("Invalid absolute start/end.");

@@ -37,7 +37,7 @@ function buildFilter(opts: {
     datetime_geq: iso(opts.start),
     datetime_lt: iso(opts.end)
   };
-  if (opts.andFilters && opts.andFilters.length) flt.AND = opts.andFilters;
+  if (opts.andFilters?.length) flt.AND = opts.andFilters;
   if (opts.extra) Object.assign(flt, opts.extra);
   return flt;
 }
@@ -74,9 +74,9 @@ async function executeGql<T = any>(args: {
     if ([429, 500, 502, 503, 504].includes(res.status) && attempt < retries) {
       const retryAfter = res.headers.get("Retry-After");
       const delay = retryAfter
-        ? parseFloat(retryAfter)
+        ? Number.parseFloat(retryAfter)
         : backoffBase * 2 ** attempt;
-      await sleep(isFinite(delay) ? delay : backoffBase);
+      await sleep(Number.isFinite(delay) ? delay : backoffBase);
       continue;
     }
 
@@ -120,7 +120,7 @@ function simplifyGrowth(current: number, previous: number) {
 export function topnToText(
   rows: TopNRow[],
   total?: number,
-  maxRows: number = 15
+  maxRows = 15
 ): string {
   const lines: string[] = [];
   if (typeof total === "number") lines.push(`Total: ${fmtNumber(total)}`);
@@ -139,7 +139,7 @@ export function timeseriesToText(
   total: number,
   previous: number,
   sparkline: { ts: string; count: number }[],
-  limitPoints: number = 48
+  limitPoints = 48
 ): string {
   const chg = simplifyGrowth(total, previous);
   const lines: string[] = [

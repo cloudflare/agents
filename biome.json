@@ -29,7 +29,8 @@
       "!**/normalize.css",
       "!package.json",
       "!**/package.json",
-      "!package-lock.json"
+      "!package-lock.json",
+      "!**/*.html"
     ]
   },
   "formatter": {

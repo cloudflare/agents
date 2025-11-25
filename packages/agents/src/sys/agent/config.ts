@@ -71,7 +71,7 @@ export function PersistedObject<T extends Record<string, unknown>>(
       deleteProperty(target, prop) {
         console.error(
           `⚠️ Persited Object: Delete detected on ${propName}.${String(prop)}. ` +
-            `This will NOT persist. Use reassignment to remove properties.`
+            "This will NOT persist. Use reassignment to remove properties."
         );
         return Reflect.deleteProperty(target, prop);
       }
