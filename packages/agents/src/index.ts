@@ -1451,7 +1451,12 @@ export class Agent<
 
     const result = await this.mcp.connectToServer(id);
 
-    // If state is connected then this is an non oauth connection and we should try discovery.
+    // If connection failed immediately, throw an error
+    if (result.state === "failed") {
+      throw new Error(`Failed to connect to MCP server at ${url}`);
+    }
+
+    // If state is connected then this is a non-oauth connection and we should try discovery.
     await this.mcp.discoverIfConnected(id);
 
     return {
