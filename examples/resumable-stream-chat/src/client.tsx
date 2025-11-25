@@ -41,10 +41,8 @@ function Chat() {
       setIsConnected(false);
       setIsReconnecting(true);
     },
-    onError: () => {
-      if (import.meta.env.DEV) {
-        console.log("⚠️ WebSocket error (likely hot-reload)");
-      }
+    onError: (error) => {
+      console.error("WebSocket error:", error);
     }
   });
 
