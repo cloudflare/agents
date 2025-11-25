@@ -6,7 +6,6 @@ import type {
   OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { nanoid } from "nanoid";
-import type { OAuthClientStorage } from "./client-storage";
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
 // This allows us to track authentication for a specific server and associated dynamic client registration
@@ -22,10 +21,16 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   private _clientId_: string | undefined;
 
   constructor(
-    public storage: OAuthClientStorage,
+    public storage: DurableObjectStorage,
     public clientName: string,
     public baseRedirectUrl: string
-  ) {}
+  ) {
+    if (!storage) {
+      throw new Error(
+        "DurableObjectOAuthClientProvider requires a valid DurableObjectStorage instance"
+      );
+    }
+  }
 
   get clientMetadata(): OAuthClientMetadata {
     return {

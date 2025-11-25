@@ -26,7 +26,6 @@ import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
-import { AgentMCPClientStorage } from "./mcp/client-storage";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
@@ -404,32 +403,11 @@ export class Agent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
-      storage: new AgentMCPClientStorage(
-        this.sql.bind(this),
-        this.ctx.storage.kv
-      )
-    });
-
     if (!wrappedClasses.has(this.constructor)) {
       // Auto-wrap custom methods with agent context
       this._autoWrapCustomMethods();
       wrappedClasses.add(this.constructor);
     }
-
-    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
-    this._disposables.add(
-      this.mcp.onServerStateChanged(async () => {
-        await this.broadcastMcpServers();
-      })
-    );
-
-    // Emit MCP observability events
-    this._disposables.add(
-      this.mcp.onObservabilityEvent((event) => {
-        this.observability?.emit(event);
-      })
-    );
 
     this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
@@ -471,6 +449,25 @@ export class Agent<
         created_at INTEGER DEFAULT (unixepoch())
       )
     `;
+
+    // Initialize MCPClientManager AFTER tables are created
+    this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
+      storage: this.ctx.storage
+    });
+
+    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
+    this._disposables.add(
+      this.mcp.onServerStateChanged(async () => {
+        this.broadcastMcpServers();
+      })
+    );
+
+    // Emit MCP observability events
+    this._disposables.add(
+      this.mcp.onObservabilityEvent((event) => {
+        this.observability?.emit(event);
+      })
+    );
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
@@ -603,7 +600,7 @@ export class Agent<
 
           connection.send(
             JSON.stringify({
-              mcp: await this.getMcpServers(),
+              mcp: this.getMcpServers(),
               type: MessageType.CF_AGENT_MCP_SERVERS
             })
           );
@@ -637,7 +634,7 @@ export class Agent<
         async () => {
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
-            await this.broadcastMcpServers();
+            this.broadcastMcpServers();
             return _onStart(props);
           });
         }
@@ -1409,7 +1406,7 @@ export class Agent<
     const id = nanoid(8);
 
     const authProvider = new DurableObjectOAuthClientProvider(
-      this.ctx.storage.kv,
+      this.ctx.storage,
       this.name,
       callbackUrl
     );
@@ -1463,10 +1460,10 @@ export class Agent<
     if (this.mcp.mcpConnections[id]) {
       await this.mcp.closeConnection(id);
     }
-    await this.mcp.removeServer(id);
+    this.mcp.removeServer(id);
   }
 
-  async getMcpServers(): Promise<MCPServersState> {
+  getMcpServers(): MCPServersState {
     const mcpState: MCPServersState = {
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
@@ -1474,7 +1471,7 @@ export class Agent<
       tools: this.mcp.listTools()
     };
 
-    const servers = await this.mcp.listServers();
+    const servers = this.mcp.listServers();
 
     if (servers && Array.isArray(servers) && servers.length > 0) {
       for (const server of servers) {
@@ -1501,10 +1498,10 @@ export class Agent<
     return mcpState;
   }
 
-  private async broadcastMcpServers() {
+  private broadcastMcpServers() {
     this.broadcast(
       JSON.stringify({
-        mcp: await this.getMcpServers(),
+        mcp: this.getMcpServers(),
         type: MessageType.CF_AGENT_MCP_SERVERS
       })
     );
@@ -1527,7 +1524,7 @@ export class Agent<
     request: Request
   ): Promise<Response | null> {
     // Check if this is an OAuth callback request
-    const isCallback = await this.mcp.isCallbackRequest(request);
+    const isCallback = this.mcp.isCallbackRequest(request);
     if (!isCallback) {
       return null;
     }

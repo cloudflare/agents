@@ -378,24 +378,27 @@ export class TestOAuthAgent extends Agent<Env> {
     } as unknown as MCPClientConnection;
   }
 
-  async setupMockMcpConnection(
+  setupMockMcpConnection(
     serverId: string,
     serverName: string,
     serverUrl: string,
     callbackUrl: string,
     clientId?: string | null
-  ): Promise<void> {
-    // Save server to database with callback URL
-    // biome-ignore lint/suspicious/noExplicitAny: just a test
-    await (this.mcp as any)._storage.saveServer({
-      id: serverId,
-      name: serverName,
-      server_url: serverUrl,
-      callback_url: `${callbackUrl}/${serverId}`,
-      client_id: clientId ?? null,
-      auth_url: null,
-      server_options: null
-    });
+  ): void {
+    // Save server to database with callback URL using SQL directly
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (
+        id, name, server_url, client_id, auth_url, callback_url, server_options
+      ) VALUES (
+        ${serverId},
+        ${serverName},
+        ${serverUrl},
+        ${clientId ?? null},
+        ${null},
+        ${`${callbackUrl}/${serverId}`},
+        ${null}
+      )
+    `;
     this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
       serverId,
       serverUrl,
@@ -451,8 +454,8 @@ export class TestOAuthAgent extends Agent<Env> {
     return servers.length > 0 ? servers[0] : null;
   }
 
-  async isCallbackUrlRegistered(callbackUrl: string): Promise<boolean> {
-    return await this.mcp.isCallbackRequest(new Request(callbackUrl));
+  isCallbackUrlRegistered(callbackUrl: string): boolean {
+    return this.mcp.isCallbackRequest(new Request(callbackUrl));
   }
 
   removeMcpConnection(serverId: string): void {

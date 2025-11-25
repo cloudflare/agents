@@ -1,83 +1,97 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MCPClientManager } from "../../mcp/client";
 import { MCPClientConnection } from "../../mcp/client-connection";
-import {
-  AgentMCPClientStorage,
-  type MCPServerRow
-} from "../../mcp/client-storage";
+import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
-
-/**
- * Internal type for test access to private storage.
- */
-type MCPClientManagerInternal = {
-  _storage: AgentMCPClientStorage;
-};
 
 describe("MCPClientManager OAuth Integration", () => {
   let manager: MCPClientManager;
   let mockStorageData: Map<string, MCPServerRow>;
   let mockKVData: Map<string, unknown>;
 
+  // Helper to save a server directly to mock storage (simulates registerServer's storage effect)
+  let saveServerToMock: (server: MCPServerRow) => void;
+  // Helper to clear auth URL (simulates clearAuthUrl's storage effect)
+  let clearAuthUrlInMock: (serverId: string) => void;
+
   beforeEach(() => {
     mockStorageData = new Map();
     mockKVData = new Map();
 
-    // Create a proper mock storage adapter
-    const mockStorage = new AgentMCPClientStorage(
-      <T extends Record<string, unknown>>(
-        strings: TemplateStringsArray,
-        ...values: (string | number | boolean | null)[]
-      ) => {
-        const query = strings.join("");
+    // Initialize helpers
+    saveServerToMock = (server: MCPServerRow) => {
+      mockStorageData.set(server.id, server);
+    };
 
-        if (query.includes("INSERT OR REPLACE")) {
-          const id = values[0] as string;
-          mockStorageData.set(id, {
-            id: values[0] as string,
-            name: values[1] as string,
-            server_url: values[2] as string,
-            client_id: values[3] as string | null,
-            auth_url: values[4] as string | null,
-            callback_url: values[5] as string,
-            server_options: values[6] as string | null
-          });
-          return [] as unknown as T[];
+    clearAuthUrlInMock = (serverId: string) => {
+      const server = mockStorageData.get(serverId);
+      if (server) {
+        server.auth_url = null;
+        mockStorageData.set(serverId, server);
+      }
+    };
+
+    // Create a mock SqlStorage with exec method
+    const mockSqlExec = <T extends Record<string, SqlStorageValue>>(
+      query: string,
+      ...values: SqlStorageValue[]
+    ) => {
+      const results: T[] = [];
+
+      if (query.includes("INSERT OR REPLACE")) {
+        const id = values[0] as string;
+        mockStorageData.set(id, {
+          id: values[0] as string,
+          name: values[1] as string,
+          server_url: values[2] as string,
+          client_id: values[3] as string | null,
+          auth_url: values[4] as string | null,
+          callback_url: values[5] as string,
+          server_options: values[6] as string | null
+        });
+      } else if (query.includes("DELETE")) {
+        const id = values[0] as string;
+        mockStorageData.delete(id);
+      } else if (
+        query.includes("UPDATE") &&
+        query.includes("auth_url = NULL")
+      ) {
+        // clearAuthUrl query - only clears auth_url, preserves callback_url
+        const id = values[0] as string;
+        const server = mockStorageData.get(id);
+        if (server) {
+          server.auth_url = null;
+          mockStorageData.set(id, server);
         }
-
-        if (query.includes("DELETE")) {
-          const id = values[0] as string;
-          mockStorageData.delete(id);
-          return [] as unknown as T[];
-        }
-
-        if (query.includes("UPDATE") && query.includes("auth_url = NULL")) {
-          // clearAuthUrl query - only clears auth_url, preserves callback_url
-          const id = values[0] as string;
-          const server = mockStorageData.get(id);
-          if (server) {
-            server.auth_url = null;
-            mockStorageData.set(id, server);
-          }
-          return [] as unknown as T[];
-        }
-
-        if (query.includes("SELECT")) {
-          if (query.includes("WHERE callback_url")) {
-            const url = values[0] as string;
-            for (const server of mockStorageData.values()) {
-              if (server.callback_url === url) {
-                return [server] as unknown as T[];
-              }
+      } else if (query.includes("SELECT")) {
+        if (query.includes("WHERE callback_url")) {
+          const url = values[0] as string;
+          for (const server of mockStorageData.values()) {
+            if (server.callback_url === url) {
+              results.push(server as unknown as T);
+              break;
             }
-            return [] as unknown as T[];
           }
-          return Array.from(mockStorageData.values()) as unknown as T[];
+        } else {
+          results.push(
+            ...(Array.from(mockStorageData.values()) as unknown as T[])
+          );
         }
+      }
 
-        return [] as unknown as T[];
+      return results[Symbol.iterator]();
+    };
+
+    // Create a mock DurableObjectStorage
+    const mockDOStorage = {
+      sql: {
+        exec: mockSqlExec
       },
-      {
+      get: async <T>(key: string) => mockKVData.get(key) as T | undefined,
+      put: async (key: string, value: unknown) => {
+        mockKVData.set(key, value);
+      },
+      kv: {
         get: <T>(key: string) => mockKVData.get(key) as T | undefined,
         put: (key: string, value: unknown) => {
           mockKVData.set(key, value);
@@ -85,10 +99,10 @@ describe("MCPClientManager OAuth Integration", () => {
         list: vi.fn(),
         delete: vi.fn()
       }
-    );
+    } as unknown as DurableObjectStorage;
 
     manager = new MCPClientManager("test-client", "1.0.0", {
-      storage: mockStorage
+      storage: mockDOStorage
     });
   });
 
@@ -132,9 +146,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl2 = "http://localhost:3000/callback/server2";
 
       // Save servers with callback URLs to database
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "server1",
         name: "Test Server 1",
         server_url: "http://test1.com",
@@ -143,9 +155,7 @@ describe("MCPClientManager OAuth Integration", () => {
         auth_url: null,
         server_options: null
       });
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "server2",
         name: "Test Server 2",
         server_url: "http://test2.com",
@@ -157,34 +167,24 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Test callback recognition
       expect(
-        await manager.isCallbackRequest(
-          new Request(`${callbackUrl1}?code=test`)
-        )
+        manager.isCallbackRequest(new Request(`${callbackUrl1}?code=test`))
       ).toBe(true);
       expect(
-        await manager.isCallbackRequest(
-          new Request(`${callbackUrl2}?code=test`)
-        )
+        manager.isCallbackRequest(new Request(`${callbackUrl2}?code=test`))
       ).toBe(true);
       expect(
-        await manager.isCallbackRequest(
-          new Request("http://other.com/callback")
-        )
+        manager.isCallbackRequest(new Request("http://other.com/callback"))
       ).toBe(false);
 
       // Remove server from database
-      await manager.removeServer("server1");
+      manager.removeServer("server1");
 
       // Should no longer recognize the removed server's callback
       expect(
-        await manager.isCallbackRequest(
-          new Request(`${callbackUrl1}?code=test`)
-        )
+        manager.isCallbackRequest(new Request(`${callbackUrl1}?code=test`))
       ).toBe(false);
       expect(
-        await manager.isCallbackRequest(
-          new Request(`${callbackUrl2}?code=test`)
-        )
+        manager.isCallbackRequest(new Request(`${callbackUrl2}?code=test`))
       ).toBe(true);
     });
 
@@ -195,9 +195,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
 
       // Save server to database with callback URL
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -285,9 +283,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should handle OAuth error response from provider", async () => {
       const callbackUrl = "http://localhost:3000/callback/server1";
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "server1",
         name: "Test Server",
         server_url: "http://test.com",
@@ -310,9 +306,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should throw error for callback without code or error", async () => {
       const callbackUrl = "http://localhost:3000/callback/server1";
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "server1",
         name: "Test Server",
         server_url: "http://test.com",
@@ -331,9 +325,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should throw error for callback without state", async () => {
       const callbackUrl = "http://localhost:3000/callback/server1";
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "server1",
         name: "Test Server",
         server_url: "http://test.com",
@@ -352,9 +344,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should throw error for callback with non-existent server", async () => {
       const callbackUrl = "http://localhost:3000/callback/non-existent";
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "non-existent",
         name: "Test Server",
         server_url: "http://test.com",
@@ -376,9 +366,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should handle duplicate callback when already in ready state", async () => {
       const serverId = "test-server";
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -415,9 +403,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should error when callback received for connection in failed state", async () => {
       const serverId = "test-server";
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -460,9 +446,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Save server with auth_url and callback_url
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -534,9 +518,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
 
       // Save server with cleared callback_url (simulating post-auth state)
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -551,7 +533,7 @@ describe("MCPClientManager OAuth Integration", () => {
       );
 
       // Request should not be recognized as a callback
-      const isCallback = await manager.isCallbackRequest(callbackRequest);
+      const isCallback = manager.isCallbackRequest(callbackRequest);
       expect(isCallback).toBe(false);
 
       // And handleCallbackRequest should fail
@@ -564,9 +546,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const serverId = "test-server";
       const callbackUrl = `http://localhost:3000/callback/${serverId}`;
 
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -578,19 +558,19 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Exact match should work
       expect(
-        await manager.isCallbackRequest(new Request(`${callbackUrl}?code=test`))
+        manager.isCallbackRequest(new Request(`${callbackUrl}?code=test`))
       ).toBe(true);
 
       // Prefix match should work (URL params)
       expect(
-        await manager.isCallbackRequest(
+        manager.isCallbackRequest(
           new Request(`${callbackUrl}?code=test&state=abc`)
         )
       ).toBe(true);
 
       // Different server ID should not match
       expect(
-        await manager.isCallbackRequest(
+        manager.isCallbackRequest(
           new Request(
             "http://localhost:3000/callback/different-server?code=test"
           )
@@ -599,14 +579,14 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Different host should not match
       expect(
-        await manager.isCallbackRequest(
+        manager.isCallbackRequest(
           new Request(`http://evil.com/callback/${serverId}?code=test`)
         )
       ).toBe(false);
 
       // Different path should not match
       expect(
-        await manager.isCallbackRequest(
+        manager.isCallbackRequest(
           new Request(`http://localhost:3000/different/${serverId}?code=test`)
         )
       ).toBe(false);
@@ -621,9 +601,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Save OAuth server to storage
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "OAuth Server",
         server_url: "http://oauth-server.com",
@@ -677,9 +655,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackUrl = "http://localhost:3000/callback";
 
       // Save non-OAuth server (no auth_url)
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Regular Server",
         server_url: "http://regular-server.com",
@@ -716,9 +692,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should restore mixed OAuth and non-OAuth servers", async () => {
       // Save OAuth server
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "oauth-server",
         name: "OAuth Server",
         server_url: "http://oauth.com",
@@ -729,9 +703,7 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       // Save regular server
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: "regular-server",
         name: "Regular Server",
         server_url: "http://regular.com",
@@ -1021,9 +993,7 @@ describe("MCPClientManager OAuth Integration", () => {
       manager.onServerStateChanged(onStateChangedSpy);
 
       // Setup server in storage
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id,
         name: "OAuth Server",
         server_url: "http://oauth.example.com/mcp",
@@ -1092,9 +1062,7 @@ describe("MCPClientManager OAuth Integration", () => {
       manager.onServerStateChanged(onStateChangedSpy);
 
       // Setup server in storage
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id,
         name: "OAuth Server",
         server_url: "http://oauth.example.com/mcp",
@@ -1224,7 +1192,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Clear previous calls from registerServer
       onStateChangedSpy.mockClear();
 
-      await manager.removeServer(id);
+      manager.removeServer(id);
 
       // Should fire when server is removed
       expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
@@ -1418,16 +1386,17 @@ describe("MCPClientManager OAuth Integration", () => {
 
     it("should throw error if jsonSchema not initialized", () => {
       // Create a new manager without initializing jsonSchema
+      const mockStorage = {
+        sql: {
+          exec: <T extends Record<string, SqlStorageValue>>() =>
+            ([] as T[])[Symbol.iterator]()
+        },
+        get: async () => undefined,
+        put: async () => {}
+      } as unknown as DurableObjectStorage;
+
       const newManager = new MCPClientManager("test-client", "1.0.0", {
-        storage: new AgentMCPClientStorage(
-          <T extends Record<string, unknown>>() => [] as T[],
-          {
-            get: () => undefined,
-            put: () => {},
-            list: vi.fn(),
-            delete: vi.fn()
-          }
-        )
+        storage: mockStorage
       });
 
       expect(() => newManager.getAITools()).toThrow(
@@ -1443,9 +1412,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Save server with auth_url
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "OAuth Server",
         server_url: "http://oauth.example.com",
@@ -1461,9 +1428,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(server?.callback_url).toBe(callbackUrl);
 
       // Clear auth URL
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.clearAuthUrl(serverId);
+      clearAuthUrlInMock(serverId);
 
       // Verify auth_url cleared but callback_url preserved
       server = mockStorageData.get(serverId);
@@ -1485,12 +1450,8 @@ describe("MCPClientManager OAuth Integration", () => {
         server_options: JSON.stringify({ transport: { type: "auto" } })
       };
 
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer(serverData);
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.clearAuthUrl(serverId);
+      saveServerToMock(serverData);
+      clearAuthUrlInMock(serverId);
 
       const server = mockStorageData.get(serverId);
       expect(server?.auth_url).toBe(null); // Only this changed
@@ -1508,9 +1469,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const serverId = "already-ready";
 
       // Save server to storage
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Ready Server",
         server_url: "http://ready.com",
@@ -1546,9 +1505,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should skip servers in connecting state", async () => {
       const serverId = "in-flight-connecting";
 
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Connecting Server",
         server_url: "http://connecting.com",
@@ -1582,9 +1539,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should skip servers in authenticating state", async () => {
       const serverId = "in-flight-auth";
 
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Authenticating Server",
         server_url: "http://auth.com",
@@ -1618,9 +1573,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should skip servers in discovering state", async () => {
       const serverId = "discovering";
 
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Discovering Server",
         server_url: "http://discover.com",
@@ -1652,9 +1605,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should recreate failed connections", async () => {
       const serverId = "failed-server";
 
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Failed Server",
         server_url: "http://failed.com",
@@ -1694,9 +1645,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should only restore once (idempotent)", async () => {
       const serverId = "idempotent-test";
 
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -1730,9 +1679,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const clientId = "stored-client-id";
 
       // Save OAuth server to storage (auth_url = null means we completed auth previously)
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "OAuth Server",
         server_url: "http://oauth.com",
@@ -1767,9 +1714,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const clientId = "needs-auth-client";
 
       // Save OAuth server with auth_url (indicates needs auth)
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "OAuth Server",
         server_url: "http://oauth.com",
@@ -1905,9 +1850,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const serverId = "auto-reconnect";
 
       // Simulate previous session: server was registered
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Auto Reconnect Server",
         server_url: "http://auto.com",
@@ -1937,9 +1880,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Simulate previous session: OAuth server was registered but tokens expired
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "OAuth Reauth Server",
         server_url: "http://oauth.com",
@@ -1968,7 +1909,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(connectSpy).toHaveBeenCalledWith(serverId);
 
       // Developer would get auth URL from the returned state
-      const servers = await manager.listServers();
+      const servers = manager.listServers();
       const server = servers.find((s) => s.id === serverId);
       expect(server?.auth_url).toBe(authUrl);
     });
