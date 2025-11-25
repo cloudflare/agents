@@ -7,6 +7,35 @@ declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
 
+// Message types used in tests
+interface StateMessage {
+  type: MessageType.CF_AGENT_STATE;
+  state: { count?: number };
+}
+
+interface StateErrorMessage {
+  type: MessageType.CF_AGENT_STATE_ERROR;
+  error: string;
+}
+
+interface RpcMessage {
+  type: MessageType.RPC;
+  id: string;
+  success?: boolean;
+  result?: unknown;
+}
+
+type TestMessage = StateMessage | StateErrorMessage | RpcMessage;
+
+function isTestMessage(data: unknown): data is TestMessage {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "type" in data &&
+    typeof (data as TestMessage).type === "string"
+  );
+}
+
 async function connectWS(path: string) {
   const ctx = createExecutionContext();
   const req = new Request(`http://example.com${path}`, {
@@ -20,17 +49,17 @@ async function connectWS(path: string) {
   return { ws, ctx };
 }
 
-function waitForMessage(
+function waitForMessage<T extends TestMessage>(
   ws: WebSocket,
-  predicate: (data: unknown) => boolean
-): Promise<unknown> {
+  predicate: (data: TestMessage) => boolean
+): Promise<T> {
   return new Promise((resolve) => {
     const handler = (e: MessageEvent) => {
       try {
-        const data = JSON.parse(e.data as string);
-        if (predicate(data)) {
+        const data: unknown = JSON.parse(e.data as string);
+        if (isTestMessage(data) && predicate(data)) {
           ws.removeEventListener("message", handler);
-          resolve(data);
+          resolve(data as T);
         }
       } catch {
         // Ignore parse errors
@@ -49,9 +78,9 @@ describe("Readonly Connections", () => {
       );
 
       // Wait for initial state message
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws1,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       ws1.close();
@@ -61,9 +90,9 @@ describe("Readonly Connections", () => {
         `/agents/test-readonly-agent/${room}?readonly=false`
       );
 
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws2,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Test passed - connections were established with different readonly query params
@@ -79,15 +108,15 @@ describe("Readonly Connections", () => {
       );
 
       // Wait for initial state
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Try to update state from readonly connection
-      const errorPromise = waitForMessage(
+      const errorPromise = waitForMessage<StateErrorMessage>(
         ws,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE_ERROR
+        (data) => data.type === MessageType.CF_AGENT_STATE_ERROR
       );
 
       ws.send(
@@ -97,7 +126,7 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const errorMsg = (await errorPromise) as any;
+      const errorMsg = await errorPromise;
       expect(errorMsg.type).toBe(MessageType.CF_AGENT_STATE_ERROR);
       expect(errorMsg.error).toBe("Connection is readonly");
 
@@ -111,10 +140,10 @@ describe("Readonly Connections", () => {
       );
 
       // Wait for initial state
-      const initialState = (await waitForMessage(
+      const initialState = await waitForMessage<StateMessage>(
         ws,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
-      )) as any;
+        (data) => data.type === MessageType.CF_AGENT_STATE
+      );
 
       expect(initialState.state).toBeDefined();
 
@@ -130,16 +159,16 @@ describe("Readonly Connections", () => {
       );
 
       // Wait for initial state
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Call RPC method from readonly connection
       const rpcId = Math.random().toString(36).slice(2);
-      const rpcPromise = waitForMessage(
+      const rpcPromise = waitForMessage<RpcMessage>(
         ws,
-        (data: any) => data.type === MessageType.RPC && data.id === rpcId
+        (data) => data.type === MessageType.RPC && data.id === rpcId
       );
 
       ws.send(
@@ -151,7 +180,7 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const rpcMsg = (await rpcPromise) as any;
+      const rpcMsg = await rpcPromise;
       expect(rpcMsg.success).toBe(true);
       expect(rpcMsg.result).toBe(1);
 
@@ -167,9 +196,9 @@ describe("Readonly Connections", () => {
       );
 
       // Wait for initial state
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Call an RPC method to verify connection works
@@ -183,10 +212,10 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const rpcMsg = (await waitForMessage(
+      const rpcMsg = await waitForMessage<RpcMessage>(
         ws,
-        (data: any) => data.type === MessageType.RPC && data.id === rpcId
-      )) as any;
+        (data) => data.type === MessageType.RPC && data.id === rpcId
+      );
 
       expect(rpcMsg.success).toBe(true);
       expect(rpcMsg.result).toBeDefined();
@@ -203,9 +232,9 @@ describe("Readonly Connections", () => {
       );
 
       // Wait for connection
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Check that readonly status is in the database
@@ -219,14 +248,14 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const dbResult = (await waitForMessage(
+      const dbResult = await waitForMessage<RpcMessage>(
         ws,
-        (data: any) => data.type === MessageType.RPC && data.id === checkDbId
-      )) as any;
+        (data) => data.type === MessageType.RPC && data.id === checkDbId
+      );
 
       // Should have at least one entry
       expect(Array.isArray(dbResult.result)).toBe(true);
-      expect(dbResult.result.length).toBeGreaterThan(0);
+      expect((dbResult.result as unknown[]).length).toBeGreaterThan(0);
 
       ws.close();
     });
@@ -239,9 +268,9 @@ describe("Readonly Connections", () => {
         `/agents/test-readonly-agent/${room}?readonly=true`
       );
 
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws1,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Close connection (simulates hibernation scenario)
@@ -255,15 +284,15 @@ describe("Readonly Connections", () => {
         `/agents/test-readonly-agent/${room}?readonly=true`
       );
 
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws2,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Try state update - should still be blocked
-      const errorPromise = waitForMessage(
+      const errorPromise = waitForMessage<StateErrorMessage>(
         ws2,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE_ERROR
+        (data) => data.type === MessageType.CF_AGENT_STATE_ERROR
       );
 
       ws2.send(
@@ -273,7 +302,7 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const errorMsg = (await errorPromise) as any;
+      const errorMsg = await errorPromise;
       expect(errorMsg.type).toBe(MessageType.CF_AGENT_STATE_ERROR);
 
       ws2.close();
@@ -287,9 +316,9 @@ describe("Readonly Connections", () => {
         `/agents/test-readonly-agent/${room}?readonly=true`
       );
 
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // Verify it's in the database
@@ -303,12 +332,12 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const dbResult1 = (await waitForMessage(
+      const dbResult1 = await waitForMessage<RpcMessage>(
         ws,
-        (data: any) => data.type === MessageType.RPC && data.id === checkDbId1
-      )) as any;
+        (data) => data.type === MessageType.RPC && data.id === checkDbId1
+      );
 
-      expect(dbResult1.result.length).toBeGreaterThan(0);
+      expect((dbResult1.result as unknown[]).length).toBeGreaterThan(0);
 
       // Close connection
       ws.close();
@@ -321,9 +350,9 @@ describe("Readonly Connections", () => {
         `/agents/test-readonly-agent/${room}?readonly=false`
       );
 
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws2,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       const checkDbId2 = Math.random().toString(36).slice(2);
@@ -336,10 +365,10 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const dbResult2 = (await waitForMessage(
+      const dbResult2 = await waitForMessage<RpcMessage>(
         ws2,
-        (data: any) => data.type === MessageType.RPC && data.id === checkDbId2
-      )) as any;
+        (data) => data.type === MessageType.RPC && data.id === checkDbId2
+      );
 
       // Old connection should be cleaned up
       expect(dbResult2.result).toEqual([]);
@@ -357,15 +386,15 @@ describe("Readonly Connections", () => {
         `/agents/test-readonly-agent/${room}?readonly=true`
       );
 
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws1,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       // ws1 (readonly) should not be able to update state
-      const errorPromise = waitForMessage(
+      const errorPromise = waitForMessage<StateErrorMessage>(
         ws1,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE_ERROR
+        (data) => data.type === MessageType.CF_AGENT_STATE_ERROR
       );
 
       ws1.send(
@@ -375,7 +404,7 @@ describe("Readonly Connections", () => {
         })
       );
 
-      const errorMsg = (await errorPromise) as any;
+      const errorMsg = await errorPromise;
       expect(errorMsg.error).toBe("Connection is readonly");
 
       ws1.close();
@@ -385,9 +414,9 @@ describe("Readonly Connections", () => {
         `/agents/test-readonly-agent/${room}?readonly=false`
       );
 
-      await waitForMessage(
+      await waitForMessage<StateMessage>(
         ws2,
-        (data: any) => data.type === MessageType.CF_AGENT_STATE
+        (data) => data.type === MessageType.CF_AGENT_STATE
       );
 
       ws2.close();

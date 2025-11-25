@@ -666,7 +666,7 @@ export class TestReadonlyAgent extends Agent<Env, { count: number }> {
   }> = [];
 
   shouldConnectionBeReadonly(
-    connection: Connection,
+    _connection: Connection,
     ctx: import("../index").ConnectionContext
   ): boolean {
     // Check query parameter to determine readonly status
