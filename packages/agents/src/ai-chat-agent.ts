@@ -26,6 +26,10 @@ import { nanoid } from "nanoid";
 
 /** Number of chunks to buffer before flushing to SQLite */
 const CHUNK_BUFFER_SIZE = 10;
+/** Maximum buffer size to prevent memory issues on rapid reconnections */
+const CHUNK_BUFFER_MAX_SIZE = 100;
+/** Maximum age for a "streaming" stream before considering it stale (ms) - 5 minutes */
+const STREAM_STALE_THRESHOLD_MS = 5 * 60 * 1000;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /** Default age threshold for cleaning up completed streams (ms) - 24 hours */
@@ -97,6 +101,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }> = [];
 
   /**
+   * Lock to prevent concurrent flush operations
+   */
+  private _isFlushingChunks = false;
+
+  /**
    * Timestamp of the last cleanup operation for old streams
    */
   private _lastCleanupTime = 0;
@@ -147,7 +156,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Restore active stream state if the agent was restarted during streaming.
    * Called during construction to recover any interrupted streams.
-   * This allows clients to resume streams even after a Durable Object restart.
+   * Validates stream freshness to avoid sending stale resume notifications.
    */
   private _restoreActiveStream() {
     const activeStreams = this.sql<StreamMetadata>`
@@ -156,9 +165,28 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       order by created_at desc 
       limit 1
     `;
+
     if (activeStreams && activeStreams.length > 0) {
-      this._activeStreamId = activeStreams[0].id;
-      this._activeRequestId = activeStreams[0].request_id;
+      const stream = activeStreams[0];
+      const streamAge = Date.now() - stream.created_at;
+
+      // Check if stream is stale (started too long ago)
+      if (streamAge > STREAM_STALE_THRESHOLD_MS) {
+        // Mark stale stream as error and don't restore
+        this.sql`
+          update cf_ai_chat_stream_metadata 
+          set status = 'error', completed_at = ${Date.now()} 
+          where id = ${stream.id}
+        `;
+        console.warn(
+          `[AIChatAgent] Discarded stale stream ${stream.id} (age: ${Math.round(streamAge / 1000)}s)`
+        );
+        return;
+      }
+
+      this._activeStreamId = stream.id;
+      this._activeRequestId = stream.request_id;
+
       // Get the last chunk index
       const lastChunk = this.sql<{ max_index: number }>`
         select max(chunk_index) as max_index 
@@ -257,6 +285,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @param body - The serialized chunk body
    */
   private _storeStreamChunk(streamId: string, body: string) {
+    // Force flush if buffer is at max to prevent memory issues
+    if (this._chunkBuffer.length >= CHUNK_BUFFER_MAX_SIZE) {
+      this._flushChunkBuffer();
+    }
+
     this._chunkBuffer.push({
       id: nanoid(),
       streamId,
@@ -265,7 +298,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     });
     this._streamChunkIndex++;
 
-    // Flush when buffer is full
+    // Flush when buffer reaches threshold
     if (this._chunkBuffer.length >= CHUNK_BUFFER_SIZE) {
       this._flushChunkBuffer();
     }
@@ -273,23 +306,29 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
   /**
    * Flush buffered chunks to SQLite in a single batch.
-   * This reduces write overhead by batching multiple chunks together.
+   * Uses a lock to prevent concurrent flush operations.
    */
   private _flushChunkBuffer() {
-    if (this._chunkBuffer.length === 0) {
+    // Prevent concurrent flushes
+    if (this._isFlushingChunks || this._chunkBuffer.length === 0) {
       return;
     }
 
-    const chunks = this._chunkBuffer;
-    this._chunkBuffer = [];
+    this._isFlushingChunks = true;
+    try {
+      const chunks = this._chunkBuffer;
+      this._chunkBuffer = [];
 
-    // Batch insert all chunks
-    const now = Date.now();
-    for (const chunk of chunks) {
-      this.sql`
-        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
-        values (${chunk.id}, ${chunk.streamId}, ${chunk.body}, ${chunk.index}, ${now})
-      `;
+      // Batch insert all chunks
+      const now = Date.now();
+      for (const chunk of chunks) {
+        this.sql`
+          insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+          values (${chunk.id}, ${chunk.streamId}, ${chunk.body}, ${chunk.index}, ${now})
+        `;
+      }
+    } finally {
+      this._isFlushingChunks = false;
     }
   }
 
@@ -300,6 +339,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @returns The generated stream ID
    */
   private _startStream(requestId: string): string {
+    // Flush any pending chunks from previous streams to prevent mixing
+    this._flushChunkBuffer();
+
     const streamId = nanoid();
     this._activeStreamId = streamId;
     this._activeRequestId = requestId;

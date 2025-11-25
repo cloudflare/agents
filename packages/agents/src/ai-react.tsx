@@ -658,8 +658,14 @@ export function useAgentChat<
                 }
                 return [...prevMessages, partialMessage];
               });
-            } catch (_error) {
-              // Not JSON, might be plain text
+            } catch (parseError) {
+              // Log corrupted chunk for debugging - could indicate data loss
+              console.warn(
+                "[useAgentChat] Failed to parse resumed stream chunk:",
+                parseError instanceof Error ? parseError.message : parseError,
+                "body:",
+                data.body?.slice(0, 100) // Truncate for logging
+              );
             }
           }
 
