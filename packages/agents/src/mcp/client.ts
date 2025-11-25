@@ -225,7 +225,11 @@ export class MCPClientManager {
       // If tokens are missing/invalid, connection will fail with Unauthorized
       // and state will be set to "authenticating"
       await this.connectToServer(server.id).catch((error) => {
-        console.error(`Error restoring ${server.id}:`, error);
+        console.error(`Error connecting to ${server.id}:`, error);
+      });
+
+      await this.discoverIfConnected(server.id).catch((error) => {
+        console.error(`Error discovering ${server.id}:`, error);
       });
     }
 
