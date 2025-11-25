@@ -687,11 +687,6 @@ export const createLegacySseHandler = (
       // Build MessageExtraInfo with filtered headers
       const headers = Object.fromEntries(request.headers.entries());
 
-      // Remove internal headers that are not part of the original request
-      delete headers[MCP_HTTP_METHOD_HEADER];
-      delete headers[MCP_MESSAGE_HEADER];
-      delete headers.upgrade;
-
       const extraInfo: MessageExtraInfo = {
         requestInfo: { headers }
       };
