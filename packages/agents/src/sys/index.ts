@@ -5,3 +5,4 @@ export * from "./worker";
 export * from "./agent";
 export * from "./events";
 export * from "./system";
+export * from "./client";

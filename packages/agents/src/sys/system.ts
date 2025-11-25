@@ -16,7 +16,6 @@ import type {
   ThreadMetadata
 } from "./types";
 import { createHandler, type HandlerOptions } from "./worker";
-import type { Connection, WSMessage } from "partyserver";
 
 type AgentSystemOptions = {
   defaultModel: string;
@@ -133,8 +132,8 @@ export class AgentSystem<TConfig = Record<string, unknown>> {
     const { toolRegistry, middlewareRegistry, agentRegistry } = this;
     const options = this.options; // biome bug, if I put it above the biome things its not used anywhere
     class ConfiguredAgentSystem extends SystemAgent<AgentEnv> {
-      async onDone(ctx: { agent: SystemAgent; final: string }): Promise<void> {
-        // throw new Error("Method not implemented.");
+      async onDone(_ctx: { agent: SystemAgent; final: string }): Promise<void> {
+        // Override in subclass if needed
       }
 
       // Gets local agent blueprint or reads it from static defaults.

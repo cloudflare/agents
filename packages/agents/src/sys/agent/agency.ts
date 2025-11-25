@@ -62,9 +62,10 @@ export class Agency extends DurableObject<AgentEnv> {
       if (!bp.name) return new Response("Missing name", { status: 400 });
 
       const now = new Date().toISOString();
-      const existing = this.sql
+      const rows = this.sql
         .exec("SELECT data FROM blueprints WHERE name = ?", bp.name)
-        .one();
+        .toArray();
+      const existing = rows.length > 0 ? rows[0] : null;
 
       let merged = { ...bp };
       if (existing) {
@@ -183,12 +184,12 @@ export class Agency extends DurableObject<AgentEnv> {
     const matchBp = path.match(/^\/internal\/blueprint\/([^/]+)$/);
     if (req.method === "GET" && matchBp) {
       const name = matchBp[1];
-      const row = this.sql
+      const rows = this.sql
         .exec("SELECT data FROM blueprints WHERE name = ?", name)
-        .one();
+        .toArray();
 
-      if (row) {
-        return Response.json(JSON.parse(row.data as string));
+      if (rows.length > 0) {
+        return Response.json(JSON.parse(rows[0].data as string));
       }
 
       return new Response(null, { status: 404 });

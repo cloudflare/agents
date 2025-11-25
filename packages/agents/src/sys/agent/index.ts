@@ -73,6 +73,7 @@ export abstract class SystemAgent<
   abstract get model(): string;
   abstract get config(): AgentConfig;
   abstract get provider(): Provider;
+  abstract onRegister(meta: ThreadMetadata): Promise<void>;
 
   get messages() {
     return this.store.listMessages();
@@ -174,7 +175,9 @@ export abstract class SystemAgent<
       if (metadata.parent) {
         this.info.parentInfo = metadata.parent;
       }
-      for (const m of this.middleware) await m.onInit?.(this.mwContext);
+
+      // Call onRegister hook to fetch blueprint and initialize
+      await this.onRegister(metadata);
 
       return Response.json({ ok: true });
     } catch (error: unknown) {
