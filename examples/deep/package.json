@@ -1,0 +1,12 @@
+{
+  "author": "",
+  "keywords": [],
+  "name": "@cloudflare/agents-deep-example",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types --include-runtime false"
+  },
+  "type": "module"
+}

@@ -1,0 +1,47 @@
+{
+  "compatibility_date": "2025-04-17",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // adding these flags since the vitest runner needs them
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module"
+  ],
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.html"],
+      "fallthrough": true
+    }
+  ],
+  "vars": {
+    // Mock API key for tests - actual LLM calls won't work but registration will pass
+    "LLM_API_KEY": "test-api-key-for-testing"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "SystemAgent",
+        "name": "SYSTEM_AGENT"
+      },
+      {
+        "class_name": "Agency",
+        "name": "AGENCY"
+      }
+    ]
+  },
+  "kv_namespaces": [
+    {
+      "binding": "AGENCY_REGISTRY",
+      "id": "test-agency-registry"
+    }
+  ],
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["SystemAgent", "Agency"],
+      "tag": "v1"
+    }
+  ]
+}

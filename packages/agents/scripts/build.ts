@@ -13,12 +13,16 @@ async function main() {
       "src/mcp/do-oauth-client-provider.ts",
       "src/mcp/x402.ts",
       "src/observability/index.ts",
-      "src/codemode/ai.ts"
+      "src/codemode/ai.ts",
+      "src/sys/index.ts"
     ],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
-    sourcemap: true
+    sourcemap: true,
+    loader: {
+      ".html": "text"
+    }
   });
 
   // then run prettier on the generated .d.ts files
