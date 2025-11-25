@@ -9,7 +9,8 @@ async function main() {
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
-    sourcemap: true
+    sourcemap: true,
+    fixedExtension: false
   });
 
   // then run prettier on the generated .d.ts files

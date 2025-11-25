@@ -14,27 +14,40 @@ export class MyMCP extends McpAgent {
     const { echoAvailable } = this.props as Props;
     // Simple echo tool that's gated behind a feature flag
     if (echoAvailable) {
-      this.server.tool("echo", { msg: z.string() }, async ({ msg }) => ({
-        content: [{ type: "text", text: msg }]
-      }));
+      this.server.registerTool(
+        "echo",
+        {
+          description: "Echo a message",
+          inputSchema: { msg: z.string() }
+        },
+        async ({ msg }) => ({
+          content: [{ type: "text", text: msg }]
+        })
+      );
     }
 
     // Simple addition tool
-    this.server.tool(
+    this.server.registerTool(
       "add",
-      { a: z.number(), b: z.number() },
-      async ({ a, b }) => ({
-        content: [{ type: "text", text: String(a + b) }]
-      })
+      {
+        description: "Add two numbers",
+        inputSchema: { a: z.number(), b: z.number() }
+      },
+      async ({ a, b }) => {
+        return { content: [{ type: "text", text: String(a + b) }] };
+      }
     );
 
     // Calculator tool with multiple operations
-    this.server.tool(
+    this.server.registerTool(
       "calculate",
       {
-        operation: z.enum(["add", "subtract", "multiply", "divide"]),
-        a: z.number(),
-        b: z.number()
+        description: "Calculate a mathematical operation",
+        inputSchema: {
+          operation: z.enum(["add", "subtract", "multiply", "divide"]),
+          a: z.number(),
+          b: z.number()
+        }
       },
       async ({ operation, a, b }) => {
         let result: number;
