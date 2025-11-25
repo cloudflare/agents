@@ -1,5 +1,5 @@
 // Imports
-import { AgentSystem, subagents } from "agents/sys";
+import { AgentSystem } from "agents/sys";
 import {
   getCurrentWindowTool,
   setTimeWindowTool,
