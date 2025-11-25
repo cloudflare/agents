@@ -369,6 +369,100 @@ export class TestChatAgent extends AIChatAgent<Env> {
     await this.persistMessages([messageWithToolOutput]);
     return messageWithToolOutput;
   }
+
+  // Resumable streaming test helpers
+
+  @callable()
+  testStartStream(requestId: string): string {
+    // Access private method via any cast for testing
+    return (this as any)._startStream(requestId);
+  }
+
+  @callable()
+  testStoreStreamChunk(streamId: string, body: string): void {
+    (this as any)._storeStreamChunk(streamId, body);
+  }
+
+  @callable()
+  testFlushChunkBuffer(): void {
+    (this as any)._flushChunkBuffer();
+  }
+
+  @callable()
+  testCompleteStream(streamId: string): void {
+    (this as any)._completeStream(streamId);
+  }
+
+  @callable()
+  testMarkStreamError(streamId: string): void {
+    (this as any)._markStreamError(streamId);
+  }
+
+  @callable()
+  getActiveStreamId(): string | null {
+    return (this as any)._activeStreamId;
+  }
+
+  @callable()
+  getActiveRequestId(): string | null {
+    return (this as any)._activeRequestId;
+  }
+
+  @callable()
+  getStreamChunks(
+    streamId: string
+  ): Array<{ body: string; chunk_index: number }> {
+    return (
+      this.sql`
+      select body, chunk_index from cf_ai_chat_stream_chunks 
+      where stream_id = ${streamId} 
+      order by chunk_index asc
+    ` || []
+    );
+  }
+
+  @callable()
+  getStreamMetadata(
+    streamId: string
+  ): { status: string; request_id: string } | null {
+    const result = this.sql`
+      select status, request_id from cf_ai_chat_stream_metadata 
+      where id = ${streamId}
+    `;
+    return result && result.length > 0 ? result[0] : null;
+  }
+
+  @callable()
+  getAllStreamMetadata(): Array<{
+    id: string;
+    status: string;
+    request_id: string;
+    created_at: number;
+  }> {
+    return (
+      this
+        .sql`select id, status, request_id, created_at from cf_ai_chat_stream_metadata` ||
+      []
+    );
+  }
+
+  @callable()
+  testInsertStaleStream(
+    streamId: string,
+    requestId: string,
+    ageMs: number
+  ): void {
+    const createdAt = Date.now() - ageMs;
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      values (${streamId}, ${requestId}, 'streaming', ${createdAt})
+    `;
+  }
+
+  @callable()
+  testRestoreActiveStream(): void {
+    (this as any)._restoreActiveStream();
+  }
 }
 
 // Test MCP Agent for jurisdiction feature
