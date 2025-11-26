@@ -177,7 +177,7 @@ describe("MCPClientManager OAuth Integration", () => {
       ).toBe(false);
 
       // Remove server from database
-      manager.removeServer("server1");
+      await manager.removeServer("server1");
 
       // Should no longer recognize the removed server's callback
       expect(
