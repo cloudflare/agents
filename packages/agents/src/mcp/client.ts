@@ -689,8 +689,11 @@ export class MCPClientManager {
 
   /**
    * Discover server capabilities if connection is in CONNECTED or READY state.
-   * Transitions to DISCOVERING then READY (or FAILED on error).
+   * Transitions to DISCOVERING then READY (or CONNECTED on error).
    * Can be called to refresh server capabilities (e.g., from a UI refresh button).
+   *
+   * If called while a previous discovery is in-flight for the same server,
+   * the previous discovery will be aborted.
    *
    * @param serverId The server ID to discover
    * @param options Optional configuration
@@ -701,8 +704,6 @@ export class MCPClientManager {
     serverId: string,
     options: { timeoutMs?: number } = {}
   ): Promise<MCPDiscoverResult | undefined> {
-    const { timeoutMs = 30000 } = options;
-
     const conn = this.mcpConnections[serverId];
     if (!conn) {
       this._onObservabilityEvent.fire({
@@ -715,56 +716,14 @@ export class MCPClientManager {
       return undefined;
     }
 
-    if (
-      conn.connectionState !== MCPConnectionState.CONNECTED &&
-      conn.connectionState !== MCPConnectionState.READY
-    ) {
-      this._onObservabilityEvent.fire({
-        type: "mcp:client:discover",
-        displayMessage: `discoverIfConnected skipped for ${serverId}, state is ${conn.connectionState}`,
-        payload: {},
-        timestamp: Date.now(),
-        id: nanoid()
-      });
-      // Return current state with success: false (skipped, not an error)
-      return {
-        success: false,
-        state: conn.connectionState,
-        error: `Discovery skipped - connection in ${conn.connectionState} state`
-      };
-    }
-
-    conn.connectionState = MCPConnectionState.DISCOVERING;
+    // Delegate to connection's discover method which handles cancellation and timeout
+    const result = await conn.discover(options);
     this._onServerStateChanged.fire();
 
-    try {
-      // Race discovery against timeout
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(
-          () => reject(new Error(`Discovery timed out after ${timeoutMs}ms`)),
-          timeoutMs
-        );
-      });
-
-      await Promise.race([conn.discoverAndRegister(), timeoutPromise]);
-      this._onServerStateChanged.fire();
-
-      this._onObservabilityEvent.fire({
-        type: "mcp:client:discover",
-        displayMessage: `Discovery completed for ${serverId}`,
-        payload: {},
-        timestamp: Date.now(),
-        id: nanoid()
-      });
-
-      return { success: true, state: MCPConnectionState.READY };
-    } catch (e) {
-      // Return to CONNECTED state so user can retry discovery
-      conn.connectionState = MCPConnectionState.CONNECTED;
-      this._onServerStateChanged.fire();
-      const error = e instanceof Error ? e.message : String(e);
-      return { success: false, state: MCPConnectionState.CONNECTED, error };
-    }
+    return {
+      ...result,
+      state: conn.connectionState
+    };
   }
 
   /**
@@ -939,6 +898,12 @@ export class MCPClientManager {
    */
   async closeAllConnections() {
     const ids = Object.keys(this.mcpConnections);
+
+    // Cancel all in-flight discoveries
+    for (const id of ids) {
+      this.mcpConnections[id].cancelDiscovery();
+    }
+
     await Promise.all(
       ids.map(async (id) => {
         await this.mcpConnections[id].client.close();
@@ -961,6 +926,10 @@ export class MCPClientManager {
     if (!this.mcpConnections[id]) {
       throw new Error(`Connection with id "${id}" does not exist.`);
     }
+
+    // Cancel any in-flight discovery
+    this.mcpConnections[id].cancelDiscovery();
+
     await this.mcpConnections[id].client.close();
     delete this.mcpConnections[id];
 

@@ -82,6 +82,16 @@ export type MCPClientConnectionResult = {
   transport?: BaseTransportType;
 };
 
+/**
+ * Result of a discovery operation.
+ * success indicates whether discovery completed successfully.
+ * error is present when success is false.
+ */
+export type MCPDiscoveryResult = {
+  success: boolean;
+  error?: string;
+};
+
 export class MCPClientConnection {
   client: Client;
   connectionState: MCPConnectionState = MCPConnectionState.CONNECTING;
@@ -92,6 +102,9 @@ export class MCPClientConnection {
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
   serverCapabilities: ServerCapabilities | undefined;
+
+  /** Tracks in-flight discovery to allow cancellation */
+  private _discoveryAbortController: AbortController | undefined;
 
   private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
@@ -236,19 +249,12 @@ export class MCPClientConnection {
   }
 
   /**
-   * Discover server capabilities and register tools, resources, prompts, and templates
+   * Discover server capabilities and register tools, resources, prompts, and templates.
+   * This method does the work but does not manage connection state - that's handled by discover().
    */
   async discoverAndRegister(): Promise<void> {
-    if (this.connectionState !== MCPConnectionState.DISCOVERING) {
-      throw new Error(
-        "Connection must be in discovering state to discover and register, the parent should set this and trigger observability events"
-      );
-    }
-
     this.serverCapabilities = this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
-      // Return to CONNECTED state so user can retry discovery
-      this.connectionState = MCPConnectionState.CONNECTED;
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
@@ -312,12 +318,7 @@ export class MCPClientConnection {
             break;
         }
       }
-
-      this.connectionState = MCPConnectionState.READY;
     } catch (error) {
-      // Return to CONNECTED state so user can retry discovery
-      this.connectionState = MCPConnectionState.CONNECTED;
-
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
         displayMessage: `Failed to discover capabilities for ${this.url.toString()}: ${toErrorMessage(error)}`,
@@ -330,6 +331,128 @@ export class MCPClientConnection {
       });
 
       throw error;
+    }
+  }
+
+  /**
+   * Discover server capabilities with timeout and cancellation support.
+   * If called while a previous discovery is in-flight, the previous discovery will be aborted.
+   *
+   * @param options Optional configuration
+   * @param options.timeoutMs Timeout in milliseconds (default: 30000)
+   * @returns Result indicating success/failure with optional error message
+   */
+  async discover(
+    options: { timeoutMs?: number } = {}
+  ): Promise<MCPDiscoveryResult> {
+    const { timeoutMs = 30000 } = options;
+
+    // Check if state allows discovery
+    if (
+      this.connectionState !== MCPConnectionState.CONNECTED &&
+      this.connectionState !== MCPConnectionState.READY
+    ) {
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:discover",
+        displayMessage: `Discovery skipped for ${this.url.toString()}, state is ${this.connectionState}`,
+        payload: {
+          url: this.url.toString(),
+          state: this.connectionState
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+      return {
+        success: false,
+        error: `Discovery skipped - connection in ${this.connectionState} state`
+      };
+    }
+
+    // Cancel any previous in-flight discovery
+    if (this._discoveryAbortController) {
+      this._discoveryAbortController.abort();
+      this._discoveryAbortController = undefined;
+    }
+
+    // Create a new AbortController for this discovery
+    const abortController = new AbortController();
+    this._discoveryAbortController = abortController;
+
+    this.connectionState = MCPConnectionState.DISCOVERING;
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      // Create timeout promise
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`Discovery timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      });
+
+      // Check if aborted before starting
+      if (abortController.signal.aborted) {
+        throw new Error("Discovery was cancelled");
+      }
+
+      // Create an abort promise that rejects when signal fires
+      const abortPromise = new Promise<never>((_, reject) => {
+        abortController.signal.addEventListener("abort", () => {
+          reject(new Error("Discovery was cancelled"));
+        });
+      });
+
+      await Promise.race([
+        this.discoverAndRegister(),
+        timeoutPromise,
+        abortPromise
+      ]);
+
+      // Clear timeout on success
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+
+      // Discovery succeeded - transition to ready
+      this.connectionState = MCPConnectionState.READY;
+
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:discover",
+        displayMessage: `Discovery completed for ${this.url.toString()}`,
+        payload: {
+          url: this.url.toString()
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+
+      return { success: true };
+    } catch (e) {
+      // Always clear the timeout
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+
+      // Return to CONNECTED state so user can retry discovery
+      this.connectionState = MCPConnectionState.CONNECTED;
+
+      const error = e instanceof Error ? e.message : String(e);
+      return { success: false, error };
+    } finally {
+      // Clean up the abort controller
+      this._discoveryAbortController = undefined;
+    }
+  }
+
+  /**
+   * Cancel any in-flight discovery operation.
+   * Called when closing the connection.
+   */
+  cancelDiscovery(): void {
+    if (this._discoveryAbortController) {
+      this._discoveryAbortController.abort();
+      this._discoveryAbortController = undefined;
     }
   }
 

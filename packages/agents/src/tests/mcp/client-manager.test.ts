@@ -1243,8 +1243,10 @@ describe("MCPClientManager OAuth Integration", () => {
       conn.init = vi.fn().mockImplementation(async () => {
         conn.connectionState = "connected";
       });
-      conn.discoverAndRegister = vi.fn().mockImplementation(async () => {
+      // Mock discover() instead of discoverAndRegister() since that's what discoverIfConnected calls
+      conn.discover = vi.fn().mockImplementation(async () => {
         conn.connectionState = "ready";
+        return { success: true };
       });
 
       // Clear previous calls from registerServer
@@ -1252,8 +1254,8 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.establishConnection(id);
 
-      // Should fire 4 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 2 from discoverIfConnected (discovering + ready)
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
+      // Should fire 3 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 1 from discoverIfConnected (state changed)
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(3);
     });
 
     it("should fire onServerStateChanged when establishConnection fails", async () => {
@@ -1273,9 +1275,10 @@ describe("MCPClientManager OAuth Integration", () => {
       conn.init = vi.fn().mockImplementation(async () => {
         conn.connectionState = "connected";
       });
-      conn.discoverAndRegister = vi.fn().mockImplementation(async () => {
-        conn.connectionState = "failed";
-        throw new Error("Discovery failed");
+      // Mock discover() to simulate failure - state doesn't change (stays connected)
+      conn.discover = vi.fn().mockImplementation(async () => {
+        // State stays as "connected" on failure
+        return { success: false, error: "Discovery failed" };
       });
 
       // Clear previous calls from registerServer
@@ -1283,8 +1286,8 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.establishConnection(id);
 
-      // Should fire 4 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 2 from discoverIfConnected (discovering + failed)
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
+      // Should fire 3 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 1 from discoverIfConnected
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(3);
     });
 
     it("should fire onServerStateChanged when removing a server", async () => {
@@ -2084,6 +2087,11 @@ describe("MCPClientManager OAuth Integration", () => {
 
       manager.mcpConnections[serverId] = connection;
 
+      // Set up event piping from connection to manager (normally done by createConnection)
+      connection.onObservabilityEvent((event) => {
+        (manager as any)._onObservabilityEvent.fire(event);
+      });
+
       const observabilitySpy = vi.fn();
       manager.onObservabilityEvent(observabilitySpy);
 
@@ -2117,6 +2125,11 @@ describe("MCPClientManager OAuth Integration", () => {
 
       manager.mcpConnections[serverId] = connection;
 
+      // Set up event piping from connection to manager (normally done by createConnection)
+      connection.onObservabilityEvent((event) => {
+        (manager as any)._onObservabilityEvent.fire(event);
+      });
+
       const stateChangedSpy = vi.fn();
       manager.onServerStateChanged(stateChangedSpy);
 
@@ -2125,14 +2138,14 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.discoverIfConnected(serverId);
 
-      // Should have called discoverAndRegister
+      // Should have called discoverAndRegister (via discover)
       expect(connection.discoverAndRegister).toHaveBeenCalledTimes(1);
 
       // Should have transitioned through discovering to ready
       expect(connection.connectionState).toBe("ready");
 
-      // Should have fired state changed twice (discovering + ready)
-      expect(stateChangedSpy).toHaveBeenCalledTimes(2);
+      // Should have fired state changed once (only when state actually changes)
+      expect(stateChangedSpy).toHaveBeenCalledTimes(1);
 
       // Should have fired completion observability event
       expect(observabilitySpy).toHaveBeenCalledWith(
@@ -2209,6 +2222,11 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       manager.mcpConnections[serverId] = connection;
+
+      // Set up event piping from connection to manager (normally done by createConnection)
+      connection.onObservabilityEvent((event) => {
+        (manager as any)._onObservabilityEvent.fire(event);
+      });
 
       const observabilityEvents: string[] = [];
       manager.onObservabilityEvent((event) => {

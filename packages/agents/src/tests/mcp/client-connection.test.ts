@@ -121,10 +121,10 @@ describe("MCP Client Connection Integration", () => {
       // After init, connection should be in CONNECTED state
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      connection.connectionState = "discovering";
-      await connection.discoverAndRegister();
+      // Trigger discovery using the public discover() method
+      const result = await connection.discover();
 
+      expect(result.success).toBe(true);
       expect(connection.connectionState).toBe("ready");
       expect(connection.serverCapabilities).toBeDefined();
       expect(connection.tools).toBeDefined();
@@ -240,10 +240,10 @@ describe("MCP Client Connection Integration", () => {
       await connection.init();
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      connection.connectionState = "discovering";
-      await connection.discoverAndRegister();
+      // Trigger discovery using the public discover() method
+      const result = await connection.discover();
 
+      expect(result.success).toBe(true);
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toHaveLength(1);
       expect(connection.tools[0].name).toBe("test-tool");
@@ -282,10 +282,10 @@ describe("MCP Client Connection Integration", () => {
       await connection.init();
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      connection.connectionState = "discovering";
-      await connection.discoverAndRegister();
+      // Trigger discovery using the public discover() method
+      const result = await connection.discover();
 
+      expect(result.success).toBe(true);
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toEqual([]);
       expect(connection.resources).toEqual([]);
@@ -328,10 +328,10 @@ describe("MCP Client Connection Integration", () => {
       await connection.init();
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      connection.connectionState = "discovering";
-      await connection.discoverAndRegister();
+      // Trigger discovery using the public discover() method
+      const result = await connection.discover();
 
+      expect(result.success).toBe(true);
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toEqual([]);
 
@@ -377,19 +377,24 @@ describe("MCP Client Connection Integration", () => {
       await newConnection.init();
       expect(newConnection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      newConnection.connectionState = "discovering";
-      await newConnection.discoverAndRegister();
+      // Trigger discovery using the public discover() method
+      await newConnection.discover();
 
-      // Now verify the observability event was fired (filter for discover events only)
+      // Now verify the observability events were fired (filter for discover events only)
       const discoverEvents = observabilityEvents.filter(
         (e) => e.type === "mcp:client:discover"
       );
-      expect(discoverEvents).toHaveLength(1);
+      // Should have 2 events: one warning about method-not-found, one completion
+      expect(discoverEvents).toHaveLength(2);
+
+      // First event should be the method-not-found warning
       expect(discoverEvents[0].displayMessage).toContain(
         "The server advertised support for the capability tools"
       );
       expect(discoverEvents[0].payload.capability).toBe("tools");
+
+      // Second event should be the completion event
+      expect(discoverEvents[1].displayMessage).toContain("Discovery completed");
     });
   });
 
@@ -447,11 +452,11 @@ describe("MCP Client Connection Integration", () => {
       await connection.init();
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery - should fail
-      connection.connectionState = "discovering";
-      await expect(connection.discoverAndRegister()).rejects.toThrow(
-        "Instructions service down"
-      );
+      // Trigger discovery - should fail and return error result
+      const result = await connection.discover();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Instructions service down");
 
       // Connection should return to connected state (not failed) so user can retry
       expect(connection.connectionState).toBe("connected");
@@ -503,9 +508,9 @@ describe("MCP Client Connection Integration", () => {
 
       await testConnection.init();
 
-      // Manually trigger discovery - should fail
-      testConnection.connectionState = "discovering";
-      await expect(testConnection.discoverAndRegister()).rejects.toThrow();
+      // Trigger discovery - should fail
+      const testResult = await testConnection.discover();
+      expect(testResult.success).toBe(false);
 
       // Should have fired observability event for the failure
       const discoverEvents = observabilityEvents.filter(
@@ -550,11 +555,11 @@ describe("MCP Client Connection Integration", () => {
       await connection.init();
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery - should fail
-      connection.connectionState = "discovering";
-      await expect(connection.discoverAndRegister()).rejects.toThrow(
-        "All services down"
-      );
+      // Trigger discovery - should fail
+      const result = await connection.discover();
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("All services down");
 
       // Connection should return to connected state (not failed) so user can retry
       expect(connection.connectionState).toBe("connected");
@@ -596,9 +601,9 @@ describe("MCP Client Connection Integration", () => {
 
       await testConn.init();
 
-      // Manually trigger discovery - should fail
-      testConn.connectionState = "discovering";
-      await expect(testConn.discoverAndRegister()).rejects.toThrow();
+      // Trigger discovery - should fail
+      const testResult = await testConn.discover();
+      expect(testResult.success).toBe(false);
 
       // Should have fired observability event for the failure
       const discoverEvents = events.filter(
@@ -647,9 +652,10 @@ describe("MCP Client Connection Integration", () => {
       await connection.init();
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery - should fail on first error
-      connection.connectionState = "discovering";
-      await expect(connection.discoverAndRegister()).rejects.toThrow();
+      // Trigger discovery - should fail on first error
+      const result = await connection.discover();
+
+      expect(result.success).toBe(false);
 
       // Connection should return to connected state (not failed) so user can retry
       expect(connection.connectionState).toBe("connected");
@@ -734,10 +740,10 @@ describe("MCP Client Connection Integration", () => {
 
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      connection.connectionState = "discovering";
-      await connection.discoverAndRegister();
+      // Trigger discovery using the public discover() method
+      const result = await connection.discover();
 
+      expect(result.success).toBe(true);
       expect(connection.connectionState).toBe("ready");
     });
 
