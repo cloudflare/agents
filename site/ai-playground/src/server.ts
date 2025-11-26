@@ -121,27 +121,22 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
 
   @callable()
   async connectMCPServer(url: string, headers?: Record<string, string>) {
-    await this.mcp.closeAllConnections();
-
-    let result: { id: string; authUrl: string | undefined };
-    if (!headers) {
-      result = await this.addMcpServer("mcp-server", url, this.env.HOST);
-    } else {
-      result = await this.addMcpServer(
-        "mcp-server",
-        url,
-        this.env.HOST,
-        "agents",
-        {
-          transport: {
-            type: "auto",
-            headers
-          }
-        }
-      );
+    // Remove any existing server to ensure clean slate
+    // This prevents stale callback URLs from matching old servers
+    const { servers } = await this.getMcpServers();
+    for (const id of Object.keys(servers)) {
+      await this.removeMcpServer(id);
     }
 
-    return result;
+    if (!headers) {
+      return await this.addMcpServer("mcp-server", url, this.env.HOST);
+    }
+    return await this.addMcpServer("mcp-server", url, this.env.HOST, "agents", {
+      transport: {
+        type: "auto",
+        headers
+      }
+    });
   }
 
   @callable()
