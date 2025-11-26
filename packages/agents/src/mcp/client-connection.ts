@@ -339,13 +339,13 @@ export class MCPClientConnection {
    * If called while a previous discovery is in-flight, the previous discovery will be aborted.
    *
    * @param options Optional configuration
-   * @param options.timeoutMs Timeout in milliseconds (default: 30000)
+   * @param options.timeoutMs Timeout in milliseconds (default: 15000)
    * @returns Result indicating success/failure with optional error message
    */
   async discover(
     options: { timeoutMs?: number } = {}
   ): Promise<MCPDiscoveryResult> {
-    const { timeoutMs = 30000 } = options;
+    const { timeoutMs = 15000 } = options;
 
     // Check if state allows discovery
     if (

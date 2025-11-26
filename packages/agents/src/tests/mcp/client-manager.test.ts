@@ -692,7 +692,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const clientId = "stored-client-id";
       const authUrl = "https://auth.example.com/authorize";
 
-      // Save OAuth server to storage
+      // Save OAuth server to storage with auth_url set (OAuth flow in progress)
       await (
         manager as unknown as MCPClientManagerInternal
       )._storage.saveServer({
@@ -708,30 +708,16 @@ describe("MCPClientManager OAuth Integration", () => {
         })
       });
 
-      // Spy on connectToServer and mock it to set authenticating state
-      const connectSpy = vi
-        .spyOn(manager, "connectToServer")
-        .mockImplementation(async (id) => {
-          const conn = manager.mcpConnections[id];
-          if (conn) {
-            conn.init = vi.fn().mockImplementation(async () => {
-              conn.connectionState = "authenticating";
-            });
-            await conn.init();
-          }
-          return {
-            state: "authenticating",
-            authUrl,
-            clientId
-          };
-        });
+      // Spy on connectToServer - should NOT be called when auth_url is set
+      const connectSpy = vi.spyOn(manager, "connectToServer");
 
       await manager.restoreConnectionsFromStorage("test-agent");
 
-      // Verify connection was created and connectToServer was called
+      // Verify connection was created but connectToServer was NOT called
+      // (auth_url means OAuth flow is in progress, so we skip connection attempt)
       const connection = manager.mcpConnections[serverId];
       expect(connection).toBeDefined();
-      expect(connectSpy).toHaveBeenCalledWith(serverId);
+      expect(connectSpy).not.toHaveBeenCalled();
       expect(connection.connectionState).toBe("authenticating");
 
       // Verify auth provider was set up
@@ -1844,11 +1830,11 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(connectSpy).toHaveBeenCalledWith(serverId);
     });
 
-    it("should call connectToServer for OAuth servers with auth_url", async () => {
+    it("should skip connectToServer for OAuth servers with auth_url (OAuth in progress)", async () => {
       const serverId = "oauth-needs-auth";
       const clientId = "needs-auth-client";
 
-      // Save OAuth server with auth_url (indicates needs auth)
+      // Save OAuth server with auth_url (indicates OAuth flow is in progress)
       await (
         manager as unknown as MCPClientManagerInternal
       )._storage.saveServer({
@@ -1857,26 +1843,22 @@ describe("MCPClientManager OAuth Integration", () => {
         server_url: "http://oauth.com",
         callback_url: "http://localhost:3000/callback",
         client_id: clientId,
-        auth_url: "https://auth.example.com/authorize", // ✅ Has auth_url - needs auth
+        auth_url: "https://auth.example.com/authorize", // ✅ Has auth_url - OAuth in progress
         server_options: JSON.stringify({ transport: { type: "auto" } })
       });
 
-      // Spy on connectToServer
-      const connectSpy = vi
-        .spyOn(manager, "connectToServer")
-        .mockResolvedValue({
-          state: "authenticating",
-          authUrl: "https://auth.example.com/authorize",
-          clientId: "needs-auth-client"
-        });
+      // Spy on connectToServer - should NOT be called
+      const connectSpy = vi.spyOn(manager, "connectToServer");
 
       await manager.restoreConnectionsFromStorage("test-agent");
 
       const conn = manager.mcpConnections[serverId];
       expect(conn).toBeDefined();
 
-      // Should call connectToServer (let it determine if OAuth is needed)
-      expect(connectSpy).toHaveBeenCalledWith(serverId);
+      // Should NOT call connectToServer when auth_url is set (OAuth flow in progress)
+      expect(connectSpy).not.toHaveBeenCalled();
+      // State should be set to authenticating directly
+      expect(conn.connectionState).toBe("authenticating");
     });
   });
 
@@ -2015,11 +1997,11 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(connectSpy).toHaveBeenCalledWith(serverId);
     });
 
-    it("should call connectToServer for OAuth server after restore", async () => {
+    it("should restore OAuth server in authenticating state when auth_url exists", async () => {
       const serverId = "oauth-reauth-flow";
       const authUrl = "https://auth.example.com/authorize";
 
-      // Simulate previous session: OAuth server was registered but tokens expired
+      // Simulate previous session: OAuth flow was in progress (auth_url is set)
       await (
         manager as unknown as MCPClientManagerInternal
       )._storage.saveServer({
@@ -2028,18 +2010,12 @@ describe("MCPClientManager OAuth Integration", () => {
         server_url: "http://oauth.com",
         callback_url: "http://localhost:3000/callback",
         client_id: "old-client-id",
-        auth_url: authUrl, // ✅ Has auth_url - indicates needs re-auth
+        auth_url: authUrl, // ✅ Has auth_url - OAuth flow in progress
         server_options: JSON.stringify({ transport: { type: "auto" } })
       });
 
-      // Mock connectToServer to return authenticating state
-      const connectSpy = vi
-        .spyOn(manager, "connectToServer")
-        .mockResolvedValue({
-          state: "authenticating",
-          authUrl,
-          clientId: "old-client-id"
-        });
+      // Spy on connectToServer - should NOT be called
+      const connectSpy = vi.spyOn(manager, "connectToServer");
 
       // Restore connections
       await manager.restoreConnectionsFromStorage("test-agent");
@@ -2047,10 +2023,11 @@ describe("MCPClientManager OAuth Integration", () => {
       const conn = manager.mcpConnections[serverId];
       expect(conn).toBeDefined();
 
-      // Verify connectToServer was called
-      expect(connectSpy).toHaveBeenCalledWith(serverId);
+      // Should NOT call connectToServer - just set state to authenticating
+      expect(connectSpy).not.toHaveBeenCalled();
+      expect(conn.connectionState).toBe("authenticating");
 
-      // Developer would get auth URL from the returned state
+      // auth_url should still be preserved in storage for the callback handler
       const servers = await manager.listServers();
       const server = servers.find((s) => s.id === serverId);
       expect(server?.auth_url).toBe(authUrl);

@@ -231,7 +231,7 @@ export class MCPClientManager {
       );
 
       // Create the in-memory connection object (no need to save to storage - we just read from it!)
-      this.createConnection(server.id, server.server_url, {
+      const conn = this.createConnection(server.id, server.server_url, {
         client: parsedOptions?.client ?? {},
         transport: {
           ...(parsedOptions?.transport ?? {}),
@@ -240,29 +240,40 @@ export class MCPClientManager {
         }
       });
 
-      // Always try to connect - the connection logic will determine if OAuth is needed
-      // If stored OAuth tokens are valid, connection will succeed automatically
-      // If tokens are missing/invalid, connection will fail with Unauthorized
-      // and state will be set to "authenticating"
-      const connectResult = await this.connectToServer(server.id).catch(
-        (error) => {
-          console.error(`Error connecting to ${server.id}:`, error);
-          return null;
-        }
-      );
-
-      if (connectResult?.state === MCPConnectionState.CONNECTED) {
-        const discoverResult = await this.discoverIfConnected(server.id);
-        if (discoverResult && !discoverResult.success) {
-          console.error(
-            `Error discovering ${server.id}:`,
-            discoverResult.error
-          );
-        }
+      // If auth_url exists, OAuth flow is in progress - set state and wait for callback
+      if (server.auth_url) {
+        conn.connectionState = MCPConnectionState.AUTHENTICATING;
+        continue;
       }
+
+      // Start connection in background (don't await) to avoid blocking the DO
+      this._restoreServer(server.id);
     }
 
     this._isRestored = true;
+  }
+
+  /**
+   * Internal method to restore a single server connection and discovery
+   */
+  private async _restoreServer(serverId: string): Promise<void> {
+    // Always try to connect - the connection logic will determine if OAuth is needed
+    // If stored OAuth tokens are valid, connection will succeed automatically
+    // If tokens are missing/invalid, connection will fail with Unauthorized
+    // and state will be set to "authenticating"
+    const connectResult = await this.connectToServer(serverId).catch(
+      (error) => {
+        console.error(`Error connecting to ${serverId}:`, error);
+        return null;
+      }
+    );
+
+    if (connectResult?.state === MCPConnectionState.CONNECTED) {
+      const discoverResult = await this.discoverIfConnected(serverId);
+      if (discoverResult && !discoverResult.success) {
+        console.error(`Error discovering ${serverId}:`, discoverResult.error);
+      }
+    }
   }
 
   /**
@@ -409,6 +420,7 @@ export class MCPClientManager {
   /**
    * Create an in-memory connection object and set up observability
    * Does NOT save to storage - use registerServer() for that
+   * @returns The connection object (existing or newly created)
    */
   private createConnection(
     id: string,
@@ -417,10 +429,10 @@ export class MCPClientManager {
       client?: ConstructorParameters<typeof Client>[1];
       transport: MCPTransportOptions;
     }
-  ): void {
-    // Skip if connection already exists
+  ): MCPClientConnection {
+    // Return existing connection if already exists
     if (this.mcpConnections[id]) {
-      return;
+      return this.mcpConnections[id];
     }
 
     const normalizedTransport = {
@@ -450,6 +462,8 @@ export class MCPClientManager {
         this._onObservabilityEvent.fire(event);
       })
     );
+
+    return this.mcpConnections[id];
   }
 
   /**
