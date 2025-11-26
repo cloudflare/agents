@@ -6,7 +6,6 @@ import type {
   OAuthTokens
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { nanoid } from "nanoid";
-import type { OAuthClientStorage } from "./client-storage";
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
 // This allows us to track authentication for a specific server and associated dynamic client registration
@@ -22,10 +21,16 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   private _clientId_: string | undefined;
 
   constructor(
-    public storage: OAuthClientStorage,
+    public storage: DurableObjectStorage,
     public clientName: string,
     public baseRedirectUrl: string
-  ) {}
+  ) {
+    if (!storage) {
+      throw new Error(
+        "DurableObjectOAuthClientProvider requires a valid DurableObjectStorage instance"
+      );
+    }
+  }
 
   get clientMetadata(): OAuthClientMetadata {
     return {
@@ -76,7 +81,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return `${this.keyPrefix(clientId)}/client_info/`;
   }
 
-  async clientInformation() {
+  async clientInformation(): Promise<OAuthClientInformation | undefined> {
     if (!this._clientId_) {
       return undefined;
     }
@@ -87,7 +92,9 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     );
   }
 
-  async saveClientInformation(clientInformation: OAuthClientInformationFull) {
+  async saveClientInformation(
+    clientInformation: OAuthClientInformationFull
+  ): Promise<void> {
     await this.storage.put(
       this.clientInfoKey(clientInformation.client_id),
       clientInformation
@@ -99,7 +106,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return `${this.keyPrefix(clientId)}/token`;
   }
 
-  async tokens() {
+  async tokens(): Promise<OAuthTokens | undefined> {
     if (!this._clientId_) {
       return undefined;
     }
@@ -109,7 +116,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     );
   }
 
-  async saveTokens(tokens: OAuthTokens) {
+  async saveTokens(tokens: OAuthTokens): Promise<void> {
     await this.storage.put(this.tokenKey(this.clientId), tokens);
   }
 
@@ -121,7 +128,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
    * Because this operates on the server side (but we need browser auth), we send this url back to the user
    * and require user interact to initiate the redirect flow
    */
-  redirectToAuthorization(authUrl: URL) {
+  async redirectToAuthorization(authUrl: URL): Promise<void> {
     // Generate secure random token for state parameter
     const stateToken = nanoid();
     authUrl.searchParams.set("state", stateToken);
@@ -132,7 +139,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return `${this.keyPrefix(clientId)}/code_verifier`;
   }
 
-  async saveCodeVerifier(verifier: string) {
+  async saveCodeVerifier(verifier: string): Promise<void> {
     const key = this.codeVerifierKey(this.clientId);
 
     // Don't overwrite existing verifier to preserve first PKCE verifier
@@ -144,7 +151,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     await this.storage.put(key, verifier);
   }
 
-  async codeVerifier() {
+  async codeVerifier(): Promise<string> {
     const codeVerifier = await this.storage.get<string>(
       this.codeVerifierKey(this.clientId)
     );

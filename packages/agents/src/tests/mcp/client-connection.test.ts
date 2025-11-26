@@ -1,8 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type {
-  CallToolResult,
-  ServerCapabilities
-} from "@modelcontextprotocol/sdk/types.js";
+import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { z } from "zod";
 import { MCPClientConnection } from "../../mcp/client-connection";
@@ -33,11 +30,13 @@ class MockMcpServer {
   }
 
   private setupDefaultTools() {
-    this.server.tool(
+    this.server.registerTool(
       "test-tool",
-      "A test tool",
-      { message: z.string().describe("Test message") },
-      async ({ message }): Promise<CallToolResult> => {
+      {
+        description: "A test tool",
+        inputSchema: { message: z.string().describe("Test message") }
+      },
+      async ({ message }) => {
         return { content: [{ text: `Test: ${message}`, type: "text" }] };
       }
     );

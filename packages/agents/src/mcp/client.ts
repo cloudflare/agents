@@ -24,7 +24,7 @@ import {
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
-import type { MCPClientStorage, MCPServerRow } from "./client-storage";
+import type { MCPServerRow } from "./client-storage";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 
@@ -100,7 +100,7 @@ export type MCPClientOAuthResult = {
 };
 
 export type MCPClientManagerOptions = {
-  storage: MCPClientStorage;
+  storage: DurableObjectStorage;
 };
 
 /**
@@ -111,7 +111,7 @@ export class MCPClientManager {
   private _didWarnAboutUnstableGetAITools = false;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
-  private _storage: MCPClientStorage;
+  private _storage: DurableObjectStorage;
   private _isRestored = false;
 
   private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
@@ -136,7 +136,53 @@ export class MCPClientManager {
     private _version: string,
     options: MCPClientManagerOptions
   ) {
+    if (!options.storage) {
+      throw new Error(
+        "MCPClientManager requires a valid DurableObjectStorage instance"
+      );
+    }
     this._storage = options.storage;
+  }
+
+  // SQL helper - runs a query and returns results as array
+  private sql<T extends Record<string, SqlStorageValue>>(
+    query: string,
+    ...bindings: SqlStorageValue[]
+  ): T[] {
+    return [...this._storage.sql.exec<T>(query, ...bindings)];
+  }
+
+  // Storage operations
+  private saveServerToStorage(server: MCPServerRow): void {
+    this.sql(
+      `INSERT OR REPLACE INTO cf_agents_mcp_servers (
+        id, name, server_url, client_id, auth_url, callback_url, server_options
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      server.id,
+      server.name,
+      server.server_url,
+      server.client_id ?? null,
+      server.auth_url ?? null,
+      server.callback_url,
+      server.server_options ?? null
+    );
+  }
+
+  private removeServerFromStorage(serverId: string): void {
+    this.sql("DELETE FROM cf_agents_mcp_servers WHERE id = ?", serverId);
+  }
+
+  private getServersFromStorage(): MCPServerRow[] {
+    return this.sql<MCPServerRow>(
+      "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers"
+    );
+  }
+
+  private clearServerAuthUrl(serverId: string): void {
+    this.sql(
+      "UPDATE cf_agents_mcp_servers SET auth_url = NULL WHERE id = ?",
+      serverId
+    );
   }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
@@ -151,6 +197,11 @@ export class MCPClientManager {
     clientName: string,
     clientId?: string
   ): AgentsOAuthProvider {
+    if (!this._storage) {
+      throw new Error(
+        "Cannot create auth provider: storage is not initialized"
+      );
+    }
     const authProvider = new DurableObjectOAuthClientProvider(
       this._storage,
       clientName,
@@ -174,7 +225,7 @@ export class MCPClientManager {
       return;
     }
 
-    const servers = await this._storage.listServers();
+    const servers = this.getServersFromStorage();
 
     if (!servers || servers.length === 0) {
       this._isRestored = true;
@@ -487,8 +538,10 @@ export class MCPClientManager {
       }
     });
 
-    // Save to storage
-    await this._storage.saveServer({
+    // Save to storage (exclude authProvider since it's recreated during restore)
+    const { authProvider: _, ...transportWithoutAuth } =
+      options.transport ?? {};
+    this.saveServerToStorage({
       id,
       name: options.name,
       server_url: options.url,
@@ -497,7 +550,7 @@ export class MCPClientManager {
       auth_url: options.authUrl ?? null,
       server_options: JSON.stringify({
         client: options.client,
-        transport: options.transport
+        transport: transportWithoutAuth
       })
     });
 
@@ -550,6 +603,23 @@ export class MCPClientManager {
         }
 
         const clientId = conn.options.transport.authProvider?.clientId;
+    if (
+      conn.connectionState === "authenticating" &&
+      authUrl &&
+      conn.options.transport.authProvider?.redirectUrl
+    ) {
+      const clientId = conn.options.transport.authProvider?.clientId;
+
+      // Update storage with auth URL and client ID
+      const servers = this.getServersFromStorage();
+      const serverRow = servers.find((s) => s.id === id);
+      if (serverRow) {
+        this.saveServerToStorage({
+          ...serverRow,
+          auth_url: authUrl,
+          client_id: clientId ?? null
+        });
+      }
 
         const servers = await this._storage.listServers();
         const serverRow = servers.find((s) => s.id === id);
@@ -579,7 +649,7 @@ export class MCPClientManager {
     }
   }
 
-  async isCallbackRequest(req: Request): Promise<boolean> {
+  isCallbackRequest(req: Request): boolean {
     if (req.method !== "GET") {
       return false;
     }
@@ -591,7 +661,7 @@ export class MCPClientManager {
     }
 
     // Check database for matching callback URL
-    const servers = await this._storage.listServers();
+    const servers = this.getServersFromStorage();
     return servers.some(
       (server) => server.callback_url && req.url.startsWith(server.callback_url)
     );
@@ -601,7 +671,7 @@ export class MCPClientManager {
     const url = new URL(req.url);
 
     // Find the matching server from database
-    const servers = await this._storage.listServers();
+    const servers = this.getServersFromStorage();
     const matchingServer = servers.find((server: MCPServerRow) => {
       return server.callback_url && req.url.startsWith(server.callback_url);
     });
@@ -680,7 +750,7 @@ export class MCPClientManager {
 
     try {
       await conn.completeAuthorization(code);
-      await this._storage.clearAuthUrl(serverId);
+      this.clearServerAuthUrl(serverId);
       this._onServerStateChanged.fire();
 
       return {
@@ -963,15 +1033,15 @@ export class MCPClientManager {
         // Ignore errors when closing
       }
     }
-    await this._storage.removeServer(serverId);
+    this.removeServerFromStorage(serverId);
     this._onServerStateChanged.fire();
   }
 
   /**
    * List all MCP servers from storage
    */
-  async listServers(): Promise<MCPServerRow[]> {
-    return await this._storage.listServers();
+  listServers(): MCPServerRow[] {
+    return this.getServersFromStorage();
   }
 
   /**

@@ -9,10 +9,12 @@ const server = new McpServer({
   version: "1.0.0"
 });
 
-server.tool(
+server.registerTool(
   "hello",
-  "Returns a greeting message",
-  { name: z.string().optional() },
+  {
+    description: "Returns a greeting message",
+    inputSchema: { name: z.string().optional() }
+  },
   async ({ name }) => {
     return {
       content: [

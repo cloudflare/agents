@@ -1,5 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type {
+  CallToolResult,
+  IsomorphicHeaders,
+  ServerNotification,
+  ServerRequest
+} from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { McpAgent } from "../mcp/index.ts";
 import {
@@ -39,6 +45,19 @@ type Props = {
   testValue: string;
 };
 
+type ToolExtraInfo = RequestHandlerExtra<ServerRequest, ServerNotification>;
+
+type EchoResponseData = {
+  headers: IsomorphicHeaders;
+  authInfo: ToolExtraInfo["authInfo"] | null;
+  hasRequestInfo: boolean;
+  hasAuthInfo: boolean;
+  requestId: ToolExtraInfo["requestId"];
+  sessionId: string | null;
+  availableExtraKeys: string[];
+  [key: string]: unknown;
+};
+
 export class TestMcpAgent extends McpAgent<Env, State, Props> {
   observability = undefined;
   private tempToolHandle?: { remove: () => void };
@@ -48,40 +67,49 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
     {
       capabilities: {
         logging: {},
-        tools: { listChanged: true },
-        elicitation: { form: {}, url: {} }
+        tools: { listChanged: true }
+        // disable because types started failing in 1.22.0
+        // elicitation: { form: {}, url: {} }
       }
     }
   );
 
   async init() {
-    this.server.tool(
+    this.server.registerTool(
       "greet",
-      "A simple greeting tool",
-      { name: z.string().describe("Name to greet") },
-      async ({ name }): Promise<CallToolResult> => {
+      {
+        description: "A simple greeting tool",
+        inputSchema: { name: z.string().describe("Name to greet") }
+      },
+      async ({ name }) => {
         return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "getPropsTestValue",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Get the test value"
+      },
+      async () => {
         return {
-          content: [{ text: this.props?.testValue ?? "unknown", type: "text" }]
+          content: [
+            { text: this.props?.testValue ?? "unknown", type: "text" as const }
+          ]
         };
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "emitLog",
-      "Emit a logging/message notification",
       {
-        level: z.enum(["debug", "info", "warning", "error"]),
-        message: z.string()
+        description: "Emit a logging/message notification",
+        inputSchema: {
+          level: z.enum(["debug", "info", "warning", "error"]),
+          message: z.string()
+        }
       },
-      async ({ level, message }): Promise<CallToolResult> => {
+      async ({ level, message }) => {
         // Force a logging message to be sent when the tool is called
         await this.server.server.sendLoggingMessage({
           level,
@@ -97,7 +125,7 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
       "elicitName",
       "Test tool that elicits user input for a name",
       {},
-      async (): Promise<CallToolResult> => {
+      async () => {
         const result = await this.server.server.elicitInput({
           message: "What is your name?",
           requestedSchema: {
@@ -131,42 +159,95 @@ export class TestMcpAgent extends McpAgent<Env, State, Props> {
 
     // Use `registerTool` so we can later remove it.
     // Triggers notifications/tools/list_changed
-    this.server.tool(
+    this.server.registerTool(
       "installTempTool",
-      "Register a temporary tool that echoes input",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Register a temp tool",
+        inputSchema: {}
+      },
+      async () => {
         if (!this.tempToolHandle) {
-          // Prefer modern registerTool(name, description, schema, handler)
           this.tempToolHandle = this.server.registerTool(
             "temp-echo",
             {
               description: "Echo text (temporary tool)",
               inputSchema: { what: z.string().describe("Text to echo") }
             },
-            async ({ what }: { what: string }): Promise<CallToolResult> => {
+            async ({ what }) => {
               return { content: [{ type: "text", text: `echo:${what}` }] };
             }
           );
         }
-        // Most SDKs auto-send notifications/tools/list_changed here.
         return { content: [{ type: "text", text: "temp tool installed" }] };
       }
     );
 
     // Remove the dynamically added tool.
-    // Triggers notifications/tools/list_changed
-    this.server.tool(
+    this.server.registerTool(
       "uninstallTempTool",
-      "Remove the temporary tool if present",
-      {},
-      async (): Promise<CallToolResult> => {
+      {
+        description: "Remove the temporary tool if present"
+      },
+      async () => {
         if (this.tempToolHandle?.remove) {
           this.tempToolHandle.remove();
           this.tempToolHandle = undefined;
-          return { content: [{ type: "text", text: "temp tool removed" }] };
+          return {
+            content: [{ type: "text" as const, text: "temp tool removed" }]
+          };
         }
-        return { content: [{ type: "text", text: "nothing to remove" }] };
+        return {
+          content: [{ type: "text" as const, text: "nothing to remove" }]
+        };
+      }
+    );
+
+    // Echo request info for testing header and auth passthrough
+    this.server.tool(
+      "echoRequestInfo",
+      "Echo back request headers and auth info",
+      {},
+      async (_args, extra: ToolExtraInfo): Promise<CallToolResult> => {
+        // Extract headers from requestInfo, auth from authInfo
+        const headers: IsomorphicHeaders = extra.requestInfo?.headers ?? {};
+        const authInfo = extra.authInfo ?? null;
+
+        // Track non-function properties available in extra
+        const extraRecord = extra as Record<string, unknown>;
+        const extraKeys = Object.keys(extraRecord).filter(
+          (key) => typeof extraRecord[key] !== "function"
+        );
+
+        // Build response object with all available data
+        const responseData: EchoResponseData = {
+          headers,
+          authInfo,
+          hasRequestInfo: !!extra.requestInfo,
+          hasAuthInfo: !!extra.authInfo,
+          requestId: extra.requestId,
+          // Include any sessionId if it exists
+          sessionId: extra.sessionId ?? null,
+          // List all available properties in extra
+          availableExtraKeys: extraKeys
+        };
+
+        // Add any other properties from extra that aren't already included
+        extraKeys.forEach((key) => {
+          if (
+            !["requestInfo", "authInfo", "requestId", "sessionId"].includes(key)
+          ) {
+            responseData[`extra_${key}`] = extraRecord[key];
+          }
+        });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(responseData, null, 2)
+            }
+          ]
+        };
       }
     );
   }
@@ -297,24 +378,27 @@ export class TestOAuthAgent extends Agent<Env> {
     } as unknown as MCPClientConnection;
   }
 
-  async setupMockMcpConnection(
+  setupMockMcpConnection(
     serverId: string,
     serverName: string,
     serverUrl: string,
     callbackUrl: string,
     clientId?: string | null
-  ): Promise<void> {
-    // Save server to database with callback URL
-    // biome-ignore lint/suspicious/noExplicitAny: just a test
-    await (this.mcp as any)._storage.saveServer({
-      id: serverId,
-      name: serverName,
-      server_url: serverUrl,
-      callback_url: `${callbackUrl}/${serverId}`,
-      client_id: clientId ?? null,
-      auth_url: null,
-      server_options: null
-    });
+  ): void {
+    // Save server to database with callback URL using SQL directly
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (
+        id, name, server_url, client_id, auth_url, callback_url, server_options
+      ) VALUES (
+        ${serverId},
+        ${serverName},
+        ${serverUrl},
+        ${clientId ?? null},
+        ${null},
+        ${`${callbackUrl}/${serverId}`},
+        ${null}
+      )
+    `;
     this.mcp.mcpConnections[serverId] = this.createMockMcpConnection(
       serverId,
       serverUrl,
@@ -367,8 +451,8 @@ export class TestOAuthAgent extends Agent<Env> {
     return servers.length > 0 ? servers[0] : null;
   }
 
-  async isCallbackUrlRegistered(callbackUrl: string): Promise<boolean> {
-    return await this.mcp.isCallbackRequest(new Request(callbackUrl));
+  isCallbackUrlRegistered(callbackUrl: string): boolean {
+    return this.mcp.isCallbackRequest(new Request(callbackUrl));
   }
 
   removeMcpConnection(serverId: string): void {
@@ -446,6 +530,104 @@ export class TestChatAgent extends AIChatAgent<Env> {
     await this.persistMessages([messageWithToolOutput]);
     return messageWithToolOutput;
   }
+
+  // Resumable streaming test helpers
+
+  @callable()
+  testStartStream(requestId: string): string {
+    // Access private method via any cast for testing
+    return (this as any)._startStream(requestId);
+  }
+
+  @callable()
+  testStoreStreamChunk(streamId: string, body: string): void {
+    (this as any)._storeStreamChunk(streamId, body);
+  }
+
+  @callable()
+  testFlushChunkBuffer(): void {
+    (this as any)._flushChunkBuffer();
+  }
+
+  @callable()
+  testCompleteStream(streamId: string): void {
+    (this as any)._completeStream(streamId);
+  }
+
+  @callable()
+  testMarkStreamError(streamId: string): void {
+    (this as any)._markStreamError(streamId);
+  }
+
+  @callable()
+  getActiveStreamId(): string | null {
+    return (this as any)._activeStreamId;
+  }
+
+  @callable()
+  getActiveRequestId(): string | null {
+    return (this as any)._activeRequestId;
+  }
+
+  @callable()
+  getStreamChunks(
+    streamId: string
+  ): Array<{ body: string; chunk_index: number }> {
+    return (
+      this.sql<{ body: string; chunk_index: number }>`
+        select body, chunk_index from cf_ai_chat_stream_chunks 
+        where stream_id = ${streamId} 
+        order by chunk_index asc
+      ` || []
+    );
+  }
+
+  @callable()
+  getStreamMetadata(
+    streamId: string
+  ): { status: string; request_id: string } | null {
+    const result = this.sql<{ status: string; request_id: string }>`
+      select status, request_id from cf_ai_chat_stream_metadata 
+      where id = ${streamId}
+    `;
+    return result && result.length > 0 ? result[0] : null;
+  }
+
+  @callable()
+  getAllStreamMetadata(): Array<{
+    id: string;
+    status: string;
+    request_id: string;
+    created_at: number;
+  }> {
+    return (
+      this.sql<{
+        id: string;
+        status: string;
+        request_id: string;
+        created_at: number;
+      }>`select id, status, request_id, created_at from cf_ai_chat_stream_metadata` ||
+      []
+    );
+  }
+
+  @callable()
+  testInsertStaleStream(
+    streamId: string,
+    requestId: string,
+    ageMs: number
+  ): void {
+    const createdAt = Date.now() - ageMs;
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      values (${streamId}, ${requestId}, 'streaming', ${createdAt})
+    `;
+  }
+
+  @callable()
+  testRestoreActiveStream(): void {
+    (this as any)._restoreActiveStream();
+  }
 }
 
 // Test MCP Agent for jurisdiction feature
@@ -458,13 +640,15 @@ export class TestMcpJurisdiction extends McpAgent<Env> {
   );
 
   async init() {
-    this.server.tool(
+    this.server.registerTool(
       "test-tool",
-      "A test tool",
-      { message: z.string().describe("Test message") },
-      async ({ message }): Promise<CallToolResult> => ({
-        content: [{ text: `Echo: ${message}`, type: "text" }]
-      })
+      {
+        description: "A test tool",
+        inputSchema: { message: z.string().describe("Test message") }
+      },
+      async ({ message }) => {
+        return { content: [{ text: `Echo: ${message}`, type: "text" }] };
+      }
     );
   }
 }

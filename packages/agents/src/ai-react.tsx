@@ -67,6 +67,11 @@ type UseAgentChatOptions<
    * @default true
    */
   autoSendAfterAllConfirmationsResolved?: boolean;
+  /**
+   * Set to false to disable automatic stream resumption.
+   * @default true
+   */
+  resume?: boolean;
 };
 
 const requestCache = new Map<string, Promise<Message[]>>();
@@ -108,6 +113,7 @@ export function useAgentChat<
     tools,
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
     autoSendAfterAllConfirmationsResolved = true,
+    resume = true, // Enable stream resumption by default
     ...rest
   } = options;
 
@@ -249,7 +255,11 @@ export function useAgentChat<
         // }))
         abortController.abort();
         // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Stream may already be errored or closed
+        }
       });
 
       currentAgent.addEventListener(
@@ -276,7 +286,11 @@ export function useAgentChat<
                   );
                 }
                 if (data.done) {
-                  controller.close();
+                  try {
+                    controller.close();
+                  } catch {
+                    // Stream may already be errored or closed
+                  }
                   abortController.abort();
                 }
               }
@@ -338,17 +352,7 @@ export function useAgentChat<
         });
         return transport.sendMessages(options);
       },
-      reconnectToStream: async (
-        options: Parameters<
-          typeof DefaultChatTransport.prototype.reconnectToStream
-        >[0]
-      ) => {
-        const transport = new DefaultChatTransport<ChatMessage>({
-          api: agentUrlString,
-          fetch: aiFetch
-        });
-        return transport.reconnectToStream(options);
-      }
+      reconnectToStream: async () => null
     }),
     [agentUrlString, aiFetch]
   );
@@ -358,6 +362,9 @@ export function useAgentChat<
     messages: initialMessages,
     transport: customTransport,
     id: agent._pk
+    // Note: We handle stream resumption via WebSocket instead of HTTP,
+    // so we don't pass 'resume' to useChat. The onStreamResuming handler
+    // automatically resumes active streams when the WebSocket reconnects.
   });
 
   const processedToolCalls = useRef(new Set<string>());
@@ -459,41 +466,238 @@ export function useAgentChat<
     toolsRequiringConfirmation
   ]);
 
-  useEffect(() => {
-    function onClearHistory(event: MessageEvent) {
-      if (typeof event.data !== "string") return;
-      let data: OutgoingMessage;
-      try {
-        data = JSON.parse(event.data) as OutgoingMessage;
-      } catch (_error) {
-        return;
-      }
-      if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
-        useChatHelpers.setMessages([]);
-      }
-    }
+  /**
+   * Contains the request ID, accumulated message parts, and a unique message ID.
+   */
+  const resumedStreamRef = useRef<{
+    id: string;
+    messageId: string;
+    parts: ChatMessage["parts"];
+  } | null>(null);
 
-    function onMessages(event: MessageEvent) {
+  useEffect(() => {
+    /**
+     * Unified message handler that parses JSON once and dispatches based on type.
+     * Avoids duplicate parsing overhead from separate listeners.
+     */
+    function onAgentMessage(event: MessageEvent) {
       if (typeof event.data !== "string") return;
+
       let data: OutgoingMessage<ChatMessage>;
       try {
         data = JSON.parse(event.data) as OutgoingMessage<ChatMessage>;
       } catch (_error) {
         return;
       }
-      if (data.type === MessageType.CF_AGENT_CHAT_MESSAGES) {
-        useChatHelpers.setMessages(data.messages);
+
+      switch (data.type) {
+        case MessageType.CF_AGENT_CHAT_CLEAR:
+          useChatHelpers.setMessages([]);
+          break;
+
+        case MessageType.CF_AGENT_CHAT_MESSAGES:
+          useChatHelpers.setMessages(data.messages);
+          break;
+
+        case MessageType.CF_AGENT_STREAM_RESUMING:
+          if (!resume) return;
+          // Clear any previous incomplete resumed stream to prevent memory leak
+          resumedStreamRef.current = null;
+          // Initialize resumed stream state with unique ID
+          resumedStreamRef.current = {
+            id: data.id,
+            messageId: nanoid(),
+            parts: []
+          };
+          // Send ACK to server - we're ready to receive chunks
+          agentRef.current.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+              id: data.id
+            })
+          );
+          break;
+
+        case MessageType.CF_AGENT_USE_CHAT_RESPONSE:
+          // Handle resumed stream chunks
+          if (!resume || !resumedStreamRef.current) return;
+          if (data.id !== resumedStreamRef.current.id) return;
+
+          if (data.body?.trim()) {
+            try {
+              const chunkData = JSON.parse(data.body);
+              const resumedMsg = resumedStreamRef.current;
+
+              // Handle all chunk types for complete message reconstruction
+              switch (chunkData.type) {
+                case "text-start": {
+                  resumedMsg.parts.push({
+                    type: "text",
+                    text: "",
+                    state: "streaming"
+                  });
+                  break;
+                }
+                case "text-delta": {
+                  const lastTextPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "text");
+                  if (lastTextPart && lastTextPart.type === "text") {
+                    lastTextPart.text += chunkData.delta;
+                  } else {
+                    // Handle plain text responses (no text-start)
+                    resumedMsg.parts.push({
+                      type: "text",
+                      text: chunkData.delta
+                    });
+                  }
+                  break;
+                }
+                case "text-end": {
+                  const lastTextPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "text");
+                  if (lastTextPart && "state" in lastTextPart) {
+                    lastTextPart.state = "done";
+                  }
+                  break;
+                }
+                case "reasoning-start": {
+                  resumedMsg.parts.push({
+                    type: "reasoning",
+                    text: "",
+                    state: "streaming"
+                  });
+                  break;
+                }
+                case "reasoning-delta": {
+                  const lastReasoningPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "reasoning");
+                  if (
+                    lastReasoningPart &&
+                    lastReasoningPart.type === "reasoning"
+                  ) {
+                    lastReasoningPart.text += chunkData.delta;
+                  }
+                  break;
+                }
+                case "reasoning-end": {
+                  const lastReasoningPart = [...resumedMsg.parts]
+                    .reverse()
+                    .find((p) => p.type === "reasoning");
+                  if (lastReasoningPart && "state" in lastReasoningPart) {
+                    lastReasoningPart.state = "done";
+                  }
+                  break;
+                }
+                case "file": {
+                  resumedMsg.parts.push({
+                    type: "file",
+                    mediaType: chunkData.mediaType,
+                    url: chunkData.url
+                  });
+                  break;
+                }
+                case "source-url": {
+                  resumedMsg.parts.push({
+                    type: "source-url",
+                    sourceId: chunkData.sourceId,
+                    url: chunkData.url,
+                    title: chunkData.title
+                  });
+                  break;
+                }
+                case "source-document": {
+                  resumedMsg.parts.push({
+                    type: "source-document",
+                    sourceId: chunkData.sourceId,
+                    mediaType: chunkData.mediaType,
+                    title: chunkData.title,
+                    filename: chunkData.filename
+                  });
+                  break;
+                }
+                case "tool-input-available": {
+                  // Add tool call part when input is available
+                  resumedMsg.parts.push({
+                    type: `tool-${chunkData.toolName}`,
+                    toolCallId: chunkData.toolCallId,
+                    toolName: chunkData.toolName,
+                    state: "input-available",
+                    input: chunkData.input
+                  } as ChatMessage["parts"][number]);
+                  break;
+                }
+                case "tool-output-available": {
+                  // Update existing tool part with output
+                  const toolPart = resumedMsg.parts.find(
+                    (p) =>
+                      "toolCallId" in p && p.toolCallId === chunkData.toolCallId
+                  );
+                  if (toolPart && "state" in toolPart) {
+                    (toolPart as Record<string, unknown>).state =
+                      "output-available";
+                    (toolPart as Record<string, unknown>).output =
+                      chunkData.output;
+                  }
+                  break;
+                }
+                case "step-start": {
+                  resumedMsg.parts.push({ type: "step-start" });
+                  break;
+                }
+                // Other chunk types (tool-input-start, tool-input-delta, etc.)
+                // are intermediate states - the final state will be captured above
+              }
+
+              // Update messages with the partial response
+              useChatHelpers.setMessages((prevMessages: ChatMessage[]) => {
+                if (!resumedMsg) return prevMessages;
+
+                const existingIdx = prevMessages.findIndex(
+                  (m) => m.id === resumedMsg.messageId
+                );
+
+                const partialMessage = {
+                  id: resumedMsg.messageId,
+                  role: "assistant" as const,
+                  parts: [...resumedMsg.parts]
+                } as unknown as ChatMessage;
+
+                if (existingIdx >= 0) {
+                  const updated = [...prevMessages];
+                  updated[existingIdx] = partialMessage;
+                  return updated;
+                }
+                return [...prevMessages, partialMessage];
+              });
+            } catch (parseError) {
+              // Log corrupted chunk for debugging - could indicate data loss
+              console.warn(
+                "[useAgentChat] Failed to parse resumed stream chunk:",
+                parseError instanceof Error ? parseError.message : parseError,
+                "body:",
+                data.body?.slice(0, 100) // Truncate for logging
+              );
+            }
+          }
+
+          // Clear on completion or error
+          if (data.done || data.error) {
+            resumedStreamRef.current = null;
+          }
+          break;
       }
     }
 
-    agent.addEventListener("message", onClearHistory);
-    agent.addEventListener("message", onMessages);
-
+    agent.addEventListener("message", onAgentMessage);
     return () => {
-      agent.removeEventListener("message", onClearHistory);
-      agent.removeEventListener("message", onMessages);
+      agent.removeEventListener("message", onAgentMessage);
+      // Clear resumed stream state on cleanup to prevent memory leak
+      resumedStreamRef.current = null;
     };
-  }, [agent, useChatHelpers.setMessages]);
+  }, [agent, useChatHelpers.setMessages, resume]);
 
   // Wrapper that sends only when the last pending confirmation is resolved
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =

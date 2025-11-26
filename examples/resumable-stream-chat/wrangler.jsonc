@@ -1,0 +1,28 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "nodejs_compat_populate_process_env"
+  ],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "dist"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ResumableStreamingChat",
+        "name": "ResumableStreamingChat"
+      }
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ResumableStreamingChat"],
+      "tag": "v1"
+    }
+  ],
+  "name": "resumable-stream-chat"
+}
