@@ -37,9 +37,8 @@ describe("Auto Transport Mode", () => {
 
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      connection.connectionState = "discovering";
-      await connection.discoverAndRegister();
+      // Trigger discovery
+      await connection.discover();
 
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toBeDefined();
@@ -55,9 +54,8 @@ describe("Auto Transport Mode", () => {
 
       expect(connection.connectionState).toBe("connected");
 
-      // Manually trigger discovery
-      connection.connectionState = "discovering";
-      await connection.discoverAndRegister();
+      // Trigger discovery
+      await connection.discover();
 
       expect(connection.connectionState).toBe("ready");
       expect(connection.tools).toBeDefined();
