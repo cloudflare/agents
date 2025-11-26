@@ -603,28 +603,12 @@ export class MCPClientManager {
         }
 
         const clientId = conn.options.transport.authProvider?.clientId;
-    if (
-      conn.connectionState === "authenticating" &&
-      authUrl &&
-      conn.options.transport.authProvider?.redirectUrl
-    ) {
-      const clientId = conn.options.transport.authProvider?.clientId;
 
-      // Update storage with auth URL and client ID
-      const servers = this.getServersFromStorage();
-      const serverRow = servers.find((s) => s.id === id);
-      if (serverRow) {
-        this.saveServerToStorage({
-          ...serverRow,
-          auth_url: authUrl,
-          client_id: clientId ?? null
-        });
-      }
-
-        const servers = await this._storage.listServers();
+        // Update storage with auth URL and client ID
+        const servers = this.getServersFromStorage();
         const serverRow = servers.find((s) => s.id === id);
         if (serverRow) {
-          await this._storage.saveServer({
+          this.saveServerToStorage({
             ...serverRow,
             auth_url: authUrl,
             client_id: clientId ?? null
@@ -716,7 +700,7 @@ export class MCPClientManager {
         MCPConnectionState.CONNECTED
     ) {
       // make sure auth_url is cleared
-      await this._storage.clearAuthUrl(serverId);
+      this.clearServerAuthUrl(serverId);
 
       // Already authenticated and ready, treat as success
       return {

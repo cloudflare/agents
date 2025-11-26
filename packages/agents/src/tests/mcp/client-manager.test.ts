@@ -598,9 +598,7 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Save server with auth_url and callback_url
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
+      saveServerToMock({
         id: serverId,
         name: "Test Server",
         server_url: "http://test.com",
@@ -673,10 +671,6 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Save OAuth server to storage with auth_url set (OAuth flow in progress)
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
-      // Save OAuth server to storage
       saveServerToMock({
         id: serverId,
         name: "OAuth Server",
@@ -1264,7 +1258,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Clear previous calls from registerServer
       onStateChangedSpy.mockClear();
 
-      manager.removeServer(id);
+      await manager.removeServer(id);
 
       // Should fire when server is removed
       expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
@@ -1786,10 +1780,6 @@ describe("MCPClientManager OAuth Integration", () => {
       const clientId = "needs-auth-client";
 
       // Save OAuth server with auth_url (indicates OAuth flow is in progress)
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
-      // Save OAuth server with auth_url (indicates needs auth)
       saveServerToMock({
         id: serverId,
         name: "OAuth Server",
@@ -1953,10 +1943,6 @@ describe("MCPClientManager OAuth Integration", () => {
       const authUrl = "https://auth.example.com/authorize";
 
       // Simulate previous session: OAuth flow was in progress (auth_url is set)
-      await (
-        manager as unknown as MCPClientManagerInternal
-      )._storage.saveServer({
-      // Simulate previous session: OAuth server was registered but tokens expired
       saveServerToMock({
         id: serverId,
         name: "OAuth Reauth Server",
@@ -1981,8 +1967,6 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(conn.connectionState).toBe("authenticating");
 
       // auth_url should still be preserved in storage for the callback handler
-      const servers = await manager.listServers();
-      // Developer would get auth URL from the returned state
       const servers = manager.listServers();
       const server = servers.find((s) => s.id === serverId);
       expect(server?.auth_url).toBe(authUrl);
