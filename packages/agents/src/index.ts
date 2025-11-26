@@ -23,7 +23,7 @@ import {
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
-import type { MCPConnectionState } from "./mcp/client-connection";
+import { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { AgentMCPClientStorage } from "./mcp/client-storage";
@@ -1370,7 +1370,8 @@ export class Agent<
    * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request.
    * @param agentsPrefix agents routing prefix if not using `agents`
    * @param options MCP client and transport options
-   * @returns authUrl
+   * @returns Server id and state - either "authenticating" with authUrl, or "ready"
+   * @throws If connection or discovery fails
    */
   async addMcpServer(
     serverName: string,
@@ -1384,7 +1385,14 @@ export class Agent<
         type?: TransportType;
       };
     }
-  ): Promise<{ id: string; authUrl: string | undefined }> {
+  ): Promise<
+    | {
+        id: string;
+        state: typeof MCPConnectionState.AUTHENTICATING;
+        authUrl: string;
+      }
+    | { id: string; state: typeof MCPConnectionState.READY }
+  > {
     // If callbackHost is not provided, derive it from the current request
     let resolvedCallbackHost = callbackHost;
     if (!resolvedCallbackHost) {
@@ -1451,18 +1459,26 @@ export class Agent<
 
     const result = await this.mcp.connectToServer(id);
 
-    // If connection failed immediately, throw an error
-    if (result.state === "failed") {
-      throw new Error(`Failed to connect to MCP server at ${url}`);
+    if (result.state === MCPConnectionState.FAILED) {
+      throw new Error(
+        `Failed to connect to MCP server at ${url}: ${result.error}`
+      );
     }
 
-    // If state is connected then this is a non-oauth connection and we should try discovery.
-    await this.mcp.discoverIfConnected(id);
+    if (result.state === MCPConnectionState.AUTHENTICATING) {
+      return { id, state: result.state, authUrl: result.authUrl };
+    }
 
-    return {
-      id,
-      authUrl: result.state === "authenticating" ? result.authUrl : undefined
-    };
+    // State is CONNECTED - discover capabilities
+    const discoverResult = await this.mcp.discoverIfConnected(id);
+
+    if (discoverResult?.state === MCPConnectionState.FAILED) {
+      throw new Error(
+        `Failed to discover MCP server capabilities: ${discoverResult.error}`
+      );
+    }
+
+    return { id, state: MCPConnectionState.READY };
   }
 
   async removeMcpServer(id: string) {

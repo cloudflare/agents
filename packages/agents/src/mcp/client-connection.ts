@@ -120,9 +120,9 @@ export class MCPClientConnection {
    * Initialize a client connection, if authentication is required, the connection will be in the AUTHENTICATING state
    * Sets connection state based on the result and emits observability events
    *
-   * @returns
+   * @returns Error message if connection failed, undefined otherwise
    */
-  async init() {
+  async init(): Promise<string | undefined> {
     const transportType = this.options.transport.type;
     if (!transportType) {
       throw new Error("Transport type must be specified");
@@ -156,20 +156,24 @@ export class MCPClientConnection {
         timestamp: Date.now(),
         id: nanoid()
       });
+      return undefined;
     } else if (res.state === MCPConnectionState.FAILED && res.error) {
+      const errorMessage = toErrorMessage(res.error);
       this._onObservabilityEvent.fire({
         type: "mcp:client:connect",
-        displayMessage: `Failed to connect to ${this.url.toString()}: ${toErrorMessage(res.error)}`,
+        displayMessage: `Failed to connect to ${this.url.toString()}: ${errorMessage}`,
         payload: {
           url: this.url.toString(),
           transport: transportType,
           state: this.connectionState,
-          error: toErrorMessage(res.error)
+          error: errorMessage
         },
         timestamp: Date.now(),
         id: nanoid()
       });
+      return errorMessage;
     }
+    return undefined;
   }
 
   /**

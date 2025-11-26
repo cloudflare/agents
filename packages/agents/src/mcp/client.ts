@@ -59,13 +59,34 @@ export type RegisterServerOptions = {
 
 /**
  * Result of attempting to connect to an MCP server.
- * Returns the current connection state after the operation.
+ * Discriminated union ensures error is present only on failure.
  */
-export type MCPConnectionResult = {
-  state: MCPConnectionState;
-  authUrl?: string;
-  clientId?: string;
-};
+export type MCPConnectionResult =
+  | {
+      state: typeof MCPConnectionState.FAILED;
+      error: string;
+    }
+  | {
+      state: typeof MCPConnectionState.AUTHENTICATING;
+      authUrl: string;
+      clientId?: string;
+    }
+  | {
+      state: typeof MCPConnectionState.CONNECTED;
+    };
+
+/**
+ * Result of discovering server capabilities.
+ * Returns undefined if discovery was skipped (wrong state or connection not found).
+ */
+export type MCPDiscoverResult =
+  | {
+      state: typeof MCPConnectionState.READY;
+    }
+  | {
+      state: typeof MCPConnectionState.FAILED;
+      error: string;
+    };
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -224,13 +245,22 @@ export class MCPClientManager {
       // If stored OAuth tokens are valid, connection will succeed automatically
       // If tokens are missing/invalid, connection will fail with Unauthorized
       // and state will be set to "authenticating"
-      await this.connectToServer(server.id).catch((error) => {
-        console.error(`Error connecting to ${server.id}:`, error);
-      });
+      const connectResult = await this.connectToServer(server.id).catch(
+        (error) => {
+          console.error(`Error connecting to ${server.id}:`, error);
+          return null;
+        }
+      );
 
-      await this.discoverIfConnected(server.id).catch((error) => {
-        console.error(`Error discovering ${server.id}:`, error);
-      });
+      if (connectResult?.state === MCPConnectionState.CONNECTED) {
+        const discoverResult = await this.discoverIfConnected(server.id);
+        if (discoverResult?.state === MCPConnectionState.FAILED) {
+          console.error(
+            `Error discovering ${server.id}:`,
+            discoverResult.error
+          );
+        }
+      }
     }
 
     this._isRestored = true;
@@ -365,7 +395,12 @@ export class MCPClientManager {
     }
 
     // If connection is connected, discover capabilities
-    await this.discoverIfConnected(id);
+    const discoverResult = await this.discoverIfConnected(id);
+    if (discoverResult?.state === MCPConnectionState.FAILED) {
+      throw new Error(
+        `Failed to discover server capabilities: ${discoverResult.error}`
+      );
+    }
 
     return {
       id
@@ -461,14 +496,13 @@ export class MCPClientManager {
   /**
    * Connect to an already registered MCP server and initialize the connection.
    *
-   * For OAuth servers, this returns `{ state: "authenticating", authUrl, clientId? }`
-   * without establishing the connection. The user must complete the OAuth flow via
-   * the authUrl, which will trigger a callback handled by `handleCallbackRequest()`.
+   * For OAuth servers, returns `{ state: "authenticating", authUrl, clientId? }`.
+   * The user must complete the OAuth flow via the authUrl, which triggers a
+   * callback handled by `handleCallbackRequest()`.
    *
-   * For non-OAuth servers, this establishes the connection immediately and returns
-   * `{ state: "ready" }`.
-   *
-   * Updates storage with auth URL and client ID after connection.
+   * For non-OAuth servers, establishes the transport connection and returns
+   * `{ state: "connected" }`. Call `discoverIfConnected()` afterwards to
+   * discover capabilities and transition to "ready" state.
    *
    * @param id Server ID (must be registered first via registerServer())
    * @returns Connection result with current state and OAuth info (if applicable)
@@ -481,43 +515,55 @@ export class MCPClientManager {
       );
     }
 
-    // Initialize connection
-    await conn.init();
+    const error = await conn.init();
     this._onServerStateChanged.fire();
 
-    // If connection is in authenticating state, return auth URL for OAuth flow
-    const authUrl = conn.options.transport.authProvider?.authUrl;
+    switch (conn.connectionState) {
+      case MCPConnectionState.FAILED:
+        return {
+          state: conn.connectionState,
+          error: error ?? "Unknown connection error"
+        };
 
-    if (
-      conn.connectionState === MCPConnectionState.AUTHENTICATING &&
-      authUrl &&
-      conn.options.transport.authProvider?.redirectUrl
-    ) {
-      const clientId = conn.options.transport.authProvider?.clientId;
+      case MCPConnectionState.AUTHENTICATING: {
+        const authUrl = conn.options.transport.authProvider?.authUrl;
+        const redirectUrl = conn.options.transport.authProvider?.redirectUrl;
 
-      // Update storage with auth URL and client ID
-      const servers = await this._storage.listServers();
-      const serverRow = servers.find((s) => s.id === id);
-      if (serverRow) {
-        await this._storage.saveServer({
-          ...serverRow,
-          auth_url: authUrl,
-          client_id: clientId ?? null
-        });
+        if (!authUrl || !redirectUrl) {
+          return {
+            state: MCPConnectionState.FAILED,
+            error: `OAuth configuration incomplete: missing ${!authUrl ? "authUrl" : "redirectUrl"}`
+          };
+        }
+
+        const clientId = conn.options.transport.authProvider?.clientId;
+
+        const servers = await this._storage.listServers();
+        const serverRow = servers.find((s) => s.id === id);
+        if (serverRow) {
+          await this._storage.saveServer({
+            ...serverRow,
+            auth_url: authUrl,
+            client_id: clientId ?? null
+          });
+        }
+
+        return {
+          state: conn.connectionState,
+          authUrl,
+          clientId
+        };
       }
 
-      this._onServerStateChanged.fire();
+      case MCPConnectionState.CONNECTED:
+        return { state: conn.connectionState };
 
-      return {
-        state: conn.connectionState,
-        authUrl,
-        clientId
-      };
+      default:
+        return {
+          state: MCPConnectionState.FAILED,
+          error: `Unexpected connection state after init: ${conn.connectionState}`
+        };
     }
-
-    this._onServerStateChanged.fire();
-
-    return { state: conn.connectionState };
   }
 
   async isCallbackRequest(req: Request): Promise<boolean> {
@@ -643,22 +689,26 @@ export class MCPClientManager {
   }
 
   /**
-   * Discover server capabilities if connection is in CONNECTED state
-   * Transitions from CONNECTED to DISCOVERING to READY
-   * Can be called to refresh server capabilities (e.g., from a UI refresh button)
+   * Discover server capabilities if connection is in CONNECTED or READY state.
+   * Transitions to DISCOVERING then READY (or FAILED on error).
+   * Can be called to refresh server capabilities (e.g., from a UI refresh button).
+   *
    * @param serverId The server ID to discover
+   * @returns Result indicating ready or failed, or undefined if skipped
    */
-  async discoverIfConnected(serverId: string): Promise<void> {
+  async discoverIfConnected(
+    serverId: string
+  ): Promise<MCPDiscoverResult | undefined> {
     const conn = this.mcpConnections[serverId];
     if (!conn) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
-        displayMessage: `discoverIfConnected called but connection not found for ${serverId}`,
+        displayMessage: `Connection not found for ${serverId}`,
         payload: {},
         timestamp: Date.now(),
         id: nanoid()
       });
-      return;
+      return undefined;
     }
 
     if (
@@ -667,27 +717,35 @@ export class MCPClientManager {
     ) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
-        displayMessage: `discoverIfConnected skipped for ${serverId}, state is ${conn.connectionState} (not CONNECTED or READY)`,
+        displayMessage: `discoverIfConnected skipped for ${serverId}, state is ${conn.connectionState}`,
         payload: {},
         timestamp: Date.now(),
         id: nanoid()
       });
-      return;
+      return undefined;
     }
 
     conn.connectionState = MCPConnectionState.DISCOVERING;
     this._onServerStateChanged.fire();
 
-    await conn.discoverAndRegister();
-    this._onServerStateChanged.fire();
+    try {
+      await conn.discoverAndRegister();
+      this._onServerStateChanged.fire();
 
-    this._onObservabilityEvent.fire({
-      type: "mcp:client:discover",
-      displayMessage: `Discovery completed for ${serverId}, final state: ${conn.connectionState}`,
-      payload: {},
-      timestamp: Date.now(),
-      id: nanoid()
-    });
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:discover",
+        displayMessage: `Discovery completed for ${serverId}`,
+        payload: {},
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+
+      return { state: MCPConnectionState.READY };
+    } catch (e) {
+      this._onServerStateChanged.fire();
+      const error = e instanceof Error ? e.message : String(e);
+      return { state: MCPConnectionState.FAILED, error };
+    }
   }
 
   /**
@@ -708,10 +766,31 @@ export class MCPClientManager {
       return;
     }
 
-    await this.connectToServer(serverId);
+    // Skip if already discovering or ready - prevents duplicate work
+    if (
+      conn.connectionState === MCPConnectionState.DISCOVERING ||
+      conn.connectionState === MCPConnectionState.READY
+    ) {
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:connect",
+        displayMessage: `establishConnection skipped for ${serverId}, already in ${conn.connectionState} state`,
+        payload: {
+          url: conn.url.toString(),
+          transport: conn.options.transport.type || "unknown",
+          state: conn.connectionState
+        },
+        timestamp: Date.now(),
+        id: nanoid()
+      });
+      return;
+    }
+
+    const connectResult = await this.connectToServer(serverId);
     this._onServerStateChanged.fire();
 
-    await this.discoverIfConnected(serverId);
+    if (connectResult.state === MCPConnectionState.CONNECTED) {
+      await this.discoverIfConnected(serverId);
+    }
 
     this._onObservabilityEvent.fire({
       type: "mcp:client:connect",

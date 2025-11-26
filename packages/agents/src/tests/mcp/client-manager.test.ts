@@ -766,7 +766,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Mock connectToServer to avoid real HTTP calls
       vi.spyOn(manager, "connectToServer").mockResolvedValue({
-        state: "ready"
+        state: "connected"
       });
 
       await manager.restoreConnectionsFromStorage("test-agent");
@@ -827,7 +827,7 @@ describe("MCPClientManager OAuth Integration", () => {
             clientId: "oauth-client"
           };
         }
-        return { state: "ready" };
+        return { state: "connected" };
       });
 
       await manager.restoreConnectionsFromStorage("test-agent");
@@ -1033,8 +1033,8 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.connectToServer(id);
 
-      // Should fire twice: once after init(), once at the end
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(2);
+      // Should fire once: after init() when state changes
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
     });
 
     it("should fire onServerStateChanged when connecting to OAuth server (authenticating state)", async () => {
@@ -1082,8 +1082,8 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.connectToServer(id);
 
-      // Should fire twice: once after init(), once after saving auth URL
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(2);
+      // Should fire once: after init() when state changes
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
     });
 
     it("should fire onServerStateChanged when OAuth callback succeeds", async () => {
@@ -1252,8 +1252,8 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.establishConnection(id);
 
-      // Should fire 5 times: 2 from connectToServer (after init + at end), 1 explicit in establishConnection, 2 from discoverIfConnected (discovering + ready)
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(5);
+      // Should fire 4 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 2 from discoverIfConnected (discovering + ready)
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
     });
 
     it("should fire onServerStateChanged when establishConnection fails", async () => {
@@ -1281,13 +1281,9 @@ describe("MCPClientManager OAuth Integration", () => {
       // Clear previous calls from registerServer
       onStateChangedSpy.mockClear();
 
-      try {
-        await manager.establishConnection(id);
-      } catch (_e) {
-        // Expected to throw
-      }
+      await manager.establishConnection(id);
 
-      // Should fire 4 times: 2 from connectToServer (after init + at end), 1 explicit in establishConnection, 1 from discoverIfConnected (when setting to discovering before it fails)
+      // Should fire 4 times: 1 from connectToServer (after init), 1 explicit in establishConnection, 2 from discoverIfConnected (discovering + failed)
       expect(onStateChangedSpy).toHaveBeenCalledTimes(4);
     });
 
@@ -1763,7 +1759,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Mock connectToServer to avoid real HTTP calls
       vi.spyOn(manager, "connectToServer").mockResolvedValue({
-        state: "ready"
+        state: "connected"
       });
 
       await manager.restoreConnectionsFromStorage("test-agent");
@@ -1791,7 +1787,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Mock connectToServer to avoid real HTTP calls
       vi.spyOn(manager, "connectToServer").mockResolvedValue({
-        state: "ready"
+        state: "connected"
       });
 
       // First restoration
@@ -1835,7 +1831,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Spy on connectToServer to verify it's called
       const connectSpy = vi
         .spyOn(manager, "connectToServer")
-        .mockResolvedValue({ state: "ready" });
+        .mockResolvedValue({ state: "connected" });
 
       await manager.restoreConnectionsFromStorage("test-agent");
 
@@ -1882,7 +1878,7 @@ describe("MCPClientManager OAuth Integration", () => {
   });
 
   describe("connectToServer() - Connection States", () => {
-    it("should return ready state for successful non-OAuth connection", async () => {
+    it("should return connected state for successful non-OAuth connection", async () => {
       const serverId = "non-oauth-connect-test";
 
       await manager.registerServer(serverId, {
@@ -1895,14 +1891,15 @@ describe("MCPClientManager OAuth Integration", () => {
 
       const conn = manager.mcpConnections[serverId];
 
-      // Mock successful connection
+      // Mock successful connection - init returns connected state, discovery happens separately
       conn.init = vi.fn().mockImplementation(async () => {
-        conn.connectionState = "ready";
+        conn.connectionState = "connected";
+        return undefined; // no error
       });
 
       const result = await manager.connectToServer(serverId);
 
-      expect(result.state).toBe("ready");
+      expect(result.state).toBe("connected");
       expect(conn.init).toHaveBeenCalled();
     });
 
@@ -2003,7 +2000,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Mock connectToServer
       const connectSpy = vi
         .spyOn(manager, "connectToServer")
-        .mockResolvedValue({ state: "ready" });
+        .mockResolvedValue({ state: "connected" });
 
       // Simulate DO restart - restore connections
       await manager.restoreConnectionsFromStorage("test-agent");
@@ -2062,13 +2059,16 @@ describe("MCPClientManager OAuth Integration", () => {
       const observabilitySpy = vi.fn();
       manager.onObservabilityEvent(observabilitySpy);
 
-      await manager.discoverIfConnected("non-existent-server");
+      const result = await manager.discoverIfConnected("non-existent-server");
+
+      // Should return undefined when skipped
+      expect(result).toBeUndefined();
 
       // Should fire observability event about missing connection
       expect(observabilitySpy).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "mcp:client:discover",
-          displayMessage: expect.stringContaining("connection not found")
+          displayMessage: expect.stringContaining("Connection not found")
         })
       );
     });
@@ -2184,10 +2184,12 @@ describe("MCPClientManager OAuth Integration", () => {
 
       manager.mcpConnections[serverId] = connection;
 
-      // Should throw the error
-      await expect(manager.discoverIfConnected(serverId)).rejects.toThrow(
-        "Discovery failed"
-      );
+      // Should return failed result (not throw)
+      const result = await manager.discoverIfConnected(serverId);
+      expect(result).toEqual({
+        state: "failed",
+        error: "Discovery failed"
+      });
 
       // Connection should be in failed state
       expect(connection.connectionState).toBe("failed");
