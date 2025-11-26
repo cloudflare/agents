@@ -453,8 +453,8 @@ describe("MCP Client Connection Integration", () => {
         "Instructions service down"
       );
 
-      // Connection should be in failed state
-      expect(connection.connectionState).toBe("failed");
+      // Connection should return to connected state (not failed) so user can retry
+      expect(connection.connectionState).toBe("connected");
 
       // Verify observability event for failure
       const testConnection = new MCPClientConnection(
@@ -556,8 +556,8 @@ describe("MCP Client Connection Integration", () => {
         "All services down"
       );
 
-      // Connection should be in failed state
-      expect(connection.connectionState).toBe("failed");
+      // Connection should return to connected state (not failed) so user can retry
+      expect(connection.connectionState).toBe("connected");
 
       // Verify observability event for failure
       const testConn = new MCPClientConnection(
@@ -651,8 +651,8 @@ describe("MCP Client Connection Integration", () => {
       connection.connectionState = "discovering";
       await expect(connection.discoverAndRegister()).rejects.toThrow();
 
-      // Connection should be in failed state
-      expect(connection.connectionState).toBe("failed");
+      // Connection should return to connected state (not failed) so user can retry
+      expect(connection.connectionState).toBe("connected");
     });
   });
 

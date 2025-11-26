@@ -247,7 +247,8 @@ export class MCPClientConnection {
 
     this.serverCapabilities = this.client.getServerCapabilities();
     if (!this.serverCapabilities) {
-      this.connectionState = MCPConnectionState.FAILED;
+      // Return to CONNECTED state so user can retry discovery
+      this.connectionState = MCPConnectionState.CONNECTED;
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
@@ -314,7 +315,8 @@ export class MCPClientConnection {
 
       this.connectionState = MCPConnectionState.READY;
     } catch (error) {
-      this.connectionState = MCPConnectionState.FAILED;
+      // Return to CONNECTED state so user can retry discovery
+      this.connectionState = MCPConnectionState.CONNECTED;
 
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",

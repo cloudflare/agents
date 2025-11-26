@@ -1391,7 +1391,11 @@ export class Agent<
         state: typeof MCPConnectionState.AUTHENTICATING;
         authUrl: string;
       }
-    | { id: string; state: typeof MCPConnectionState.READY }
+    | {
+        id: string;
+        state: typeof MCPConnectionState.READY;
+        authUrl?: undefined;
+      }
   > {
     // If callbackHost is not provided, derive it from the current request
     let resolvedCallbackHost = callbackHost;
@@ -1460,6 +1464,7 @@ export class Agent<
     const result = await this.mcp.connectToServer(id);
 
     if (result.state === MCPConnectionState.FAILED) {
+      // Server stays in storage so user can retry via connectToServer(id)
       throw new Error(
         `Failed to connect to MCP server at ${url}: ${result.error}`
       );
@@ -1472,7 +1477,8 @@ export class Agent<
     // State is CONNECTED - discover capabilities
     const discoverResult = await this.mcp.discoverIfConnected(id);
 
-    if (discoverResult?.state === MCPConnectionState.FAILED) {
+    if (discoverResult && !discoverResult.success) {
+      // Server stays in storage - connection is still valid, user can retry discovery
       throw new Error(
         `Failed to discover MCP server capabilities: ${discoverResult.error}`
       );
@@ -1482,9 +1488,6 @@ export class Agent<
   }
 
   async removeMcpServer(id: string) {
-    if (this.mcp.mcpConnections[id]) {
-      await this.mcp.closeConnection(id);
-    }
     await this.mcp.removeServer(id);
   }
 

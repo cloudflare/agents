@@ -2178,21 +2178,21 @@ describe("MCPClientManager OAuth Integration", () => {
       // Mock discoverAndRegister to fail
       const error = new Error("Discovery failed");
       connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
-        connection.connectionState = "failed";
         throw error;
       });
 
       manager.mcpConnections[serverId] = connection;
 
-      // Should return failed result (not throw)
+      // Should return result with success: false (not throw)
       const result = await manager.discoverIfConnected(serverId);
       expect(result).toEqual({
-        state: "failed",
+        success: false,
+        state: "connected",
         error: "Discovery failed"
       });
 
-      // Connection should be in failed state
-      expect(connection.connectionState).toBe("failed");
+      // Connection should return to connected state (not failed) so user can retry
+      expect(connection.connectionState).toBe("connected");
     });
 
     it("should fire observability events in correct order", async () => {

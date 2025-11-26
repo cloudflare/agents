@@ -77,16 +77,15 @@ export type MCPConnectionResult =
 
 /**
  * Result of discovering server capabilities.
- * Returns undefined if discovery was skipped (wrong state or connection not found).
+ * success indicates whether discovery completed successfully.
+ * state is the current connection state at time of return.
+ * error is present when success is false.
  */
-export type MCPDiscoverResult =
-  | {
-      state: typeof MCPConnectionState.READY;
-    }
-  | {
-      state: typeof MCPConnectionState.FAILED;
-      error: string;
-    };
+export type MCPDiscoverResult = {
+  success: boolean;
+  state: MCPConnectionState;
+  error?: string;
+};
 
 export type MCPClientOAuthCallbackConfig = {
   successRedirect?: string;
@@ -254,7 +253,7 @@ export class MCPClientManager {
 
       if (connectResult?.state === MCPConnectionState.CONNECTED) {
         const discoverResult = await this.discoverIfConnected(server.id);
-        if (discoverResult?.state === MCPConnectionState.FAILED) {
+        if (discoverResult && !discoverResult.success) {
           console.error(
             `Error discovering ${server.id}:`,
             discoverResult.error
@@ -396,7 +395,7 @@ export class MCPClientManager {
 
     // If connection is connected, discover capabilities
     const discoverResult = await this.discoverIfConnected(id);
-    if (discoverResult?.state === MCPConnectionState.FAILED) {
+    if (discoverResult && !discoverResult.success) {
       throw new Error(
         `Failed to discover server capabilities: ${discoverResult.error}`
       );
@@ -694,11 +693,16 @@ export class MCPClientManager {
    * Can be called to refresh server capabilities (e.g., from a UI refresh button).
    *
    * @param serverId The server ID to discover
-   * @returns Result indicating ready or failed, or undefined if skipped
+   * @param options Optional configuration
+   * @param options.timeoutMs Timeout in milliseconds (default: 30000)
+   * @returns Result with current state and optional error, or undefined if connection not found
    */
   async discoverIfConnected(
-    serverId: string
+    serverId: string,
+    options: { timeoutMs?: number } = {}
   ): Promise<MCPDiscoverResult | undefined> {
+    const { timeoutMs = 30000 } = options;
+
     const conn = this.mcpConnections[serverId];
     if (!conn) {
       this._onObservabilityEvent.fire({
@@ -722,14 +726,27 @@ export class MCPClientManager {
         timestamp: Date.now(),
         id: nanoid()
       });
-      return undefined;
+      // Return current state with success: false (skipped, not an error)
+      return {
+        success: false,
+        state: conn.connectionState,
+        error: `Discovery skipped - connection in ${conn.connectionState} state`
+      };
     }
 
     conn.connectionState = MCPConnectionState.DISCOVERING;
     this._onServerStateChanged.fire();
 
     try {
-      await conn.discoverAndRegister();
+      // Race discovery against timeout
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error(`Discovery timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      });
+
+      await Promise.race([conn.discoverAndRegister(), timeoutPromise]);
       this._onServerStateChanged.fire();
 
       this._onObservabilityEvent.fire({
@@ -740,11 +757,13 @@ export class MCPClientManager {
         id: nanoid()
       });
 
-      return { state: MCPConnectionState.READY };
+      return { success: true, state: MCPConnectionState.READY };
     } catch (e) {
+      // Return to CONNECTED state so user can retry discovery
+      conn.connectionState = MCPConnectionState.CONNECTED;
       this._onServerStateChanged.fire();
       const error = e instanceof Error ? e.message : String(e);
-      return { state: MCPConnectionState.FAILED, error };
+      return { success: false, state: MCPConnectionState.CONNECTED, error };
     }
   }
 
@@ -909,7 +928,14 @@ export class MCPClientManager {
   }
 
   /**
-   * Closes all connections to MCP servers
+   * Closes all active in-memory connections to MCP servers.
+   *
+   * Note: This only closes the transport connections - it does NOT remove
+   * servers from storage. Servers will still be listed and their callback
+   * URLs will still match incoming OAuth requests.
+   *
+   * Use removeServer() instead if you want to fully clean up a server
+   * (closes connection AND removes from storage).
    */
   async closeAllConnections() {
     const ids = Object.keys(this.mcpConnections);
@@ -944,9 +970,16 @@ export class MCPClientManager {
   }
 
   /**
-   * Remove an MCP server from storage
+   * Remove an MCP server - closes connection if active and removes from storage.
    */
   async removeServer(serverId: string): Promise<void> {
+    if (this.mcpConnections[serverId]) {
+      try {
+        await this.closeConnection(serverId);
+      } catch (e) {
+        // Ignore errors when closing
+      }
+    }
     await this._storage.removeServer(serverId);
     this._onServerStateChanged.fire();
   }
