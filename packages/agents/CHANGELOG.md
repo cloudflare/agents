@@ -1,5 +1,66 @@
 # @cloudflare/agents
 
+## 0.2.24
+
+### Patch Changes
+
+- [#673](https://github.com/cloudflare/agents/pull/673) [`603b825`](https://github.com/cloudflare/agents/commit/603b825f90b20b61a0fe08275b063d8d4474c622) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - added resumable streaming with minimal setup
+
+- [#665](https://github.com/cloudflare/agents/pull/665) [`4c0838a`](https://github.com/cloudflare/agents/commit/4c0838a28e707b7a69abea14b9df5dd1b78d53ae) Thanks [@threepointone](https://github.com/threepointone)! - Add default JSON schema validator to MCP client
+
+- [#664](https://github.com/cloudflare/agents/pull/664) [`36d03e6`](https://github.com/cloudflare/agents/commit/36d03e63fe51e6bf7296928bfac11ef6d91c3103) Thanks [@threepointone](https://github.com/threepointone)! - Refactor MCP server table management in Agent class
+
+  Moved creation and deletion of the cf_agents_mcp_servers table from AgentMCPClientStorage to the Agent class. Removed redundant create and destroy methods from AgentMCPClientStorage and updated MCPClientManager to reflect these changes. Added comments to clarify usage in demo and test code.
+
+- [#653](https://github.com/cloudflare/agents/pull/653) [`412321b`](https://github.com/cloudflare/agents/commit/412321bc9f8d58e3f8aa11a2aa6d646b7cb6c7ec) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Allow `this.destroy` inside a schedule by including a `destroyed` flag and yielding `ctx.abort` instead of calling it directly
+  Fix issue where schedules would not be able to run for more 30 seconds due to `blockConccurencyWhile`. `alarm()` isn't manually called anymore, getting rid of the bCW.
+  Fix an issue where immediate schedules (e.g. `this.schedule(0, "foo"))`) would not get immediately scheduled.
+
+- [#652](https://github.com/cloudflare/agents/pull/652) [`c07b2c0`](https://github.com/cloudflare/agents/commit/c07b2c05ae6a9b5ac4f87f24e80a145e3d2f8aaa) Thanks [@mattzcarey](https://github.com/mattzcarey)! - ### New Features
+  - **`MCPClientManager` API changes**:
+    - New `registerServer()` method to register servers (replaces part of `connect()`)
+    - New `connectToServer()` method to establish connection (replaces part of `connect()`)
+    - `connect()` method deprecated (still works for backward compatibility)
+  - **Connection state observability**: New `onServerStateChanged()` event for tracking all server state changes
+  - **Improved reconnect logic**: `restoreConnectionsFromStorage()` handles failed connections
+
+  ### Bug Fixes
+  - Fixed failed connections not being recreated on restore
+  - Fixed redundant storage operations during connection restoration
+  - Fixed potential OAuth storage initialization issue by excluding non-serializable authProvider from stored server options
+  - Added defensive checks for storage initialization in MCPClientManager and DurableObjectOAuthClientProvider
+  - Fixed initialization order: MCPClientManager is now created AFTER database tables are created to prevent possible table-not-found errors during DO restart
+
+- [#678](https://github.com/cloudflare/agents/pull/678) [`cccbd0f`](https://github.com/cloudflare/agents/commit/cccbd0f0ffdbdf9af520c495c27a6d975dfd11d2) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - convert internal AI SDK stream events to UIMessageStreamPart format
+
+- [#672](https://github.com/cloudflare/agents/pull/672) [`7c9f8b0`](https://github.com/cloudflare/agents/commit/7c9f8b0aed916701bcd97faa2747ee288bdb40d6) Thanks [@mattzcarey](https://github.com/mattzcarey)! - - `MCPClientConnection.init()` no longer triggers discovery automatically. Discovery should be done via `discover()` or through `MCPClientManager.discoverIfConnected()`
+
+  ### Features
+  - New `discover()` method on `MCPClientConnection` with full lifecycle management:
+    - Handles state transitions (CONNECTED → DISCOVERING → READY on success, CONNECTED on failure)
+    - Supports cancellation via AbortController (cancels previous in-flight discovery)
+    - Configurable timeout (default 15s)
+  - New `cancelDiscovery()` method to abort in-flight discoveries
+  - New `discoverIfConnected()` on `MCPClientManager` for simpler capability discovery per server
+  - `createConnection()` now returns the connection object for immediate use
+  - Created `MCPConnectionState` enum to formalize possible states: `idle`, `connecting`, `authenticating`, `connected`, `discovering`, `ready`, `failed`
+
+  ### Fixes
+  - **Fixed discovery hanging on repeated requests** - New discoveries now cancel previous in-flight ones via AbortController
+  - **Fixed Durable Object crash-looping** - `restoreConnectionsFromStorage()` now starts connections in background (fire-and-forget) to avoid blocking `onStart` and causing `blockConcurrencyWhile` timeouts
+  - **Fixed OAuth callback race condition** - When `auth_url` exists in storage during restoration, state is set to AUTHENTICATING directly instead of calling `connectToServer()` which was overwriting the state
+  - **Set discovery timeout to 15s**
+  - MCP Client Discovery failures now throw errors immediately instead of continuing with empty arrays
+  - Added "connected" state to represent a connected server with no tools loaded yet
+
+- [#654](https://github.com/cloudflare/agents/pull/654) [`a315e86`](https://github.com/cloudflare/agents/commit/a315e86693d81a3ad4d8b3acb21f0f67b4b59ef4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - When handling MCP server requests use relatedRequestId in TransportOptions to send the response down a POST stream if supported (streamable-http)
+
+- [#661](https://github.com/cloudflare/agents/pull/661) [`93589e5`](https://github.com/cloudflare/agents/commit/93589e5dd0c580be0823df42a3e3220d3f88e7a7) Thanks [@naji247](https://github.com/naji247)! - fix: add session ID and header support to SSE transport
+
+  The SSE transport now properly forwards session IDs and request headers to MCP message handlers, achieving closer header parity with StreamableHTTP transport. This allows MCP servers using SSE to access request headers for session management.
+
+- [#659](https://github.com/cloudflare/agents/pull/659) [`48849be`](https://github.com/cloudflare/agents/commit/48849bea45b96a45f55046e18f0c7d87e022765e) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
 ## 0.2.23
 
 ### Patch Changes
