@@ -255,7 +255,11 @@ export function useAgentChat<
         // }))
         abortController.abort();
         // Make sure to also close the stream (cf. https://github.com/cloudflare/agents-starter/issues/69)
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // Stream may already be errored or closed
+        }
       });
 
       currentAgent.addEventListener(
@@ -282,7 +286,11 @@ export function useAgentChat<
                   );
                 }
                 if (data.done) {
-                  controller.close();
+                  try {
+                    controller.close();
+                  } catch {
+                    // Stream may already be errored or closed
+                  }
                   abortController.abort();
                 }
               }

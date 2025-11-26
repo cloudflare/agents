@@ -1224,11 +1224,28 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                     // Do we want to handle data parts?
                   }
 
+                  // Convert internal AI SDK stream events to valid UIMessageStreamPart format.
+                  // The "finish" event with "finishReason" is an internal LanguageModelV3StreamPart,
+                  // not a UIMessageStreamPart (which expects "messageMetadata" instead).
+                  // See: https://github.com/cloudflare/agents/issues/677
+                  let eventToSend: unknown = data;
+                  if (data.type === "finish" && "finishReason" in data) {
+                    const { finishReason, ...rest } = data as {
+                      finishReason: string;
+                      [key: string]: unknown;
+                    };
+                    eventToSend = {
+                      ...rest,
+                      type: "finish",
+                      messageMetadata: { finishReason }
+                    };
+                  }
+
                   // Store chunk for replay on reconnection
-                  const chunkBody = JSON.stringify(data);
+                  const chunkBody = JSON.stringify(eventToSend);
                   this._storeStreamChunk(streamId, chunkBody);
 
-                  // Always forward the raw part to the client
+                  // Forward the converted event to the client
                   this._broadcastChatMessage({
                     body: chunkBody,
                     done: false,
