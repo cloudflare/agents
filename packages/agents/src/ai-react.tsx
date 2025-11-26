@@ -237,6 +237,10 @@ export function useAgentChat<
       let controller: ReadableStreamDefaultController;
       const currentAgent = agentRef.current;
 
+      // Track this request ID so the onAgentMessage handler knows to skip it
+      // (this tab's aiFetch listener handles its own stream)
+      localRequestIdsRef.current.add(id);
+
       signal?.addEventListener("abort", () => {
         currentAgent.send(
           JSON.stringify({
@@ -260,6 +264,8 @@ export function useAgentChat<
         } catch {
           // Stream may already be errored or closed
         }
+        // Clean up the request ID tracking
+        localRequestIdsRef.current.delete(id);
       });
 
       currentAgent.addEventListener(
@@ -278,6 +284,8 @@ export function useAgentChat<
               if (data.error) {
                 controller.error(new Error(data.body));
                 abortController.abort();
+                // Clean up the request ID tracking
+                localRequestIdsRef.current.delete(id);
               } else {
                 // Only enqueue non-empty data to prevent JSON parsing errors
                 if (data.body?.trim()) {
@@ -292,6 +300,8 @@ export function useAgentChat<
                     // Stream may already be errored or closed
                   }
                   abortController.abort();
+                  // Clean up the request ID tracking
+                  localRequestIdsRef.current.delete(id);
                 }
               }
             }
@@ -468,12 +478,19 @@ export function useAgentChat<
 
   /**
    * Contains the request ID, accumulated message parts, and a unique message ID.
+   * Used for both resumed streams and real-time broadcasts from other tabs.
    */
-  const resumedStreamRef = useRef<{
+  const activeStreamRef = useRef<{
     id: string;
     messageId: string;
     parts: ChatMessage["parts"];
   } | null>(null);
+
+  /**
+   * Tracks request IDs initiated by this tab via aiFetch.
+   * Used to distinguish local requests from broadcasts.
+   */
+  const localRequestIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     /**
@@ -501,10 +518,10 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
           if (!resume) return;
-          // Clear any previous incomplete resumed stream to prevent memory leak
-          resumedStreamRef.current = null;
-          // Initialize resumed stream state with unique ID
-          resumedStreamRef.current = {
+          // Clear any previous incomplete active stream to prevent memory leak
+          activeStreamRef.current = null;
+          // Initialize active stream state with unique ID
+          activeStreamRef.current = {
             id: data.id,
             messageId: nanoid(),
             parts: []
@@ -518,20 +535,33 @@ export function useAgentChat<
           );
           break;
 
-        case MessageType.CF_AGENT_USE_CHAT_RESPONSE:
-          // Handle resumed stream chunks
-          if (!resume || !resumedStreamRef.current) return;
-          if (data.id !== resumedStreamRef.current.id) return;
+        case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
+          // Skip if this is a response to a request this tab initiated
+          // (handled by the aiFetch listener instead)
+          if (localRequestIdsRef.current.has(data.id)) return;
+
+          // Initialize stream state for broadcasts from other tabs
+          if (
+            !activeStreamRef.current ||
+            activeStreamRef.current.id !== data.id
+          ) {
+            activeStreamRef.current = {
+              id: data.id,
+              messageId: nanoid(),
+              parts: []
+            };
+          }
+
+          const activeMsg = activeStreamRef.current;
 
           if (data.body?.trim()) {
             try {
               const chunkData = JSON.parse(data.body);
-              const resumedMsg = resumedStreamRef.current;
 
               // Handle all chunk types for complete message reconstruction
               switch (chunkData.type) {
                 case "text-start": {
-                  resumedMsg.parts.push({
+                  activeMsg.parts.push({
                     type: "text",
                     text: "",
                     state: "streaming"
@@ -539,14 +569,14 @@ export function useAgentChat<
                   break;
                 }
                 case "text-delta": {
-                  const lastTextPart = [...resumedMsg.parts]
+                  const lastTextPart = [...activeMsg.parts]
                     .reverse()
                     .find((p) => p.type === "text");
                   if (lastTextPart && lastTextPart.type === "text") {
                     lastTextPart.text += chunkData.delta;
                   } else {
                     // Handle plain text responses (no text-start)
-                    resumedMsg.parts.push({
+                    activeMsg.parts.push({
                       type: "text",
                       text: chunkData.delta
                     });
@@ -554,7 +584,7 @@ export function useAgentChat<
                   break;
                 }
                 case "text-end": {
-                  const lastTextPart = [...resumedMsg.parts]
+                  const lastTextPart = [...activeMsg.parts]
                     .reverse()
                     .find((p) => p.type === "text");
                   if (lastTextPart && "state" in lastTextPart) {
@@ -563,7 +593,7 @@ export function useAgentChat<
                   break;
                 }
                 case "reasoning-start": {
-                  resumedMsg.parts.push({
+                  activeMsg.parts.push({
                     type: "reasoning",
                     text: "",
                     state: "streaming"
@@ -571,7 +601,7 @@ export function useAgentChat<
                   break;
                 }
                 case "reasoning-delta": {
-                  const lastReasoningPart = [...resumedMsg.parts]
+                  const lastReasoningPart = [...activeMsg.parts]
                     .reverse()
                     .find((p) => p.type === "reasoning");
                   if (
@@ -583,7 +613,7 @@ export function useAgentChat<
                   break;
                 }
                 case "reasoning-end": {
-                  const lastReasoningPart = [...resumedMsg.parts]
+                  const lastReasoningPart = [...activeMsg.parts]
                     .reverse()
                     .find((p) => p.type === "reasoning");
                   if (lastReasoningPart && "state" in lastReasoningPart) {
@@ -592,7 +622,7 @@ export function useAgentChat<
                   break;
                 }
                 case "file": {
-                  resumedMsg.parts.push({
+                  activeMsg.parts.push({
                     type: "file",
                     mediaType: chunkData.mediaType,
                     url: chunkData.url
@@ -600,7 +630,7 @@ export function useAgentChat<
                   break;
                 }
                 case "source-url": {
-                  resumedMsg.parts.push({
+                  activeMsg.parts.push({
                     type: "source-url",
                     sourceId: chunkData.sourceId,
                     url: chunkData.url,
@@ -609,7 +639,7 @@ export function useAgentChat<
                   break;
                 }
                 case "source-document": {
-                  resumedMsg.parts.push({
+                  activeMsg.parts.push({
                     type: "source-document",
                     sourceId: chunkData.sourceId,
                     mediaType: chunkData.mediaType,
@@ -620,7 +650,7 @@ export function useAgentChat<
                 }
                 case "tool-input-available": {
                   // Add tool call part when input is available
-                  resumedMsg.parts.push({
+                  activeMsg.parts.push({
                     type: `tool-${chunkData.toolName}`,
                     toolCallId: chunkData.toolCallId,
                     toolName: chunkData.toolName,
@@ -631,7 +661,7 @@ export function useAgentChat<
                 }
                 case "tool-output-available": {
                   // Update existing tool part with output
-                  const toolPart = resumedMsg.parts.find(
+                  const toolPart = activeMsg.parts.find(
                     (p) =>
                       "toolCallId" in p && p.toolCallId === chunkData.toolCallId
                   );
@@ -644,7 +674,7 @@ export function useAgentChat<
                   break;
                 }
                 case "step-start": {
-                  resumedMsg.parts.push({ type: "step-start" });
+                  activeMsg.parts.push({ type: "step-start" });
                   break;
                 }
                 // Other chunk types (tool-input-start, tool-input-delta, etc.)
@@ -653,16 +683,16 @@ export function useAgentChat<
 
               // Update messages with the partial response
               useChatHelpers.setMessages((prevMessages: ChatMessage[]) => {
-                if (!resumedMsg) return prevMessages;
+                if (!activeMsg) return prevMessages;
 
                 const existingIdx = prevMessages.findIndex(
-                  (m) => m.id === resumedMsg.messageId
+                  (m) => m.id === activeMsg.messageId
                 );
 
                 const partialMessage = {
-                  id: resumedMsg.messageId,
+                  id: activeMsg.messageId,
                   role: "assistant" as const,
-                  parts: [...resumedMsg.parts]
+                  parts: [...activeMsg.parts]
                 } as unknown as ChatMessage;
 
                 if (existingIdx >= 0) {
@@ -675,7 +705,7 @@ export function useAgentChat<
             } catch (parseError) {
               // Log corrupted chunk for debugging - could indicate data loss
               console.warn(
-                "[useAgentChat] Failed to parse resumed stream chunk:",
+                "[useAgentChat] Failed to parse stream chunk:",
                 parseError instanceof Error ? parseError.message : parseError,
                 "body:",
                 data.body?.slice(0, 100) // Truncate for logging
@@ -685,17 +715,18 @@ export function useAgentChat<
 
           // Clear on completion or error
           if (data.done || data.error) {
-            resumedStreamRef.current = null;
+            activeStreamRef.current = null;
           }
           break;
+        }
       }
     }
 
     agent.addEventListener("message", onAgentMessage);
     return () => {
       agent.removeEventListener("message", onAgentMessage);
-      // Clear resumed stream state on cleanup to prevent memory leak
-      resumedStreamRef.current = null;
+      // Clear active stream state on cleanup to prevent memory leak
+      activeStreamRef.current = null;
     };
   }, [agent, useChatHelpers.setMessages, resume]);
 
