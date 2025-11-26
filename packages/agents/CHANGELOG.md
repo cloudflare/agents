@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.25
+
+### Patch Changes
+
+- [#679](https://github.com/cloudflare/agents/pull/679) [`e173b41`](https://github.com/cloudflare/agents/commit/e173b41af61bbea24d6952287ebb00726c6ba1b9) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - enhance request ID tracking and stream handling in useAgentChat
+
 ## 0.2.24
 
 ### Patch Changes
