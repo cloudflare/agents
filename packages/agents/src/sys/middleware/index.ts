@@ -1,11 +1,4 @@
-import type {
-  AgentMiddleware,
-  ToolCall,
-  Todo,
-  ToolHandler,
-  ToolMeta,
-  AgentBlueprint
-} from "../types";
+import type { AgentMiddleware, ToolCall, Todo, AgentBlueprint } from "../types";
 import {
   WRITE_TODOS_SYSTEM_PROMPT,
   FILESYSTEM_SYSTEM_PROMPT,
@@ -18,16 +11,17 @@ import {
   READ_FILE_TOOL_DESCRIPTION
 } from "./prompts";
 import {
-  WriteTodosSchema,
-  ListFilesSchema,
-  ReadFileSchema,
-  WriteFileSchema,
-  EditFileSchema,
-  TaskSchema
+  WriteTodosParams,
+  ListFilesParams,
+  ReadFileParams,
+  WriteFileParams,
+  EditFileParams,
+  TaskParams
 } from "./schemas";
 import { AgentEventType } from "../events";
 import { getAgentByName } from "../../";
 import type { AgentEnv } from "..";
+import { tool, type ToolContext } from "./tools";
 
 export function defineMiddleware<TConfig>(
   mw: Omit<AgentMiddleware<TConfig>, "__configType">
@@ -36,13 +30,11 @@ export function defineMiddleware<TConfig>(
 }
 
 /* -------------------- Planning: write_todos -------------------- */
-const write_todos = defineTool(
-  {
-    name: "write_todos",
-    description: WRITE_TODOS_TOOL_DESCRIPTION, // long, curated guidance
-    parameters: WriteTodosSchema
-  },
-  async (p: { todos: Todo[] }, ctx) => {
+const write_todos = tool({
+  name: "write_todos",
+  description: WRITE_TODOS_TOOL_DESCRIPTION,
+  inputSchema: WriteTodosParams,
+  execute: async (p, ctx) => {
     const sql = ctx.agent.store.sql;
     const clean = (p.todos ?? []).map((t) => ({
       content: String(t.content ?? "").slice(0, 2000),
@@ -64,7 +56,7 @@ const write_todos = defineTool(
     }
     return `Updated todo list (${clean.length} items).`;
   }
-);
+});
 
 export const planning: AgentMiddleware = {
   name: "planning",
@@ -136,13 +128,11 @@ export const filesystem: AgentMiddleware = {
     };
 
     // ls - list directory
-    const ls = defineTool(
-      {
-        name: "ls",
-        description: LIST_FILES_TOOL_DESCRIPTION,
-        parameters: ListFilesSchema
-      },
-      async (p: { path?: string }) => {
+    const ls = tool({
+      name: "ls",
+      description: LIST_FILES_TOOL_DESCRIPTION,
+      inputSchema: ListFilesParams,
+      execute: async (p) => {
         try {
           const entries = await agentFs.readDir(p.path ?? ".");
           if (entries.length === 0) return "Directory is empty";
@@ -153,16 +143,14 @@ export const filesystem: AgentMiddleware = {
           return `Error: ${e instanceof Error ? e.message : String(e)}`;
         }
       }
-    );
+    });
 
     // read_file
-    const read_file = defineTool(
-      {
-        name: "read_file",
-        description: READ_FILE_TOOL_DESCRIPTION,
-        parameters: ReadFileSchema
-      },
-      async (p: { path: string; offset?: number; limit?: number }) => {
+    const read_file = tool({
+      name: "read_file",
+      description: READ_FILE_TOOL_DESCRIPTION,
+      inputSchema: ReadFileParams,
+      execute: async (p) => {
         const path = String(p.path ?? "");
         try {
           const raw = await agentFs.readFile(path, false);
@@ -192,16 +180,14 @@ export const filesystem: AgentMiddleware = {
           return `Error: ${e instanceof Error ? e.message : String(e)}`;
         }
       }
-    );
+    });
 
     // write_file
-    const write_file = defineTool(
-      {
-        name: "write_file",
-        description: WRITE_FILE_TOOL_DESCRIPTION,
-        parameters: WriteFileSchema
-      },
-      async (p: { path: string; content: string }) => {
+    const write_file = tool({
+      name: "write_file",
+      description: WRITE_FILE_TOOL_DESCRIPTION,
+      inputSchema: WriteFileParams,
+      execute: async (p) => {
         const path = String(p.path ?? "");
         const content = String(p.content ?? "");
         try {
@@ -211,21 +197,14 @@ export const filesystem: AgentMiddleware = {
           return `Error: ${e instanceof Error ? e.message : String(e)}`;
         }
       }
-    );
+    });
 
     // edit_file
-    const edit_file = defineTool(
-      {
-        name: "edit_file",
-        description: EDIT_FILE_TOOL_DESCRIPTION,
-        parameters: EditFileSchema
-      },
-      async (p: {
-        path: string;
-        oldString: string;
-        newString: string;
-        replaceAll?: boolean;
-      }) => {
+    const edit_file = tool({
+      name: "edit_file",
+      description: EDIT_FILE_TOOL_DESCRIPTION,
+      inputSchema: EditFileParams,
+      execute: async (p) => {
         const path = String(p.path ?? "");
 
         // Must read first
@@ -258,7 +237,7 @@ export const filesystem: AgentMiddleware = {
           return `Error: ${e instanceof Error ? e.message : String(e)}`;
         }
       }
-    );
+    });
 
     ctx.registerTool(ls);
     ctx.registerTool(read_file);
@@ -274,12 +253,6 @@ export type SubagentsConfig = {
   subagents?: {
     subagents: AgentBlueprint[];
   };
-};
-
-type TaskInput = {
-  description: string;
-  subagentType: string;
-  timeoutMs?: number;
 };
 
 function renderOtherAgents(subagents: AgentBlueprint[]) {
@@ -298,13 +271,11 @@ export const subagents = defineMiddleware<SubagentsConfig>({
       "{other_agents}",
       otherAgents
     );
-    const task = defineTool(
-      {
-        name: "task",
-        description: taskDesc,
-        parameters: TaskSchema
-      },
-      async (p: TaskInput, ctx) => {
+    const task = tool({
+      name: "task",
+      description: taskDesc,
+      inputSchema: TaskParams,
+      execute: async (p, ctx) => {
         const { description, subagentType } = p;
         const token = crypto.randomUUID();
         const childId = crypto.randomUUID();
@@ -377,7 +348,7 @@ export const subagents = defineMiddleware<SubagentsConfig>({
 
         return null; // Won't immediately get added as a tool result
       }
-    );
+    });
     ctx.registerTool(task);
   },
   tags: ["subagents"]
@@ -414,15 +385,12 @@ export const hitl = defineMiddleware<HitlConfig>({
   tags: ["hitl"]
 });
 
-export function defineTool(meta: ToolMeta, handler: ToolHandler): ToolHandler {
-  handler.__tool = meta; // stash metadata on the function
-  return handler;
-}
-
-export function getToolMeta(
-  fn: ToolHandler,
-  fallbackName?: string
-): ToolMeta | null {
-  const m = fn.__tool;
-  return m ? m : fallbackName ? { name: fallbackName } : null;
-}
+// Re-export tool utilities
+export {
+  tool,
+  getToolMeta,
+  z,
+  type ToolFn,
+  type ToolResult,
+  type ToolContext
+} from "./tools";

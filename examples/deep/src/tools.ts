@@ -1,6 +1,5 @@
-import { defineTool } from "agents/sys";
+import { tool } from "agents/sys";
 import * as z from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
 import { getCustomStatTimeseriesText, getCustomTopNText } from "./analytics";
 
 const validDimension = (d: string) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(d);
@@ -51,20 +50,17 @@ export const GetTopNTextParams = z
   })
   .strict();
 
-export type GetTopNTextArgs = z.infer<typeof GetTopNTextParams>;
-
-export const getTopNTextTool = defineTool(
-  {
-    name: "get_topn_text",
-    description:
-      "Return a formatted Top-N table from Cloudflare Analytics for a chosen dimension (e.g., clientIP, clientCountryName, edgeResponseStatus, userAgent, clientASN, host, path, method). Use this to pivot quickly.",
-    parameters: zodToJsonSchema(GetTopNTextParams)
-  },
-  async (p: GetTopNTextArgs, ctx) => {
+export const getTopNTextTool = tool({
+  name: "get_topn_text",
+  description:
+    "Return a formatted Top-N table from Cloudflare Analytics for a chosen dimension (e.g., clientIP, clientCountryName, edgeResponseStatus, userAgent, clientASN, host, path, method). Use this to pivot quickly.",
+  inputSchema: GetTopNTextParams,
+  execute: async (
+    { dimension, limit, startISO, endISO, maxRows, zoneTag, andFilters },
+    ctx
+  ) => {
     const start = ctx.agent.store.kv.get<number>("current_window.start");
     const end = ctx.agent.store.kv.get<number>("current_window.end");
-    const { dimension, limit, startISO, endISO, maxRows, zoneTag, andFilters } =
-      p;
     if (!validDimension(dimension))
       throw new Error(`Invalid dimension: ${dimension}`);
     const s = startISO ? new Date(startISO) : new Date(start!);
@@ -82,7 +78,7 @@ export const getTopNTextTool = defineTool(
       maxRows: typeof maxRows === "number" ? maxRows : undefined
     });
   }
-);
+});
 
 export const GetTimeseriesTextParams = z
   .object({
@@ -126,19 +122,13 @@ export const GetTimeseriesTextParams = z
   })
   .strict();
 
-export type GetTimeseriesTextArgs = z.infer<typeof GetTimeseriesTextParams>;
-
-export const getTimeseriesTextTool = defineTool(
-  {
-    name: "get_timeseries_text",
-    description:
-      "Return a formatted timeseries (current vs previous window) for request counts from Cloudflare Analytics. Use this to confirm spikes, dips, or diurnal patterns.",
-    parameters: zodToJsonSchema(GetTimeseriesTextParams)
-  },
-  async (p: GetTimeseriesTextArgs, ctx) => {
-    const start = ctx.agent.store.kv.get<number>("current_window.start");
-    const end = ctx.agent.store.kv.get<number>("current_window.end");
-    const {
+export const getTimeseriesTextTool = tool({
+  name: "get_timeseries_text",
+  description:
+    "Return a formatted timeseries (current vs previous window) for request counts from Cloudflare Analytics. Use this to confirm spikes, dips, or diurnal patterns.",
+  inputSchema: GetTimeseriesTextParams,
+  execute: async (
+    {
       startISO,
       endISO,
       prevStartISO,
@@ -146,7 +136,11 @@ export const getTimeseriesTextTool = defineTool(
       limitPoints,
       zoneTag,
       andFilters
-    } = p;
+    },
+    ctx
+  ) => {
+    const start = ctx.agent.store.kv.get<number>("current_window.start");
+    const end = ctx.agent.store.kv.get<number>("current_window.end");
     const s = startISO ? new Date(startISO) : new Date(start!);
     const e = endISO ? new Date(endISO) : new Date(end!);
     const ps = prevStartISO ? new Date(prevStartISO) : new Date(start!);
@@ -164,7 +158,7 @@ export const getTimeseriesTextTool = defineTool(
       limitPoints: typeof limitPoints === "number" ? limitPoints : 500
     });
   }
-);
+});
 
 export const SetTimeWindowParams = z
   .object({
@@ -203,18 +197,12 @@ export const SetTimeWindowParams = z
   })
   .strict();
 
-export type SetTimeWindowArgs = z.infer<typeof SetTimeWindowParams>;
-
-export const setTimeWindowTool = defineTool(
-  {
-    name: "set_time_window",
-    description:
-      "Adjust the active time window used by other tools. Supports absolute range, relative lookback hours, or zoom in/out around center.",
-    parameters: zodToJsonSchema(SetTimeWindowParams)
-  },
-  async (p: SetTimeWindowArgs, ctx) => {
-    const { startISO, endISO, lookbackHours, zoom, factor } = p;
-
+export const setTimeWindowTool = tool({
+  name: "set_time_window",
+  description:
+    "Adjust the active time window used by other tools. Supports absolute range, relative lookback hours, or zoom in/out around center.",
+  inputSchema: SetTimeWindowParams,
+  execute: async ({ startISO, endISO, lookbackHours, zoom, factor }, ctx) => {
     const describe = (s: Date, e: Date) =>
       `OK. Window is now ${s.toISOString()} → ${e.toISOString()} (duration ${(e.getTime() - s.getTime()) / 3600000}h).`;
 
@@ -262,21 +250,19 @@ export const setTimeWindowTool = defineTool(
 
     return "No changes made (provide lookbackHours, or both startISO/endISO, or zoom).";
   }
-);
+});
 
 export const GetCurrentWindowParams = z.object({}).strict();
-export type GetCurrentWindowArgs = z.infer<typeof GetCurrentWindowParams>;
 
-export const getCurrentWindowTool = defineTool(
-  {
-    name: "get_current_window",
-    description: "Return the current time window used by other tools."
-  },
-  async (_: GetCurrentWindowArgs, ctx) => {
+export const getCurrentWindowTool = tool({
+  name: "get_current_window",
+  description: "Return the current time window used by other tools.",
+  inputSchema: GetCurrentWindowParams,
+  execute: async (_, ctx) => {
     const start = new Date(
       ctx.agent.store.kv.get<number>("current_window.start")!
     );
     const end = new Date(ctx.agent.store.kv.get<number>("current_window.end")!);
     return `Current window: ${start.toISOString()} → ${end.toISOString()} (duration ${(end.getTime() - start.getTime()) / 3600000}h).`;
   }
-);
+});
