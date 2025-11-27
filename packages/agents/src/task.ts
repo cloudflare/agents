@@ -84,6 +84,10 @@ export interface Task<TResult = unknown> {
   timeoutMs?: number;
   /** Queue item ID (links to queue system) */
   queueId?: string;
+  /** Workflow instance ID (for workflow tasks) */
+  workflowInstanceId?: string;
+  /** Workflow binding name (for workflow tasks) */
+  workflowBinding?: string;
 }
 
 /**
@@ -283,7 +287,10 @@ interface TaskRow {
   events: string;
   progress: number | null;
   timeout_ms: number | null;
+  deadline_at: number | null;
   queue_id: string | null;
+  workflow_instance_id: string | null;
+  workflow_binding: string | null;
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
@@ -294,12 +301,12 @@ interface TaskRow {
  * - SQL for persistence and queries
  * - State sync callback for real-time updates to clients
  * - Execution handled by queue system
+ * - Timeouts use deadline-based checking (no setTimeout accumulation)
  */
 export class TaskTracker {
   private sql: SqlExecutor;
   private syncToState: StateSyncCallback;
   private abortControllers = new Map<string, AbortController>();
-  private taskTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingSync = new Set<string>();
   private syncTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -308,6 +315,7 @@ export class TaskTracker {
     this.syncToState = syncToState;
 
     // Create tasks table if not exists
+    // deadline_at: when the task should timeout (calculated from timeout_ms + started_at)
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_tasks (
         id TEXT PRIMARY KEY NOT NULL,
@@ -319,7 +327,10 @@ export class TaskTracker {
         events TEXT DEFAULT '[]',
         progress REAL,
         timeout_ms INTEGER,
+        deadline_at INTEGER,
         queue_id TEXT,
+        workflow_instance_id TEXT,
+        workflow_binding TEXT,
         created_at INTEGER DEFAULT (unixepoch() * 1000),
         started_at INTEGER,
         completed_at INTEGER
@@ -332,7 +343,6 @@ export class TaskTracker {
     `;
 
     // Clean up stale tasks from previous runs (pending/running tasks that didn't complete)
-    // This prevents timeout accumulation on restart
     this.sql`
       UPDATE cf_agents_tasks 
       SET status = 'failed', error = 'Agent restarted', completed_at = ${Date.now()}
@@ -433,13 +443,50 @@ export class TaskTracker {
   }
 
   /**
+   * Link task to a workflow instance for cancellation support
+   */
+  linkToWorkflow(taskId: string, instanceId: string, binding: string): void {
+    this.sql`
+      UPDATE cf_agents_tasks 
+      SET workflow_instance_id = ${instanceId}, workflow_binding = ${binding}
+      WHERE id = ${taskId}
+    `;
+  }
+
+  /**
+   * Get workflow info for a task (for cancellation)
+   */
+  getWorkflowInfo(
+    taskId: string
+  ): { instanceId: string; binding: string } | null {
+    const rows = this.sql<{
+      workflow_instance_id: string | null;
+      workflow_binding: string | null;
+    }>`
+      SELECT workflow_instance_id, workflow_binding 
+      FROM cf_agents_tasks WHERE id = ${taskId}
+    `;
+    if (!rows?.[0]?.workflow_instance_id || !rows?.[0]?.workflow_binding) {
+      return null;
+    }
+    return {
+      instanceId: rows[0].workflow_instance_id,
+      binding: rows[0].workflow_binding
+    };
+  }
+
+  /**
    * Mark task as running (called when queue executes it)
+   * Sets deadline based on timeout_ms for deadline-based timeout checking
    */
   markRunning(taskId: string): AbortController {
     const now = Date.now();
+    const task = this.get(taskId);
+    const deadline = task?.timeoutMs ? now + task.timeoutMs : null;
+
     this.sql`
       UPDATE cf_agents_tasks
-      SET status = 'running', started_at = ${now}
+      SET status = 'running', started_at = ${now}, deadline_at = ${deadline}
       WHERE id = ${taskId}
     `;
 
@@ -447,30 +494,31 @@ export class TaskTracker {
     const controller = new AbortController();
     this.abortControllers.set(taskId, controller);
 
-    const task = this.get(taskId);
-    if (task) {
-      // Sync to state - immediate for status change
-      this.syncNow(taskId);
-
-      // Set up timeout if specified - but limit to prevent timeout accumulation
-      if (task.timeoutMs && this.taskTimeouts.size < 100) {
-        // Clear any existing timeout for this task
-        const existingTimeout = this.taskTimeouts.get(taskId);
-        if (existingTimeout) {
-          clearTimeout(existingTimeout);
-        }
-
-        const timeout = setTimeout(() => {
-          this.taskTimeouts.delete(taskId);
-          if (!controller.signal.aborted) {
-            this.abort(taskId, "Task timed out");
-          }
-        }, task.timeoutMs);
-        this.taskTimeouts.set(taskId, timeout);
-      }
-    }
+    // Sync to state - immediate for status change
+    this.syncNow(taskId);
 
     return controller;
+  }
+
+  /**
+   * Check if a task has exceeded its deadline
+   * Called by Agent during execution to enforce timeouts
+   */
+  checkTimeout(taskId: string): boolean {
+    const task = this.get(taskId);
+    if (!task || task.status !== "running") return false;
+
+    // Check deadline from database (persisted, survives restarts)
+    const rows = this.sql<{ deadline_at: number | null }>`
+      SELECT deadline_at FROM cf_agents_tasks WHERE id = ${taskId}
+    `;
+    const deadline = rows?.[0]?.deadline_at;
+
+    if (deadline && Date.now() > deadline) {
+      this.abort(taskId, "Task timed out");
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -706,12 +754,6 @@ export class TaskTracker {
 
   private cleanupController(taskId: string): void {
     this.abortControllers.delete(taskId);
-    // Also clear any pending timeout for this task
-    const timeout = this.taskTimeouts.get(taskId);
-    if (timeout) {
-      clearTimeout(timeout);
-      this.taskTimeouts.delete(taskId);
-    }
   }
 
   private rowToTask(row: TaskRow): Task {
@@ -726,6 +768,8 @@ export class TaskTracker {
       progress: row.progress ?? undefined,
       timeoutMs: row.timeout_ms ?? undefined,
       queueId: row.queue_id ?? undefined,
+      workflowInstanceId: row.workflow_instance_id ?? undefined,
+      workflowBinding: row.workflow_binding ?? undefined,
       createdAt: row.created_at,
       startedAt: row.started_at ?? undefined,
       completedAt: row.completed_at ?? undefined
@@ -762,11 +806,26 @@ export class TaskTracker {
 // ============================================================================
 
 /**
+ * Callback for canceling workflow tasks
+ */
+export type WorkflowCancelCallback = (taskId: string) => Promise<boolean>;
+
+/**
  * Accessor object for task operations
  * Provides a clean API: this.tasks.get(id), this.tasks.cancel(id), etc.
  */
 export class TasksAccessor {
+  private workflowCancelCallback?: WorkflowCancelCallback;
+
   constructor(private tracker: TaskTracker) {}
+
+  /**
+   * Set callback for canceling workflow tasks
+   * @internal
+   */
+  setWorkflowCancelCallback(callback: WorkflowCancelCallback): void {
+    this.workflowCancelCallback = callback;
+  }
 
   /**
    * Get a task by ID
@@ -792,9 +851,15 @@ export class TasksAccessor {
   }
 
   /**
-   * Cancel/abort a task
+   * Cancel/abort a task (also terminates workflow if applicable)
    */
-  cancel(taskId: string, reason?: string): boolean {
+  async cancel(taskId: string, reason?: string): Promise<boolean> {
+    // Try to cancel workflow first if this is a workflow task
+    if (this.workflowCancelCallback) {
+      await this.workflowCancelCallback(taskId).catch(() => {
+        // Ignore errors - workflow may already be done
+      });
+    }
     return this.tracker.cancel(taskId, reason);
   }
 

@@ -142,19 +142,15 @@ export abstract class AgentWorkflow<
   ): Promise<unknown> {
     const { _taskId, _agentBinding, _agentName, ...params } = event.payload;
 
-    // Track pending updates to batch them
-    const pendingUpdates: WorkflowUpdate[] = [];
-    let lastFlush = Date.now();
+    // Batch updates - only flushed at step boundaries (no extra durable steps)
+    let pendingUpdate: WorkflowUpdate | null = null;
 
+    // Flush pending update by merging into next step (no separate durable step)
     const flushUpdates = async () => {
-      if (pendingUpdates.length === 0) return;
-      const updates = [...pendingUpdates];
-      pendingUpdates.length = 0;
-
-      for (const update of updates) {
-        await this.notifyAgent(_agentBinding, _agentName, update);
-      }
-      lastFlush = Date.now();
+      if (!pendingUpdate) return;
+      const update = pendingUpdate;
+      pendingUpdate = null;
+      await this.notifyAgent(_agentBinding, _agentName, update);
     };
 
     // Create context with Task-like API
@@ -163,7 +159,7 @@ export abstract class AgentWorkflow<
       taskId: _taskId,
 
       step: async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
-        // Flush any pending updates before step
+        // Flush pending update, then execute step
         await flushUpdates();
         return step.do(name, fn);
       },
@@ -173,25 +169,22 @@ export abstract class AgentWorkflow<
         return step.sleep(name, duration);
       },
 
+      // Queue event - will be sent at next step boundary
       emit: (type: string, data?: unknown) => {
-        pendingUpdates.push({
+        pendingUpdate = {
           taskId: _taskId,
+          ...pendingUpdate,
           event: { type, data }
-        });
-        // Auto-flush if it's been a while
-        if (Date.now() - lastFlush > 100) {
-          step.do(`_emit_${type}_${Date.now()}`, () => flushUpdates());
-        }
+        };
       },
 
+      // Queue progress - will be sent at next step boundary
       setProgress: (progress: number) => {
-        pendingUpdates.push({
+        pendingUpdate = {
           taskId: _taskId,
+          ...pendingUpdate,
           progress
-        });
-        if (Date.now() - lastFlush > 100) {
-          step.do(`_progress_${progress}`, () => flushUpdates());
-        }
+        };
       }
     };
 
@@ -199,7 +192,7 @@ export abstract class AgentWorkflow<
       // Run the workflow
       const result = await this.run(ctx);
 
-      // Notify Agent of completion
+      // Notify Agent of completion (always a separate step for durability)
       await step.do("_complete", async () => {
         await this.notifyAgent(_agentBinding, _agentName, {
           taskId: _taskId,
@@ -211,7 +204,7 @@ export abstract class AgentWorkflow<
 
       return result;
     } catch (error) {
-      // Notify Agent of failure
+      // Notify Agent of failure (always a separate step for durability)
       await step.do("_fail", async () => {
         await this.notifyAgent(_agentBinding, _agentName, {
           taskId: _taskId,

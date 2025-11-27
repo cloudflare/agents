@@ -476,6 +476,11 @@ export class Agent<
       this._taskTracker
     );
 
+    // Set workflow cancel callback for TasksAccessor
+    this.tasks.setWorkflowCancelCallback((taskId) =>
+      this._cancelWorkflow(taskId)
+    );
+
     // Clear any stale queue items from previous runs to prevent task spirals
     this.sql`DELETE FROM cf_agents_queues WHERE callback = '_executeTask'`;
 
@@ -509,7 +514,14 @@ export class Agent<
             request.method === "POST"
           ) {
             try {
-              const update = await request.json();
+              const update = (await request.json()) as {
+                taskId: string;
+                event?: { type: string; data?: unknown };
+                progress?: number;
+                status?: "completed" | "failed";
+                result?: unknown;
+                error?: string;
+              };
               this._handleWorkflowUpdate(update);
               return new Response("ok", { status: 200 });
             } catch (error) {
@@ -876,7 +888,8 @@ export class Agent<
       }
     });
 
-    // 4. Store workflow instance ID for potential cancellation
+    // 4. Store workflow instance ID for cancellation support
+    this._taskTracker.linkToWorkflow(task.id, instance.id, workflowBinding);
     this._taskTracker.addEvent(task.id, "workflow-started", {
       instanceId: instance.id,
       binding: workflowBinding
@@ -884,6 +897,32 @@ export class Agent<
 
     // 5. Return handle
     return this._taskTracker.getHandle<TResult>(task.id)!;
+  }
+
+  /**
+   * Cancel a workflow task by terminating its workflow instance
+   * @internal
+   */
+  async _cancelWorkflow(taskId: string): Promise<boolean> {
+    const workflowInfo = this._taskTracker.getWorkflowInfo(taskId);
+    if (!workflowInfo) return false;
+
+    const workflowNS = (this.env as Record<string, unknown>)[
+      workflowInfo.binding
+    ] as {
+      get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
+    } | null;
+
+    if (!workflowNS?.get) return false;
+
+    try {
+      const instance = await workflowNS.get(workflowInfo.instanceId);
+      await instance.terminate();
+      return true;
+    } catch {
+      // Workflow may already be terminated or not exist
+      return false;
+    }
   }
 
   /**
@@ -960,18 +999,26 @@ export class Agent<
     let lastError: Error | undefined;
 
     for (let attempt = 0; attempt <= retries; attempt++) {
-      if (controller.signal.aborted) {
-        return; // Already marked as aborted by the tracker
+      // Check for abort or timeout (deadline-based, no setTimeout accumulation)
+      if (controller.signal.aborted || this._taskTracker.checkTimeout(taskId)) {
+        return;
       }
 
       try {
         const result = await (method as Function).call(this, input, ctx);
-        this._taskTracker.complete(taskId, result);
+        // Final timeout check before completing
+        if (!this._taskTracker.checkTimeout(taskId)) {
+          this._taskTracker.complete(taskId, result);
+        }
         return;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
 
         if (attempt < retries && !controller.signal.aborted) {
+          // Check timeout before retry
+          if (this._taskTracker.checkTimeout(taskId)) {
+            return;
+          }
           // Add retry event
           this._taskTracker.addEvent(taskId, "retry", {
             attempt: attempt + 1,
@@ -986,18 +1033,16 @@ export class Agent<
       }
     }
 
-    // All retries exhausted
-    if (!controller.signal.aborted) {
+    // All retries exhausted - check timeout one more time
+    if (!controller.signal.aborted && !this._taskTracker.checkTimeout(taskId)) {
       this._taskTracker.fail(taskId, lastError?.message || "Unknown error");
     }
   }
 
   /**
-   * Sync a task update to the agent's state
-   * This triggers automatic broadcast to all connected clients via existing state sync
+   * Track last broadcast per task to rate-limit progress updates
    * @internal
    */
-  // Track last broadcast per task to prevent flooding
   private _lastTaskBroadcast = new Map<
     string,
     { time: number; status: string }
@@ -1005,9 +1050,14 @@ export class Agent<
 
   /**
    * Broadcast task update to all connected clients.
-   * Rate-limited to prevent flooding - only sends on status changes or every 500ms.
+   *
+   * Rate limiting strategy (single-threaded DO, no race conditions):
+   * - Status changes: ALWAYS broadcast immediately
+   * - Final states (completed/failed/aborted): ALWAYS broadcast + cleanup
+   * - Progress updates: Rate-limited to every 500ms to prevent flooding
    */
   private _syncTaskToState(taskId: string, task: Task | null): void {
+    // Task deleted - always broadcast
     if (!task) {
       this._lastTaskBroadcast.delete(taskId);
       this.broadcast(
@@ -1019,13 +1069,22 @@ export class Agent<
     const now = Date.now();
     const last = this._lastTaskBroadcast.get(taskId);
     const statusChanged = !last || last.status !== task.status;
+    const isFinalState = ["completed", "failed", "aborted"].includes(
+      task.status
+    );
     const timeSinceLast = last ? now - last.time : Infinity;
 
-    if (statusChanged || timeSinceLast >= 500) {
+    // Always broadcast: status changes, final states, or 500ms since last
+    if (statusChanged || isFinalState || timeSinceLast >= 500) {
       this._lastTaskBroadcast.set(taskId, { time: now, status: task.status });
       this.broadcast(
         JSON.stringify({ type: "CF_AGENT_TASK_UPDATE", taskId, task })
       );
+
+      // Cleanup tracking for final states
+      if (isFinalState) {
+        this._lastTaskBroadcast.delete(taskId);
+      }
     }
   }
 
