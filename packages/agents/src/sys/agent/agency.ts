@@ -285,6 +285,14 @@ export class Agency extends Agent<AgentEnv> {
     }
 
     // --------------------------------------------------
+    // Filesystem
+    // --------------------------------------------------
+
+    if (path.startsWith("/fs")) {
+      return this.handleFilesystem(req, path);
+    }
+
+    // --------------------------------------------------
     // Internal: Blueprint lookup for child agents
     // --------------------------------------------------
 
@@ -797,6 +805,154 @@ export class Agency extends Agent<AgentEnv> {
       default:
         return null;
     }
+  }
+
+  // ============================================================
+  // Filesystem Handlers
+  // ============================================================
+
+  /**
+   * Handle filesystem requests.
+   * Routes:
+   *   GET  /fs/...          - List directory or read file
+   *   PUT  /fs/...          - Write file (body = content)
+   *   DELETE /fs/...        - Delete file
+   *
+   * Paths map to R2: /fs/shared/... → {agencyId}/shared/...
+   *                  /fs/agents/... → {agencyId}/agents/...
+   */
+  private async handleFilesystem(
+    req: Request,
+    path: string
+  ): Promise<Response> {
+    const bucket = this.env.FS;
+    if (!bucket) {
+      return new Response("Filesystem not configured (missing FS binding)", {
+        status: 503
+      });
+    }
+
+    // Extract the path after /fs
+    // /fs → "", /fs/ → "", /fs/shared/foo → "shared/foo"
+    let fsPath = path.slice(3); // remove "/fs"
+    if (fsPath.startsWith("/")) fsPath = fsPath.slice(1);
+
+    // Build R2 key: /{agencyId}/{fsPath}
+    const r2Prefix = this.agencyName + "/";
+    const r2Key = r2Prefix + fsPath;
+
+    switch (req.method) {
+      case "GET":
+        return this.handleFsGet(bucket, r2Key, r2Prefix, fsPath);
+      case "PUT":
+        return this.handleFsPut(bucket, r2Key, fsPath, req);
+      case "DELETE":
+        return this.handleFsDelete(bucket, r2Key, fsPath);
+      default:
+        return new Response("Method not allowed", { status: 405 });
+    }
+  }
+
+  private async handleFsGet(
+    bucket: R2Bucket,
+    r2Key: string,
+    r2Prefix: string,
+    fsPath: string
+  ): Promise<Response> {
+    // Check if it's a file first
+    const obj = await bucket.get(r2Key);
+    if (obj) {
+      // It's a file - return contents
+      const content = await obj.text();
+      return new Response(content, {
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "x-fs-path": "/" + fsPath,
+          "x-fs-size": String(obj.size),
+          "x-fs-modified": obj.uploaded.toISOString()
+        }
+      });
+    }
+
+    // Not a file - list as directory
+    const prefix = r2Key.endsWith("/") ? r2Key : r2Key + "/";
+    const list = await bucket.list({ prefix, delimiter: "/" });
+
+    type FSEntry = {
+      type: "file" | "dir";
+      path: string;
+      size?: number;
+      modified?: string;
+    };
+
+    const entries: FSEntry[] = [];
+
+    // Add directories (delimited prefixes)
+    for (const p of list.delimitedPrefixes) {
+      const relPath = p.slice(r2Prefix.length);
+      entries.push({ type: "dir", path: "/" + relPath });
+    }
+
+    // Add files
+    for (const obj of list.objects) {
+      // Skip the "directory marker" if key equals prefix
+      if (obj.key === r2Key) continue;
+      const relPath = obj.key.slice(r2Prefix.length);
+      entries.push({
+        type: "file",
+        path: "/" + relPath,
+        size: obj.size,
+        modified: obj.uploaded.toISOString()
+      });
+    }
+
+    // Sort: directories first, then files
+    entries.sort((a, b) => {
+      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+      return a.path.localeCompare(b.path);
+    });
+
+    return Response.json({
+      path: "/" + fsPath || "/",
+      entries
+    });
+  }
+
+  private async handleFsPut(
+    bucket: R2Bucket,
+    r2Key: string,
+    fsPath: string,
+    req: Request
+  ): Promise<Response> {
+    if (!fsPath) {
+      return new Response("Cannot write to root", { status: 400 });
+    }
+
+    const content = await req.text();
+    await bucket.put(r2Key, content);
+
+    return Response.json({
+      ok: true,
+      path: "/" + fsPath,
+      size: content.length
+    });
+  }
+
+  private async handleFsDelete(
+    bucket: R2Bucket,
+    r2Key: string,
+    fsPath: string
+  ): Promise<Response> {
+    if (!fsPath) {
+      return new Response("Cannot delete root", { status: 400 });
+    }
+
+    await bucket.delete(r2Key);
+
+    return Response.json({
+      ok: true,
+      path: "/" + fsPath
+    });
   }
 }
 

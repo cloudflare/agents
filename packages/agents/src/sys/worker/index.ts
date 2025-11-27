@@ -8,7 +8,7 @@ import type { Agency } from "../agent/agency";
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-SECRET, Authorization",
+  "Access-Control-Allow-Headers": "*",
   "Access-Control-Max-Age": "86400"
 };
 
@@ -306,6 +306,22 @@ export const createHandler = (opts: HandlerOptions = {}) => {
             );
             return withCors(res);
           }
+        }
+
+        // --------------------------------------
+        // Filesystem
+        // /agency/:id/fs/...
+        // --------------------------------------
+
+        if (subPath.startsWith("/fs")) {
+          const res = await agencyStub.fetch(
+            new Request(`http://do${subPath}`, {
+              method: req.method,
+              headers: req.headers,
+              body: req.body
+            })
+          );
+          return withCors(res);
         }
 
         // --------------------------------------
