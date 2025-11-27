@@ -8,6 +8,7 @@ async function main() {
     entry: [
       "src/*.ts",
       "src/*.tsx",
+      "src/cli/index.ts",
       "src/mcp/index.ts",
       "src/mcp/client.ts",
       "src/mcp/do-oauth-client-provider.ts",

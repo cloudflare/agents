@@ -17,7 +17,7 @@
     "url": "git+https://github.com/cloudflare/agents.git"
   },
   "bin": {
-    "agents": "dist/cli.js"
+    "agents": "dist/cli/index.js"
   },
   "author": "Cloudflare Inc.",
   "bugs": {
