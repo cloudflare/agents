@@ -216,34 +216,237 @@ export abstract class AgentWorkflow<
   }
 
   /**
-   * Send update to Agent via fetch
+   * Send update to Agent via fetch with retry logic
+   * @param binding - Agent binding name
+   * @param agentName - Agent instance name
+   * @param update - Update payload to send
+   * @param maxRetries - Maximum number of retry attempts (default: 3)
    */
   private async notifyAgent(
     binding: string,
     agentName: string,
-    update: WorkflowUpdate
+    update: WorkflowUpdate,
+    maxRetries = 3
   ): Promise<void> {
-    try {
-      // Get the Agent's Durable Object
-      const agentNS = this.env[binding] as DurableObjectNamespace;
-      if (!agentNS) {
-        console.error(`[AgentWorkflow] Binding ${binding} not found`);
-        return;
+    // Get the Agent's Durable Object
+    const agentNS = this.env[binding] as DurableObjectNamespace;
+    if (!agentNS) {
+      console.error(`[AgentWorkflow] Binding ${binding} not found`);
+      return;
+    }
+
+    const agentId = agentNS.idFromName(agentName);
+    const agent = agentNS.get(agentId);
+
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await agent.fetch(
+          new Request("http://internal/_workflow-update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(update)
+          })
+        );
+
+        // Check for successful response
+        if (response.ok) {
+          return; // Success!
+        }
+
+        // Non-retryable client errors (4xx except 429)
+        if (
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 429
+        ) {
+          console.error(
+            `[AgentWorkflow] Non-retryable error notifying agent: ${response.status}`
+          );
+          return;
+        }
+
+        lastError = new Error(
+          `HTTP ${response.status}: ${response.statusText}`
+        );
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
       }
 
-      const agentId = agentNS.idFromName(agentName);
-      const agent = agentNS.get(agentId);
+      // If not the last attempt, wait before retrying with exponential backoff
+      if (attempt < maxRetries - 1) {
+        const backoffMs = Math.min(100 * 2 ** attempt, 2000);
+        await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        console.warn(
+          `[AgentWorkflow] Retry ${attempt + 1}/${maxRetries} notifying agent...`
+        );
+      }
+    }
 
-      // Send update
-      await agent.fetch(
-        new Request("http://internal/_workflow-update", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(update)
-        })
-      );
+    // All retries exhausted
+    console.error(
+      `[AgentWorkflow] Failed to notify agent after ${maxRetries} attempts:`,
+      lastError
+    );
+  }
+}
+
+// ============================================================================
+// Workflow Adapter Pattern
+// ============================================================================
+
+/**
+ * Workflow adapter interface for flexible workflow implementations.
+ *
+ * This pattern allows you to:
+ * - Swap between different workflow backends (Cloudflare Workflows, custom, etc.)
+ * - Add middleware/interceptors for workflow operations
+ * - Mock workflows in tests
+ *
+ * @example
+ * ```typescript
+ * // Custom adapter for testing
+ * class MockWorkflowAdapter implements WorkflowAdapter {
+ *   private tasks = new Map<string, any>();
+ *
+ *   async dispatch(binding: string, input: unknown, taskId: string) {
+ *     this.tasks.set(taskId, { status: "running", input });
+ *     return { instanceId: `mock_${taskId}` };
+ *   }
+ *
+ *   async getStatus(binding: string, instanceId: string) {
+ *     return { status: "running" };
+ *   }
+ *
+ *   async terminate(binding: string, instanceId: string) {
+ *     return { success: true };
+ *   }
+ * }
+ * ```
+ */
+export interface WorkflowAdapter {
+  /**
+   * Dispatch a workflow with the given parameters
+   * @returns Object containing the workflow instance ID
+   */
+  dispatch(
+    binding: string,
+    input: unknown,
+    taskId: string,
+    agentBinding: string,
+    agentName: string
+  ): Promise<{ instanceId: string }>;
+
+  /**
+   * Get the status of a workflow instance
+   */
+  getStatus(
+    binding: string,
+    instanceId: string
+  ): Promise<{ status: string; output?: unknown; error?: string }>;
+
+  /**
+   * Terminate a running workflow instance
+   */
+  terminate(
+    binding: string,
+    instanceId: string
+  ): Promise<{ success: boolean; reason?: string }>;
+}
+
+/**
+ * Default Cloudflare Workflows adapter implementation
+ */
+export class CloudflareWorkflowAdapter implements WorkflowAdapter {
+  constructor(private env: Record<string, unknown>) {}
+
+  async dispatch(
+    binding: string,
+    input: unknown,
+    taskId: string,
+    agentBinding: string,
+    agentName: string
+  ): Promise<{ instanceId: string }> {
+    const workflowNS = this.env[binding] as {
+      create: (opts: { params: unknown }) => Promise<{ id: string }>;
+    } | null;
+
+    if (!workflowNS?.create) {
+      throw new Error(`Workflow binding ${binding} not found`);
+    }
+
+    // Ensure input is an object for spreading
+    const inputObj =
+      typeof input === "object" && input !== null ? input : { data: input };
+
+    const instance = await workflowNS.create({
+      params: {
+        ...(inputObj as Record<string, unknown>),
+        _taskId: taskId,
+        _agentBinding: agentBinding,
+        _agentName: agentName
+      }
+    });
+
+    return { instanceId: instance.id };
+  }
+
+  async getStatus(
+    binding: string,
+    instanceId: string
+  ): Promise<{ status: string; output?: unknown; error?: string }> {
+    const workflowNS = this.env[binding] as {
+      get: (id: string) => Promise<{
+        status: () => Promise<{
+          status: string;
+          output?: unknown;
+          error?: string;
+        }>;
+      }>;
+    } | null;
+
+    if (!workflowNS?.get) {
+      throw new Error(`Workflow binding ${binding} not found`);
+    }
+
+    const instance = await workflowNS.get(instanceId);
+    return await instance.status();
+  }
+
+  async terminate(
+    binding: string,
+    instanceId: string
+  ): Promise<{ success: boolean; reason?: string }> {
+    const workflowNS = this.env[binding] as {
+      get: (id: string) => Promise<{
+        terminate: () => Promise<void>;
+        status: () => Promise<{ status: string }>;
+      }>;
+    } | null;
+
+    if (!workflowNS?.get) {
+      return { success: false, reason: "binding_not_found" };
+    }
+
+    try {
+      const instance = await workflowNS.get(instanceId);
+
+      // Check status first
+      try {
+        const { status } = await instance.status();
+        if (["complete", "errored", "terminated"].includes(status)) {
+          return { success: false, reason: `already_${status}` };
+        }
+      } catch {
+        // Status check failed, try to terminate anyway
+      }
+
+      await instance.terminate();
+      return { success: true };
     } catch (error) {
-      console.error("[AgentWorkflow] Failed to notify agent:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      return { success: false, reason: message };
     }
   }
 }

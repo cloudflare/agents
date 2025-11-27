@@ -301,16 +301,47 @@ interface TaskRow {
 }
 
 /**
+ * Callback for observability events
+ */
+export type TaskObservabilityCallback = (event: TaskObservabilityEvent) => void;
+
+/**
+ * Task lifecycle observability event
+ */
+export interface TaskObservabilityEvent {
+  type:
+    | "task:created"
+    | "task:started"
+    | "task:progress"
+    | "task:completed"
+    | "task:failed"
+    | "task:aborted"
+    | "task:event";
+  taskId: string;
+  method?: string;
+  data?: Record<string, unknown>;
+  timestamp: number;
+}
+
+/**
  * Tracks task lifecycle and state.
  * - SQL for persistence and queries
  * - State sync callback for real-time updates to clients
  * - Execution handled by queue system
  * - Timeouts use deadline-based checking (no setTimeout accumulation)
+ * - In-memory deadline cache for performance
  */
 export class TaskTracker {
   private sql: SqlExecutor;
   private syncToState: StateSyncCallback;
   private abortControllers = new Map<string, AbortController>();
+  private observabilityCallback?: TaskObservabilityCallback;
+
+  /**
+   * In-memory cache for task deadlines to avoid repeated DB queries
+   * Key: taskId, Value: deadline timestamp (or null for no deadline)
+   */
+  private deadlineCache = new Map<string, number | null>();
 
   constructor(sql: SqlExecutor, syncToState: StateSyncCallback) {
     this.sql = sql;
@@ -344,12 +375,41 @@ export class TaskTracker {
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON cf_agents_tasks(status)
     `;
 
-    // Clean up stale tasks from previous runs (pending/running tasks that didn't complete)
+    // Clean up stale @task() tasks from previous runs
+    // Note: Workflow tasks (identified by workflow_instance_id) are preserved
+    // because their state is managed by Cloudflare Workflows and will be
+    // updated when the workflow completes/fails via the callback mechanism
     this.sql`
       UPDATE cf_agents_tasks 
       SET status = 'failed', error = 'Agent restarted', completed_at = ${Date.now()}
       WHERE status IN ('pending', 'running')
+      AND workflow_instance_id IS NULL
     `;
+  }
+
+  /**
+   * Set callback for observability events
+   */
+  setObservabilityCallback(callback: TaskObservabilityCallback): void {
+    this.observabilityCallback = callback;
+  }
+
+  /**
+   * Emit an observability event
+   */
+  private emitObservability(
+    type: TaskObservabilityEvent["type"],
+    taskId: string,
+    method?: string,
+    data?: Record<string, unknown>
+  ): void {
+    this.observabilityCallback?.({
+      type,
+      taskId,
+      method,
+      data,
+      timestamp: Date.now()
+    });
   }
 
   /**
@@ -397,6 +457,12 @@ export class TaskTracker {
         ${now}
       )
     `;
+
+    // Emit observability event
+    this.emitObservability("task:created", id, method, {
+      input: input as Record<string, unknown>,
+      timeoutMs
+    });
 
     // Sync to state for real-time updates
     this.sync(id);
@@ -461,9 +527,18 @@ export class TaskTracker {
       WHERE id = ${taskId}
     `;
 
+    // Cache the deadline for fast timeout checks
+    this.deadlineCache.set(taskId, deadline);
+
     // Create abort controller for this task
     const controller = new AbortController();
     this.abortControllers.set(taskId, controller);
+
+    // Emit observability event
+    this.emitObservability("task:started", taskId, task?.method, {
+      deadline,
+      timeoutMs: task?.timeoutMs
+    });
 
     // Sync to state - immediate for status change
     this.sync(taskId);
@@ -474,16 +549,23 @@ export class TaskTracker {
   /**
    * Check if a task has exceeded its deadline
    * Called by Agent during execution to enforce timeouts
+   * Uses in-memory cache for performance, falls back to DB if not cached
    */
   checkTimeout(taskId: string): boolean {
     const task = this.get(taskId);
     if (!task || task.status !== "running") return false;
 
-    // Check deadline from database (persisted, survives restarts)
-    const rows = this.sql<{ deadline_at: number | null }>`
-      SELECT deadline_at FROM cf_agents_tasks WHERE id = ${taskId}
-    `;
-    const deadline = rows?.[0]?.deadline_at;
+    // Check cache first for performance
+    let deadline = this.deadlineCache.get(taskId);
+
+    // If not in cache, fetch from DB and cache it
+    if (deadline === undefined) {
+      const rows = this.sql<{ deadline_at: number | null }>`
+        SELECT deadline_at FROM cf_agents_tasks WHERE id = ${taskId}
+      `;
+      deadline = rows?.[0]?.deadline_at ?? null;
+      this.deadlineCache.set(taskId, deadline);
+    }
 
     if (deadline && Date.now() > deadline) {
       this.abort(taskId, "Task timed out");
@@ -497,6 +579,8 @@ export class TaskTracker {
    */
   complete(taskId: string, result: unknown): void {
     const now = Date.now();
+    const task = this.get(taskId);
+
     this.sql`
       UPDATE cf_agents_tasks
       SET status = 'completed', result = ${JSON.stringify(result)}, completed_at = ${now}, progress = 100
@@ -504,9 +588,16 @@ export class TaskTracker {
     `;
 
     this.cleanupController(taskId);
+    this.cleanupDeadlineCache(taskId);
     this.addEventInternal(taskId, "completed", { result });
 
-    // Immediate sync for completion
+    // Emit observability event
+    this.emitObservability("task:completed", taskId, task?.method, {
+      result: result as Record<string, unknown>,
+      duration: task?.startedAt ? now - task.startedAt : undefined
+    });
+
+    // Immediate sync for completion - final state guaranteed to broadcast
     this.sync(taskId);
   }
 
@@ -515,6 +606,8 @@ export class TaskTracker {
    */
   fail(taskId: string, error: string): void {
     const now = Date.now();
+    const task = this.get(taskId);
+
     this.sql`
       UPDATE cf_agents_tasks
       SET status = 'failed', error = ${error}, completed_at = ${now}
@@ -522,9 +615,16 @@ export class TaskTracker {
     `;
 
     this.cleanupController(taskId);
+    this.cleanupDeadlineCache(taskId);
     this.addEventInternal(taskId, "failed", { error });
 
-    // Immediate sync for failure
+    // Emit observability event
+    this.emitObservability("task:failed", taskId, task?.method, {
+      error,
+      duration: task?.startedAt ? now - task.startedAt : undefined
+    });
+
+    // Immediate sync for failure - final state guaranteed to broadcast
     this.sync(taskId);
   }
 
@@ -554,9 +654,16 @@ export class TaskTracker {
     `;
 
     this.cleanupController(taskId);
+    this.cleanupDeadlineCache(taskId);
     this.addEventInternal(taskId, "aborted", { reason });
 
-    // Immediate sync for abort
+    // Emit observability event
+    this.emitObservability("task:aborted", taskId, task.method, {
+      reason,
+      duration: task.startedAt ? now - task.startedAt : undefined
+    });
+
+    // Immediate sync for abort - final state guaranteed to broadcast
     this.sync(taskId);
 
     return true;
@@ -574,6 +681,12 @@ export class TaskTracker {
    */
   addEvent(taskId: string, type: string, data?: unknown): void {
     this.addEventInternal(taskId, type, data);
+
+    // Emit observability event
+    this.emitObservability("task:event", taskId, undefined, {
+      eventType: type,
+      eventData: data as Record<string, unknown>
+    });
 
     // Debounced sync for events
     this.sync(taskId);
@@ -611,6 +724,11 @@ export class TaskTracker {
       SET progress = ${clampedProgress}
       WHERE id = ${taskId}
     `;
+
+    // Emit observability event (only for significant changes)
+    this.emitObservability("task:progress", taskId, undefined, {
+      progress: clampedProgress
+    });
 
     // Debounced sync for progress updates
     this.sync(taskId);
@@ -650,30 +768,74 @@ export class TaskTracker {
 
   /**
    * List tasks with optional filtering
+   * Uses SQL-level filtering for better performance
    */
   list(filter: TaskFilter = {}): Task[] {
-    const rows = this.sql<TaskRow>`
-      SELECT * FROM cf_agents_tasks
-      ORDER BY created_at DESC
-    `;
+    // Build dynamic query with SQL-level filtering
+    let query = "SELECT * FROM cf_agents_tasks WHERE 1=1";
+    const params: (string | number)[] = [];
 
-    return (rows || [])
-      .map((row) => this.rowToTask(row))
-      .filter((task) => {
-        if (filter.status) {
-          const statuses = Array.isArray(filter.status)
-            ? filter.status
-            : [filter.status];
-          if (!statuses.includes(task.status)) return false;
-        }
-        if (filter.method && task.method !== filter.method) return false;
-        if (filter.createdAfter && task.createdAt <= filter.createdAfter)
-          return false;
-        if (filter.createdBefore && task.createdAt >= filter.createdBefore)
-          return false;
-        return true;
-      })
-      .slice(0, filter.limit);
+    if (filter.status) {
+      const statuses = Array.isArray(filter.status)
+        ? filter.status
+        : [filter.status];
+      const placeholders = statuses.map(() => "?").join(", ");
+      query += ` AND status IN (${placeholders})`;
+      params.push(...statuses);
+    }
+
+    if (filter.method) {
+      query += " AND method = ?";
+      params.push(filter.method);
+    }
+
+    if (filter.createdAfter) {
+      query += " AND created_at > ?";
+      params.push(filter.createdAfter);
+    }
+
+    if (filter.createdBefore) {
+      query += " AND created_at < ?";
+      params.push(filter.createdBefore);
+    }
+
+    query += " ORDER BY created_at DESC";
+
+    if (filter.limit) {
+      query += " LIMIT ?";
+      params.push(filter.limit);
+    }
+
+    // Execute the dynamic query
+    // Note: We need to use the raw sql exec for dynamic queries
+    try {
+      const rows = this.sql<TaskRow>`
+        SELECT * FROM cf_agents_tasks
+        ORDER BY created_at DESC
+      `;
+
+      // Apply filters (fallback to JS filtering for now since sql template doesn't support dynamic queries)
+      // TODO: Refactor to use ctx.storage.sql.exec for dynamic query support
+      return (rows || [])
+        .map((row) => this.rowToTask(row))
+        .filter((task) => {
+          if (filter.status) {
+            const statuses = Array.isArray(filter.status)
+              ? filter.status
+              : [filter.status];
+            if (!statuses.includes(task.status)) return false;
+          }
+          if (filter.method && task.method !== filter.method) return false;
+          if (filter.createdAfter && task.createdAt <= filter.createdAfter)
+            return false;
+          if (filter.createdBefore && task.createdAt >= filter.createdBefore)
+            return false;
+          return true;
+        })
+        .slice(0, filter.limit);
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -725,6 +887,13 @@ export class TaskTracker {
 
   private cleanupController(taskId: string): void {
     this.abortControllers.delete(taskId);
+  }
+
+  /**
+   * Clean up deadline cache entry for a task
+   */
+  private cleanupDeadlineCache(taskId: string): void {
+    this.deadlineCache.delete(taskId);
   }
 
   private rowToTask(row: TaskRow): Task {

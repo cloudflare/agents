@@ -42,7 +42,8 @@ import {
   type TaskFilter,
   type TaskEvent,
   type TaskStatus,
-  type TaskExecutionPayload
+  type TaskExecutionPayload,
+  type TaskObservabilityEvent
 } from "./task";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
@@ -481,6 +482,26 @@ export class Agent<
       this._cancelWorkflow(taskId)
     );
 
+    // Set observability callback for task lifecycle events
+    this._taskTracker.setObservabilityCallback(
+      (event: TaskObservabilityEvent) => {
+        this.observability?.emit(
+          {
+            displayMessage: this._formatTaskObservabilityMessage(event),
+            id: nanoid(),
+            payload: {
+              taskId: event.taskId,
+              method: event.method,
+              ...event.data
+            },
+            timestamp: event.timestamp,
+            type: event.type
+          },
+          this.ctx
+        );
+      }
+    );
+
     // Clear any stale queue items from previous runs to prevent task spirals
     this.sql`DELETE FROM cf_agents_queues WHERE callback = '_executeTask'`;
 
@@ -516,16 +537,14 @@ export class Agent<
             try {
               const json = await request.json();
 
-              // Validate required fields to prevent crashes from malformed payloads
-              if (
-                !json ||
-                typeof json !== "object" ||
-                typeof (json as Record<string, unknown>).taskId !== "string"
-              ) {
+              // Comprehensive validation of workflow update payload
+              const validationError = this._validateWorkflowUpdate(json);
+              if (validationError) {
                 console.error(
-                  "[Agent] Invalid workflow update: missing taskId"
+                  "[Agent] Invalid workflow update:",
+                  validationError
                 );
-                return new Response("invalid payload", { status: 400 });
+                return new Response(validationError, { status: 400 });
               }
 
               const update = json as {
@@ -969,6 +988,88 @@ export class Agent<
   }
 
   /**
+   * Format task observability message for display
+   * @internal
+   */
+  private _formatTaskObservabilityMessage(
+    event: TaskObservabilityEvent
+  ): string {
+    const method = event.method ? ` (${event.method})` : "";
+    switch (event.type) {
+      case "task:created":
+        return `Task ${event.taskId}${method} created`;
+      case "task:started":
+        return `Task ${event.taskId}${method} started`;
+      case "task:progress":
+        return `Task ${event.taskId} progress: ${event.data?.progress}%`;
+      case "task:completed":
+        return `Task ${event.taskId}${method} completed`;
+      case "task:failed":
+        return `Task ${event.taskId}${method} failed: ${event.data?.error}`;
+      case "task:aborted":
+        return `Task ${event.taskId}${method} aborted: ${event.data?.reason}`;
+      case "task:event":
+        return `Task ${event.taskId} event: ${event.data?.eventType}`;
+      default:
+        return `Task ${event.taskId} ${event.type}`;
+    }
+  }
+
+  /**
+   * Validate workflow update payload
+   * @internal
+   * @returns Error message if validation fails, null if valid
+   */
+  private _validateWorkflowUpdate(json: unknown): string | null {
+    if (!json || typeof json !== "object") {
+      return "payload must be an object";
+    }
+
+    const payload = json as Record<string, unknown>;
+
+    // Required field: taskId
+    if (typeof payload.taskId !== "string" || !payload.taskId) {
+      return "missing or invalid taskId";
+    }
+
+    // Optional field: event (must be object with type string if present)
+    if (payload.event !== undefined) {
+      if (typeof payload.event !== "object" || payload.event === null) {
+        return "event must be an object";
+      }
+      const event = payload.event as Record<string, unknown>;
+      if (typeof event.type !== "string") {
+        return "event.type must be a string";
+      }
+    }
+
+    // Optional field: progress (must be number 0-100 if present)
+    if (payload.progress !== undefined) {
+      if (
+        typeof payload.progress !== "number" ||
+        payload.progress < 0 ||
+        payload.progress > 100
+      ) {
+        return "progress must be a number between 0 and 100";
+      }
+    }
+
+    // Optional field: status (must be "completed" or "failed" if present)
+    if (payload.status !== undefined) {
+      if (payload.status !== "completed" && payload.status !== "failed") {
+        return 'status must be "completed" or "failed"';
+      }
+    }
+
+    // Optional field: error (must be string if present)
+    if (payload.error !== undefined && typeof payload.error !== "string") {
+      return "error must be a string";
+    }
+
+    return null;
+  }
+
+  /**
    * Handle workflow update callbacks
    * @internal
    */
@@ -1102,21 +1203,33 @@ export class Agent<
    */
   private _lastTaskBroadcast = new Map<
     string,
-    { time: number; status: string }
+    { time: number; status: string; broadcastCount: number }
   >();
+
+  /**
+   * Pending final state broadcasts to guarantee delivery
+   * Maps taskId -> task state for deferred final broadcast
+   * @internal
+   */
+  private _pendingFinalBroadcasts = new Map<string, Task>();
 
   /**
    * Broadcast task update to all connected clients.
    *
    * Rate limiting strategy (single-threaded DO, no race conditions):
    * - Status changes: ALWAYS broadcast immediately
-   * - Final states (completed/failed/aborted): ALWAYS broadcast + cleanup
+   * - Final states (completed/failed/aborted): ALWAYS broadcast + schedule deferred guarantee
    * - Progress updates: Rate-limited to every 500ms to prevent flooding
+   *
+   * Final state guarantee: If a final state is reached, we broadcast immediately
+   * and also schedule a deferred broadcast to ensure clients receive the final
+   * state even if the immediate broadcast was missed (e.g., due to WebSocket issues).
    */
   private _syncTaskToState(taskId: string, task: Task | null): void {
     // Task deleted - always broadcast
     if (!task) {
       this._lastTaskBroadcast.delete(taskId);
+      this._pendingFinalBroadcasts.delete(taskId);
       this.broadcast(
         JSON.stringify({ type: "CF_AGENT_TASK_UPDATE", taskId, task: null })
       );
@@ -1133,14 +1246,37 @@ export class Agent<
 
     // Always broadcast: status changes, final states, or 500ms since last
     if (statusChanged || isFinalState || timeSinceLast >= 500) {
-      this._lastTaskBroadcast.set(taskId, { time: now, status: task.status });
+      const broadcastCount = (last?.broadcastCount || 0) + 1;
+      this._lastTaskBroadcast.set(taskId, {
+        time: now,
+        status: task.status,
+        broadcastCount
+      });
+
       this.broadcast(
         JSON.stringify({ type: "CF_AGENT_TASK_UPDATE", taskId, task })
       );
 
-      // Cleanup tracking for final states
+      // For final states, schedule a deferred rebroadcast to guarantee delivery
+      // This ensures the final state is sent even if rapid updates caused issues
       if (isFinalState) {
-        this._lastTaskBroadcast.delete(taskId);
+        this._pendingFinalBroadcasts.set(taskId, task);
+        // Use queueMicrotask for deferred execution after current sync cycle
+        queueMicrotask(() => {
+          const pendingTask = this._pendingFinalBroadcasts.get(taskId);
+          if (pendingTask) {
+            // Broadcast the final state one more time to guarantee delivery
+            this.broadcast(
+              JSON.stringify({
+                type: "CF_AGENT_TASK_UPDATE",
+                taskId,
+                task: pendingTask
+              })
+            );
+            this._pendingFinalBroadcasts.delete(taskId);
+            this._lastTaskBroadcast.delete(taskId);
+          }
+        });
       }
     }
   }
@@ -1441,15 +1577,57 @@ export class Agent<
 
   /**
    * Get all queues by key and value
-   * @param key Key to filter by
+   * Uses SQL JSON extraction for efficient filtering when possible
+   * @param key Key to filter by (supports nested paths like "data.userId")
    * @param value Value to filter by
    * @returns Array of matching QueueItem objects
    */
   async getQueues(key: string, value: string): Promise<QueueItem<string>[]> {
+    // Use SQL JSON extraction for single-level keys (more efficient)
+    // SQLite's json_extract uses $ path syntax
+    if (!key.includes(".")) {
+      try {
+        const result = this.ctx.storage.sql
+          .exec(
+            `SELECT * FROM cf_agents_queues WHERE json_extract(payload, ?) = ?`,
+            `$.${key}`,
+            value
+          )
+          .toArray() as QueueItem<string>[];
+
+        return result.map((row) => ({
+          ...row,
+          payload: JSON.parse(row.payload)
+        }));
+      } catch {
+        // Fall back to JS filtering if SQL approach fails
+      }
+    }
+
+    // Fallback: fetch all and filter in JS (for nested keys or if SQL fails)
     const result = this.sql<QueueItem<string>>`
       SELECT * FROM cf_agents_queues
     `;
-    return result.filter((row) => JSON.parse(row.payload)[key] === value);
+    return result
+      .filter((row) => {
+        try {
+          const payload = JSON.parse(row.payload);
+          // Support nested keys with dot notation
+          const keys = key.split(".");
+          let val = payload;
+          for (const k of keys) {
+            if (val === null || val === undefined) return false;
+            val = val[k];
+          }
+          return val === value;
+        } catch {
+          return false;
+        }
+      })
+      .map((row) => ({
+        ...row,
+        payload: JSON.parse(row.payload)
+      }));
   }
 
   /**
@@ -2495,6 +2673,7 @@ export class StreamingResponse {
 
 // Re-export task decorator and types for convenience
 export { task } from "./task";
+export type { TaskObservabilityEvent, TaskObservabilityCallback } from "./task";
 export type {
   Task,
   TaskContext,
@@ -2506,5 +2685,9 @@ export type {
 };
 
 // Re-export workflow types for durable task execution
-export { AgentWorkflow } from "./workflow";
-export type { WorkflowTaskContext, WorkflowUpdate } from "./workflow";
+export { AgentWorkflow, CloudflareWorkflowAdapter } from "./workflow";
+export type {
+  WorkflowTaskContext,
+  WorkflowUpdate,
+  WorkflowAdapter
+} from "./workflow";
