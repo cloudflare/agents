@@ -3,6 +3,7 @@
  * Make sure you add the binding `DEEP_AGENT` in your `wrangler.jsonc` file.
  */
 
+import { getAgentByName } from "..";
 import { SystemAgent, type AgentEnv } from "./agent";
 import { Agency } from "./agent/agency";
 import { AgentEventType } from "./events";
@@ -162,9 +163,7 @@ export class AgentSystem<TConfig = Record<string, unknown>> {
 
         // 1. Ask Agency DO for blueprint
         try {
-          const agencyStub = this.env.AGENCY.get(
-            this.env.AGENCY.idFromString(agencyId)
-          );
+          const agencyStub = await getAgentByName(this.env.AGENCY, agencyId);
           const res = await agencyStub.fetch(
             `http://do/internal/blueprint/${type}`
           );

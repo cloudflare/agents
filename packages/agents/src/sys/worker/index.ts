@@ -5,6 +5,25 @@ import type { KVNamespace } from "@cloudflare/workers-types";
 import type { SystemAgent } from "../agent";
 import type { Agency } from "../agent/agency";
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, X-SECRET, Authorization",
+  "Access-Control-Max-Age": "86400"
+};
+
+function withCors(response: Response): Response {
+  const newHeaders = new Headers(response.headers);
+  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+    newHeaders.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders
+  });
+}
+
 const CF_CONTEXT_KEYS = [
   "colo",
   "country",
@@ -58,17 +77,24 @@ export const createHandler = (opts: HandlerOptions = {}) => {
       const url = new URL(req.url);
       const path = url.pathname;
 
+      // 0. CORS preflight
+      if (req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+
       // 1. Dashboard
       if (req.method === "GET" && path === "/") {
-        return new Response(html, {
-          status: 200,
-          headers: { "content-type": "text/html" }
-        });
+        return withCors(
+          new Response(html, {
+            status: 200,
+            headers: { "content-type": "text/html" }
+          })
+        );
       }
 
       // 2. Auth check
       if (opts.secret && req.headers.get("X-SECRET") !== opts.secret) {
-        return new Response("Unauthorized", { status: 401 });
+        return withCors(new Response("Unauthorized", { status: 401 }));
       }
 
       // ======================================================
@@ -85,7 +111,7 @@ export const createHandler = (opts: HandlerOptions = {}) => {
           agencies.push(meta ? JSON.parse(meta) : { id: key.name });
         }
 
-        return Response.json({ agencies });
+        return withCors(Response.json({ agencies }));
       }
 
       // POST /agencies -> Create a new Agency
@@ -103,7 +129,7 @@ export const createHandler = (opts: HandlerOptions = {}) => {
         };
 
         await env.AGENCY_REGISTRY.put(id, JSON.stringify(meta));
-        return Response.json(meta, { status: 201 });
+        return withCors(Response.json(meta, { status: 201 }));
       }
 
       // ======================================================
@@ -117,9 +143,9 @@ export const createHandler = (opts: HandlerOptions = {}) => {
 
         let agencyStub: DurableObjectStub<Agency>;
         try {
-          agencyStub = env.AGENCY.get(env.AGENCY.idFromString(agencyId));
+          agencyStub = await getAgentByName(env.AGENCY, agencyId);
         } catch (e) {
-          return new Response("Invalid Agency ID", { status: 400 });
+          return withCors(new Response("Invalid Agency ID", { status: 400 }));
         }
 
         // --------------------------------------
@@ -131,7 +157,7 @@ export const createHandler = (opts: HandlerOptions = {}) => {
           const res = await agencyStub.fetch(
             new Request("http://do/blueprints", req)
           );
-          if (!res.ok) return res;
+          if (!res.ok) return withCors(res);
 
           const dynamic = await res.json<{ blueprints: AgentBlueprint[] }>();
           const combined = new Map<string, AgentBlueprint>();
@@ -146,17 +172,25 @@ export const createHandler = (opts: HandlerOptions = {}) => {
             combined.set(b.name, b);
           });
 
-          return Response.json({ blueprints: Array.from(combined.values()) });
+          return withCors(
+            Response.json({ blueprints: Array.from(combined.values()) })
+          );
         }
 
         // POST /agency/:id/blueprints -> pass through to Agency DO
         if (req.method === "POST" && subPath === "/blueprints") {
-          return agencyStub.fetch(new Request("http://do/blueprints", req));
+          const res = await agencyStub.fetch(
+            new Request("http://do/blueprints", req)
+          );
+          return withCors(res);
         }
 
         // GET /agency/:id/agents
         if (req.method === "GET" && subPath === "/agents") {
-          return agencyStub.fetch(new Request("http://do/agents", req));
+          const res = await agencyStub.fetch(
+            new Request("http://do/agents", req)
+          );
+          return withCors(res);
         }
 
         // POST /agency/:id/agents -> spawn agent
@@ -164,13 +198,114 @@ export const createHandler = (opts: HandlerOptions = {}) => {
           const body = await req.json<any>();
           body.requestContext = buildRequestContext(req);
 
-          return agencyStub.fetch(
+          const res = await agencyStub.fetch(
             new Request("http://do/agents", {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify(body)
             })
           );
+          return withCors(res);
+        }
+
+        // --------------------------------------
+        // Schedule Management
+        // /agency/:id/schedules/*
+        // --------------------------------------
+
+        // GET /agency/:id/schedules -> list schedules
+        if (req.method === "GET" && subPath === "/schedules") {
+          const res = await agencyStub.fetch(
+            new Request("http://do/schedules", req)
+          );
+          return withCors(res);
+        }
+
+        // POST /agency/:id/schedules -> create schedule
+        if (req.method === "POST" && subPath === "/schedules") {
+          const res = await agencyStub.fetch(
+            new Request("http://do/schedules", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: req.body
+            })
+          );
+          return withCors(res);
+        }
+
+        // Schedule-specific operations
+        const scheduleMatch = subPath.match(/^\/schedules\/([^/]+)(\/.*)?$/);
+        if (scheduleMatch) {
+          const scheduleId = scheduleMatch[1];
+          const scheduleAction = scheduleMatch[2] || "";
+
+          // GET /agency/:id/schedules/:scheduleId
+          if (req.method === "GET" && scheduleAction === "") {
+            const res = await agencyStub.fetch(
+              new Request(`http://do/schedules/${scheduleId}`, req)
+            );
+            return withCors(res);
+          }
+
+          // PATCH /agency/:id/schedules/:scheduleId
+          if (req.method === "PATCH" && scheduleAction === "") {
+            const res = await agencyStub.fetch(
+              new Request(`http://do/schedules/${scheduleId}`, {
+                method: "PATCH",
+                headers: { "content-type": "application/json" },
+                body: req.body
+              })
+            );
+            return withCors(res);
+          }
+
+          // DELETE /agency/:id/schedules/:scheduleId
+          if (req.method === "DELETE" && scheduleAction === "") {
+            const res = await agencyStub.fetch(
+              new Request(`http://do/schedules/${scheduleId}`, {
+                method: "DELETE"
+              })
+            );
+            return withCors(res);
+          }
+
+          // POST /agency/:id/schedules/:scheduleId/pause
+          if (req.method === "POST" && scheduleAction === "/pause") {
+            const res = await agencyStub.fetch(
+              new Request(`http://do/schedules/${scheduleId}/pause`, {
+                method: "POST"
+              })
+            );
+            return withCors(res);
+          }
+
+          // POST /agency/:id/schedules/:scheduleId/resume
+          if (req.method === "POST" && scheduleAction === "/resume") {
+            const res = await agencyStub.fetch(
+              new Request(`http://do/schedules/${scheduleId}/resume`, {
+                method: "POST"
+              })
+            );
+            return withCors(res);
+          }
+
+          // POST /agency/:id/schedules/:scheduleId/trigger
+          if (req.method === "POST" && scheduleAction === "/trigger") {
+            const res = await agencyStub.fetch(
+              new Request(`http://do/schedules/${scheduleId}/trigger`, {
+                method: "POST"
+              })
+            );
+            return withCors(res);
+          }
+
+          // GET /agency/:id/schedules/:scheduleId/runs
+          if (req.method === "GET" && scheduleAction === "/runs") {
+            const res = await agencyStub.fetch(
+              new Request(`http://do/schedules/${scheduleId}/runs`, req)
+            );
+            return withCors(res);
+          }
         }
 
         // --------------------------------------
@@ -191,6 +326,13 @@ export const createHandler = (opts: HandlerOptions = {}) => {
           const doUrl = new URL(req.url);
           doUrl.pathname = agentTail; // strip /agency/:id/agent/:agentId
 
+          // WebSocket upgrade - pass through directly (don't wrap response)
+          const isWebSocketUpgrade =
+            req.headers.get("Upgrade")?.toLowerCase() === "websocket";
+          if (isWebSocketUpgrade) {
+            return systemAgentStub.fetch(req);
+          }
+
           let doReq: Request;
 
           // POST /invoke -> inject threadId
@@ -207,11 +349,12 @@ export const createHandler = (opts: HandlerOptions = {}) => {
             doReq = new Request(doUrl, req);
           }
 
-          return systemAgentStub.fetch(doReq);
+          const res = await systemAgentStub.fetch(doReq);
+          return withCors(res);
         }
       }
 
-      return new Response("Not found", { status: 404 });
+      return withCors(new Response("Not found", { status: 404 }));
     }
   };
 };

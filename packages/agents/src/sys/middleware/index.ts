@@ -308,6 +308,7 @@ export const subagents = defineMiddleware<SubagentsConfig>({
               createdAt: new Date().toISOString(),
               agentType: subagentType, // Pass the requested type here
               request: ctx.agent.info.request, // Pass down request context (IP, etc)
+              agencyId: ctx.agent.info.agencyId, // Required for blueprint lookup
               parent: {
                 threadId: ctx.agent.info.threadId,
                 token
