@@ -100,149 +100,172 @@ CREATE TABLE IF NOT EXISTS todos (
 };
 
 /* -------------------- Filesystem: ls/read/write/edit -------------------- */
-const ls = defineTool(
-  {
-    name: "ls",
-    description: LIST_FILES_TOOL_DESCRIPTION,
-    parameters: ListFilesSchema
-  },
-  async (_: {}, ctx) => Object.keys(ctx.agent.store.listFiles())
-);
 
-const read_file = defineTool(
-  {
-    name: "read_file",
-    description: READ_FILE_TOOL_DESCRIPTION,
-    parameters: ReadFileSchema
-  },
-  async (p: { path: string; offset?: number; limit?: number }, ctx) => {
-    const path = String(p.path ?? "");
-    const raw = ctx.agent.store.readFile(path);
-    if (raw === undefined || raw === null)
-      return `Error: File '${path}' not found`;
-
-    ctx.agent.store.kv.put(
-      "lastReadPaths",
-      Array.from(
-        new Set([
-          ...(ctx.agent.store.kv.get<string[]>("lastReadPaths") ?? []),
-          path
-        ])
-      )
-    );
-    if (raw.trim() === "")
-      return "System reminder: File exists but has empty contents";
-
-    const lines = raw.split(/\r?\n/);
-    const offset = Math.max(0, Number(p.offset ?? 0));
-    const limit = Math.max(1, Number(p.limit ?? 2000)); // number of lines, not tokens
-    if (offset >= lines.length) {
-      return `Error: Line offset ${offset} exceeds file length (${lines.length} lines)`;
-    }
-    const end = Math.min(lines.length, offset + limit);
-    const out = [];
-    for (let i = offset; i < end; i++) {
-      let content = lines[i];
-      if (content.length > 2000) content = content.slice(0, 2000);
-      const lineNum = (i + 1).toString().padStart(6, " ");
-      out.push(`${lineNum}\t${content}`);
-    }
-
-    return out.join("\n");
-  }
-);
-
-const write_file = defineTool(
-  {
-    name: "write_file",
-    description: WRITE_FILE_TOOL_DESCRIPTION,
-    parameters: WriteFileSchema
-  },
-  async (p: { path: string; content: string }, ctx) => {
-    const path = String(p.path ?? "");
-    const content = String(p.content ?? "");
-    ctx.agent.store.writeFile(path, content);
-    return `Updated file ${path}`;
-  }
-);
-
-const edit_file = defineTool(
-  {
-    name: "edit_file",
-    description: EDIT_FILE_TOOL_DESCRIPTION,
-    parameters: EditFileSchema
-  },
-  async (
-    p: {
-      path: string;
-      oldString: string;
-      newString: string;
-      replaceAll?: boolean;
-    },
-    ctx
-  ) => {
-    const path = String(p.path ?? "");
-    const files = ctx.agent.store.listFiles();
-    if (!(path in files)) return `Error: File '${path}' not found`;
-
-    // must read first at least once
-    const readSet = new Set(
-      ctx.agent.store.kv.get<string[]>("lastReadPaths") ?? []
-    );
-    if (!readSet.has(path)) {
-      return `Error: You must read '${path}' before editing it`;
-    }
-
-    const { replaced } = ctx.agent.store.editFile(
-      path,
-      p.oldString,
-      p.newString,
-      p.replaceAll
-    );
-
-    if (replaced === 0)
-      return `Error: String not found in file: '${p.oldString}'`;
-    if (replaced < 0) {
-      return `Error: String '${p.oldString}' appears ${Math.abs(replaced)} times. Use replaceAll=true or provide a more specific oldString.`;
-    }
-    if (!p.replaceAll && replaced > 1) {
-      return `Error: String '${p.oldString}' appears ${replaced} times. Use replaceAll=true or provide a more specific oldString.`;
-    }
-
-    return p.replaceAll
-      ? `Successfully replaced ${replaced} instance(s) in '${path}'`
-      : `Successfully replaced string in '${path}'`;
-  }
-);
+/**
+ * Filesystem middleware.
+ *
+ * Registers file tools that use the agent's built-in `fs` (AgentFileSystem).
+ * The filesystem provides:
+ * - Per-agent home directories: `/{agencyId}/agents/{agentId}/`
+ * - Shared space: `/{agencyId}/shared/`
+ * - Cross-agent read access (collaborative)
+ *
+ * Requires `FS: R2Bucket` binding in wrangler config.
+ */
 export const filesystem: AgentMiddleware = {
   name: "filesystem",
+
   async beforeModel(ctx, plan) {
     plan.addSystemPrompt(FILESYSTEM_SYSTEM_PROMPT);
+
+    const agentFs = ctx.agent.fs;
+    if (!agentFs) {
+      console.warn(
+        `R2 filesystem not available (missing FS binding or agent not registered). Filesystem tools disabled.`
+      );
+      return;
+    }
+
+    // Track read paths in KV for edit safety
+    const getReadPaths = () =>
+      new Set(ctx.agent.store.kv.get<string[]>("fsReadPaths") ?? []);
+    const markRead = (path: string) => {
+      const paths = getReadPaths();
+      paths.add(path);
+      ctx.agent.store.kv.put("fsReadPaths", Array.from(paths));
+    };
+
+    // ls - list directory
+    const ls = defineTool(
+      {
+        name: "ls",
+        description: LIST_FILES_TOOL_DESCRIPTION,
+        parameters: ListFilesSchema
+      },
+      async (p: { path?: string }) => {
+        try {
+          const entries = await agentFs.readDir(p.path ?? ".");
+          if (entries.length === 0) return "Directory is empty";
+          return entries
+            .map((e) => `${e.type === "dir" ? "d" : "-"} ${e.path}`)
+            .join("\n");
+        } catch (e) {
+          return `Error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+    );
+
+    // read_file
+    const read_file = defineTool(
+      {
+        name: "read_file",
+        description: READ_FILE_TOOL_DESCRIPTION,
+        parameters: ReadFileSchema
+      },
+      async (p: { path: string; offset?: number; limit?: number }) => {
+        const path = String(p.path ?? "");
+        try {
+          const raw = await agentFs.readFile(path, false);
+          if (raw === null) return `Error: File '${path}' not found`;
+
+          markRead(path);
+
+          if (raw.trim() === "")
+            return "System reminder: File exists but has empty contents";
+
+          const lines = raw.split(/\r?\n/);
+          const offset = Math.max(0, Number(p.offset ?? 0));
+          const limit = Math.max(1, Number(p.limit ?? 2000));
+          if (offset >= lines.length) {
+            return `Error: Line offset ${offset} exceeds file length (${lines.length} lines)`;
+          }
+          const end = Math.min(lines.length, offset + limit);
+          const out = [];
+          for (let i = offset; i < end; i++) {
+            let content = lines[i];
+            if (content.length > 2000) content = content.slice(0, 2000);
+            const lineNum = (i + 1).toString().padStart(6, " ");
+            out.push(`${lineNum}\t${content}`);
+          }
+          return out.join("\n");
+        } catch (e) {
+          return `Error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+    );
+
+    // write_file
+    const write_file = defineTool(
+      {
+        name: "write_file",
+        description: WRITE_FILE_TOOL_DESCRIPTION,
+        parameters: WriteFileSchema
+      },
+      async (p: { path: string; content: string }) => {
+        const path = String(p.path ?? "");
+        const content = String(p.content ?? "");
+        try {
+          await agentFs.writeFile(path, content);
+          return `Updated file ${path}`;
+        } catch (e) {
+          return `Error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+    );
+
+    // edit_file
+    const edit_file = defineTool(
+      {
+        name: "edit_file",
+        description: EDIT_FILE_TOOL_DESCRIPTION,
+        parameters: EditFileSchema
+      },
+      async (p: {
+        path: string;
+        oldString: string;
+        newString: string;
+        replaceAll?: boolean;
+      }) => {
+        const path = String(p.path ?? "");
+
+        // Must read first
+        const readPaths = getReadPaths();
+        if (!readPaths.has(path)) {
+          return `Error: You must read '${path}' before editing it`;
+        }
+
+        try {
+          const { replaced } = await agentFs.editFile(
+            path,
+            p.oldString,
+            p.newString,
+            p.replaceAll
+          );
+
+          if (replaced === 0)
+            return `Error: String not found in file: '${p.oldString}'`;
+          if (replaced < 0) {
+            return `Error: String '${p.oldString}' appears ${Math.abs(replaced)} times. Use replaceAll=true or provide a more specific oldString.`;
+          }
+          if (!p.replaceAll && replaced > 1) {
+            return `Error: String '${p.oldString}' appears ${replaced} times. Use replaceAll=true or provide a more specific oldString.`;
+          }
+
+          return p.replaceAll
+            ? `Successfully replaced ${replaced} instance(s) in '${path}'`
+            : `Successfully replaced string in '${path}'`;
+        } catch (e) {
+          return `Error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+    );
+
     ctx.registerTool(ls);
     ctx.registerTool(read_file);
     ctx.registerTool(write_file);
     ctx.registerTool(edit_file);
   },
-  async onInit(ctx) {
-    ctx.agent.store.sql.exec(`CREATE TABLE IF NOT EXISTS files (
-        path TEXT PRIMARY KEY,
-        content BLOB,
-        updated_at INTEGER NOT NULL
-    )`);
-  },
-  state: (ctx) => {
-    const rows = ctx.agent.store.sql.exec(
-      "SELECT path, content FROM files ORDER BY path ASC"
-    );
-    const files: Record<string, string> = {};
-    for (const r of rows ?? []) {
-      files[String(r.path)] =
-        typeof r.content === "string"
-          ? r.content
-          : new TextDecoder().decode(r.content as ArrayBuffer);
-    }
-    return { files };
-  },
+
   tags: ["fs"]
 };
 

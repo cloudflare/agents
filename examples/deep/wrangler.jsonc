@@ -19,6 +19,12 @@
       "id": "deep-soc-demo-registry"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "FS",
+      "name": "agent-files"
+    }
+  ],
   "main": "src/index.ts",
   "migrations": [
     {

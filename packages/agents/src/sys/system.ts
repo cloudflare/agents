@@ -4,7 +4,7 @@
  */
 
 import { getAgentByName } from "..";
-import { SystemAgent, type AgentEnv } from "./agent";
+import { SystemAgent } from "./agent";
 import { Agency } from "./agent/agency";
 import { AgentEventType } from "./events";
 import { planning, filesystem, subagents, getToolMeta } from "./middleware";
@@ -14,7 +14,8 @@ import type {
   AgentMiddleware,
   AgentBlueprint,
   AgentConfig,
-  ThreadMetadata
+  ThreadMetadata,
+  AgentEnv
 } from "./types";
 import { createHandler, type HandlerOptions } from "./worker";
 

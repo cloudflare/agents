@@ -407,11 +407,24 @@ When NOT to use the task tool:
 
 export const FILESYSTEM_SYSTEM_PROMPT = `## Filesystem Tools \`ls\`, \`read_file\`, \`write_file\`, \`edit_file\`
 
-You have access to a local, private filesystem which you can interact with using these tools.
-- ls: list all files in the local filesystem
-- read_file: read a file from the local filesystem
-- write_file: write to a file in the local filesystem
-- edit_file: edit a file in the local filesystem`;
+You have access to a shared filesystem which you can interact with using these tools.
+
+### Path Resolution
+- Relative paths (e.g., \`foo.txt\`, \`subdir/file.js\`) resolve to your home directory
+- \`~\` or \`~/...\` explicitly refers to your home directory  
+- \`/shared/...\` is agency-wide shared space (all agents can read/write)
+- \`/agents/{id}/...\` is another agent's home directory (read-only)
+
+### Tools
+- ls: List directory contents (default: home directory)
+- read_file: Read a file from the filesystem
+- write_file: Create or overwrite a file (home or /shared only)
+- edit_file: Edit a file with find-replace (home or /shared only)
+
+### Tips
+- Use \`/shared/\` to collaborate with other agents or persist data across sessions
+- Files in your home directory are private by default but readable by other agents
+- You cannot write to another agent's home directory`;
 
 export const BASE_AGENT_PROMPT = `
 In order to complete the objective that the user asks of you, you have access to a number of standard tools.

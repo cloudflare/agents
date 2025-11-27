@@ -2,6 +2,7 @@ import type { env } from "cloudflare:workers";
 import type { ModelPlanBuilder } from "./middleware/plan";
 import type { SystemAgent } from "./agent";
 import type { Provider } from "./providers";
+import type { Agency } from "./agent/agency";
 
 export type RunStatus =
   | "idle"
@@ -136,9 +137,18 @@ export type AgentBlueprint<TConfig = Record<string, unknown>> = {
   updatedAt?: string; // ISO
 };
 
+export interface AgentEnv {
+  SYSTEM_AGENT: DurableObjectNamespace<SystemAgent>;
+  AGENCY: DurableObjectNamespace<Agency>;
+  LLM_API_KEY?: string;
+  LLM_API_BASE?: string;
+  FS?: R2Bucket;
+}
+
 export type MWContext = {
   provider: Provider;
   agent: SystemAgent;
+  env: AgentEnv;
   registerTool: (handler: ToolHandler) => void;
 };
 

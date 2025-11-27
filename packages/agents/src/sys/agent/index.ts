@@ -12,7 +12,8 @@ import type {
   ThreadRequestContext,
   RunState,
   AgentConfig,
-  AgentBlueprint
+  AgentBlueprint,
+  AgentEnv
 } from "../types";
 import { Agent, getAgentByName, type AgentContext } from "../..";
 import { getToolMeta } from "../middleware";
@@ -20,14 +21,7 @@ import { type AgentEvent, AgentEventType } from "../events";
 import { step } from "./step";
 import { Store } from "./store";
 import { PersistedObject } from "./config";
-import type { Agency } from "./agency";
-
-export interface AgentEnv {
-  SYSTEM_AGENT: DurableObjectNamespace<SystemAgent>;
-  AGENCY: DurableObjectNamespace<Agency>;
-  LLM_API_KEY?: string;
-  LLM_API_BASE?: string;
-}
+import { AgentFileSystem } from "../middleware/fs";
 
 // I rather name this State but the name's taken
 export type Info = {
@@ -45,6 +39,7 @@ export abstract class SystemAgent<
   Env extends AgentEnv = AgentEnv
 > extends Agent<Env> {
   protected _tools: Record<string, ToolHandler> = {};
+  private _fs: AgentFileSystem | null = null;
 
   // State
   readonly info: Info;
@@ -79,10 +74,32 @@ export abstract class SystemAgent<
     return this.store.listMessages();
   }
 
+  /**
+   * R2-backed filesystem with per-agent home directory and shared spce.
+   * Returns null if FS binding is not configured.
+   */
+  get fs(): AgentFileSystem | null {
+    // Return cached instance
+    if (this._fs) return this._fs;
+
+    // Need R2 bucket binding
+    const bucket = this.env.FS;
+    if (!bucket) return null;
+
+    // Need agent identity (set after registration)
+    const agencyId = this.info.agencyId;
+    const agentId = this.info.threadId;
+    if (!agencyId || !agentId) return null;
+
+    this._fs = new AgentFileSystem(bucket, { agencyId, agentId });
+    return this._fs;
+  }
+
   get mwContext(): MWContext {
     return {
       agent: this,
       provider: this.provider,
+      env: this.env,
       registerTool: (tool: ToolHandler) => {
         const name = getToolMeta(tool)?.name;
         if (!name) throw new Error("Tool missing name: use defineTool(...)");

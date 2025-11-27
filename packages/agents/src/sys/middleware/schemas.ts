@@ -26,11 +26,17 @@ export const WriteTodosSchema = {
   title: "write_todos"
 } as const;
 
-// ls() — no user parameters
+// ls(path?: string) — list directory contents
 export const ListFilesSchema = {
   type: "object",
   additionalProperties: false,
-  properties: {},
+  properties: {
+    path: {
+      type: "string",
+      description:
+        "Directory to list. Relative paths resolve to home. Use /shared for shared files, /agents/{id} for other agents. Default: home directory"
+    }
+  },
   required: [],
   title: "ls"
 } as const;
@@ -42,9 +48,8 @@ export const ReadFileSchema = {
   properties: {
     path: {
       type: "string",
-      // Enforce absolute (Unix-style). If you need Windows too, expand the pattern.
-      pattern: "^/",
-      description: "Absolute path to the file"
+      description:
+        "File path. Relative paths resolve to home. Use /shared/... for shared files, /agents/{id}/... for other agents"
     },
     offset: {
       type: "integer",
@@ -63,15 +68,15 @@ export const ReadFileSchema = {
   title: "read_file"
 } as const;
 
-// write_file(_path: string, content: string)
+// write_file(path: string, content: string)
 export const WriteFileSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
     path: {
       type: "string",
-      pattern: "^/",
-      description: "Absolute path to create/overwrite"
+      description:
+        "File path. Relative paths write to home. Use /shared/... for shared files. Cannot write to other agents' homes."
     },
     content: {
       type: "string",
@@ -89,8 +94,8 @@ export const EditFileSchema = {
   properties: {
     path: {
       type: "string",
-      pattern: "^/",
-      description: "Absolute path to edit"
+      description:
+        "File path. Relative paths edit in home. Use /shared/... for shared files. Cannot edit other agents' files."
     },
     oldString: {
       type: "string",
