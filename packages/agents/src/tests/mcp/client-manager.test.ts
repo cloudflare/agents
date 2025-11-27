@@ -3,9 +3,20 @@ import { MCPClientManager } from "../../mcp/client";
 import { MCPClientConnection } from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { MCPObservabilityEvent } from "../../observability/mcp";
+
+/**
+ * Test subclass that exposes protected members for testing.
+ */
+class TestMCPClientManager extends MCPClientManager {
+  fireObservabilityEvent(event: MCPObservabilityEvent) {
+    this._onObservabilityEvent.fire(event);
+  }
+}
 
 describe("MCPClientManager OAuth Integration", () => {
-  let manager: MCPClientManager;
+  let manager: TestMCPClientManager;
   let mockStorageData: Map<string, MCPServerRow>;
   let mockKVData: Map<string, unknown>;
 
@@ -101,7 +112,7 @@ describe("MCPClientManager OAuth Integration", () => {
       }
     } as unknown as DurableObjectStorage;
 
-    manager = new MCPClientManager("test-client", "1.0.0", {
+    manager = new TestMCPClientManager("test-client", "1.0.0", {
       storage: mockDOStorage
     });
   });
@@ -2005,7 +2016,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Set up event piping from connection to manager (normally done by createConnection)
       connection.onObservabilityEvent((event) => {
-        (manager as any)._onObservabilityEvent.fire(event);
+        manager.fireObservabilityEvent(event);
       });
 
       const observabilitySpy = vi.fn();
@@ -2043,7 +2054,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Set up event piping from connection to manager (normally done by createConnection)
       connection.onObservabilityEvent((event) => {
-        (manager as any)._onObservabilityEvent.fire(event);
+        manager.fireObservabilityEvent(event);
       });
 
       const stateChangedSpy = vi.fn();
@@ -2141,7 +2152,7 @@ describe("MCPClientManager OAuth Integration", () => {
 
       // Set up event piping from connection to manager (normally done by createConnection)
       connection.onObservabilityEvent((event) => {
-        (manager as any)._onObservabilityEvent.fire(event);
+        manager.fireObservabilityEvent(event);
       });
 
       const observabilityEvents: string[] = [];
@@ -2168,13 +2179,13 @@ describe("MCPClientManager OAuth Integration", () => {
       );
       connection.connectionState = "ready";
       connection.tools = [
-        { name: "old-tool", inputSchema: { type: "object" } } as any
+        { name: "old-tool", inputSchema: { type: "object" } } as Tool
       ];
 
       // Mock discoverAndRegister to update tools
       connection.discoverAndRegister = vi.fn().mockImplementation(async () => {
         connection.tools = [
-          { name: "new-tool", inputSchema: { type: "object" } } as any
+          { name: "new-tool", inputSchema: { type: "object" } } as Tool
         ];
         connection.connectionState = "ready";
       });
