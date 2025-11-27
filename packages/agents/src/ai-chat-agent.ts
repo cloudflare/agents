@@ -648,9 +648,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
        * a chat message is received.
        * So it's safe to delay loading it until a chat message is received.
        */
-      const { getToolName, isToolUIPart, parsePartialJson } = await import(
-        "ai"
-      );
+      const { getToolName, isToolUIPart, parsePartialJson } =
+        await import("ai");
 
       const reader = response.body.getReader();
 

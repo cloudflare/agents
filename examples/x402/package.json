@@ -1,7 +1,7 @@
 {
   "author": "",
   "dependencies": {
-    "hono": "^4.10.6",
+    "hono": "^4.10.7",
     "x402-fetch": "^0.7.3",
     "x402-hono": "^0.7.3"
   },

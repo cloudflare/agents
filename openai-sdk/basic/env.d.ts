@@ -14,6 +14,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
     : string;
 };
 declare namespace NodeJS {
-  interface ProcessEnv
-    extends StringifyValues<Pick<Cloudflare.Env, "OPENAI_API_KEY">> {}
+  interface ProcessEnv extends StringifyValues<
+    Pick<Cloudflare.Env, "OPENAI_API_KEY">
+  > {}
 }

@@ -10,22 +10,22 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^12.6.11",
+    "@astrojs/cloudflare": "^12.6.12",
     "@astrojs/react": "^4.4.2",
     "@cfworker/json-schema": "^4.1.1",
     "@chonkiejs/core": "^0.0.5",
     "@gsap/react": "^2.1.2",
     "@orama/orama": "^3.1.16",
     "@use-it/interval": "^1.0.0",
-    "astro": "^5.16.0",
+    "astro": "^5.16.1",
     "clsx": "^2.1.1",
-    "effect": "^3.19.6",
+    "effect": "^3.19.7",
     "framer-motion": "^12.23.24",
     "gsap": "^3.13.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-wrap-balancer": "^1.1.1",
-    "shiki": "^3.15.0",
+    "shiki": "^3.17.0",
     "tailwindcss": "^4.1.17"
   },
   "devDependencies": {
@@ -35,7 +35,7 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.50.0"
+    "wrangler": "^4.51.0"
   },
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.30.2",

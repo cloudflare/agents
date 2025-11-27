@@ -3,10 +3,6 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import icon from "./mcp-icon.svg";
 
-type Env = {
-  MyMCP: DurableObjectNamespace<MyMCP>;
-};
-
 type State = { counter: number };
 
 export class MyMCP extends McpAgent<Env, State, {}> {

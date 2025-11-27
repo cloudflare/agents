@@ -24,10 +24,10 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.72",
+    "@ai-sdk/openai": "2.0.73",
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/sdk": "^1.22.0",
-    "ai": "5.0.101",
+    "@modelcontextprotocol/sdk": "^1.23.0",
+    "ai": "5.0.103",
     "cron-schedule": "^6.0.0",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
