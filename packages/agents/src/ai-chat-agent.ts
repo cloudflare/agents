@@ -756,12 +756,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         request.messages
       );
     } finally {
-      this._isProcessingChat = false;
-
-      // Check if a new request arrived while we were processing
+      // Check for new request and schedule BEFORE releasing lock.
+      // This prevents race condition where timer could fire between
+      // releasing lock and scheduling new timer.
       if (this._pendingChatRequest) {
         this._scheduleProcessing();
       }
+      this._isProcessingChat = false;
     }
   }
 
