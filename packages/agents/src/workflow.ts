@@ -34,11 +34,7 @@
  * ```
  */
 
-import type {
-  WorkflowEntrypoint,
-  WorkflowEvent,
-  WorkflowStep
-} from "cloudflare:workers";
+import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 // ============================================================================
 // Types
@@ -155,18 +151,21 @@ export abstract class AgentWorkflow<
 
     // Create context with Task-like API
     const ctx: WorkflowTaskContext<TParams> = {
-      params: params as TParams,
+      params: params as unknown as TParams,
       taskId: _taskId,
 
       step: async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
         // Flush pending update, then execute step
         await flushUpdates();
-        return step.do(name, fn);
+        // step.do returns Serializable<T>, cast back to T for convenience
+        // biome-ignore lint/suspicious/noExplicitAny: Workflow type coercion
+        return step.do(name, fn as any) as unknown as Promise<T>;
       },
 
       sleep: async (name: string, duration: string): Promise<void> => {
         await flushUpdates();
-        return step.sleep(name, duration);
+        // Cast duration string to the required WorkflowSleepDuration type
+        return step.sleep(name, duration as Parameters<typeof step.sleep>[1]);
       },
 
       // Queue event - will be sent at next step boundary

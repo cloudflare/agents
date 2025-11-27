@@ -131,7 +131,10 @@ export function getTaskMethodKey(
  * - Automatic progress/event broadcasting
  * - Persistence in SQLite
  * - Cancellation support
- * - Optional timeout and retries
+ * - Optional timeout and retries (non-durable, in-memory)
+ *
+ * Note: For durable retries that survive restarts, use `this.workflow()` with
+ * Cloudflare Workflows which has built-in retry support via `step.do({ retries: {...} })`.
  *
  * @example
  * ```typescript
@@ -183,8 +186,9 @@ export function task(options: TaskMethodMetadata = {}) {
     }
 
     // Store the original method once we know the class name
-    context.addInitializer(function (this: This) {
-      const className = this.constructor.name;
+    context.addInitializer(function () {
+      const instance = this as This;
+      const className = instance.constructor.name;
       const key = getTaskMethodKey(className, methodName);
       if (!taskMethodOriginals.has(key)) {
         taskMethodOriginals.set(key, target);
@@ -307,8 +311,6 @@ export class TaskTracker {
   private sql: SqlExecutor;
   private syncToState: StateSyncCallback;
   private abortControllers = new Map<string, AbortController>();
-  private pendingSync = new Set<string>();
-  private syncTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(sql: SqlExecutor, syncToState: StateSyncCallback) {
     this.sql = sql;
@@ -351,42 +353,11 @@ export class TaskTracker {
   }
 
   /**
-   * Queue a task sync to be batched with other updates
-   * Debounces rapid updates to prevent state flooding
+   * Sync task state to callback.
+   * Rate limiting is handled by the Agent's _syncTaskToState, so we always call immediately.
+   * This ensures consistent ordering - no debouncing means no out-of-order updates.
    */
-  private queueSync(taskId: string): void {
-    this.pendingSync.add(taskId);
-
-    // Flush immediately for important state changes, debounce for progress
-    if (this.syncTimeout) {
-      clearTimeout(this.syncTimeout);
-    }
-
-    // Batch syncs within 10ms to prevent flooding
-    this.syncTimeout = setTimeout(() => {
-      this.flushSync();
-    }, 10);
-  }
-
-  /**
-   * Flush all pending syncs
-   */
-  private flushSync(): void {
-    if (this.pendingSync.size === 0) return;
-
-    for (const taskId of this.pendingSync) {
-      const task = this.get(taskId);
-      this.syncToState(taskId, task || null);
-    }
-    this.pendingSync.clear();
-    this.syncTimeout = null;
-  }
-
-  /**
-   * Force immediate sync for a task (for important state changes like completion)
-   */
-  private syncNow(taskId: string): void {
-    this.pendingSync.delete(taskId);
+  private sync(taskId: string): void {
     const task = this.get(taskId);
     this.syncToState(taskId, task || null);
   }
@@ -428,7 +399,7 @@ export class TaskTracker {
     `;
 
     // Sync to state for real-time updates
-    this.syncNow(id);
+    this.sync(id);
 
     return task;
   }
@@ -495,7 +466,7 @@ export class TaskTracker {
     this.abortControllers.set(taskId, controller);
 
     // Sync to state - immediate for status change
-    this.syncNow(taskId);
+    this.sync(taskId);
 
     return controller;
   }
@@ -536,7 +507,7 @@ export class TaskTracker {
     this.addEventInternal(taskId, "completed", { result });
 
     // Immediate sync for completion
-    this.syncNow(taskId);
+    this.sync(taskId);
   }
 
   /**
@@ -554,7 +525,7 @@ export class TaskTracker {
     this.addEventInternal(taskId, "failed", { error });
 
     // Immediate sync for failure
-    this.syncNow(taskId);
+    this.sync(taskId);
   }
 
   /**
@@ -586,7 +557,7 @@ export class TaskTracker {
     this.addEventInternal(taskId, "aborted", { reason });
 
     // Immediate sync for abort
-    this.syncNow(taskId);
+    this.sync(taskId);
 
     return true;
   }
@@ -605,7 +576,7 @@ export class TaskTracker {
     this.addEventInternal(taskId, type, data);
 
     // Debounced sync for events
-    this.queueSync(taskId);
+    this.sync(taskId);
   }
 
   /**
@@ -642,7 +613,7 @@ export class TaskTracker {
     `;
 
     // Debounced sync for progress updates
-    this.queueSync(taskId);
+    this.sync(taskId);
   }
 
   /**
@@ -783,7 +754,7 @@ export class TaskTracker {
     const match = timeout.match(/^(\d+)(ms|s|m|h)?$/);
     if (!match) return undefined;
 
-    const value = parseInt(match[1], 10);
+    const value = Number.parseInt(match[1], 10);
     const unit = match[2] || "ms";
 
     switch (unit) {
@@ -806,9 +777,19 @@ export class TaskTracker {
 // ============================================================================
 
 /**
+ * Result of workflow cancellation attempt
+ */
+export interface WorkflowCancelResult {
+  success: boolean;
+  reason?: string;
+}
+
+/**
  * Callback for canceling workflow tasks
  */
-export type WorkflowCancelCallback = (taskId: string) => Promise<boolean>;
+export type WorkflowCancelCallback = (
+  taskId: string
+) => Promise<WorkflowCancelResult>;
 
 /**
  * Accessor object for task operations
@@ -852,13 +833,18 @@ export class TasksAccessor {
 
   /**
    * Cancel/abort a task (also terminates workflow if applicable)
+   * @returns true if task was cancelled, false otherwise
    */
   async cancel(taskId: string, reason?: string): Promise<boolean> {
     // Try to cancel workflow first if this is a workflow task
     if (this.workflowCancelCallback) {
-      await this.workflowCancelCallback(taskId).catch(() => {
-        // Ignore errors - workflow may already be done
-      });
+      const result = await this.workflowCancelCallback(taskId);
+      // Add event if workflow cancellation had issues
+      if (!result.success && result.reason !== "not_a_workflow") {
+        this.tracker.addEvent(taskId, "workflow-cancel-failed", {
+          reason: result.reason
+        });
+      }
     }
     return this.tracker.cancel(taskId, reason);
   }

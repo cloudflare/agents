@@ -514,7 +514,21 @@ export class Agent<
             request.method === "POST"
           ) {
             try {
-              const update = (await request.json()) as {
+              const json = await request.json();
+
+              // Validate required fields to prevent crashes from malformed payloads
+              if (
+                !json ||
+                typeof json !== "object" ||
+                typeof (json as Record<string, unknown>).taskId !== "string"
+              ) {
+                console.error(
+                  "[Agent] Invalid workflow update: missing taskId"
+                );
+                return new Response("invalid payload", { status: 400 });
+              }
+
+              const update = json as {
                 taskId: string;
                 event?: { type: string; data?: unknown };
                 progress?: number;
@@ -522,6 +536,7 @@ export class Agent<
                 result?: unknown;
                 error?: string;
               };
+
               this._handleWorkflowUpdate(update);
               return new Response("ok", { status: 200 });
             } catch (error) {
@@ -900,28 +915,56 @@ export class Agent<
   }
 
   /**
-   * Cancel a workflow task by terminating its workflow instance
+   * Cancel a workflow task by terminating its workflow instance.
+   * Returns { success, reason } to indicate outcome.
    * @internal
    */
-  async _cancelWorkflow(taskId: string): Promise<boolean> {
+  async _cancelWorkflow(
+    taskId: string
+  ): Promise<{ success: boolean; reason?: string }> {
     const workflowInfo = this._taskTracker.getWorkflowInfo(taskId);
-    if (!workflowInfo) return false;
+    if (!workflowInfo) {
+      return { success: false, reason: "not_a_workflow" };
+    }
 
     const workflowNS = (this.env as Record<string, unknown>)[
       workflowInfo.binding
     ] as {
-      get: (id: string) => Promise<{ terminate: () => Promise<void> }>;
+      get: (id: string) => Promise<{
+        terminate: () => Promise<void>;
+        status: () => Promise<{ status: string }>;
+      }>;
     } | null;
 
-    if (!workflowNS?.get) return false;
+    if (!workflowNS?.get) {
+      console.error(
+        `[Agent] Workflow binding ${workflowInfo.binding} not found`
+      );
+      return { success: false, reason: "binding_not_found" };
+    }
 
     try {
       const instance = await workflowNS.get(workflowInfo.instanceId);
+
+      // Check status first to provide better feedback
+      try {
+        const { status } = await instance.status();
+        if (["complete", "errored", "terminated"].includes(status)) {
+          return { success: false, reason: `already_${status}` };
+        }
+      } catch {
+        // Status check failed, try to terminate anyway
+      }
+
       await instance.terminate();
-      return true;
-    } catch {
-      // Workflow may already be terminated or not exist
-      return false;
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(
+        `[Agent] Failed to terminate workflow ${workflowInfo.instanceId}:`,
+        message
+      );
+      return { success: false, reason: message };
     }
   }
 
@@ -991,7 +1034,7 @@ export class Agent<
 
     // Safety check: if original is same as wrapper, we'd loop forever
     if (originalMethod && originalMethod === methodOrWrapper) {
-      this._taskTracker.fail(taskId, `Internal error: task method loop`);
+      this._taskTracker.fail(taskId, "Internal error: task method loop");
       return;
     }
 
@@ -1025,10 +1068,24 @@ export class Agent<
             maxRetries: retries,
             error: lastError.message
           });
-          // Exponential backoff
-          await new Promise((r) =>
-            setTimeout(r, Math.min(1000 * 2 ** attempt, 30000))
-          );
+
+          // Exponential backoff with deadline checking
+          // Note: For durable retries, use this.workflow() with Cloudflare Workflows
+          // which has built-in retry support via step.do({ retries: {...} })
+          const backoffMs = Math.min(1000 * 2 ** attempt, 30000);
+          const checkInterval = 1000; // Check deadline every second during backoff
+          let waited = 0;
+          while (waited < backoffMs) {
+            if (
+              controller.signal.aborted ||
+              this._taskTracker.checkTimeout(taskId)
+            ) {
+              return;
+            }
+            const waitTime = Math.min(checkInterval, backoffMs - waited);
+            await new Promise((r) => setTimeout(r, waitTime));
+            waited += waitTime;
+          }
         }
       }
     }
@@ -1072,7 +1129,7 @@ export class Agent<
     const isFinalState = ["completed", "failed", "aborted"].includes(
       task.status
     );
-    const timeSinceLast = last ? now - last.time : Infinity;
+    const timeSinceLast = last ? now - last.time : Number.POSITIVE_INFINITY;
 
     // Always broadcast: status changes, final states, or 500ms since last
     if (statusChanged || isFinalState || timeSinceLast >= 500) {
@@ -2043,9 +2100,9 @@ export type AgentOptions<Env> = PartyServerOptions<Env> & {
  * ExecutionContext with optional exports (ctx.exports API)
  * @see https://developers.cloudflare.com/changelog/2025-09-26-ctx-exports/
  */
-export interface ExecutionContextWithExports extends ExecutionContext {
+export type ExecutionContextWithExports = ExecutionContext & {
   exports?: Record<string, unknown>;
-}
+};
 
 /**
  * Route a request to the appropriate Agent

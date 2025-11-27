@@ -85,7 +85,7 @@ export class TaskRunner extends Agent<Env> {
   ): Promise<AnalysisResult> {
     const { repoUrl, branch = "main" } = input;
 
-    const match = repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
     if (!match) {
       throw new Error("Invalid GitHub URL");
     }

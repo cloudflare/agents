@@ -7,8 +7,8 @@
 
 import {
   WorkflowEntrypoint,
-  WorkflowStep,
-  WorkflowEvent
+  type WorkflowStep,
+  type WorkflowEvent
 } from "cloudflare:workers";
 import OpenAI from "openai";
 
@@ -89,7 +89,7 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, AnalysisParams> {
       }
     };
 
-    const match = repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+    const match = repoUrl.match(/github\.com\/([^/]+)\/([^/]+)/);
     if (!match) {
       throw new Error(
         "Invalid GitHub URL. Expected: https://github.com/owner/repo"

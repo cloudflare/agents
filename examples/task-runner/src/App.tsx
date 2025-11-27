@@ -4,7 +4,7 @@
  * Demonstrates tasks with real-time broadcast updates
  */
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useAgent } from "../../../packages/agents/src/react";
 
 type TaskResult = {
@@ -195,6 +195,7 @@ function App() {
         </div>
         <div className="buttons">
           <button
+            type="button"
             onClick={startQuickAnalysis}
             className="primary"
             disabled={isStarting}
@@ -202,6 +203,7 @@ function App() {
             {isStarting ? "Starting..." : "⚡ Quick Analysis"}
           </button>
           <button
+            type="button"
             onClick={startDeepAnalysis}
             className="secondary"
             disabled={isStarting}
@@ -437,8 +439,8 @@ function TaskCard({
             <div className="result-section">
               <strong>Tech Stack</strong>
               <div className="tags">
-                {task.result.techStack.map((tech, i) => (
-                  <span key={i} className="tag">
+                {task.result.techStack.map((tech) => (
+                  <span key={tech} className="tag">
                     {tech}
                   </span>
                 ))}
@@ -449,8 +451,8 @@ function TaskCard({
             <div className="result-section">
               <strong>Suggestions</strong>
               <ul>
-                {task.result.suggestions.map((s, i) => (
-                  <li key={i}>{s}</li>
+                {task.result.suggestions.map((s) => (
+                  <li key={s}>{s}</li>
                 ))}
               </ul>
             </div>
@@ -470,7 +472,11 @@ function TaskCard({
 
       {isRunning && (
         <div className="task-actions">
-          <button className="danger" onClick={() => onAbort(task.id)}>
+          <button
+            type="button"
+            className="danger"
+            onClick={() => onAbort(task.id)}
+          >
             Abort
           </button>
         </div>

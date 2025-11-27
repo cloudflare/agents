@@ -4,7 +4,7 @@
     "target": "ES2021",
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["@cloudflare/workers-types/2023-07-01", "vite/client"]
+    "types": ["@cloudflare/workers-types/2023-07-01", "vite/client", "node"]
   },
   "include": ["src/**/*"]
 }

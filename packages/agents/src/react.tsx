@@ -243,14 +243,12 @@ type AgentStub<T> = {
 type UntypedAgentStub = Record<string, Method>;
 
 /**
- * Extended agent type with task support
+ * Base agent type with task support (without typed call/stub)
  */
-export type AgentWithTasks<State = unknown> = PartySocket & {
+type AgentBase<State = unknown> = PartySocket & {
   agent: string;
   name: string;
   setState: (state: State) => void;
-  call: UntypedAgentMethodCall;
-  stub: UntypedAgentStub;
   /**
    * Start a task and get a reactive TaskRef back.
    * The returned object updates automatically as the task progresses.
@@ -270,6 +268,14 @@ export type AgentWithTasks<State = unknown> = PartySocket & {
 };
 
 /**
+ * Extended agent type with task support (untyped version)
+ */
+export type AgentWithTasks<State = unknown> = AgentBase<State> & {
+  call: UntypedAgentMethodCall;
+  stub: UntypedAgentStub;
+};
+
+/**
  * React hook for connecting to an Agent
  */
 export function useAgent<State = unknown>(
@@ -282,13 +288,19 @@ export function useAgent<
   State
 >(
   options: UseAgentOptions<State>
-): AgentWithTasks<State> & {
+): AgentBase<State> & {
   call: AgentMethodCall<AgentT>;
   stub: AgentStub<AgentT>;
 };
-export function useAgent<State>(
+export function useAgent<
+  AgentT extends { get state(): State } | unknown,
+  State = unknown
+>(
   options: UseAgentOptions<unknown>
-): AgentWithTasks<State> {
+): AgentBase<State> & {
+  call: AgentMethodCall<AgentT> | UntypedAgentMethodCall;
+  stub: AgentStub<AgentT> | UntypedAgentStub;
+} {
   const agentNamespace = camelCaseToKebabCase(options.agent);
   const { query, queryDeps, cacheTtl, ...restOptions } = options;
 
