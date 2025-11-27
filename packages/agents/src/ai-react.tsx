@@ -8,10 +8,20 @@ import type {
 } from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
-import { use, useCallback, useEffect, useMemo, useRef } from "react";
+import {
+  use,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type ChangeEvent
+} from "react";
 import type { OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
+
+/** Throttle interval for typing indicators (ms) */
+const TYPING_THROTTLE_MS = 500;
 
 export type AITool<Input = unknown, Output = unknown> = {
   description?: string;
@@ -104,6 +114,52 @@ export function useAgentChat<
   options: UseAgentChatOptions<State, ChatMessage>
 ): ReturnType<typeof useChat<ChatMessage>> & {
   clearHistory: () => void;
+  /**
+   * Send a typing indicator to the agent (throttled).
+   * Call this when the user is typing to delay message processing.
+   * The agent will wait for typing to stop before processing buffered messages.
+   */
+  sendTypingIndicator: () => void;
+  /**
+   * Input change handler that automatically sends typing indicators.
+   * Wire this up to your input's onChange for automatic typing detection.
+   *
+   * @example
+   * ```tsx
+   * <input
+   *   value={input}
+   *   onChange={(e) => {
+   *     handleInputChange(e);
+   *     onInputChange(e);
+   *   }}
+   * />
+   * ```
+   */
+  onInputChange: (
+    e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+  ) => void;
+  /**
+   * Props to spread onto your input element for automatic typing detection.
+   * Includes onChange handler that sends typing indicators.
+   *
+   * @example
+   * ```tsx
+   * // Simple usage - just spread inputProps
+   * <input {...inputProps} />
+   *
+   * // With useChat's handleInputChange
+   * <input
+   *   value={input}
+   *   onChange={(e) => {
+   *     handleInputChange(e);
+   *     inputProps.onChange(e);
+   *   }}
+   * />
+   * ```
+   */
+  inputProps: {
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => void;
+  };
 } {
   const {
     agent,
@@ -760,6 +816,36 @@ export function useAgentChat<
       }
     };
 
+  // Throttle ref for typing indicators
+  const lastTypingIndicatorRef = useRef<number>(0);
+
+  const sendTypingIndicator = useCallback(() => {
+    const now = Date.now();
+    // Throttle typing indicators to avoid spamming the server
+    if (now - lastTypingIndicatorRef.current >= TYPING_THROTTLE_MS) {
+      lastTypingIndicatorRef.current = now;
+      agentRef.current.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TYPING
+        })
+      );
+    }
+  }, []);
+
+  const onInputChange = useCallback(
+    (_e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      sendTypingIndicator();
+    },
+    [sendTypingIndicator]
+  );
+
+  const inputProps = useMemo(
+    () => ({
+      onChange: onInputChange
+    }),
+    [onInputChange]
+  );
+
   return {
     ...useChatHelpers,
     addToolResult: addToolResultAndSendMessage,
@@ -771,6 +857,9 @@ export function useAgentChat<
         })
       );
     },
+    sendTypingIndicator,
+    onInputChange,
+    inputProps,
     setMessages: (
       messages: Parameters<typeof useChatHelpers.setMessages>[0]
     ) => {

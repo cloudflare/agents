@@ -50,10 +50,12 @@ function Chat() {
   // - Message persistence
   // - Streaming
   // - Automatic resume on reconnect (via resume: true default)
-  const { messages, sendMessage, clearHistory, status } = useAgentChat({
-    agent
-    // resume: true is the default - streams automatically resume on reconnect
-  });
+  // - Typing indicator for smart message batching
+  const { messages, sendMessage, clearHistory, status, onInputChange } =
+    useAgentChat({
+      agent
+      // resume: true is the default - streams automatically resume on reconnect
+    });
 
   const isStreaming = status === "streaming";
 
@@ -67,6 +69,8 @@ function Chat() {
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
+    // Send typing indicator to batch multiple messages
+    onInputChange(e);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
