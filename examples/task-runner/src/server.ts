@@ -1,11 +1,11 @@
 /**
  * Task Runner Example
  *
- * Demonstrates real AI-powered repository analysis using:
- * - Tasks for long-running operations
- * - OpenAI for architecture analysis
- * - GitHub API for repo data
- * - Real-time progress updates
+ * Demonstrates both task patterns:
+ * 1. @task() - Quick operations running in the Agent (DO)
+ * 2. workflow() - Long-running durable operations via Cloudflare Workflows
+ *
+ * Both use the same client API: agent.task("methodName", input)
  */
 
 import {
@@ -17,8 +17,18 @@ import {
 } from "../../../packages/agents/src/index";
 import OpenAI from "openai";
 
+// Re-export the workflow for wrangler
+export { AnalysisWorkflow } from "./workflows/analysis";
+
+// Workflow type from cloudflare:workers
+interface Workflow {
+  create: (opts?: { params?: unknown }) => Promise<{ id: string }>;
+  get: (id: string) => Promise<{ status: () => Promise<unknown> }>;
+}
+
 type Env = {
   TaskRunner: DurableObjectNamespace<TaskRunner>;
+  ANALYSIS_WORKFLOW: Workflow;
   OPENAI_API_KEY: string;
 };
 
@@ -40,7 +50,11 @@ interface AnalysisResult {
 }
 
 /**
- * Task Runner Agent - Analyzes GitHub repositories using AI
+ * Task Runner Agent
+ *
+ * Offers two analysis modes:
+ * - Quick analysis: Uses @task(), runs in Agent, faster but limited duration
+ * - Deep analysis: Uses Workflow, durable, can run for hours
  */
 export class TaskRunner extends Agent<Env> {
   private openai: OpenAI | null = null;
@@ -54,72 +68,49 @@ export class TaskRunner extends Agent<Env> {
     return this.openai;
   }
 
+  // =========================================================================
+  // Option 1: Quick Analysis with @task() (runs in Agent)
+  // =========================================================================
+
   /**
-   * Analyze a GitHub repository using AI
-   *
-   * The @task() decorator automatically:
-   * - Wraps execution with progress tracking
-   * - Persists task state to SQLite
-   * - Broadcasts updates to connected clients
-   * - Handles cancellation via ctx.signal
-   *
-   * Returns a TaskHandle immediately (doesn't wait for completion)
+   * Quick analysis using @task() decorator
+   * - Runs in the Agent (Durable Object)
+   * - Good for operations under ~30s
+   * - Progress syncs in real-time
    */
   @task({ timeout: "5m" })
-  async analyzeRepo(
+  async quickAnalysis(
     input: { repoUrl: string; branch?: string },
     ctx: TaskContext
   ): Promise<AnalysisResult> {
     const { repoUrl, branch = "main" } = input;
 
-    // Parse GitHub URL
     const match = repoUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
     if (!match) {
-      throw new Error(
-        "Invalid GitHub URL. Expected: https://github.com/owner/repo"
-      );
+      throw new Error("Invalid GitHub URL");
     }
     const [, owner, repo] = match;
     const repoName = repo.replace(/\.git$/, "");
 
-    // Phase 1: Fetch repository structure
-    ctx.emit("phase", {
-      name: "fetching",
-      message: "Fetching repository structure..."
-    });
+    ctx.emit("phase", { name: "fetching" });
     ctx.setProgress(10);
 
     if (ctx.signal.aborted) throw new Error("Aborted");
 
     const files = await this.fetchRepoTree(owner, repoName, branch);
-    ctx.emit("files", {
-      count: files.length,
-      sample: files.slice(0, 10).map((f) => f.path)
-    });
     ctx.setProgress(30);
 
-    // Phase 2: Fetch key files (README, package.json, etc.)
-    ctx.emit("phase", { name: "reading", message: "Reading key files..." });
-
-    if (ctx.signal.aborted) throw new Error("Aborted");
-
+    ctx.emit("phase", { name: "reading" });
     const keyFiles = await this.fetchKeyFiles(owner, repoName, branch, files);
-    ctx.emit("keyFiles", { found: Object.keys(keyFiles) });
     ctx.setProgress(50);
 
-    // Phase 3: AI Analysis
-    ctx.emit("phase", {
-      name: "analyzing",
-      message: "AI analyzing architecture..."
-    });
-
     if (ctx.signal.aborted) throw new Error("Aborted");
 
-    const analysis = await this.analyzeWithAI(repoUrl, files, keyFiles, ctx);
+    ctx.emit("phase", { name: "analyzing" });
+    const analysis = await this.analyzeWithAI(repoUrl, files, keyFiles);
     ctx.setProgress(90);
 
-    // Complete
-    ctx.emit("phase", { name: "complete", message: "Analysis complete!" });
+    ctx.emit("phase", { name: "complete" });
     ctx.setProgress(100);
 
     return {
@@ -131,16 +122,32 @@ export class TaskRunner extends Agent<Env> {
     };
   }
 
+  // =========================================================================
+  // Option 2: Deep Analysis with Workflow (durable)
+  // =========================================================================
+
   /**
-   * Fetch repository file tree from GitHub API
+   * Deep analysis using Cloudflare Workflow
+   * - Runs in Workflow engine (separate from DO)
+   * - Can run for hours/days
+   * - Survives restarts, automatic retries
+   * - Same client API via this.workflow()!
    */
+  @callable()
+  async deepAnalysis(input: { repoUrl: string; branch?: string }) {
+    return this.workflow<typeof input>("ANALYSIS_WORKFLOW", input);
+  }
+
+  // =========================================================================
+  // Shared Helper Methods
+  // =========================================================================
+
   private async fetchRepoTree(
     owner: string,
     repo: string,
     branch: string
   ): Promise<RepoFile[]> {
     const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
-
     const response = await fetch(url, {
       headers: {
         Accept: "application/vnd.github.v3+json",
@@ -149,11 +156,6 @@ export class TaskRunner extends Agent<Env> {
     });
 
     if (!response.ok) {
-      if (response.status === 404) {
-        throw new Error(
-          `Repository not found: ${owner}/${repo} (branch: ${branch})`
-        );
-      }
       throw new Error(`GitHub API error: ${response.status}`);
     }
 
@@ -168,9 +170,6 @@ export class TaskRunner extends Agent<Env> {
     }));
   }
 
-  /**
-   * Fetch content of key configuration files
-   */
   private async fetchKeyFiles(
     owner: string,
     repo: string,
@@ -179,36 +178,27 @@ export class TaskRunner extends Agent<Env> {
   ): Promise<Record<string, string>> {
     const keyFileNames = [
       "README.md",
-      "readme.md",
       "package.json",
       "Cargo.toml",
       "go.mod",
-      "pyproject.toml",
-      "requirements.txt",
-      "wrangler.toml",
-      "wrangler.jsonc",
-      "tsconfig.json"
+      "pyproject.toml"
     ];
 
     const results: Record<string, string> = {};
 
     for (const fileName of keyFileNames) {
-      const file = files.find(
-        (f) => f.path === fileName || f.path.endsWith(`/${fileName}`)
-      );
+      const file = files.find((f) => f.path === fileName);
       if (file && file.type === "file") {
         try {
-          const content = await this.fetchFileContent(
-            owner,
-            repo,
-            branch,
-            file.path
-          );
-          if (content) {
-            results[file.path] = content.slice(0, 5000); // Limit size
+          const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${file.path}`;
+          const response = await fetch(url, {
+            headers: { "User-Agent": "Agents-Task-Runner" }
+          });
+          if (response.ok) {
+            results[file.path] = (await response.text()).slice(0, 5000);
           }
         } catch {
-          // Skip files we can't fetch
+          // Skip
         }
       }
     }
@@ -216,42 +206,13 @@ export class TaskRunner extends Agent<Env> {
     return results;
   }
 
-  /**
-   * Fetch a single file's content
-   */
-  private async fetchFileContent(
-    owner: string,
-    repo: string,
-    branch: string,
-    path: string
-  ): Promise<string | null> {
-    const url = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`;
-
-    const response = await fetch(url, {
-      headers: { "User-Agent": "Agents-Task-Runner" }
-    });
-
-    if (!response.ok) return null;
-    return response.text();
-  }
-
-  /**
-   * Use OpenAI to analyze the repository
-   */
   private async analyzeWithAI(
     repoUrl: string,
     files: RepoFile[],
-    keyFiles: Record<string, string>,
-    ctx: TaskContext
-  ): Promise<{
-    summary: string;
-    architecture: string;
-    techStack: string[];
-    suggestions: string[];
-  }> {
+    keyFiles: Record<string, string>
+  ) {
     const openai = this.getOpenAI();
 
-    // Build context for the AI
     const fileList = files
       .filter((f) => f.type === "file")
       .map((f) => f.path)
@@ -262,77 +223,80 @@ export class TaskRunner extends Agent<Env> {
       .map(([path, content]) => `--- ${path} ---\n${content}`)
       .join("\n\n");
 
-    ctx.emit("ai", { message: "Sending to OpenAI for analysis..." });
-
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
-          content: `You are a senior software architect analyzing a repository. 
-Provide a structured analysis in JSON format with these exact fields:
-- summary: 2-3 sentence overview of what this project does
-- architecture: Description of the project structure and patterns used
-- techStack: Array of technologies/frameworks detected
-- suggestions: Array of 2-3 improvement suggestions
-
-Respond ONLY with valid JSON, no markdown.`
+          content: `You are a senior software architect. Analyze the repository and respond with JSON:
+{ "summary": "...", "architecture": "...", "techStack": [...], "suggestions": [...] }`
         },
         {
           role: "user",
-          content: `Analyze this repository: ${repoUrl}
-
-FILE STRUCTURE:
-${fileList}
-
-KEY FILES:
-${keyFilesContent}`
+          content: `Analyze: ${repoUrl}\n\nFILES:\n${fileList}\n\nKEY FILES:\n${keyFilesContent}`
         }
       ],
       temperature: 0.3,
       max_tokens: 1000
     });
 
-    const responseText = completion.choices[0]?.message?.content || "{}";
+    let text = completion.choices[0]?.message?.content || "{}";
+
+    // Strip markdown code fences if present
+    text = text
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
 
     try {
-      const parsed = JSON.parse(responseText);
+      const parsed = JSON.parse(text);
       return {
         summary: parsed.summary || "Unable to generate summary",
-        architecture: parsed.architecture || "Unable to analyze architecture",
+        architecture: parsed.architecture || "Unable to analyze",
         techStack: Array.isArray(parsed.techStack) ? parsed.techStack : [],
         suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions : []
       };
     } catch {
-      // If JSON parsing fails, return the raw text as summary
+      // Try to extract JSON from the response
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          return {
+            summary: parsed.summary || text.slice(0, 500),
+            architecture: parsed.architecture || "See summary",
+            techStack: Array.isArray(parsed.techStack) ? parsed.techStack : [],
+            suggestions: Array.isArray(parsed.suggestions)
+              ? parsed.suggestions
+              : []
+          };
+        } catch {
+          // Fall through to fallback
+        }
+      }
       return {
-        summary: responseText.slice(0, 500),
-        architecture: "Unable to parse structured analysis",
+        summary: text.slice(0, 500),
+        architecture: "Unable to parse AI response",
         techStack: [],
         suggestions: []
       };
     }
   }
 
-  /**
-   * Get task status
-   */
+  // =========================================================================
+  // Task Management (same for both @task and workflow)
+  // =========================================================================
+
   @callable()
   getTask(taskId: string) {
     return this.tasks.get(taskId);
   }
 
-  /**
-   * Abort a running task
-   */
   @callable()
   abortTask(taskId: string) {
     return this.tasks.cancel(taskId, "Cancelled by user");
   }
 
-  /**
-   * List all tasks
-   */
   @callable()
   listTasks() {
     return this.tasks.list();
@@ -340,9 +304,9 @@ ${keyFilesContent}`
 }
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return (
-      (await routeAgentRequest(request, env)) ||
+      (await routeAgentRequest(request, env, { ctx })) ||
       new Response("Not found", { status: 404 })
     );
   }

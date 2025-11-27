@@ -1,149 +1,178 @@
 # Task Runner Example
 
-A real-world example demonstrating the **task system** in the Agents SDK - an AI-powered GitHub repository analyzer.
+Demonstrates the Agents SDK task system with two execution modes:
 
-## What It Does
+1. **Quick Analysis** (`@task()`) - Runs in the Agent (Durable Object), good for < 30s operations
+2. **Deep Analysis** (`workflow()`) - Runs in Cloudflare Workflows, durable for hours/days
 
-Enter a GitHub repo URL → AI analyzes the architecture → Real-time progress updates → Get structured analysis.
+## Key Feature: Same Client API
 
-## Features
-
-- **`@task()` decorator** - One decorator, one method, full lifecycle tracking
-- **Progress events** - `ctx.emit()` for real-time updates
-- **Progress percentage** - `ctx.setProgress()` for completion tracking
-- **Abort handling** - Cancel tasks with `ctx.signal`
-- **Real-time WebSocket** - `useTask()` hook for reactive UI
-- **Persistence** - Tasks survive restarts (SQLite)
-
-## How It Works
-
-### Server (Agent)
-
-```typescript
-import { Agent, task, callable, type TaskContext } from "agents";
-
-class TaskRunner extends Agent<Env> {
-  // @task() automatically:
-  // - Makes method callable via RPC
-  // - Wraps with lifecycle tracking
-  // - Returns TaskHandle immediately
-  @task({ timeout: "5m" })
-  async analyzeRepo(
-    input: { repoUrl: string; branch?: string },
-    ctx: TaskContext
-  ) {
-    ctx.emit("phase", { name: "fetching" });
-    ctx.setProgress(10);
-
-    const files = await this.fetchRepoTree(input.repoUrl);
-
-    if (ctx.signal.aborted) throw new Error("Aborted");
-
-    ctx.emit("phase", { name: "analyzing" });
-    ctx.setProgress(50);
-
-    const analysis = await this.analyzeWithAI(files);
-
-    ctx.setProgress(100);
-    return analysis;
-  }
-
-  @callable()
-  getTask(taskId: string) {
-    return this.tasks.get(taskId);
-  }
-
-  @callable()
-  abortTask(taskId: string) {
-    return this.tasks.cancel(taskId);
-  }
-}
-```
-
-### Client (React)
+Both modes use the identical client-side API:
 
 ```tsx
-import { useAgent, useTask } from "agents/react";
+// Client code - works for both @task() and workflow()
+const task = await agent.task<ResultType>("methodName", input);
 
-function TaskView({ taskId }: { taskId: string }) {
-  const agent = useAgent({ agent: "task-runner" });
-  const task = useTask(agent, taskId);
+// Task is reactive - updates automatically
+task.status; // "pending" | "running" | "completed" | "failed"
+task.progress; // 0-100
+task.events; // Real-time events from the task
+task.result; // Available when completed
+task.abort(); // Cancel the task
+```
 
-  return (
-    <div>
-      <p>Status: {task.status}</p>
-      <progress value={task.progress} max={100} />
+## Architecture
 
-      {task.events.map((e) => (
-        <div key={e.id}>
-          {e.type}: {JSON.stringify(e.data)}
-        </div>
-      ))}
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Client (React)                          │
+│                                                                 │
+│  const task = await agent.task("quickAnalysis", { repoUrl })   │
+│  const task = await agent.task("deepAnalysis", { repoUrl })    │
+│                           │                                     │
+│                    Same API! ↓                                  │
+└─────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Agent (Durable Object)                       │
+│                                                                 │
+│  @task()           │  @callable()                               │
+│  quickAnalysis()   │  deepAnalysis() {                          │
+│  - Runs in DO      │    return this.workflow("ANALYSIS_WORKFLOW")│
+│  - Fast            │  }                                         │
+│  - < 30s tasks     │                                            │
+│         │          │           │                                │
+└─────────┼──────────┴───────────┼────────────────────────────────┘
+          │                      │
+          ▼                      ▼
+     [Executes               [Dispatches to
+      in Agent]               Workflow]
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Cloudflare Workflow                            │
+│                                                                 │
+│  class AnalysisWorkflow extends WorkflowEntrypoint {           │
+│    async run(event, step) {                                    │
+│      await step.do("fetch", ...);    // Durable step           │
+│      await step.sleep("1 hour");     // Survives restarts      │
+│      await step.do("analyze", ...);  // Auto-retry on failure  │
+│    }                                                            │
+│  }                                                              │
+│                                                                 │
+│  // Sends updates back to Agent via HTTP callback              │
+│  notifyAgent({ progress: 50, event: { type: "phase" } })       │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-      {task.isRunning && <button onClick={task.abort}>Abort</button>}
-      {task.isSuccess && <pre>{JSON.stringify(task.result, null, 2)}</pre>}
-    </div>
-  );
+## When to Use Each
+
+| Feature    | @task()             | workflow()               |
+| ---------- | ------------------- | ------------------------ |
+| Duration   | Seconds to minutes  | Minutes to days          |
+| Execution  | In Durable Object   | Separate Workflow engine |
+| Durability | Lost on DO eviction | Survives restarts        |
+| Retries    | Manual              | Automatic per-step       |
+| Sleep      | Not durable         | Durable (can wait hours) |
+| Cost       | DO compute time     | Workflow compute time    |
+
+## Setup
+
+1. Install dependencies:
+
+```bash
+npm install
+```
+
+2. Create `.dev.vars`:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+3. Run development server:
+
+```bash
+npm run dev
+```
+
+4. Open http://localhost:5173
+
+## Server Implementation
+
+```typescript
+// Quick task - runs in Agent
+@task({ timeout: "5m" })
+async quickAnalysis(input: Input, ctx: TaskContext) {
+  ctx.emit("phase", { name: "fetching" });
+  ctx.setProgress(10);
+
+  // Your logic here...
+
+  return result;
+}
+
+// Durable task - runs in Workflow
+@callable()
+async deepAnalysis(input: Input) {
+  return this.workflow("ANALYSIS_WORKFLOW", input);
 }
 ```
 
-## Running
-
-1. Add your OpenAI API key to `.dev.vars`:
-
-   ```
-   OPENAI_API_KEY=sk-...
-   ```
-
-2. Start the dev server:
-
-   ```sh
-   npm run dev
-   ```
-
-3. Open http://localhost:5173
-
-## API Reference
-
-### `@task()` Decorator
+## Workflow Implementation
 
 ```typescript
-@task({ timeout?: string | number, retries?: number })
-async myTask(input: T, ctx: TaskContext): Promise<R>
+// src/workflows/analysis.ts
+import {
+  WorkflowEntrypoint,
+  WorkflowStep,
+  WorkflowEvent
+} from "cloudflare:workers";
+
+export class AnalysisWorkflow extends WorkflowEntrypoint<Env, Params> {
+  async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
+    // Durable step - persisted, auto-retry on failure
+    const files = await step.do("fetch-repo", async () => {
+      // This survives worker restarts
+      return await fetchFiles(event.payload.repoUrl);
+    });
+
+    // Durable sleep - can wait for hours
+    await step.sleep("rate-limit", "1 hour");
+
+    // Step with retry config
+    const analysis = await step.do(
+      "analyze",
+      { retries: { limit: 3, backoff: "exponential" } },
+      async () => analyzeFiles(files)
+    );
+
+    return analysis;
+  }
+}
 ```
 
-### TaskContext
+## Configuration (wrangler.jsonc)
 
-| Method                   | Description         |
-| ------------------------ | ------------------- |
-| `ctx.emit(type, data?)`  | Emit progress event |
-| `ctx.setProgress(0-100)` | Set completion %    |
-| `ctx.signal`             | AbortSignal         |
-| `ctx.taskId`             | Task ID             |
-
-### `this.tasks` Accessor
-
-| Method                | Description    |
-| --------------------- | -------------- |
-| `get(id)`             | Get task by ID |
-| `list(filter?)`       | List tasks     |
-| `cancel(id, reason?)` | Cancel task    |
-
-### `useTask()` Hook
-
-| Property   | Description                              |
-| ---------- | ---------------------------------------- |
-| `status`   | pending/running/completed/failed/aborted |
-| `progress` | 0-100                                    |
-| `result`   | Task result                              |
-| `error`    | Error message                            |
-| `events`   | Progress events                          |
-| `abort()`  | Cancel the task                          |
-
-## Task Lifecycle
-
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [{ "name": "TaskRunner", "class_name": "TaskRunner" }]
+  },
+  "workflows": [
+    {
+      "name": "analysis-workflow",
+      "binding": "ANALYSIS_WORKFLOW",
+      "class_name": "AnalysisWorkflow"
+    }
+  ]
+}
 ```
-pending → running → completed
-                 ↘ failed
-                 ↘ aborted
-```
+
+## Files
+
+- `src/server.ts` - Agent with both @task() and workflow() methods
+- `src/workflows/analysis.ts` - Durable workflow implementation
+- `src/App.tsx` - React UI demonstrating both modes
+- `wrangler.jsonc` - Cloudflare configuration

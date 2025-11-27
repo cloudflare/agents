@@ -109,6 +109,17 @@ export interface TaskMethodMetadata {
 /** Storage for task method metadata */
 export const taskMethodMetadata = new Map<Function, TaskMethodMetadata>();
 
+/** Storage for original task method implementations by class+method name */
+export const taskMethodOriginals = new Map<string, Function>();
+
+/** Helper to create a unique key for a task method */
+export function getTaskMethodKey(
+  className: string,
+  methodName: string
+): string {
+  return `${className}::${methodName}`;
+}
+
 /**
  * Decorator that marks a method as a task
  *
@@ -143,6 +154,7 @@ export function task(options: TaskMethodMetadata = {}) {
         input: unknown,
         opts: TaskOptions
       ) => Promise<TaskHandle>;
+      constructor: { name: string };
     },
     Args extends [unknown, TaskContext?],
     Return
@@ -166,8 +178,14 @@ export function task(options: TaskMethodMetadata = {}) {
       }) as Promise<TaskHandle<Return>>;
     }
 
-    // Store the original method so _executeTask can find it
-    (wrapper as unknown as { _taskMethod: typeof target })._taskMethod = target;
+    // Store the original method once we know the class name
+    context.addInitializer(function (this: This) {
+      const className = this.constructor.name;
+      const key = getTaskMethodKey(className, methodName);
+      if (!taskMethodOriginals.has(key)) {
+        taskMethodOriginals.set(key, target);
+      }
+    });
 
     // Register as callable so RPC works
     callableMetadata.set(wrapper, {});
@@ -281,6 +299,9 @@ export class TaskTracker {
   private sql: SqlExecutor;
   private syncToState: StateSyncCallback;
   private abortControllers = new Map<string, AbortController>();
+  private taskTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+  private pendingSync = new Set<string>();
+  private syncTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(sql: SqlExecutor, syncToState: StateSyncCallback) {
     this.sql = sql;
@@ -309,6 +330,55 @@ export class TaskTracker {
     this.sql`
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON cf_agents_tasks(status)
     `;
+
+    // Clean up stale tasks from previous runs (pending/running tasks that didn't complete)
+    // This prevents timeout accumulation on restart
+    this.sql`
+      UPDATE cf_agents_tasks 
+      SET status = 'failed', error = 'Agent restarted', completed_at = ${Date.now()}
+      WHERE status IN ('pending', 'running')
+    `;
+  }
+
+  /**
+   * Queue a task sync to be batched with other updates
+   * Debounces rapid updates to prevent state flooding
+   */
+  private queueSync(taskId: string): void {
+    this.pendingSync.add(taskId);
+
+    // Flush immediately for important state changes, debounce for progress
+    if (this.syncTimeout) {
+      clearTimeout(this.syncTimeout);
+    }
+
+    // Batch syncs within 10ms to prevent flooding
+    this.syncTimeout = setTimeout(() => {
+      this.flushSync();
+    }, 10);
+  }
+
+  /**
+   * Flush all pending syncs
+   */
+  private flushSync(): void {
+    if (this.pendingSync.size === 0) return;
+
+    for (const taskId of this.pendingSync) {
+      const task = this.get(taskId);
+      this.syncToState(taskId, task || null);
+    }
+    this.pendingSync.clear();
+    this.syncTimeout = null;
+  }
+
+  /**
+   * Force immediate sync for a task (for important state changes like completion)
+   */
+  private syncNow(taskId: string): void {
+    this.pendingSync.delete(taskId);
+    const task = this.get(taskId);
+    this.syncToState(taskId, task || null);
   }
 
   /**
@@ -348,7 +418,7 @@ export class TaskTracker {
     `;
 
     // Sync to state for real-time updates
-    this.syncToState(id, task);
+    this.syncNow(id);
 
     return task;
   }
@@ -379,16 +449,24 @@ export class TaskTracker {
 
     const task = this.get(taskId);
     if (task) {
-      // Sync to state
-      this.syncToState(taskId, task);
+      // Sync to state - immediate for status change
+      this.syncNow(taskId);
 
-      // Set up timeout if specified
-      if (task.timeoutMs) {
-        setTimeout(() => {
+      // Set up timeout if specified - but limit to prevent timeout accumulation
+      if (task.timeoutMs && this.taskTimeouts.size < 100) {
+        // Clear any existing timeout for this task
+        const existingTimeout = this.taskTimeouts.get(taskId);
+        if (existingTimeout) {
+          clearTimeout(existingTimeout);
+        }
+
+        const timeout = setTimeout(() => {
+          this.taskTimeouts.delete(taskId);
           if (!controller.signal.aborted) {
             this.abort(taskId, "Task timed out");
           }
         }, task.timeoutMs);
+        this.taskTimeouts.set(taskId, timeout);
       }
     }
 
@@ -409,8 +487,8 @@ export class TaskTracker {
     this.cleanupController(taskId);
     this.addEventInternal(taskId, "completed", { result });
 
-    const task = this.get(taskId);
-    if (task) this.syncToState(taskId, task);
+    // Immediate sync for completion
+    this.syncNow(taskId);
   }
 
   /**
@@ -427,8 +505,8 @@ export class TaskTracker {
     this.cleanupController(taskId);
     this.addEventInternal(taskId, "failed", { error });
 
-    const task = this.get(taskId);
-    if (task) this.syncToState(taskId, task);
+    // Immediate sync for failure
+    this.syncNow(taskId);
   }
 
   /**
@@ -459,8 +537,8 @@ export class TaskTracker {
     this.cleanupController(taskId);
     this.addEventInternal(taskId, "aborted", { reason });
 
-    const updatedTask = this.get(taskId);
-    if (updatedTask) this.syncToState(taskId, updatedTask);
+    // Immediate sync for abort
+    this.syncNow(taskId);
 
     return true;
   }
@@ -478,9 +556,8 @@ export class TaskTracker {
   addEvent(taskId: string, type: string, data?: unknown): void {
     this.addEventInternal(taskId, type, data);
 
-    // Sync updated task to state
-    const task = this.get(taskId);
-    if (task) this.syncToState(taskId, task);
+    // Debounced sync for events
+    this.queueSync(taskId);
   }
 
   /**
@@ -516,9 +593,8 @@ export class TaskTracker {
       WHERE id = ${taskId}
     `;
 
-    // Sync to state
-    const task = this.get(taskId);
-    if (task) this.syncToState(taskId, task);
+    // Debounced sync for progress updates
+    this.queueSync(taskId);
   }
 
   /**
@@ -630,6 +706,12 @@ export class TaskTracker {
 
   private cleanupController(taskId: string): void {
     this.abortControllers.delete(taskId);
+    // Also clear any pending timeout for this task
+    const timeout = this.taskTimeouts.get(taskId);
+    if (timeout) {
+      clearTimeout(timeout);
+      this.taskTimeouts.delete(taskId);
+    }
   }
 
   private rowToTask(row: TaskRow): Task {

@@ -3,7 +3,7 @@
   "name": "task-runner-example",
   "main": "src/server.ts",
   "compatibility_date": "2025-02-11",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "enable_ctx_exports"],
   "observability": {
     "enabled": true
   },
@@ -23,6 +23,13 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["TaskRunner"]
+    }
+  ],
+  "workflows": [
+    {
+      "name": "analysis-workflow",
+      "binding": "ANALYSIS_WORKFLOW",
+      "class_name": "AnalysisWorkflow"
     }
   ]
 }

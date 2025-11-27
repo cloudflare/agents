@@ -33,6 +33,8 @@ import {
   TaskTracker,
   TasksAccessor,
   createTaskContext,
+  taskMethodOriginals,
+  getTaskMethodKey,
   type Task,
   type TaskContext,
   type TaskHandle,
@@ -474,6 +476,9 @@ export class Agent<
       this._taskTracker
     );
 
+    // Clear any stale queue items from previous runs to prevent task spirals
+    this.sql`DELETE FROM cf_agents_queues WHERE callback = '_executeTask'`;
+
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
       this.mcp.onServerStateChanged(async () => {
@@ -496,6 +501,22 @@ export class Agent<
           // TODO: make zod/ai sdk more performant and remove this
           // Late initialization of jsonSchemaFn (needed for getAITools)
           await this.mcp.ensureJsonSchema();
+
+          // Handle workflow update callbacks
+          const url = new URL(request.url);
+          if (
+            url.pathname === "/_workflow-update" &&
+            request.method === "POST"
+          ) {
+            try {
+              const update = await request.json();
+              this._handleWorkflowUpdate(update);
+              return new Response("ok", { status: 200 });
+            } catch (error) {
+              console.error("[Agent] Failed to handle workflow update:", error);
+              return new Response("error", { status: 500 });
+            }
+          }
 
           // Handle MCP OAuth callback if this is one
           const oauthResponse = await this.handleMcpOAuthCallback(request);
@@ -800,6 +821,98 @@ export class Agent<
   }
 
   /**
+   * Start a Cloudflare Workflow and track it as a task.
+   *
+   * The workflow will receive a WorkflowTaskContext with emit() and setProgress()
+   * methods that sync updates back to this Agent for real-time client notifications.
+   *
+   * @param workflowBinding - The workflow binding name (e.g., "ANALYSIS_WORKFLOW")
+   * @param input - Input parameters for the workflow
+   * @returns TaskHandle for tracking the workflow
+   *
+   * @example
+   * ```typescript
+   * class MyAgent extends Agent<Env> {
+   *   @callable()
+   *   async startLongAnalysis(input: { repoUrl: string }) {
+   *     return this.workflow("ANALYSIS_WORKFLOW", input);
+   *   }
+   * }
+   * ```
+   */
+  async workflow<TInput extends Record<string, unknown>, TResult = unknown>(
+    workflowBinding: string,
+    input: TInput
+  ): Promise<TaskHandle<TResult>> {
+    // 1. Create task record
+    const task = this._taskTracker.create("_workflow", input, {});
+
+    // 2. Get workflow binding
+    const workflowNS = (this.env as Record<string, unknown>)[workflowBinding];
+    if (
+      !workflowNS ||
+      typeof (workflowNS as { create?: unknown }).create !== "function"
+    ) {
+      this._taskTracker.fail(
+        task.id,
+        `Workflow binding ${workflowBinding} not found`
+      );
+      throw new Error(`Workflow binding ${workflowBinding} not found`);
+    }
+
+    // 3. Dispatch workflow with task tracking info
+    const instance = await (
+      workflowNS as {
+        create: (opts: { params: unknown }) => Promise<{ id: string }>;
+      }
+    ).create({
+      params: {
+        ...input,
+        _taskId: task.id,
+        _agentBinding: this._ParentClass.name,
+        _agentName: (this as unknown as { name: string }).name || "default"
+      }
+    });
+
+    // 4. Store workflow instance ID for potential cancellation
+    this._taskTracker.addEvent(task.id, "workflow-started", {
+      instanceId: instance.id,
+      binding: workflowBinding
+    });
+
+    // 5. Return handle
+    return this._taskTracker.getHandle<TResult>(task.id)!;
+  }
+
+  /**
+   * Handle workflow update callbacks
+   * @internal
+   */
+  private _handleWorkflowUpdate(update: {
+    taskId: string;
+    event?: { type: string; data?: unknown };
+    progress?: number;
+    status?: "completed" | "failed";
+    result?: unknown;
+    error?: string;
+  }): void {
+    const { taskId, event, progress, status, result, error } = update;
+
+    if (event) {
+      this._taskTracker.addEvent(taskId, event.type, event.data);
+    }
+    if (progress !== undefined) {
+      this._taskTracker.setProgress(taskId, progress);
+    }
+    if (status === "completed") {
+      this._taskTracker.complete(taskId, result);
+    }
+    if (status === "failed") {
+      this._taskTracker.fail(taskId, error || "Workflow failed");
+    }
+  }
+
+  /**
    * Internal method called by queue to execute a task
    * @internal
    */
@@ -830,9 +943,16 @@ export class Agent<
     }
 
     // Check if this is a @task() decorated method - use original implementation
-    const method =
-      (methodOrWrapper as { _taskMethod?: Function })._taskMethod ||
-      methodOrWrapper;
+    const className = this.constructor.name;
+    const taskKey = getTaskMethodKey(className, methodName);
+    const originalMethod = taskMethodOriginals.get(taskKey);
+    const method = originalMethod || methodOrWrapper;
+
+    // Safety check: if original is same as wrapper, we'd loop forever
+    if (originalMethod && originalMethod === methodOrWrapper) {
+      this._taskTracker.fail(taskId, `Internal error: task method loop`);
+      return;
+    }
 
     // Execute with retries
     let lastError: Error | undefined;
@@ -875,26 +995,36 @@ export class Agent<
    * This triggers automatic broadcast to all connected clients via existing state sync
    * @internal
    */
-  private _syncTaskToState(taskId: string, task: Task | null): void {
-    // Get current state, ensuring we have a tasks object
-    const currentState = (this.state || {}) as Record<string, unknown>;
-    const currentTasks = (currentState._tasks || {}) as Record<string, Task>;
+  // Track last broadcast per task to prevent flooding
+  private _lastTaskBroadcast = new Map<
+    string,
+    { time: number; status: string }
+  >();
 
-    let newTasks: Record<string, Task>;
-    if (task === null) {
-      // Remove task from state
-      const { [taskId]: _, ...rest } = currentTasks;
-      newTasks = rest;
-    } else {
-      // Add/update task in state
-      newTasks = { ...currentTasks, [taskId]: task };
+  /**
+   * Broadcast task update to all connected clients.
+   * Rate-limited to prevent flooding - only sends on status changes or every 500ms.
+   */
+  private _syncTaskToState(taskId: string, task: Task | null): void {
+    if (!task) {
+      this._lastTaskBroadcast.delete(taskId);
+      this.broadcast(
+        JSON.stringify({ type: "CF_AGENT_TASK_UPDATE", taskId, task: null })
+      );
+      return;
     }
 
-    // Update state - this automatically broadcasts to all clients
-    this.setState({
-      ...currentState,
-      _tasks: newTasks
-    } as State);
+    const now = Date.now();
+    const last = this._lastTaskBroadcast.get(taskId);
+    const statusChanged = !last || last.status !== task.status;
+    const timeSinceLast = last ? now - last.time : Infinity;
+
+    if (statusChanged || timeSinceLast >= 500) {
+      this._lastTaskBroadcast.set(taskId, { time: now, status: task.status });
+      this.broadcast(
+        JSON.stringify({ type: "CF_AGENT_TASK_UPDATE", taskId, task })
+      );
+    }
   }
 
   /**
@@ -1849,16 +1979,41 @@ export type AgentOptions<Env> = PartyServerOptions<Env> & {
 };
 
 /**
+ * ExecutionContext with optional exports (ctx.exports API)
+ * @see https://developers.cloudflare.com/changelog/2025-09-26-ctx-exports/
+ */
+export interface ExecutionContextWithExports extends ExecutionContext {
+  exports?: Record<string, unknown>;
+}
+
+/**
  * Route a request to the appropriate Agent
  * @param request Request to route
  * @param env Environment containing Agent bindings
- * @param options Routing options
+ * @param options Routing options (can include ctx for ctx.exports support)
  * @returns Response from the Agent or undefined if no route matched
+ *
+ * @example
+ * ```typescript
+ * // With ctx.exports (recommended - auto bindings)
+ * export default {
+ *   async fetch(request, env, ctx) {
+ *     return routeAgentRequest(request, env, { ctx });
+ *   }
+ * }
+ *
+ * // Without ctx.exports (manual bindings)
+ * export default {
+ *   async fetch(request, env) {
+ *     return routeAgentRequest(request, env);
+ *   }
+ * }
+ * ```
  */
 export async function routeAgentRequest<Env>(
   request: Request,
   env: Env,
-  options?: AgentOptions<Env>
+  options?: AgentOptions<Env> & { ctx?: ExecutionContextWithExports }
 ) {
   const corsHeaders =
     options?.cors === true
@@ -1881,9 +2036,15 @@ export async function routeAgentRequest<Env>(
     );
   }
 
+  // Merge ctx.exports with env if available (ctx.exports takes precedence)
+  // This allows automatic bindings via enable_ctx_exports compatibility flag
+  const mergedEnv = options?.ctx?.exports
+    ? { ...env, ...options.ctx.exports }
+    : env;
+
   let response = await routePartykitRequest(
     request,
-    env as Record<string, unknown>,
+    mergedEnv as Record<string, unknown>,
     {
       prefix: "agents",
       ...(options as PartyServerOptions<Record<string, unknown>>)
@@ -2225,3 +2386,7 @@ export type {
   TaskEvent,
   TaskStatus
 };
+
+// Re-export workflow types for durable task execution
+export { AgentWorkflow } from "./workflow";
+export type { WorkflowTaskContext, WorkflowUpdate } from "./workflow";

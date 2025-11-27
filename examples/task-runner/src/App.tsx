@@ -1,13 +1,11 @@
 /**
  * Task Runner Example - React Client
  *
- * Demonstrates the useTask hook for real-time task tracking
+ * Demonstrates tasks with real-time broadcast updates
  */
 
-import { useState } from "react";
-// Note: Import from source for local development
-// In production, use: import { useAgent, useTask } from "agents/react";
-import { useAgent, useTask } from "../../../packages/agents/src/react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useAgent } from "../../../packages/agents/src/react";
 
 type TaskResult = {
   repoUrl: string;
@@ -20,36 +18,157 @@ type TaskResult = {
   analyzedAt: string;
 };
 
+type TaskStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+
+interface TaskData {
+  id: string;
+  status: TaskStatus;
+  progress?: number;
+  result?: TaskResult;
+  error?: string;
+  events?: Array<{
+    id: string;
+    type: string;
+    data?: unknown;
+    timestamp: number;
+  }>;
+}
+
 function App() {
-  const [taskIds, setTaskIds] = useState<string[]>([]);
+  const [tasks, setTasks] = useState<Map<string, TaskData>>(new Map());
   const [repoUrl, setRepoUrl] = useState(
     "https://github.com/cloudflare/agents"
   );
   const [branch, setBranch] = useState("main");
+  const [isStarting, setIsStarting] = useState(false);
+  const startingRef = useRef(false);
 
   const agent = useAgent({
     agent: "task-runner",
-    name: "default"
+    name: "default",
+    onMessage: (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "CF_AGENT_TASK_UPDATE") {
+          const { taskId, task } = data;
+          setTasks((prev) => {
+            const next = new Map(prev);
+            if (task === null) {
+              next.delete(taskId);
+            } else {
+              next.set(taskId, task);
+            }
+            return next;
+          });
+        }
+      } catch {
+        // Ignore non-JSON messages
+      }
+    }
   });
 
-  const startAnalysis = async () => {
+  // Poll for task updates (fallback when broadcasts are missed)
+  const pollTaskStatus = useCallback(
+    async (taskId: string) => {
+      const maxPolls = 120;
+      for (let i = 0; i < maxPolls; i++) {
+        const delay = i < 10 ? 200 : 500;
+        await new Promise((r) => setTimeout(r, delay));
+        try {
+          const task = (await agent.call("getTask", [
+            taskId
+          ])) as TaskData | null;
+          if (task) {
+            setTasks((prev) => {
+              const next = new Map(prev);
+              next.set(taskId, task);
+              return next;
+            });
+            if (["completed", "failed", "aborted"].includes(task.status)) {
+              return;
+            }
+          }
+        } catch {
+          // Ignore polling errors
+        }
+      }
+    },
+    [agent]
+  );
+
+  // Start quick analysis - protected against double-calls
+  const startQuickAnalysis = useCallback(async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
+    setIsStarting(true);
+
     try {
-      // @task() decorated methods return TaskHandle directly
-      const handle = await agent.call<{ id: string; status: string }>(
-        "analyzeRepo",
-        [{ repoUrl, branch }]
-      );
-      setTaskIds((prev) => [handle.id, ...prev]);
-    } catch (err) {
-      console.error("Failed to start analysis:", err);
+      const handle = await agent.call("quickAnalysis", [{ repoUrl, branch }]);
+      const taskId = (handle as { id: string }).id;
+
+      // Add task to local state immediately
+      setTasks((prev) => {
+        const next = new Map(prev);
+        next.set(taskId, { id: taskId, status: "pending" });
+        return next;
+      });
+
+      // Start polling as fallback for missed broadcasts (immediate first poll)
+      setTimeout(() => pollTaskStatus(taskId), 100);
+    } catch {
+      // Failed to start
+    } finally {
+      startingRef.current = false;
+      setIsStarting(false);
     }
-  };
+  }, [agent, repoUrl, branch, pollTaskStatus]);
+
+  // Start deep analysis using Cloudflare Workflow
+  const startDeepAnalysis = useCallback(async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
+    setIsStarting(true);
+
+    try {
+      const handle = await agent.call("deepAnalysis", [{ repoUrl, branch }]);
+      const taskId = (handle as { id: string }).id;
+
+      setTasks((prev) => {
+        const next = new Map(prev);
+        next.set(taskId, { id: taskId, status: "pending" });
+        return next;
+      });
+
+      // Start polling as fallback (immediate first poll)
+      setTimeout(() => pollTaskStatus(taskId), 100);
+    } catch {
+      // Failed to start
+    } finally {
+      startingRef.current = false;
+      setIsStarting(false);
+    }
+  }, [agent, repoUrl, branch, pollTaskStatus]);
+
+  const abortTask = useCallback(
+    async (taskId: string) => {
+      try {
+        await agent.call("abortTask", [taskId]);
+      } catch {
+        // Failed to abort
+      }
+    },
+    [agent]
+  );
+
+  const taskList = Array.from(tasks.values()).sort(
+    (a, b) => (b.events?.[0]?.timestamp || 0) - (a.events?.[0]?.timestamp || 0)
+  );
 
   return (
     <div className="app">
       <header>
         <h1>🔍 Repo Analyzer</h1>
-        <p>Demonstrates the Agents SDK task system with real-time updates</p>
+        <p>AI-powered repository analysis with real-time updates</p>
       </header>
 
       <section className="create-task">
@@ -73,20 +192,33 @@ function App() {
               placeholder="main"
             />
           </label>
-          <button onClick={startAnalysis} className="primary">
-            Start Analysis
+        </div>
+        <div className="buttons">
+          <button
+            onClick={startQuickAnalysis}
+            className="primary"
+            disabled={isStarting}
+          >
+            {isStarting ? "Starting..." : "⚡ Quick Analysis"}
+          </button>
+          <button
+            onClick={startDeepAnalysis}
+            className="secondary"
+            disabled={isStarting}
+          >
+            {isStarting ? "Starting..." : "🔬 Deep Analysis (Workflow)"}
           </button>
         </div>
       </section>
 
       <section className="tasks">
-        <h2>Tasks ({taskIds.length})</h2>
-        {taskIds.length === 0 ? (
-          <p className="empty">No tasks yet. Create one above!</p>
+        <h2>Tasks ({taskList.length})</h2>
+        {taskList.length === 0 ? (
+          <p className="empty">No tasks yet. Start an analysis above!</p>
         ) : (
           <div className="task-list">
-            {taskIds.map((taskId) => (
-              <TaskCard key={taskId} taskId={taskId} agent={agent} />
+            {taskList.map((task) => (
+              <TaskCard key={task.id} task={task} onAbort={abortTask} />
             ))}
           </div>
         )}
@@ -130,6 +262,7 @@ function App() {
           gap: 1rem;
           align-items: flex-end;
           flex-wrap: wrap;
+          margin-bottom: 1rem;
         }
 
         label {
@@ -151,31 +284,45 @@ function App() {
           min-width: 300px;
         }
 
+        .buttons {
+          display: flex;
+          gap: 1rem;
+        }
+
         button {
-          padding: 0.5rem 1rem;
+          padding: 0.75rem 1.5rem;
           border: none;
-          border-radius: 4px;
+          border-radius: 8px;
           font-size: 1rem;
           cursor: pointer;
-          transition: background-color 0.2s;
+          transition: all 0.2s;
         }
 
         button.primary {
-          background: #0066ff;
+          background: linear-gradient(135deg, #0066ff, #0052cc);
           color: white;
         }
 
-        button.primary:hover {
-          background: #0052cc;
+        button.primary:hover:not(:disabled) {
+          transform: translateY(-2px);
+          box-shadow: 0 4px 12px rgba(0, 102, 255, 0.3);
+        }
+
+        button.secondary {
+          background: linear-gradient(135deg, #7c3aed, #5b21b6);
+          color: white;
+        }
+
+        button.secondary:hover:not(:disabled) {
+          transform: translateY(-2px);
+          box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
         }
 
         button.danger {
           background: #ff4444;
           color: white;
-        }
-
-        button.danger:hover {
-          background: #cc3333;
+          font-size: 0.75rem;
+          padding: 0.5rem 1rem;
         }
 
         button:disabled {
@@ -199,17 +346,13 @@ function App() {
   );
 }
 
-// Task Card Component
 function TaskCard({
-  taskId,
-  agent
+  task,
+  onAbort
 }: {
-  taskId: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  agent: any;
+  task: TaskData;
+  onAbort: (id: string) => void;
 }) {
-  const task = useTask<TaskResult>(agent, taskId);
-
   const getStatusColor = () => {
     switch (task.status) {
       case "pending":
@@ -244,37 +387,43 @@ function TaskCard({
     }
   };
 
+  const isRunning = task.status === "pending" || task.status === "running";
+
   return (
     <div className="task-card">
       <div className="task-header">
         <span className="task-status" style={{ color: getStatusColor() }}>
           {getStatusEmoji()} {task.status.toUpperCase()}
         </span>
-        <span className="task-id">{taskId.slice(0, 12)}...</span>
+        <span className="task-id">{task.id.slice(0, 16)}...</span>
       </div>
 
-      {task.isRunning && (
+      {isRunning && task.progress !== undefined && (
         <div className="progress-bar">
           <div
             className="progress-fill"
-            style={{ width: `${task.progress || 0}%` }}
+            style={{ width: `${task.progress}%` }}
           />
-          <span className="progress-text">
-            {Math.round(task.progress || 0)}%
-          </span>
+          <span className="progress-text">{Math.round(task.progress)}%</span>
         </div>
       )}
 
-      <div className="task-events">
-        {task.events.slice(-3).map((event) => (
-          <div key={event.id} className="event">
-            <span className="event-type">{event.type}</span>
-            <span className="event-data">{JSON.stringify(event.data)}</span>
-          </div>
-        ))}
-      </div>
+      {task.events && task.events.length > 0 && (
+        <div className="task-events">
+          {task.events.slice(-3).map((event) => (
+            <div key={event.id} className="event">
+              <span className="event-type">{event.type}</span>
+              {event.data !== undefined && (
+                <span className="event-data">
+                  {String(JSON.stringify(event.data))}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
-      {task.isSuccess && task.result && (
+      {task.status === "completed" && task.result && (
         <div className="task-result">
           <div className="result-section">
             <strong>Summary</strong>
@@ -284,7 +433,7 @@ function TaskCard({
             <strong>Architecture</strong>
             <p>{task.result.architecture}</p>
           </div>
-          {task.result.techStack.length > 0 && (
+          {task.result.techStack && task.result.techStack.length > 0 && (
             <div className="result-section">
               <strong>Tech Stack</strong>
               <div className="tags">
@@ -296,7 +445,7 @@ function TaskCard({
               </div>
             </div>
           )}
-          {task.result.suggestions.length > 0 && (
+          {task.result.suggestions && task.result.suggestions.length > 0 && (
             <div className="result-section">
               <strong>Suggestions</strong>
               <ul>
@@ -313,16 +462,16 @@ function TaskCard({
         </div>
       )}
 
-      {task.isError && task.error && (
+      {task.status === "failed" && task.error && (
         <div className="task-error">
           <strong>Error:</strong> {task.error}
         </div>
       )}
 
-      {task.isRunning && (
+      {isRunning && (
         <div className="task-actions">
-          <button className="danger" onClick={() => task.abort()}>
-            Abort Task
+          <button className="danger" onClick={() => onAbort(task.id)}>
+            Abort
           </button>
         </div>
       )}
@@ -480,16 +629,6 @@ function TaskCard({
         .task-actions {
           display: flex;
           gap: 0.5rem;
-        }
-
-        .task-actions button {
-          font-size: 0.75rem;
-          padding: 0.25rem 0.5rem;
-          background: #f0f0f0;
-        }
-
-        .task-actions button:hover {
-          background: #e0e0e0;
         }
       `}</style>
     </div>
