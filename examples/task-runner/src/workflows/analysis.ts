@@ -38,7 +38,7 @@ interface AnalysisResult {
 }
 
 type Env = {
-  TaskRunner: DurableObjectNamespace;
+  "task-runner": DurableObjectNamespace;
   OPENAI_API_KEY: string;
 };
 

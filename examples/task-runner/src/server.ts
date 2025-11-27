@@ -27,7 +27,7 @@ interface Workflow {
 }
 
 type Env = {
-  TaskRunner: DurableObjectNamespace<TaskRunner>;
+  "task-runner": DurableObjectNamespace<TaskRunner>;
   ANALYSIS_WORKFLOW: Workflow;
   OPENAI_API_KEY: string;
 };

@@ -861,6 +861,8 @@ export class Agent<
     }
 
     // 3. Dispatch workflow with task tracking info
+    // Use kebab-case for binding name to match wrangler.jsonc convention
+    const agentBinding = camelCaseToKebabCase(this._ParentClass.name);
     const instance = await (
       workflowNS as {
         create: (opts: { params: unknown }) => Promise<{ id: string }>;
@@ -869,7 +871,7 @@ export class Agent<
       params: {
         ...input,
         _taskId: task.id,
-        _agentBinding: this._ParentClass.name,
+        _agentBinding: agentBinding,
         _agentName: (this as unknown as { name: string }).name || "default"
       }
     });

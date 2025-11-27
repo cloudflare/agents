@@ -14,7 +14,7 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "TaskRunner",
+        "name": "task-runner",
         "class_name": "TaskRunner"
       }
     ]
