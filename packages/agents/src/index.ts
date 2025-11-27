@@ -29,6 +29,19 @@ import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import {
+  TaskTracker,
+  TasksAccessor,
+  createTaskContext,
+  type Task,
+  type TaskContext,
+  type TaskHandle,
+  type TaskOptions,
+  type TaskFilter,
+  type TaskEvent,
+  type TaskStatus,
+  type TaskExecutionPayload
+} from "./task";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -104,51 +117,20 @@ function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
   );
 }
 
-/**
- * Metadata for a callable method
- */
-export type CallableMetadata = {
-  /** Optional description of what the method does */
-  description?: string;
-  /** Whether the method supports streaming responses */
-  streaming?: boolean;
-};
+// Import callable decorator and metadata from shared module
+import {
+  callable as callableDecorator,
+  unstable_callable as unstableCallableDecorator,
+  callableMetadata,
+  type CallableMetadata
+} from "./callable";
 
-const callableMetadata = new Map<Function, CallableMetadata>();
-
-/**
- * Decorator that marks a method as callable by clients
- * @param metadata Optional metadata about the callable method
- */
-export function callable(metadata: CallableMetadata = {}) {
-  return function callableDecorator<This, Args extends unknown[], Return>(
-    target: (this: This, ...args: Args) => Return,
-    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
-    context: ClassMethodDecoratorContext
-  ) {
-    if (!callableMetadata.has(target)) {
-      callableMetadata.set(target, metadata);
-    }
-
-    return target;
-  };
-}
-
-let didWarnAboutUnstableCallable = false;
-
-/**
- * Decorator that marks a method as callable by clients
- * @deprecated this has been renamed to callable, and unstable_callable will be removed in the next major version
- * @param metadata Optional metadata about the callable method
- */
-export const unstable_callable = (metadata: CallableMetadata = {}) => {
-  if (!didWarnAboutUnstableCallable) {
-    didWarnAboutUnstableCallable = true;
-    console.warn(
-      "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
-    );
-  }
-  callable(metadata);
+// Re-export for public API
+export {
+  callableDecorator as callable,
+  unstableCallableDecorator as unstable_callable,
+  callableMetadata,
+  type CallableMetadata
 };
 
 export type QueueItem<T = string> = {
@@ -313,6 +295,29 @@ export class Agent<
   readonly mcp: MCPClientManager;
 
   /**
+   * Task tracker for tracking async work lifecycle
+   * @internal
+   */
+  private _taskTracker!: TaskTracker;
+
+  /**
+   * Tasks accessor for managing tracked tasks
+   *
+   * @example
+   * ```typescript
+   * // Get a task
+   * const task = this.tasks.get(taskId);
+   *
+   * // List running tasks
+   * const running = this.tasks.list({ status: 'running' });
+   *
+   * // Cancel a task
+   * this.tasks.cancel(taskId);
+   * ```
+   */
+  readonly tasks!: TasksAccessor;
+
+  /**
    * Initial state for the Agent
    * Override to provide default state values
    */
@@ -454,6 +459,20 @@ export class Agent<
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
       storage: this.ctx.storage
     });
+
+    // Initialize TaskTracker for tracking async work lifecycle
+    // - Execution is handled by the queue system
+    // - Real-time sync is handled by the state system
+    this._taskTracker = new TaskTracker(
+      this.sql.bind(this),
+      // Sync task updates to state for automatic broadcast to clients
+      (taskId: string, task: Task | null) => {
+        this._syncTaskToState(taskId, task);
+      }
+    );
+    (this as { tasks: TasksAccessor }).tasks = new TasksAccessor(
+      this._taskTracker
+    );
 
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
@@ -699,6 +718,183 @@ export class Agent<
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
+  }
+
+  // ============================================================================
+  // Task System
+  // ============================================================================
+
+  /**
+   * Run a method as a tracked task with lifecycle management.
+   *
+   * Tasks provide:
+   * - Automatic status tracking (pending → running → completed/failed/aborted)
+   * - Progress events via ctx.emit()
+   * - Abort handling via ctx.signal
+   * - Timeout support
+   * - Retry support
+   * - Persistence across agent restarts
+   *
+   * @param methodName Name of the method to run as a task
+   * @param input Input payload to pass to the method
+   * @param options Task options (timeout, retries, custom ID)
+   * @returns TaskHandle with the task ID and status
+   *
+   * @example
+   * ```typescript
+   * class MyAgent extends Agent<Env> {
+   *   async createTask(input: string) {
+   *     // Start a task - returns immediately with task handle
+   *     const task = await this.task("processData", { input }, {
+   *       timeout: "5m",
+   *       retries: 2
+   *     });
+   *     return { taskId: task.id };
+   *   }
+   *
+   *   // The task method receives input and context
+   *   async processData(input: { input: string }, ctx: TaskContext) {
+   *     ctx.emit("starting", { step: 1 });
+   *
+   *     // Check for abort
+   *     if (ctx.signal.aborted) throw new Error("Aborted");
+   *
+   *     ctx.setProgress(50);
+   *     const result = await this.doWork(input.input);
+   *
+   *     return { result };
+   *   }
+   * }
+   * ```
+   */
+  async task<TInput, TResult = unknown>(
+    methodName: keyof this & string,
+    input: TInput,
+    options: TaskOptions = {}
+  ): Promise<TaskHandle<TResult>> {
+    // Validate method exists
+    const method = this[methodName];
+    if (typeof method !== "function") {
+      throw new Error(`Method ${methodName} does not exist on this agent`);
+    }
+
+    // 1. Create task record for tracking
+    const task = this._taskTracker.create(methodName, input, options);
+
+    // 2. Queue execution using the existing queue system
+    const payload: TaskExecutionPayload = {
+      taskId: task.id,
+      methodName,
+      input,
+      timeoutMs: task.timeoutMs,
+      retries: options.retries
+    };
+
+    const queueId = await this.queue("_executeTask" as keyof this, payload);
+
+    // Link task to queue item
+    this._taskTracker.linkToQueue(task.id, queueId);
+
+    // 3. Return handle immediately (task runs in background)
+    return this._taskTracker.getHandle<TResult>(task.id)!;
+  }
+
+  /**
+   * Internal method called by queue to execute a task
+   * @internal
+   */
+  async _executeTask(
+    payload: TaskExecutionPayload,
+    _queueItem: QueueItem<string>
+  ): Promise<void> {
+    const { taskId, methodName, input, retries = 0 } = payload;
+
+    // Check if task was already aborted before execution
+    const existingTask = this._taskTracker.get(taskId);
+    if (!existingTask || existingTask.status === "aborted") {
+      return;
+    }
+
+    // Mark task as running and get abort controller
+    const controller = this._taskTracker.markRunning(taskId);
+
+    // Create task context
+    const ctx = createTaskContext(taskId, this._taskTracker);
+
+    // Get the method to execute
+    // If method was decorated with @task(), get the original implementation
+    const methodOrWrapper = this[methodName as keyof this];
+    if (typeof methodOrWrapper !== "function") {
+      this._taskTracker.fail(taskId, `Method ${methodName} not found`);
+      return;
+    }
+
+    // Check if this is a @task() decorated method - use original implementation
+    const method =
+      (methodOrWrapper as { _taskMethod?: Function })._taskMethod ||
+      methodOrWrapper;
+
+    // Execute with retries
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      if (controller.signal.aborted) {
+        return; // Already marked as aborted by the tracker
+      }
+
+      try {
+        const result = await (method as Function).call(this, input, ctx);
+        this._taskTracker.complete(taskId, result);
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        if (attempt < retries && !controller.signal.aborted) {
+          // Add retry event
+          this._taskTracker.addEvent(taskId, "retry", {
+            attempt: attempt + 1,
+            maxRetries: retries,
+            error: lastError.message
+          });
+          // Exponential backoff
+          await new Promise((r) =>
+            setTimeout(r, Math.min(1000 * 2 ** attempt, 30000))
+          );
+        }
+      }
+    }
+
+    // All retries exhausted
+    if (!controller.signal.aborted) {
+      this._taskTracker.fail(taskId, lastError?.message || "Unknown error");
+    }
+  }
+
+  /**
+   * Sync a task update to the agent's state
+   * This triggers automatic broadcast to all connected clients via existing state sync
+   * @internal
+   */
+  private _syncTaskToState(taskId: string, task: Task | null): void {
+    // Get current state, ensuring we have a tasks object
+    const currentState = (this.state || {}) as Record<string, unknown>;
+    const currentTasks = (currentState._tasks || {}) as Record<string, Task>;
+
+    let newTasks: Record<string, Task>;
+    if (task === null) {
+      // Remove task from state
+      const { [taskId]: _, ...rest } = currentTasks;
+      newTasks = rest;
+    } else {
+      // Add/update task in state
+      newTasks = { ...currentTasks, [taskId]: task };
+    }
+
+    // Update state - this automatically broadcasts to all clients
+    this.setState({
+      ...currentState,
+      _tasks: newTasks
+    } as State);
   }
 
   /**
@@ -2017,3 +2213,15 @@ export class StreamingResponse {
     this._connection.send(JSON.stringify(response));
   }
 }
+
+// Re-export task decorator and types for convenience
+export { task } from "./task";
+export type {
+  Task,
+  TaskContext,
+  TaskHandle,
+  TaskOptions,
+  TaskFilter,
+  TaskEvent,
+  TaskStatus
+};
