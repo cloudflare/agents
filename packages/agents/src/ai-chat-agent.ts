@@ -343,13 +343,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             // Batch mode: buffer the latest request and use debounce
             this._pendingChatRequest = request;
 
-            // If currently processing, the pending request will be picked up
-            // after current processing completes
-            if (this._isProcessingChat) {
-              return;
-            }
-
-            // Start/reset the debounce timer
+            // Always schedule processing to ensure a timer exists.
+            // This handles edge cases like DO eviction during processing
+            // where _isProcessingChat is lost but pending request exists.
+            // _processPendingRequest() will check _isProcessingChat and skip if needed.
             this._scheduleProcessing();
           }
           return;

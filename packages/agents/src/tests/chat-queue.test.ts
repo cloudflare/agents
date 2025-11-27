@@ -64,13 +64,19 @@ describe("Chat Message Batching (batch mode)", () => {
       }
     });
 
-    // Send 3 messages rapidly (before debounce fires)
+    // Wait for connection to be fully established
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Send 3 messages with small delays (well within 300ms debounce window)
+    // This ensures deterministic behavior - all messages arrive before timer fires
     const msg1 = createUserMessage("msg1", "First message");
     const msg2 = createUserMessage("msg2", "Second message");
     const msg3 = createUserMessage("msg3", "Third message");
 
     ws.send(createChatRequest("req1", [msg1]));
+    await new Promise((resolve) => setTimeout(resolve, 20)); // 20ms << 300ms debounce
     ws.send(createChatRequest("req2", [msg1, msg2]));
+    await new Promise((resolve) => setTimeout(resolve, 20)); // 40ms total << 300ms
     ws.send(createChatRequest("req3", [msg1, msg2, msg3]));
 
     const done = await donePromise;
@@ -359,15 +365,19 @@ describe("Chat Message Batching (batch mode)", () => {
       }
     });
 
-    // Send messages with small delays (but within debounce window)
+    // Wait for connection to be fully established
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Send messages with small delays (well within 300ms debounce window)
+    // Each message resets the timer, so only the last should be processed
     const msg1 = createUserMessage("msg1", "Message 1");
     const msg2 = createUserMessage("msg2", "Message 2");
     const msg3 = createUserMessage("msg3", "Message 3");
 
     ws.send(createChatRequest("req1", [msg1]));
-    await new Promise((resolve) => setTimeout(resolve, 100)); // 100ms
+    await new Promise((resolve) => setTimeout(resolve, 50)); // 50ms << 300ms debounce
     ws.send(createChatRequest("req2", [msg1, msg2]));
-    await new Promise((resolve) => setTimeout(resolve, 100)); // 200ms total
+    await new Promise((resolve) => setTimeout(resolve, 50)); // 100ms total << 300ms
     ws.send(createChatRequest("req3", [msg1, msg2, msg3]));
 
     // The debounce should reset each time, so only req3 gets processed
