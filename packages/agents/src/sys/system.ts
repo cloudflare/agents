@@ -7,7 +7,13 @@ import { getAgentByName } from "..";
 import { SystemAgent } from "./agent";
 import { Agency } from "./agent/agency";
 import { AgentEventType } from "./events";
-import { planning, filesystem, subagents, getToolMeta } from "./middleware";
+import {
+  planning,
+  filesystem,
+  subagents,
+  sandbox,
+  getToolMeta
+} from "./middleware";
 import { makeOpenAI, type Provider } from "./providers";
 import type {
   ToolHandler,
@@ -101,7 +107,8 @@ export class AgentSystem<TConfig = Record<string, unknown>> {
   defaults() {
     return this.use(planning, ["default"])
       .use(filesystem, ["default"])
-      .use(subagents, ["default"]);
+      .use(subagents, ["default"])
+      .use(sandbox, ["sandbox"]);
   }
 
   addTool(handler: ToolHandler, tags?: string[]): AgentSystem<TConfig> {

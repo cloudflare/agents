@@ -21,7 +21,7 @@ import {
 import { AgentEventType } from "../events";
 import { getAgentByName } from "../../";
 import type { AgentEnv } from "..";
-import { tool, type ToolContext } from "./tools";
+import { tool } from "./tools";
 
 export function defineMiddleware<TConfig>(
   mw: Omit<AgentMiddleware<TConfig>, "__configType">
@@ -394,3 +394,6 @@ export {
   type ToolResult,
   type ToolContext
 } from "./tools";
+
+// Re-export sandbox middleware
+export { sandbox, type SandboxConfig } from "./sandbox";

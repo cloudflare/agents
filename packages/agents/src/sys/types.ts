@@ -142,7 +142,10 @@ export interface AgentEnv {
   AGENCY: DurableObjectNamespace<Agency>;
   LLM_API_KEY?: string;
   LLM_API_BASE?: string;
+  /** R2 bucket for persistent agent filesystem */
   FS?: R2Bucket;
+  /** Sandbox Durable Object for ephemeral container execution */
+  SANDBOX?: DurableObjectNamespace;
 }
 
 export type MWContext = {

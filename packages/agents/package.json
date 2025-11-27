@@ -47,11 +47,15 @@
     "x402": "^0.7.1"
   },
   "peerDependencies": {
+    "@cloudflare/sandbox": ">=0.1.0",
     "react": "*",
     "viem": ">=2.0.0",
     "x402": "^0.7.1"
   },
   "peerDependenciesMeta": {
+    "@cloudflare/sandbox": {
+      "optional": true
+    },
     "x402": {
       "optional": true
     },

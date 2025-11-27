@@ -8,5 +8,8 @@
     "deploy": "wrangler deploy",
     "types": "wrangler types --include-runtime false"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@cloudflare/sandbox": "^0.5.6"
+  }
 }

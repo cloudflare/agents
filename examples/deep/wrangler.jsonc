@@ -10,6 +10,10 @@
       {
         "class_name": "Agency",
         "name": "AGENCY"
+      },
+      {
+        "class_name": "Sandbox",
+        "name": "SANDBOX"
       }
     ]
   },
@@ -25,10 +29,19 @@
       "name": "agent-files"
     }
   ],
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "lite",
+      // Increase for multiple concurrent code reviews
+      "max_instances": 5
+    }
+  ],
   "main": "src/index.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["SystemAgent", "Agency"],
+      "new_sqlite_classes": ["SystemAgent", "Agency", "Sandbox"],
       "tag": "v1"
     }
   ],
