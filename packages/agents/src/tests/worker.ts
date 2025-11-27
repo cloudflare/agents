@@ -535,38 +535,37 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   @callable()
   testStartStream(requestId: string): string {
-    // Access private method via any cast for testing
-    return (this as any)._startStream(requestId);
+    return this._startStream(requestId);
   }
 
   @callable()
   testStoreStreamChunk(streamId: string, body: string): void {
-    (this as any)._storeStreamChunk(streamId, body);
+    this._storeStreamChunk(streamId, body);
   }
 
   @callable()
   testFlushChunkBuffer(): void {
-    (this as any)._flushChunkBuffer();
+    this._flushChunkBuffer();
   }
 
   @callable()
   testCompleteStream(streamId: string): void {
-    (this as any)._completeStream(streamId);
+    this._completeStream(streamId);
   }
 
   @callable()
   testMarkStreamError(streamId: string): void {
-    (this as any)._markStreamError(streamId);
+    this._markStreamError(streamId);
   }
 
   @callable()
   getActiveStreamId(): string | null {
-    return (this as any)._activeStreamId;
+    return this._activeStreamId;
   }
 
   @callable()
   getActiveRequestId(): string | null {
-    return (this as any)._activeRequestId;
+    return this._activeRequestId;
   }
 
   @callable()
@@ -626,7 +625,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   @callable()
   testRestoreActiveStream(): void {
-    (this as any)._restoreActiveStream();
+    this._restoreActiveStream();
   }
 }
 
