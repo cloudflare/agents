@@ -1,7 +1,35 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker, { type Env } from "./worker";
-import { MessageType } from "../ai-types";
+import { MessageType, type OutgoingMessage } from "../ai-types";
+
+function isStreamResumingMessage(
+  m: unknown
+): m is Extract<
+  OutgoingMessage,
+  { type: MessageType.CF_AGENT_STREAM_RESUMING }
+> {
+  return (
+    typeof m === "object" &&
+    m !== null &&
+    "type" in m &&
+    m.type === MessageType.CF_AGENT_STREAM_RESUMING
+  );
+}
+
+function isUseChatResponseMessage(
+  m: unknown
+): m is Extract<
+  OutgoingMessage,
+  { type: MessageType.CF_AGENT_USE_CHAT_RESPONSE }
+> {
+  return (
+    typeof m === "object" &&
+    m !== null &&
+    "type" in m &&
+    m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
+  );
+}
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -180,11 +208,9 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 100));
 
-      const resumeMsg = messages2.find(
-        (m: any) => m.type === MessageType.CF_AGENT_STREAM_RESUMING
-      );
+      const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeDefined();
-      expect((resumeMsg as any).id).toBe("req-resume");
+      expect(resumeMsg?.id).toBe("req-resume");
 
       ws2.close();
     });
@@ -234,16 +260,10 @@ describe("Resumable Streaming", () => {
       await new Promise((r) => setTimeout(r, 100));
 
       // Should receive the chunks
-      const chunkMsgs = messages2.filter(
-        (m: any) => m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
-      );
+      const chunkMsgs = messages2.filter(isUseChatResponseMessage);
       expect(chunkMsgs.length).toBeGreaterThanOrEqual(2);
-      expect((chunkMsgs[0] as any).body).toBe(
-        '{"type":"text","text":"chunk1"}'
-      );
-      expect((chunkMsgs[1] as any).body).toBe(
-        '{"type":"text","text":"chunk2"}'
-      );
+      expect(chunkMsgs[0].body).toBe('{"type":"text","text":"chunk1"}');
+      expect(chunkMsgs[1].body).toBe('{"type":"text","text":"chunk2"}');
 
       ws2.close();
     });
@@ -289,9 +309,7 @@ describe("Resumable Streaming", () => {
       await new Promise((r) => setTimeout(r, 100));
 
       // Should NOT receive chunks (only state/mcp messages)
-      const chunkMsgs = messages2.filter(
-        (m: any) => m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
-      );
+      const chunkMsgs = messages2.filter(isUseChatResponseMessage);
       expect(chunkMsgs.length).toBe(0);
 
       ws2.close();
@@ -505,9 +523,7 @@ describe("Resumable Streaming", () => {
       await new Promise((r) => setTimeout(r, 100));
 
       // Should NOT get resume notification for completed stream
-      const resumeMsg = messages2.find(
-        (m: any) => m.type === MessageType.CF_AGENT_STREAM_RESUMING
-      );
+      const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeUndefined();
 
       ws2.close();

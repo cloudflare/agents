@@ -114,7 +114,9 @@ export class MCPClientManager {
   private _storage: DurableObjectStorage;
   private _isRestored = false;
 
-  private readonly _onObservabilityEvent = new Emitter<MCPObservabilityEvent>();
+  /** @internal Protected for testing purposes. */
+  protected readonly _onObservabilityEvent =
+    new Emitter<MCPObservabilityEvent>();
   public readonly onObservabilityEvent: Event<MCPObservabilityEvent> =
     this._onObservabilityEvent.event;
 
@@ -1013,7 +1015,7 @@ export class MCPClientManager {
     if (this.mcpConnections[serverId]) {
       try {
         await this.closeConnection(serverId);
-      } catch (e) {
+      } catch (_e) {
         // Ignore errors when closing
       }
     }

@@ -7,7 +7,8 @@
   "name": "@cloudflare/agents-mcp-example",
   "private": true,
   "scripts": {
-    "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"vite dev\" --kill-others"
+    "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"vite dev\" --kill-others",
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
   "type": "module"
 }

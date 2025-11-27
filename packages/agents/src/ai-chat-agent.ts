@@ -76,13 +76,15 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Currently active stream ID for resumable streaming.
    * Stored in memory for quick access; persisted in stream_metadata table.
+   * @internal Protected for testing purposes.
    */
-  private _activeStreamId: string | null = null;
+  protected _activeStreamId: string | null = null;
 
   /**
    * Request ID associated with the active stream.
+   * @internal Protected for testing purposes.
    */
-  private _activeRequestId: string | null = null;
+  protected _activeRequestId: string | null = null;
 
   /**
    * Current chunk index for the active stream
@@ -303,8 +305,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * Restore active stream state if the agent was restarted during streaming.
    * Called during construction to recover any interrupted streams.
    * Validates stream freshness to avoid sending stale resume notifications.
+   * @internal Protected for testing purposes.
    */
-  private _restoreActiveStream() {
+  protected _restoreActiveStream() {
     const activeStreams = this.sql<StreamMetadata>`
       select * from cf_ai_chat_stream_metadata 
       where status = 'streaming' 
@@ -414,8 +417,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * Buffer a stream chunk for batch write to SQLite.
    * @param streamId - The stream this chunk belongs to
    * @param body - The serialized chunk body
+   * @internal Protected for testing purposes.
    */
-  private _storeStreamChunk(streamId: string, body: string) {
+  protected _storeStreamChunk(streamId: string, body: string) {
     // Force flush if buffer is at max to prevent memory issues
     if (this._chunkBuffer.length >= CHUNK_BUFFER_MAX_SIZE) {
       this._flushChunkBuffer();
@@ -438,8 +442,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Flush buffered chunks to SQLite in a single batch.
    * Uses a lock to prevent concurrent flush operations.
+   * @internal Protected for testing purposes.
    */
-  private _flushChunkBuffer() {
+  protected _flushChunkBuffer() {
     // Prevent concurrent flushes
     if (this._isFlushingChunks || this._chunkBuffer.length === 0) {
       return;
@@ -468,8 +473,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * Creates metadata entry in SQLite and sets up tracking state.
    * @param requestId - The unique ID of the chat request
    * @returns The generated stream ID
+   * @internal Protected for testing purposes.
    */
-  private _startStream(requestId: string): string {
+  protected _startStream(requestId: string): string {
     // Flush any pending chunks from previous streams to prevent mixing
     this._flushChunkBuffer();
 
@@ -489,8 +495,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Mark a stream as completed and flush any pending chunks.
    * @param streamId - The stream to mark as completed
+   * @internal Protected for testing purposes.
    */
-  private _completeStream(streamId: string) {
+  protected _completeStream(streamId: string) {
     // Flush any pending chunks before completing
     this._flushChunkBuffer();
 
@@ -648,9 +655,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
        * a chat message is received.
        * So it's safe to delay loading it until a chat message is received.
        */
-      const { getToolName, isToolUIPart, parsePartialJson } = await import(
-        "ai"
-      );
+      const { getToolName, isToolUIPart, parsePartialJson } =
+        await import("ai");
 
       const reader = response.body.getReader();
 
@@ -1305,8 +1311,9 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Mark a stream as errored and clean up state.
    * @param streamId - The stream to mark as errored
+   * @internal Protected for testing purposes.
    */
-  private _markStreamError(streamId: string) {
+  protected _markStreamError(streamId: string) {
     // Flush any pending chunks before marking error
     this._flushChunkBuffer();
 

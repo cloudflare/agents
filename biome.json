@@ -47,7 +47,8 @@
         "noImportantStyles": "off"
       },
       "suspicious": {
-        "noExplicitAny": "warn"
+        "noExplicitAny": "error",
+        "noEmptyInterface": "off"
       },
       "recommended": true,
       "style": {
