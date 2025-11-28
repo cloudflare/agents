@@ -9,7 +9,7 @@ type FilePreview = {
   previewUrl: string;
 };
 
-// Icons as simple SVG components
+// Icons as simple SVG components (decorative, so aria-hidden)
 const SendIcon = () => (
   <svg
     width="20"
@@ -20,6 +20,7 @@ const SendIcon = () => (
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
+    aria-hidden="true"
   >
     <line x1="22" y1="2" x2="11" y2="13" />
     <polygon points="22 2 15 22 11 13 2 9 22 2" />
@@ -36,6 +37,7 @@ const AttachmentIcon = () => (
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
+    aria-hidden="true"
   >
     <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
   </svg>
@@ -51,6 +53,7 @@ const XIcon = () => (
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
+    aria-hidden="true"
   >
     <line x1="18" y1="6" x2="6" y2="18" />
     <line x1="6" y1="6" x2="18" y2="18" />
@@ -67,6 +70,7 @@ const FileIcon = () => (
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
+    aria-hidden="true"
   >
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
     <polyline points="14 2 14 8 20 8" />
@@ -83,6 +87,7 @@ const ImageIcon = () => (
     strokeWidth="2"
     strokeLinecap="round"
     strokeLinejoin="round"
+    aria-hidden="true"
   >
     <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
     <circle cx="8.5" cy="8.5" r="1.5" />
@@ -99,6 +104,21 @@ function Chat() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const [files, setFiles] = useState<FilePreview[]>([]);
+  const filesRef = useRef<FilePreview[]>([]);
+
+  // Keep ref in sync for cleanup
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  // Cleanup on unmount - use ref to get current files
+  useEffect(() => {
+    return () => {
+      for (const fp of filesRef.current) {
+        if (fp.previewUrl) URL.revokeObjectURL(fp.previewUrl);
+      }
+    };
+  }, []);
 
   const addFiles = useCallback((fileList: FileList) => {
     const newPreviews = Array.from(fileList).map((file) => ({
@@ -125,15 +145,6 @@ function Chat() {
       }
       return [];
     });
-  }, []);
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      for (const fp of files) {
-        if (fp.previewUrl) URL.revokeObjectURL(fp.previewUrl);
-      }
-    };
   }, []);
 
   const agent = useAgent({
@@ -268,6 +279,7 @@ function Chat() {
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="1.5"
+                aria-hidden="true"
               >
                 <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
               </svg>

@@ -697,9 +697,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       ) {
         // Keep metadata but remove the actual data URL
         // Replace with a placeholder that indicates a file was attached
+        // Truncate filename to avoid exceeding SQLite limits with very long names
+        const filename =
+          (part as { filename?: string }).filename || "attachment";
+        const truncatedName =
+          filename.length > 100 ? filename.slice(0, 100) : filename;
         return {
           ...part,
-          url: `file:removed:${(part as { filename?: string }).filename || "attachment"}`
+          url: `file:removed:${truncatedName}`
         };
       }
       return part;
