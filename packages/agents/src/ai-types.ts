@@ -10,6 +10,9 @@ export enum MessageType {
   CF_AGENT_CHAT_CLEAR = "cf_agent_chat_clear",
   CF_AGENT_CHAT_REQUEST_CANCEL = "cf_agent_chat_request_cancel",
 
+  /** Sent by client when user is typing to delay processing */
+  CF_AGENT_TYPING = "cf_agent_typing",
+
   /** Sent by server when client connects and there's an active stream to resume */
   CF_AGENT_STREAM_RESUMING = "cf_agent_stream_resuming",
   /** Sent by client to acknowledge stream resuming notification and request chunks */
@@ -99,4 +102,8 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_RESUME_ACK;
       /** The request ID of the stream being resumed */
       id: string;
+    }
+  | {
+      /** Indicates the user is currently typing - resets the processing delay */
+      type: MessageType.CF_AGENT_TYPING;
     };
