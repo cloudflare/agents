@@ -13,21 +13,7 @@ type Env = {
   ResumableStreamingChat: AgentNamespace<ResumableStreamingChat>;
 };
 
-/**
- * Resumable Streaming Chat Agent
- *
- * This example demonstrates automatic resumable streaming built into AIChatAgent.
- * When a client disconnects and reconnects during streaming:
- * 1. The server automatically detects the active stream
- * 2. Sends CF_AGENT_STREAM_RESUMING notification
- * 3. Client ACKs and receives all buffered chunks
- *
- * No special setup required - just use onChatMessage() as usual.
- */
 export class ResumableStreamingChat extends AIChatAgent<Env> {
-  /**
-   * Handle incoming chat messages.
-   */
   async onChatMessage() {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {

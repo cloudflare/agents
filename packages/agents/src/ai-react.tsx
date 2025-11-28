@@ -4,14 +4,41 @@ import type {
   ChatInit,
   ChatTransport,
   UIMessage as Message,
-  UIMessage
+  UIMessage,
+  FileUIPart
 } from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
-import { use, useCallback, useEffect, useMemo, useRef } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
+
+/**
+ * Convert File[] to FileUIPart[] for use with sendMessage.
+ * Use this when you have an array of Files (e.g., from state).
+ * If you have a FileList directly from an input, use AI SDK's
+ * convertFileListToFileUIParts instead.
+ */
+export async function filesToParts(files: File[]): Promise<FileUIPart[]> {
+  return Promise.all(
+    files.map(
+      (file) =>
+        new Promise<FileUIPart>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () =>
+            resolve({
+              type: "file",
+              filename: file.name,
+              mediaType: file.type,
+              url: reader.result as string
+            });
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        })
+    )
+  );
+}
 
 export type AITool<Input = unknown, Output = unknown> = {
   description?: string;

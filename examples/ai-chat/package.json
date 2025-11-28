@@ -1,8 +1,8 @@
 {
   "author": "",
-  "description": "A resumable real-time AI streaming chat with automatic reconnection and history replay using Durable Objects",
+  "description": "AI chat with file attachments, resumable streaming, and automatic reconnection",
   "license": "ISC",
-  "name": "@cloudflare/agents-resumable-stream-chat",
+  "name": "@cloudflare/agents-ai-chat",
   "private": true,
   "scripts": {
     "deploy": "vite build && wrangler deploy",

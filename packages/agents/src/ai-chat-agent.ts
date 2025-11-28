@@ -143,11 +143,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     this.sql`create index if not exists idx_stream_chunks_stream_id 
       on cf_ai_chat_stream_chunks(stream_id, chunk_index)`;
 
-    // Load messages and automatically transform them to v5 format
+    // Load messages from DB, transform to v5 format, and filter out stripped file placeholders
     const rawMessages = this._loadMessagesFromDb();
-
-    // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-    this.messages = autoTransformMessages(rawMessages);
+    const transformedMessages = autoTransformMessages(rawMessages);
+    this.messages = AIChatAgent.filterStrippedFileParts(transformedMessages);
 
     this._chatMessageAbortControllers = new Map();
 
@@ -593,7 +592,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     options?: { abortSignal: AbortSignal | undefined }
   ): Promise<Response | undefined> {
     throw new Error(
-      "recieved a chat message, override onChatMessage and return a Response to send to the client"
+      "Received a chat message. Override onChatMessage() and return a Response to send to the client."
     );
   }
 
@@ -614,16 +613,27 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     excludeBroadcastIds: string[] = []
   ) {
     for (const message of messages) {
+      // Strip file parts before persisting to avoid SQLite size limits
+      // Files are sent directly to the model and don't need to be stored
+      const messageForStorage = this._stripFilePartsForStorage(message);
       this.sql`
         insert into cf_ai_chat_agent_messages (id, message)
-        values (${message.id}, ${JSON.stringify(message)})
+        values (${message.id}, ${JSON.stringify(messageForStorage)})
         on conflict(id) do update set message = excluded.message
       `;
     }
 
-    // refresh in-memory messages
-    const persisted = this._loadMessagesFromDb();
-    this.messages = autoTransformMessages(persisted);
+    // Update in-memory messages by merging new messages with existing ones
+    // This preserves file data for the current request while stripped versions are in DB
+    // Filter new messages to remove any stripped file placeholders (from other tabs/sessions)
+    const messageIds = new Set(messages.map((m) => m.id));
+    const existingMessages = this.messages.filter((m) => !messageIds.has(m.id));
+    const filteredNewMessages = AIChatAgent.filterStrippedFileParts(messages);
+    this.messages = autoTransformMessages([
+      ...existingMessages,
+      ...filteredNewMessages
+    ]);
+
     this._broadcastChatMessage(
       {
         messages: messages,
@@ -631,6 +641,74 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       },
       excludeBroadcastIds
     );
+  }
+
+  /**
+   * Filter out stripped file parts from messages.
+   * Messages loaded from DB have placeholder URLs (file:removed:...) for attachments
+   * that were stripped before storage. These placeholders would cause errors if passed
+   * to the model, so they're filtered out when loading messages.
+   */
+  private static filterStrippedFileParts(
+    messages: ChatMessage[]
+  ): ChatMessage[] {
+    return messages.map((message) => {
+      if (!message.parts || message.parts.length === 0) {
+        return message;
+      }
+
+      const filteredParts = message.parts.filter((part) => {
+        // Keep all non-file parts
+        if (part.type !== "file") {
+          return true;
+        }
+        // Filter out file parts with stripped URLs
+        const url = (part as { url?: string }).url;
+        return !url?.startsWith("file:removed:");
+      });
+
+      return {
+        ...message,
+        parts: filteredParts
+      };
+    });
+  }
+
+  /**
+   * Strip file parts from a message before persisting to SQLite.
+   * File data (especially images) can be very large and exceed SQLite limits.
+   * Files are sent directly to the model and don't need to be stored.
+   * We keep a placeholder with metadata so the UI knows a file was attached.
+   * @param message - The message to process
+   * @returns A copy of the message with file data stripped
+   */
+  private _stripFilePartsForStorage(message: ChatMessage): ChatMessage {
+    if (!message.parts || message.parts.length === 0) {
+      return message;
+    }
+
+    const strippedParts = message.parts.map((part) => {
+      // Check if this is a file part with a data URL
+      if (
+        part.type === "file" &&
+        "url" in part &&
+        typeof part.url === "string" &&
+        part.url.startsWith("data:")
+      ) {
+        // Keep metadata but remove the actual data URL
+        // Replace with a placeholder that indicates a file was attached
+        return {
+          ...part,
+          url: `file:removed:${(part as { filename?: string }).filename || "attachment"}`
+        };
+      }
+      return part;
+    });
+
+    return {
+      ...message,
+      parts: strippedParts
+    };
   }
 
   private async _reply(id: string, response: Response) {
