@@ -306,6 +306,7 @@ export class Agent<
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
+  private _readonlyConnections = new Set<string>();
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -468,6 +469,12 @@ export class Agent<
         this.observability?.emit(event);
       })
     );
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_readonly_connections (
+        connection_id TEXT PRIMARY KEY NOT NULL,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
@@ -510,6 +517,17 @@ export class Agent<
           }
 
           if (isStateUpdateMessage(parsed)) {
+            // Check if connection is readonly
+            if (this.isConnectionReadonly(connection)) {
+              // Send error response back to the connection
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_STATE_ERROR,
+                  error: "Connection is readonly"
+                })
+              );
+              return;
+            }
             this._setStateInternal(parsed.state as State, connection);
             return;
           }
@@ -605,6 +623,11 @@ export class Agent<
             })
           );
 
+          // Check if connection should be readonly
+          if (this.shouldConnectionBeReadonly(connection, ctx)) {
+            this.setConnectionReadonly(connection, true);
+          }
+
           this.observability?.emit(
             {
               displayMessage: "Connection established",
@@ -621,6 +644,36 @@ export class Agent<
         }
       );
     };
+
+    // Wrap onClose if it exists to clean up readonly connections
+    const _onClose = this.onClose?.bind(this);
+    if (_onClose) {
+      // biome-ignore lint/suspicious/noExplicitAny: need to pass through all args
+      this.onClose = (connection: Connection, ...args: any[]) => {
+        return agentContext.run(
+          { agent: this, connection, request: undefined, email: undefined },
+          () => {
+            // Clean up readonly connection tracking (both in-memory and persistent)
+            this._readonlyConnections.delete(connection.id);
+            this.sql`
+              DELETE FROM cf_agents_readonly_connections
+              WHERE connection_id = ${connection.id}
+            `;
+            // biome-ignore lint/suspicious/noExplicitAny: need to pass through all args
+            return this._tryCatch(() => (_onClose as any)(connection, ...args));
+          }
+        );
+      };
+    } else {
+      // If onClose doesn't exist, create a basic one for cleanup
+      this.onClose = (connection: Connection) => {
+        this._readonlyConnections.delete(connection.id);
+        this.sql`
+          DELETE FROM cf_agents_readonly_connections
+          WHERE connection_id = ${connection.id}
+        `;
+      };
+    }
 
     const _onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
@@ -689,6 +742,69 @@ export class Agent<
    */
   setState(state: State) {
     this._setStateInternal(state, "server");
+  }
+
+  /**
+   * Mark a connection as readonly or readwrite
+   * @param connection The connection to mark
+   * @param readonly Whether the connection should be readonly (default: true)
+   */
+  setConnectionReadonly(connection: Connection, readonly = true) {
+    if (readonly) {
+      this._readonlyConnections.add(connection.id);
+      // Persist to storage so it survives hibernation
+      this.sql`
+        INSERT OR IGNORE INTO cf_agents_readonly_connections (connection_id)
+        VALUES (${connection.id})
+      `;
+    } else {
+      this._readonlyConnections.delete(connection.id);
+      // Remove from storage
+      this.sql`
+        DELETE FROM cf_agents_readonly_connections
+        WHERE connection_id = ${connection.id}
+      `;
+    }
+  }
+
+  /**
+   * Check if a connection is marked as readonly
+   * @param connection The connection to check
+   * @returns True if the connection is readonly
+   */
+  isConnectionReadonly(connection: Connection): boolean {
+    // Check in-memory cache first for performance
+    if (this._readonlyConnections.has(connection.id)) {
+      return true;
+    }
+
+    // Check persistent storage (important after hibernation)
+    const result = this.sql<{ connection_id: string }>`
+      SELECT connection_id FROM cf_agents_readonly_connections
+      WHERE connection_id = ${connection.id}
+    `;
+
+    const isReadonly = result.length > 0;
+
+    // Populate cache if found in storage
+    if (isReadonly) {
+      this._readonlyConnections.add(connection.id);
+    }
+
+    return isReadonly;
+  }
+
+  /**
+   * Override this method to determine if a connection should be readonly on connect
+   * @param _connection The connection that is being established
+   * @param _ctx Connection context
+   * @returns True if the connection should be readonly
+   */
+  shouldConnectionBeReadonly(
+    _connection: Connection,
+    _ctx: ConnectionContext
+  ): boolean {
+    return false;
   }
 
   /**
@@ -1323,6 +1439,7 @@ export class Agent<
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_readonly_connections`;
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
