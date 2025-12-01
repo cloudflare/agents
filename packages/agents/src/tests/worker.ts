@@ -37,6 +37,7 @@ export type Env = {
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
+  TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
 };
 
 type State = unknown;
@@ -308,6 +309,31 @@ export class TestDestroyScheduleAgent extends Agent<Env, { status: string }> {
 
   getStatus() {
     return this.state.status;
+  }
+}
+
+export class TestScheduleAgent extends Agent<Env> {
+  observability = undefined;
+
+  // A no-op callback method for testing schedules
+  testCallback() {
+    // Intentionally empty - used for testing schedule creation
+  }
+
+  @callable()
+  async cancelScheduleById(id: string): Promise<boolean> {
+    return this.cancelSchedule(id);
+  }
+
+  @callable()
+  async getScheduleById(id: string) {
+    return this.getSchedule(id);
+  }
+
+  @callable()
+  async createSchedule(delaySeconds: number): Promise<string> {
+    const schedule = await this.schedule(delaySeconds, "testCallback");
+    return schedule.id;
   }
 }
 

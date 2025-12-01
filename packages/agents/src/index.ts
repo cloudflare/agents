@@ -1134,8 +1134,7 @@ export class Agent<
     const result = this.sql<Schedule<string>>`
       SELECT * FROM cf_agents_schedules WHERE id = ${id}
     `;
-    if (!result) {
-      console.error(`schedule ${id} not found`);
+    if (!result || result.length === 0) {
       return undefined;
     }
 
@@ -1192,25 +1191,28 @@ export class Agent<
   /**
    * Cancel a scheduled task
    * @param id ID of the task to cancel
-   * @returns true if the task was cancelled, false otherwise
+   * @returns true if the task was cancelled, false if the task was not found
    */
   async cancelSchedule(id: string): Promise<boolean> {
     const schedule = await this.getSchedule(id);
-    if (schedule) {
-      this.observability?.emit(
-        {
-          displayMessage: `Schedule ${id} cancelled`,
-          id: nanoid(),
-          payload: {
-            callback: schedule.callback,
-            id: schedule.id
-          },
-          timestamp: Date.now(),
-          type: "schedule:cancel"
-        },
-        this.ctx
-      );
+    if (!schedule) {
+      return false;
     }
+
+    this.observability?.emit(
+      {
+        displayMessage: `Schedule ${id} cancelled`,
+        id: nanoid(),
+        payload: {
+          callback: schedule.callback,
+          id: schedule.id
+        },
+        timestamp: Date.now(),
+        type: "schedule:cancel"
+      },
+      this.ctx
+    );
+
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
     await this._scheduleNextAlarm();
