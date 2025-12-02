@@ -36,7 +36,7 @@
     "@cloudflare/vite-plugin": "^1.15.3",
     "@cloudflare/vitest-pool-workers": "^0.10.11",
     "@cloudflare/workers-types": "^4.20251127.0",
-    "@modelcontextprotocol/sdk": "^1.23.0",
+    "@modelcontextprotocol/sdk": "^1.24.0",
     "@openai/agents": "^0.3.3",
     "@openai/agents-extensions": "^0.3.3",
     "@types/node": "^24.10.1",
