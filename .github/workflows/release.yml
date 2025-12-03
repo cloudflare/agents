@@ -29,7 +29,9 @@ jobs:
         with:
           node-version: 20
           cache: "npm"
-          registry-url: https://registry.npmjs.org
+
+      - name: Configure npm for OIDC publishing
+        run: npm config set registry https://registry.npmjs.org
 
       - name: Get Playwright version
         id: playwright-version
