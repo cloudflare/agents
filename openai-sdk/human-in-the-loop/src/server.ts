@@ -96,7 +96,6 @@ export class MyAgent extends CFAgent<Env, AgentState> {
       this.state.serialisedRunState!
     );
     const interruption = this.result?.interruptions?.find(
-      // @ts-expect-error missing type
       (i) => i.rawItem.callId === id
     );
     if (interruption) {
