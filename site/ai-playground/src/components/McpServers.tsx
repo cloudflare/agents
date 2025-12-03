@@ -7,11 +7,15 @@ import type { Playground, PlaygroundState } from "../server";
 import type { useAgent } from "agents/react";
 import LocalhostWarningModal from "./LocalhostWarningModal";
 
-export type McpComponentState = {
-  id?: string;
+export type McpServerInfo = {
+  id: string;
   name?: string;
-  state: string;
   url?: string;
+  state: string;
+};
+
+export type McpServersComponentState = {
+  servers: McpServerInfo[];
   tools: Tool[];
   prompts: Prompt[];
   resources: Resource[];
@@ -19,7 +23,7 @@ export type McpComponentState = {
 
 type McpServersProps = {
   agent: ReturnType<typeof useAgent<Playground, PlaygroundState>>;
-  mcpState: McpComponentState;
+  mcpState: McpServersComponentState;
   mcpLogs: Array<{ timestamp: number; status: string; serverUrl?: string }>;
 };
 
@@ -35,52 +39,35 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
       );
     }
   );
-  const [isActive, setIsActive] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showLocalhostWarning, setShowLocalhostWarning] = useState(false);
-
-  // Update isActive based on mcpState
-  useEffect(() => {
-    console.log("[McpServers] mcpState updated:", mcpState);
-    if (mcpState?.state === "ready") {
-      setIsActive(true);
-    } else if (
-      mcpState?.state === "failed" ||
-      mcpState?.state === "not-connected"
-    ) {
-      setIsActive(false);
-    }
-  }, [mcpState?.state, mcpState]);
-
-  useEffect(() => {
-    if (mcpState?.url) {
-      setServerUrl(mcpState.url);
-    }
-  }, [mcpState?.url]);
   const [error, setError] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
+  const [disconnectingServerId, setDisconnectingServerId] = useState<
+    string | null
+  >(null);
 
-  // Clear error when connection succeeds
+  // Check if any server is in a connecting state
+  const hasConnectingServer = mcpState.servers.some(
+    (s) =>
+      s.state === "discovering" ||
+      s.state === "connecting" ||
+      s.state === "connected" ||
+      s.state === "authenticating"
+  );
+
+  // Check if any server needs auth (for cancel button)
+  const authenticatingServer = mcpState.servers.find(
+    (s) => s.state === "authenticating"
+  );
+
+  // Clear error when a server becomes ready
   useEffect(() => {
-    if (mcpState?.state === "ready") {
+    const hasReadyServer = mcpState.servers.some((s) => s.state === "ready");
+    if (hasReadyServer) {
       setError("");
     }
-  }, [mcpState?.state]);
-
-  // Update isConnecting based on mcpState
-  // SDK states: "connected" | "discovering" | "authenticating" | "connecting" | "ready" | "failed"
-  useEffect(() => {
-    if (
-      mcpState?.state === "discovering" ||
-      mcpState?.state === "connecting" ||
-      mcpState?.state === "connected" ||
-      mcpState?.state === "authenticating"
-    ) {
-      setIsConnecting(true);
-    } else {
-      setIsConnecting(false);
-    }
-  }, [mcpState?.state]);
+  }, [mcpState.servers]);
 
   const logRef = useRef<HTMLDivElement>(null);
   const [showAuth, setShowAuth] = useState<boolean>(false);
@@ -104,6 +91,14 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
       }
       return newSet;
     });
+  };
+
+  // Clear auth fields
+  const clearAuthFields = () => {
+    setHeaderKey("Authorization");
+    setBearerToken("");
+    sessionStorage.removeItem("mcpHeaderKey");
+    sessionStorage.removeItem("mcpBearerToken");
   };
 
   // Handle connection
@@ -161,34 +156,37 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         openOAuthPopup(result.authUrl);
       } else {
         console.log("[McpServers] No auth required, connection successful");
-        setIsActive(true);
       }
+
+      // Clear input fields after successful connection attempt
+      setServerUrl("");
+      clearAuthFields();
+      setShowAuth(false);
     } catch (err: unknown) {
       console.error("[McpServers] Connection error:", err);
       setError(
         err instanceof Error ? err.message : "Failed to connect to MCP server"
       );
-      setIsActive(false);
     } finally {
       setIsConnecting(false);
     }
   };
 
-  const handleDisconnect = async () => {
+  const handleDisconnect = async (serverId: string) => {
     console.log(
       "[McpServers] handleDisconnect called with serverId:",
-      mcpState.id
+      serverId
     );
-    setIsConnecting(true);
+    setDisconnectingServerId(serverId);
     setError("");
 
     try {
       // Call the agent to actually disconnect from the MCP server
-      await agent.stub.disconnectMCPServer(mcpState.id);
+      await agent.stub.disconnectMCPServer(serverId);
       console.log("[McpServers] Successfully disconnected from MCP server");
 
       // The SDK will broadcast the updated state, which will trigger our useEffect
-      // and update isActive automatically
+      // and update the servers list automatically
     } catch (err: unknown) {
       console.error("[McpServers] Disconnect error:", err);
       setError(
@@ -197,7 +195,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
           : "Failed to disconnect from MCP server"
       );
     } finally {
-      setIsConnecting(false);
+      setDisconnectingServerId(null);
     }
   };
 
@@ -217,44 +215,42 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
     }
   }, []);
 
-  // Generate status badge based on connection state
-  const getStatusBadge = () => {
-    // SDK connection states: "connected" | "discovering" | "authenticating" | "connecting" | "ready" | "failed"
-    const states: Record<string, { colors: string; label: string }> = {
-      discovering: {
-        colors: "bg-blue-100 text-blue-800",
-        label: "Discovering"
-      },
-      authenticating: {
-        colors: "bg-purple-100 text-purple-800",
-        label: "Authenticating"
-      },
-      connecting: {
-        colors: "bg-yellow-100 text-yellow-800",
-        label: "Connecting"
-      },
-      connected: {
-        colors: "bg-cyan-100 text-cyan-800",
-        label: "Connected"
-      },
-      ready: {
-        colors: "bg-green-100 text-green-800",
-        label: "Ready"
-      },
-      failed: {
-        colors: "bg-red-100 text-red-800",
-        label: "Failed"
-      },
-      "not-connected": {
-        colors: "bg-gray-100 text-gray-800",
-        label: "Not Connected"
-      }
-    };
+  // Status badge styles
+  const statusStyles: Record<string, { colors: string; label: string }> = {
+    discovering: {
+      colors: "bg-blue-100 text-blue-800",
+      label: "Discovering"
+    },
+    authenticating: {
+      colors: "bg-purple-100 text-purple-800",
+      label: "Authenticating"
+    },
+    connecting: {
+      colors: "bg-yellow-100 text-yellow-800",
+      label: "Connecting"
+    },
+    connected: {
+      colors: "bg-cyan-100 text-cyan-800",
+      label: "Connected"
+    },
+    ready: {
+      colors: "bg-green-100 text-green-800",
+      label: "Ready"
+    },
+    failed: {
+      colors: "bg-red-100 text-red-800",
+      label: "Failed"
+    },
+    "not-connected": {
+      colors: "bg-gray-100 text-gray-800",
+      label: "Not Connected"
+    }
+  };
 
-    // Get the status from mcpState (mapped from SDK's 'state' field)
-    const status = mcpState?.state || "not-connected";
-    const { colors, label } = states[status] || states["not-connected"];
-
+  // Generate status badge for a specific server
+  const getStatusBadge = (state: string) => {
+    const { colors, label } =
+      statusStyles[state] || statusStyles["not-connected"];
     return (
       <span
         data-testid="status"
@@ -263,6 +259,22 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         {label}
       </span>
     );
+  };
+
+  // Get overall status for the header
+  const getOverallStatus = () => {
+    if (mcpState.servers.length === 0) return "not-connected";
+    if (mcpState.servers.some((s) => s.state === "ready")) return "ready";
+    if (mcpState.servers.some((s) => s.state === "authenticating"))
+      return "authenticating";
+    if (
+      mcpState.servers.some(
+        (s) => s.state === "connecting" || s.state === "discovering"
+      )
+    )
+      return "connecting";
+    if (mcpState.servers.some((s) => s.state === "failed")) return "failed";
+    return "not-connected";
   };
 
   return (
@@ -368,17 +380,47 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
       </p>
 
       <div className="my-4">
-        <div className="flex items-center mb-2">
-          {/* biome-ignore lint/a11y/noLabelWithoutControl: eh */}
-          <label className="font-semibold text-sm mr-2">Status:</label>
-          {getStatusBadge()}
-          {error && (
-            <span className="ml-2 text-xs text-red-600 truncate max-w-[230px]">
-              {error}
-            </span>
-          )}
-        </div>
+        {/* Connected Servers List */}
+        {mcpState.servers.length > 0 && (
+          <div className="mb-4 space-y-2">
+            <div className="font-semibold text-sm">
+              Connected Servers ({mcpState.servers.length})
+            </div>
+            {mcpState.servers.map((server) => (
+              <div
+                key={server.id}
+                className="flex items-center justify-between p-2 border border-gray-200 rounded-md bg-gray-50"
+              >
+                <div className="flex items-center space-x-2 min-w-0 flex-1">
+                  {getStatusBadge(server.state)}
+                  <span
+                    className="text-sm text-gray-700 truncate"
+                    title={server.url}
+                  >
+                    {server.url}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="ml-2 px-2 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded-md transition-colors flex-shrink-0"
+                  onClick={() => handleDisconnect(server.id)}
+                  disabled={disconnectingServerId === server.id}
+                >
+                  {disconnectingServerId === server.id
+                    ? "Disconnecting..."
+                    : "Disconnect"}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
+        {/* Error display */}
+        {error && (
+          <div className="mb-2 text-xs text-red-600 truncate">{error}</div>
+        )}
+
+        {/* Add new server form */}
         <div className="flex space-x-2 mb-4">
           <input
             type="text"
@@ -388,37 +430,27 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
             onChange={(e) => {
               setServerUrl(e.target.value);
             }}
-            disabled={isActive}
           />
-          {isActive ? (
-            <button
-              type="button"
-              className="px-3 py-2 bg-orange-100 hover:bg-orange-200 text-orange-900 rounded-md text-sm font-medium shadow-sm"
-              onClick={handleDisconnect}
-            >
-              Disconnect
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background text-white rounded-md shadow-sm py-2 px-4 text-sm"
-              onClick={
-                mcpState?.state === "authenticating"
-                  ? handleDisconnect
-                  : handleConnect
-              }
-              disabled={
-                isActive ||
-                (isConnecting && mcpState?.state !== "authenticating")
-              }
-            >
-              {mcpState?.state === "authenticating"
-                ? "Cancel"
-                : isConnecting
-                  ? "Connecting..."
-                  : "Connect"}
-            </button>
-          )}
+          <button
+            type="button"
+            className="bg-ai-loop bg-size-[200%_100%] hover:animate-gradient-background text-white rounded-md shadow-sm py-2 px-4 text-sm disabled:opacity-50"
+            onClick={
+              authenticatingServer
+                ? () => handleDisconnect(authenticatingServer.id)
+                : handleConnect
+            }
+            disabled={
+              isConnecting ||
+              (hasConnectingServer && !authenticatingServer) ||
+              (!serverUrl && !authenticatingServer)
+            }
+          >
+            {authenticatingServer
+              ? "Cancel"
+              : isConnecting || hasConnectingServer
+                ? "Connecting..."
+                : "Add Server"}
+          </button>
         </div>
 
         {/* Custom Authentication Section */}
@@ -482,7 +514,6 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                     setHeaderKey(newValue);
                     sessionStorage.setItem("mcpHeaderKey", newValue);
                   }}
-                  disabled={isActive}
                 />
               </div>
 
@@ -502,7 +533,6 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                       setBearerToken(newValue);
                       sessionStorage.setItem("mcpBearerToken", newValue);
                     }}
-                    disabled={isActive}
                   />
                   <button
                     type="button"
@@ -606,15 +636,18 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
           </div>
         )}
 
-        {/* Display tools when connected or ready */}
-        {(mcpState?.state === "connected" ||
-          mcpState?.state === "ready" ||
-          mcpState?.state === "discovering") && (
+        {/* Display tools when any server is connected or ready */}
+        {mcpState.servers.some(
+          (s) =>
+            s.state === "connected" ||
+            s.state === "ready" ||
+            s.state === "discovering"
+        ) && (
           <div className="mt-4 border border-green-200 rounded-md bg-green-50 p-3">
             <div className="flex items-center justify-between mb-2">
               <div className="text-sm font-medium text-green-900">
                 Available Tools (
-                {mcpState?.tools && Array.isArray(mcpState.tools)
+                {mcpState.tools && Array.isArray(mcpState.tools)
                   ? mcpState.tools.length
                   : 0}
                 )
@@ -622,14 +655,17 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
               <button
                 type="button"
                 onClick={async () => {
-                  if (mcpState?.id) {
-                    try {
-                      await agent.stub.refreshMcpTools(mcpState.id);
-                    } catch (err) {
-                      console.error(
-                        "[McpServers] Failed to refresh tools:",
-                        err
-                      );
+                  // Refresh tools for all ready servers
+                  for (const server of mcpState.servers) {
+                    if (server.state === "ready") {
+                      try {
+                        await agent.stub.refreshMcpTools(server.id);
+                      } catch (err) {
+                        console.error(
+                          "[McpServers] Failed to refresh tools:",
+                          err
+                        );
+                      }
                     }
                   }
                 }}
@@ -653,7 +689,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                 </svg>
               </button>
             </div>
-            {mcpState?.tools &&
+            {mcpState.tools &&
             Array.isArray(mcpState.tools) &&
             mcpState.tools.length > 0 ? (
               <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
@@ -702,7 +738,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
               </div>
             ) : (
               <div className="text-sm text-gray-600 text-center py-4">
-                {mcpState?.state === "discovering"
+                {mcpState.servers.some((s) => s.state === "discovering")
                   ? "Discovering tools..."
                   : "No tools available. Click refresh to discover."}
               </div>
