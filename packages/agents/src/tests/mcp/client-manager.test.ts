@@ -1324,8 +1324,64 @@ describe("MCPClientManager OAuth Integration", () => {
 
       await manager.connectToServer(id);
 
-      // Should fire once: after init() when state changes
-      expect(onStateChangedSpy).toHaveBeenCalledTimes(1);
+      // Should fire twice: once after init(), once after saving auth_url to storage
+      expect(onStateChangedSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("should have auth_url in storage after onServerStateChanged fires for OAuth server", async () => {
+      const id = "oauth-server-auth-url";
+      const expectedAuthUrl =
+        "https://auth.example.com/authorize?client_id=test";
+      const authUrlsAtEachBroadcast: (string | null)[] = [];
+
+      const mockAuthProvider = {
+        serverId: id,
+        clientId: "mock-client-id",
+        authUrl: expectedAuthUrl,
+        redirectUrl: "http://localhost:3000/callback",
+        clientMetadata: {
+          client_name: "test-client",
+          redirect_uris: ["http://localhost:3000/callback"]
+        },
+        tokens: vi.fn(),
+        saveTokens: vi.fn(),
+        clientInformation: vi.fn(),
+        saveClientInformation: vi.fn(),
+        redirectToAuthorization: vi.fn(),
+        saveCodeVerifier: vi.fn(),
+        codeVerifier: vi.fn()
+      };
+
+      await manager.registerServer(id, {
+        url: "http://oauth.example.com/mcp",
+        name: "OAuth Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: {
+          type: "auto",
+          authProvider: mockAuthProvider
+        }
+      });
+
+      // Mock connection to stay in authenticating state
+      const conn = manager.mcpConnections[id];
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "authenticating";
+      });
+
+      // Track auth_url at each state change broadcast
+      manager.onServerStateChanged(() => {
+        const servers = manager.listServers();
+        const server = servers.find((s) => s.id === id);
+        authUrlsAtEachBroadcast.push(server?.auth_url ?? null);
+      });
+
+      await manager.connectToServer(id);
+
+      // Should have 2 broadcasts
+      expect(authUrlsAtEachBroadcast).toHaveLength(2);
+      // Second broadcast should have auth_url populated
+      expect(authUrlsAtEachBroadcast[1]).toBe(expectedAuthUrl);
     });
 
     it("should fire onServerStateChanged when OAuth callback succeeds", async () => {

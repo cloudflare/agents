@@ -615,6 +615,8 @@ export class MCPClientManager {
             auth_url: authUrl,
             client_id: clientId ?? null
           });
+          // Broadcast again so clients receive the auth_url
+          this._onServerStateChanged.fire();
         }
 
         return {
