@@ -1349,7 +1349,10 @@ describe("MCPClientManager OAuth Integration", () => {
         saveClientInformation: vi.fn(),
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn()
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
       await manager.registerServer(id, {
