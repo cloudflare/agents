@@ -170,11 +170,13 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     }
 
     if (storedState.serverId !== serverId) {
+      await this.storage.delete(key);
       return { valid: false, error: "State serverId mismatch" };
     }
 
     const age = Date.now() - storedState.createdAt;
     if (age > STATE_EXPIRATION_MS) {
+      await this.storage.delete(key);
       return { valid: false, error: "State expired" };
     }
 
