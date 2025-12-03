@@ -481,6 +481,10 @@ export class TestOAuthAgent extends Agent<Env> {
     return this.mcp.isCallbackRequest(new Request(callbackUrl));
   }
 
+  testIsCallbackRequest(request: Request): boolean {
+    return this.mcp.isCallbackRequest(request);
+  }
+
   removeMcpConnection(serverId: string): void {
     delete this.mcp.mcpConnections[serverId];
   }

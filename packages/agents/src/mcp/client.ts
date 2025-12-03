@@ -635,40 +635,57 @@ export class MCPClientManager {
     }
   }
 
+  private extractServerIdFromCallbackUrl(url: URL): string | null {
+    const callbackIndex = url.pathname.indexOf("/callback/");
+    if (callbackIndex === -1) {
+      return null;
+    }
+    const afterCallback = url.pathname.slice(
+      callbackIndex + "/callback/".length
+    );
+    const serverId = afterCallback.split("/")[0];
+    return serverId || null;
+  }
+
   isCallbackRequest(req: Request): boolean {
     if (req.method !== "GET") {
       return false;
     }
 
-    // Quick heuristic check: most callback URLs contain "/callback"
+    // Quick heuristic check: most callback URLs contain "/callback/"
     // This avoids DB queries for obviously non-callback requests
-    if (!req.url.includes("/callback")) {
+    if (!req.url.includes("/callback/")) {
       return false;
     }
 
-    // Check database for matching callback URL
+    const url = new URL(req.url);
+    const serverId = this.extractServerIdFromCallbackUrl(url);
+    if (!serverId) {
+      return false;
+    }
+
     const servers = this.getServersFromStorage();
-    return servers.some(
-      (server) => server.callback_url && req.url.startsWith(server.callback_url)
-    );
+    return servers.some((server) => server.id === serverId);
   }
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
+    const serverId = this.extractServerIdFromCallbackUrl(url);
 
-    // Find the matching server from database
-    const servers = this.getServersFromStorage();
-    const matchingServer = servers.find((server: MCPServerRow) => {
-      return server.callback_url && req.url.startsWith(server.callback_url);
-    });
-
-    if (!matchingServer) {
+    if (!serverId) {
       throw new Error(
-        `No callback URI match found for the request url: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
+        `No serverId found in callback URL: ${req.url}. Expected format: {callback_url}/{serverId}?code=...`
       );
     }
 
-    const serverId = matchingServer.id;
+    const servers = this.getServersFromStorage();
+    const serverExists = servers.some((server) => server.id === serverId);
+
+    if (!serverExists) {
+      throw new Error(
+        `No server found with id "${serverId}" for callback URL: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
+      );
+    }
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     const error = url.searchParams.get("error");
