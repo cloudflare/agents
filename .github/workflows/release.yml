@@ -52,3 +52,4 @@ jobs:
           publish: npx tsx .github/changeset-publish.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
