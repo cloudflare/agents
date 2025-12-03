@@ -373,11 +373,17 @@ export class TestOAuthAgent extends Agent<Env> {
     this.mcp.configureOAuthCallback(config);
   }
 
+  private mockStateStorage: Map<
+    string,
+    { serverId: string; createdAt: number }
+  > = new Map();
+
   private createMockMcpConnection(
     serverId: string,
     serverUrl: string,
     connectionState: "ready" | "authenticating" | "connecting" = "ready"
   ): MCPClientConnection {
+    const self = this;
     return {
       url: new URL(serverUrl),
       connectionState,
@@ -391,7 +397,36 @@ export class TestOAuthAgent extends Agent<Env> {
         transport: {
           authProvider: {
             clientId: "test-client-id",
-            authUrl: "http://example.com/oauth/authorize"
+            serverId: serverId,
+            authUrl: "http://example.com/oauth/authorize",
+            async validateAndConsumeState(
+              state: string
+            ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
+              const parts = state.split(".");
+              if (parts.length !== 2) {
+                return { valid: false, error: "Invalid state format" };
+              }
+              const [nonce, stateServerId] = parts;
+              const stored = self.mockStateStorage.get(nonce);
+              if (!stored) {
+                return {
+                  valid: false,
+                  error: "State not found or already used"
+                };
+              }
+              self.mockStateStorage.delete(nonce);
+              if (stored.serverId !== stateServerId) {
+                return { valid: false, error: "State serverId mismatch" };
+              }
+              const age = Date.now() - stored.createdAt;
+              if (age > 10 * 60 * 1000) {
+                return { valid: false, error: "State expired" };
+              }
+              return { valid: true, serverId: stateServerId };
+            },
+            async deleteCodeVerifier(): Promise<void> {
+              // No-op for tests
+            }
           }
         }
       },
@@ -402,6 +437,10 @@ export class TestOAuthAgent extends Agent<Env> {
         this.mcp.mcpConnections[serverId].connectionState = "ready";
       }
     } as unknown as MCPClientConnection;
+  }
+
+  saveStateForTest(nonce: string, serverId: string): void {
+    this.mockStateStorage.set(nonce, { serverId, createdAt: Date.now() });
   }
 
   setupMockMcpConnection(

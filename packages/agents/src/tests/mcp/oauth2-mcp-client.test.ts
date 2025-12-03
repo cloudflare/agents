@@ -1,14 +1,19 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { type Env } from "../worker";
+import worker, { type Env, TestOAuthAgent } from "../worker";
 import { nanoid } from "nanoid";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
 
-function makeState(serverId: string): string {
-  return `${nanoid()}.${serverId}`;
+function createStateWithSetup(
+  agentStub: DurableObjectStub<TestOAuthAgent>,
+  serverId: string
+): string {
+  const nonce = nanoid();
+  agentStub.saveStateForTest(nonce, serverId);
+  return `${nonce}.${serverId}`;
 }
 
 describe("OAuth2 MCP Client - Hibernation", () => {
@@ -69,7 +74,9 @@ describe("OAuth2 MCP Client - Hibernation", () => {
     await agentStub.onStart();
 
     const response = await agentStub.fetch(
-      new Request(`${callbackUrl}?code=test-code&state=${makeState(serverId)}`)
+      new Request(
+        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`
+      )
     );
 
     expect(response.status).not.toBe(404);
@@ -102,7 +109,9 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
     const response = await agentStub.fetch(
-      new Request(`${callbackUrl}?code=test-code&state=${makeState(serverId)}`)
+      new Request(
+        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`
+      )
     );
 
     expect(response.status).toBe(200);
@@ -133,7 +142,9 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
     await agentStub.fetch(
-      new Request(`${callbackUrl}?code=test-code&state=${makeState(serverId)}`)
+      new Request(
+        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`
+      )
     );
 
     const serverAfter = await agentStub.getMcpServerFromDb(serverId);
@@ -157,7 +168,9 @@ describe("OAuth2 MCP Client - Error Handling", () => {
     `;
 
     const response = await agentStub.fetch(
-      new Request(`${callbackUrl}?state=${makeState(serverId)}`)
+      new Request(
+        `${callbackUrl}?state=${createStateWithSetup(agentStub, serverId)}`
+      )
     );
     expect(response.status).toBeGreaterThanOrEqual(400);
   });
@@ -210,7 +223,7 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
 
     const response = await agentStub.fetch(
       new Request(
-        `${callbackUrl}?code=test-code&state=${makeState(serverId)}`,
+        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`,
         {
           redirect: "manual"
         }
@@ -249,7 +262,7 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
 
     const response = await agentStub.fetch(
       new Request(
-        `${callbackUrl}?error=access_denied&state=${makeState(serverId)}`,
+        `${callbackUrl}?error=access_denied&state=${createStateWithSetup(agentStub, serverId)}`,
         { redirect: "manual" }
       )
     );
@@ -324,7 +337,9 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     await agentStub.setupMockOAuthState(serverIdB, "code-b", "state-b");
 
     const responseB = await agentStub.fetch(
-      new Request(`${callbackUrl}?code=code-b&state=${makeState(serverIdB)}`)
+      new Request(
+        `${callbackUrl}?code=code-b&state=${createStateWithSetup(agentStub, serverIdB)}`
+      )
     );
 
     expect(responseB.status).toBe(200);
@@ -333,7 +348,9 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     expect(serverBAfter?.auth_url).toBeNull();
 
     const responseA = await agentStub.fetch(
-      new Request(`${callbackUrl}?code=code-a&state=${makeState(serverIdA)}`)
+      new Request(
+        `${callbackUrl}?code=code-a&state=${createStateWithSetup(agentStub, serverIdA)}`
+      )
     );
 
     expect(responseA.status).toBe(200);
@@ -359,13 +376,15 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     `;
 
     const isCallbackA = await agentStub.testIsCallbackRequest(
-      new Request(`${callbackUrl}?code=test&state=${makeState(serverIdA)}`)
+      new Request(
+        `${callbackUrl}?code=test&state=${createStateWithSetup(agentStub, serverIdA)}`
+      )
     );
     expect(isCallbackA).toBe(true);
 
     const isCallbackNonExistent = await agentStub.testIsCallbackRequest(
       new Request(
-        `${callbackUrl}?code=test&state=${makeState(nonExistentServerId)}`
+        `${callbackUrl}?code=test&state=${nanoid()}.${nonExistentServerId}`
       )
     );
     expect(isCallbackNonExistent).toBe(false);
@@ -379,5 +398,93 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
       new Request(`${callbackUrl}?code=test&state=invalid-no-dot`)
     );
     expect(isCallbackInvalidState).toBe(false);
+  });
+});
+
+describe("OAuth2 MCP Client - State Security", () => {
+  it("should reject reused state (single-use enforcement)", async () => {
+    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentStub = env.TestOAuthAgent.get(agentId);
+    const serverId = nanoid(8);
+    const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+
+    await agentStub.setName("default");
+    await agentStub.onStart();
+
+    agentStub.sql`
+      INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
+    `;
+
+    await agentStub.setupMockMcpConnection(
+      serverId,
+      "test",
+      "http://example.com/mcp",
+      callbackUrl,
+      "client-id"
+    );
+    await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
+
+    const state = createStateWithSetup(agentStub, serverId);
+
+    const response1 = await agentStub.fetch(
+      new Request(`${callbackUrl}?code=test-code&state=${state}`)
+    );
+    expect(response1.status).toBe(200);
+
+    const response2 = await agentStub.fetch(
+      new Request(`${callbackUrl}?code=test-code&state=${state}`)
+    );
+    expect(response2.status).toBeGreaterThanOrEqual(400);
+    expect(await response2.text()).toContain("State not found or already used");
+  });
+
+  it("should reject state with mismatched serverId", async () => {
+    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentStub = env.TestOAuthAgent.get(agentId);
+    const serverIdA = nanoid(8);
+    const serverIdB = nanoid(8);
+    const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+
+    await agentStub.setName("default");
+    await agentStub.onStart();
+
+    agentStub.sql`
+      INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (${serverIdA}, ${"server-a"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
+    `;
+
+    agentStub.sql`
+      INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (${serverIdB}, ${"server-b"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
+    `;
+
+    await agentStub.setupMockMcpConnection(
+      serverIdA,
+      "server-a",
+      "http://example.com/mcp",
+      callbackUrl,
+      "client-id"
+    );
+    await agentStub.setupMockOAuthState(serverIdA, "test-code", "test-state");
+
+    await agentStub.setupMockMcpConnection(
+      serverIdB,
+      "server-b",
+      "http://example.com/mcp",
+      callbackUrl,
+      "client-id"
+    );
+    await agentStub.setupMockOAuthState(serverIdB, "test-code", "test-state");
+
+    const nonce = nanoid();
+    agentStub.saveStateForTest(nonce, serverIdA);
+    const tamperedState = `${nonce}.${serverIdB}`;
+
+    const response = await agentStub.fetch(
+      new Request(`${callbackUrl}?code=test-code&state=${tamperedState}`)
+    );
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(await response.text()).toContain("State serverId mismatch");
   });
 });

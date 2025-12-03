@@ -7,12 +7,24 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { nanoid } from "nanoid";
 
+const STATE_EXPIRATION_MS = 10 * 60 * 1000; // 10 minutes
+
+interface StoredState {
+  nonce: string;
+  serverId: string;
+  createdAt: number;
+}
+
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
 // This allows us to track authentication for a specific server and associated dynamic client registration
 export interface AgentsOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
   serverId: string | undefined;
+  validateAndConsumeState(
+    state: string
+  ): Promise<{ valid: boolean; serverId?: string; error?: string }>;
+  deleteCodeVerifier(): Promise<void>;
 }
 
 export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
@@ -124,11 +136,79 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return this._authUrl_;
   }
 
-  async redirectToAuthorization(authUrl: URL): Promise<void> {
+  private _pendingStateNonce_: string | undefined;
+
+  stateKey(nonce: string) {
+    return `/${this.clientName}/${this.serverId}/state/${nonce}`;
+  }
+
+  async state(): Promise<string> {
     const nonce = nanoid();
+    this._pendingStateNonce_ = nonce;
     const state = `${nonce}.${this.serverId}`;
-    authUrl.searchParams.set("state", state);
+    const storedState: StoredState = {
+      nonce,
+      serverId: this.serverId,
+      createdAt: Date.now()
+    };
+    await this.storage.put(this.stateKey(nonce), storedState);
+    return state;
+  }
+
+  async validateAndConsumeState(
+    state: string
+  ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
+    const parts = state.split(".");
+    if (parts.length !== 2) {
+      return { valid: false, error: "Invalid state format" };
+    }
+
+    const [nonce, serverId] = parts;
+    const key = this.stateKey(nonce);
+    const storedState = await this.storage.get<StoredState>(key);
+
+    if (!storedState) {
+      return { valid: false, error: "State not found or already used" };
+    }
+
+    await this.storage.delete(key);
+
+    if (storedState.serverId !== serverId) {
+      return { valid: false, error: "State serverId mismatch" };
+    }
+
+    const age = Date.now() - storedState.createdAt;
+    if (age > STATE_EXPIRATION_MS) {
+      return { valid: false, error: "State expired" };
+    }
+
+    return { valid: true, serverId };
+  }
+
+  async redirectToAuthorization(authUrl: URL): Promise<void> {
     this._authUrl_ = authUrl.toString();
+  }
+
+  async invalidateCredentials(
+    scope: "all" | "client" | "tokens" | "verifier"
+  ): Promise<void> {
+    if (!this._clientId_) return;
+
+    const deleteKeys: string[] = [];
+
+    if (scope === "all" || scope === "client") {
+      deleteKeys.push(this.clientInfoKey(this.clientId));
+    }
+    if (scope === "all" || scope === "tokens") {
+      deleteKeys.push(this.tokenKey(this.clientId));
+    }
+    if (scope === "all" || scope === "verifier") {
+      deleteKeys.push(this.codeVerifierKey(this.clientId));
+    }
+
+    if (deleteKeys.length > 0) {
+      await this.storage.delete(deleteKeys);
+    }
   }
 
   codeVerifierKey(clientId: string) {
@@ -155,5 +235,9 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
       throw new Error("No code verifier found");
     }
     return codeVerifier;
+  }
+
+  async deleteCodeVerifier(): Promise<void> {
+    await this.storage.delete(this.codeVerifierKey(this.clientId));
   }
 }

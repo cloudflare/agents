@@ -668,6 +668,10 @@ export class MCPClientManager {
     const error = url.searchParams.get("error");
     const errorDescription = url.searchParams.get("error_description");
 
+    if (!state) {
+      throw new Error("Unauthorized: no state provided");
+    }
+
     const serverId = this.extractServerIdFromState(state);
 
     if (!serverId) {
@@ -685,7 +689,25 @@ export class MCPClientManager {
       );
     }
 
-    // Handle OAuth error responses from the provider
+    if (this.mcpConnections[serverId] === undefined) {
+      throw new Error(`Could not find serverId: ${serverId}`);
+    }
+
+    const conn = this.mcpConnections[serverId];
+    if (!conn.options.transport.authProvider) {
+      throw new Error(
+        "Trying to finalize authentication for a server connection without an authProvider"
+      );
+    }
+
+    const authProvider = conn.options.transport.authProvider;
+    authProvider.serverId = serverId;
+
+    const stateValidation = await authProvider.validateAndConsumeState(state);
+    if (!stateValidation.valid) {
+      throw new Error(`Invalid state: ${stateValidation.error}`);
+    }
+
     if (error) {
       return {
         serverId,
@@ -697,25 +719,14 @@ export class MCPClientManager {
     if (!code) {
       throw new Error("Unauthorized: no code provided");
     }
-    if (!state) {
-      throw new Error("Unauthorized: no state provided");
-    }
 
-    if (this.mcpConnections[serverId] === undefined) {
-      throw new Error(`Could not find serverId: ${serverId}`);
-    }
-
-    // If connection is already ready/connected, this is likely a duplicate callback
     if (
       this.mcpConnections[serverId].connectionState ===
         MCPConnectionState.READY ||
       this.mcpConnections[serverId].connectionState ===
         MCPConnectionState.CONNECTED
     ) {
-      // make sure auth_url is cleared
       this.clearServerAuthUrl(serverId);
-
-      // Already authenticated and ready, treat as success
       return {
         serverId,
         authSuccess: true
@@ -731,22 +742,12 @@ export class MCPClientManager {
       );
     }
 
-    const conn = this.mcpConnections[serverId];
-    if (!conn.options.transport.authProvider) {
-      throw new Error(
-        "Trying to finalize authentication for a server connection without an authProvider"
-      );
-    }
-
-    // Get clientId from auth provider (stored during redirectToAuthorization) or fallback to state for backward compatibility
-    const clientId = conn.options.transport.authProvider.clientId || state;
-
-    // Set the OAuth credentials
-    conn.options.transport.authProvider.clientId = clientId;
-    conn.options.transport.authProvider.serverId = serverId;
+    const clientId = authProvider.clientId || state;
+    authProvider.clientId = clientId;
 
     try {
       await conn.completeAuthorization(code);
+      await authProvider.deleteCodeVerifier();
       this.clearServerAuthUrl(serverId);
       this._onServerStateChanged.fire();
 
@@ -754,9 +755,9 @@ export class MCPClientManager {
         serverId,
         authSuccess: true
       };
-    } catch (error) {
+    } catch (authError) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        authError instanceof Error ? authError.message : String(authError);
 
       this._onServerStateChanged.fire();
 
