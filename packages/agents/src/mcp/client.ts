@@ -742,9 +742,6 @@ export class MCPClientManager {
       );
     }
 
-    const clientId = authProvider.clientId || state;
-    authProvider.clientId = clientId;
-
     try {
       await conn.completeAuthorization(code);
       await authProvider.deleteCodeVerifier();
