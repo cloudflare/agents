@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.27
+
+### Patch Changes
+
+- [#691](https://github.com/cloudflare/agents/pull/691) [`d7b2f14`](https://github.com/cloudflare/agents/commit/d7b2f1471f9e336edae165d73f0247ac86b094df) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fixed schedule handling and added tests for this bug
+
 ## 0.2.26
 
 ### Patch Changes
