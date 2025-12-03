@@ -12,6 +12,7 @@ permissions:
 jobs:
   release:
     permissions:
+      id-token: write # Required for trusted publishing
       contents: write
       pull-requests: write
 
