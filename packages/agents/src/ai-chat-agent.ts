@@ -34,10 +34,12 @@ const STREAM_STALE_THRESHOLD_MS = 5 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /** Default age threshold for cleaning up completed streams (ms) - 24 hours */
 const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-/** Default idle timeout - how long to wait for user to start typing after sending a message (ms) */
-const DEFAULT_CHAT_IDLE_TIMEOUT_MS = 5000;
-/** Default typing timeout - how long to wait after user stops typing (ms) */
-const DEFAULT_CHAT_TYPING_TIMEOUT_MS = 1500;
+/** Default idle timeout for batch mode only - how long to wait before processing batched messages (ms).
+ *  In sequential mode (the default), messages are processed immediately via the queue. */
+const DEFAULT_CHAT_IDLE_TIMEOUT_MS = 3000;
+/** Default typing timeout - how long to wait after user stops typing before processing (ms).
+ *  Higher than idle timeout since typing indicates user may send another message. */
+const DEFAULT_CHAT_TYPING_TIMEOUT_MS = 5000;
 
 /**
  * Chat processing mode for handling multiple incoming messages.
@@ -77,6 +79,43 @@ type StreamMetadata = {
 };
 
 /**
+ * Payload for queued chat requests (sequential mode).
+ * Serializable so it can be persisted to SQLite via the built-in queue.
+ */
+type ChatQueuePayload = {
+  requestId: string;
+  connectionId: string;
+  data: IncomingMessage & {
+    type: typeof MessageType.CF_AGENT_USE_CHAT_REQUEST;
+  };
+  messages: ChatMessage[];
+};
+
+/**
+ * Options for configuring AIChatAgent behavior.
+ */
+export type AIChatAgentOptions = {
+  /** Whether the Agent should hibernate when inactive */
+  hibernate: boolean;
+  /**
+   * How to handle multiple incoming chat messages.
+   * - `"sequential"` (default): Process each message one-by-one via the durable queue.
+   * - `"batch"`: Combine multiple rapid messages into one response using debounce timing.
+   */
+  chatProcessingMode: ChatProcessingMode;
+  /**
+   * Idle timeout in milliseconds (batch mode only).
+   * How long to wait after a message is sent before processing.
+   */
+  chatIdleTimeout: number;
+  /**
+   * Typing timeout in milliseconds (batch mode only).
+   * How long to wait after user stops typing before processing.
+   */
+  chatTypingTimeout: number;
+};
+
+/**
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
@@ -84,6 +123,28 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   Env,
   State
 > {
+  /**
+   * Configuration options for AIChatAgent.
+   * Override in subclasses to customize behavior.
+   *
+   * @example
+   * ```ts
+   * class MyAgent extends AIChatAgent {
+   *   static options = {
+   *     ...AIChatAgent.options,
+   *     chatProcessingMode: "batch" as const,
+   *     chatIdleTimeout: 2000,
+   *   };
+   * }
+   * ```
+   */
+  static options: AIChatAgentOptions = {
+    hibernate: true,
+    chatProcessingMode: "sequential",
+    chatIdleTimeout: DEFAULT_CHAT_IDLE_TIMEOUT_MS,
+    chatTypingTimeout: DEFAULT_CHAT_TYPING_TIMEOUT_MS
+  };
+
   /**
    * Map of message `id`s to `AbortController`s
    * useful to propagate request cancellation signals for any external calls made by the agent
@@ -130,17 +191,6 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   private _lastCleanupTime = 0;
 
   /**
-   * Queue for sequential mode - stores all pending requests in order.
-   */
-  private _chatQueue: Array<{
-    connection: Connection;
-    data: IncomingMessage & {
-      type: typeof MessageType.CF_AGENT_USE_CHAT_REQUEST;
-    };
-    messages: ChatMessage[];
-  }> = [];
-
-  /**
    * Pending chat request buffer for batch mode. Stores only the most recent request.
    * When multiple requests arrive in quick succession, only the latest one
    * (which contains the complete conversation) is processed after debounce.
@@ -171,86 +221,20 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   private _userIsTyping = false;
 
-  /**
-   * How to handle multiple incoming chat messages.
-   *
-   * - `"sequential"` (default): Process each message one-by-one.
-   *   Each message gets its own response. Messages are queued and processed
-   *   in order, waiting for each response to fully complete before the next.
-   *   No client changes required.
-   *
-   * - `"batch"`: Combine multiple rapid messages into one response.
-   *   Uses debounce timing and optional typing indicators to batch messages.
-   *   Better for conversational UX where users send multiple short messages.
-   *
-   * @example
-   * ```ts
-   * // Sequential - each message gets its own response
-   * class MyAgent extends AIChatAgent {
-   *   chatProcessingMode = "sequential";
-   * }
-   *
-   * // Batch - combine messages into one response
-   * class MyAgent extends AIChatAgent {
-   *   chatProcessingMode = "batch";
-   *   chatIdleTimeout = 3000; // 3 second batching window
-   * }
-   * ```
-   */
-  chatProcessingMode: ChatProcessingMode = "sequential";
+  /** Returns the chat processing mode from static options. */
+  get chatProcessingMode(): ChatProcessingMode {
+    return (this.constructor as typeof AIChatAgent).options.chatProcessingMode;
+  }
 
-  /**
-   * Idle timeout in milliseconds (batch mode only).
-   * How long to wait after a message is sent before processing.
-   * If typing indicators are received, switches to the shorter `chatTypingTimeout`.
-   *
-   * **Without typing indicators (simple batching):**
-   * Set this to your desired batching window (e.g., 3000ms).
-   * All messages within this window will be batched together.
-   * No client changes required.
-   *
-   * **With typing indicators (smart batching):**
-   * This is the max wait time for user to start typing.
-   * Once typing is detected, switches to `chatTypingTimeout`.
-   * Requires client to send typing indicators via `onInputChange`.
-   *
-   * Default is 5000ms (5 seconds).
-   *
-   * @example
-   * ```ts
-   * // Simple batching - no client changes needed
-   * class MyAgent extends AIChatAgent {
-   *   chatProcessingMode = "batch";
-   *   chatIdleTimeout = 3000; // 3 second batching window
-   * }
-   *
-   * // Smart batching - with typing indicators
-   * class MyAgent extends AIChatAgent {
-   *   chatProcessingMode = "batch";
-   *   chatIdleTimeout = 5000;  // 5s to start typing
-   *   chatTypingTimeout = 1500; // 1.5s after typing stops
-   * }
-   * ```
-   */
-  chatIdleTimeout: number = DEFAULT_CHAT_IDLE_TIMEOUT_MS;
+  /** Returns the chat idle timeout from static options. */
+  get chatIdleTimeout(): number {
+    return (this.constructor as typeof AIChatAgent).options.chatIdleTimeout;
+  }
 
-  /**
-   * Typing timeout in milliseconds - how long to wait after user stops typing
-   * before processing. Only used when typing indicators are received.
-   * Each typing indicator resets this timer.
-   *
-   * Set to 0 to disable typing-aware batching (uses `chatIdleTimeout` only).
-   *
-   * Default is 1500ms (1.5 seconds).
-   *
-   * @example
-   * ```ts
-   * class MyAgent extends AIChatAgent {
-   *   chatTypingTimeout = 2000; // 2 seconds after typing stops
-   * }
-   * ```
-   */
-  chatTypingTimeout: number = DEFAULT_CHAT_TYPING_TIMEOUT_MS;
+  /** Returns the chat typing timeout from static options. */
+  get chatTypingTimeout(): number {
+    return (this.constructor as typeof AIChatAgent).options.chatTypingTimeout;
+  }
 
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
@@ -327,21 +311,27 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
 
-          const request = {
-            connection,
-            data: data as IncomingMessage & {
-              type: typeof MessageType.CF_AGENT_USE_CHAT_REQUEST;
-            },
-            messages: transformedMessages
-          };
-
           if (this.chatProcessingMode === "sequential") {
-            // Sequential mode: queue all requests and process one by one
-            this._chatQueue.push(request);
-            this._processSequentialQueue();
+            // Sequential mode: queue all requests using the built-in durable queue
+            const payload: ChatQueuePayload = {
+              requestId: data.id,
+              connectionId: connection.id,
+              data: data as IncomingMessage & {
+                type: typeof MessageType.CF_AGENT_USE_CHAT_REQUEST;
+              },
+              messages: transformedMessages
+            };
+            // Use type assertion since _processQueuedChatRequest is a valid method but private
+            this.queue("_processQueuedChatRequest" as keyof this, payload);
           } else {
             // Batch mode: buffer the latest request and use debounce
-            this._pendingChatRequest = request;
+            this._pendingChatRequest = {
+              connection,
+              data: data as IncomingMessage & {
+                type: typeof MessageType.CF_AGENT_USE_CHAT_REQUEST;
+              },
+              messages: transformedMessages
+            };
 
             // Always schedule processing to ensure a timer exists.
             // This handles edge cases like DO eviction during processing
@@ -355,7 +345,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         // Handle clear chat
         if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
           // Clear both queue (sequential) and pending request (batch)
-          this._chatQueue = [];
+          this.dequeueAllByCallback("_processQueuedChatRequest");
           this._pendingChatRequest = null;
           this._cancelProcessingTimeout();
           this._userIsTyping = false;
@@ -383,10 +373,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
         // Handle request cancellation
         if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
-          // Remove from sequential queue if present
-          this._chatQueue = this._chatQueue.filter(
-            (item) => item.data.id !== data.id
-          );
+          // Remove from sequential queue if present (using built-in queue)
+          const queuedItems = await this.getQueues("requestId", data.id);
+          for (const item of queuedItems) {
+            await this.dequeue(item.id);
+          }
           // Clear pending batch request if it matches
           if (this._pendingChatRequest?.data.id === data.id) {
             this._pendingChatRequest = null;
@@ -674,29 +665,35 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
-   * Process the sequential queue - each message gets its own response.
-   * Messages are processed one at a time, waiting for each response to complete.
+   * Get a connection by its ID.
+   * @param id - The connection ID to look up
+   * @returns The connection if found, undefined otherwise
    */
-  private async _processSequentialQueue() {
-    // Skip if already processing or queue is empty
-    if (this._isProcessingChat || this._chatQueue.length === 0) {
+  private _getConnectionById(id: string): Connection | undefined {
+    for (const conn of this.getConnections()) {
+      if (conn.id === id) {
+        return conn;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Callback method for the built-in queue to process sequential chat requests.
+   * Called by the Agent's queue system when processing queued items.
+   * @param payload - The serialized chat request payload
+   */
+  private async _processQueuedChatRequest(payload: ChatQueuePayload) {
+    const connection = this._getConnectionById(payload.connectionId);
+    if (!connection) {
+      // Connection is gone (client disconnected), skip this request
+      console.warn(
+        `[AIChatAgent] Connection ${payload.connectionId} not found, skipping chat request ${payload.requestId}`
+      );
       return;
     }
 
-    this._isProcessingChat = true;
-
-    try {
-      while (this._chatQueue.length > 0) {
-        const request = this._chatQueue.shift()!;
-        await this._processChatRequest(
-          request.connection,
-          request.data,
-          request.messages
-        );
-      }
-    } finally {
-      this._isProcessingChat = false;
-    }
+    await this._processChatRequest(connection, payload.data, payload.messages);
   }
 
   /**
@@ -1681,7 +1678,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    */
   async destroy() {
     // Clear both queue (sequential) and pending request (batch)
-    this._chatQueue = [];
+    await this.dequeueAllByCallback("_processQueuedChatRequest");
     this._pendingChatRequest = null;
     this._cancelProcessingTimeout();
     this._userIsTyping = false;
