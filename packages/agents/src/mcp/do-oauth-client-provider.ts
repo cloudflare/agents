@@ -21,9 +21,10 @@ export interface AgentsOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
   serverId: string | undefined;
-  validateState(
+  checkState(
     state: string
   ): Promise<{ valid: boolean; serverId?: string; error?: string }>;
+  consumeState(state: string): Promise<void>;
   deleteCodeVerifier(): Promise<void>;
 }
 
@@ -136,15 +137,12 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return this._authUrl_;
   }
 
-  private _pendingStateNonce_: string | undefined;
-
   stateKey(nonce: string) {
     return `/${this.clientName}/${this.serverId}/state/${nonce}`;
   }
 
   async state(): Promise<string> {
     const nonce = nanoid();
-    this._pendingStateNonce_ = nonce;
     const state = `${nonce}.${this.serverId}`;
     const storedState: StoredState = {
       nonce,
@@ -155,7 +153,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return state;
   }
 
-  async validateState(
+  async checkState(
     state: string
   ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
     const parts = state.split(".");
@@ -171,8 +169,6 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
       return { valid: false, error: "State not found or already used" };
     }
 
-    await this.storage.delete(key);
-
     if (storedState.serverId !== serverId) {
       return { valid: false, error: "State serverId mismatch" };
     }
@@ -183,6 +179,15 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     }
 
     return { valid: true, serverId };
+  }
+
+  async consumeState(state: string): Promise<void> {
+    const parts = state.split(".");
+    if (parts.length !== 2) {
+      return;
+    }
+    const [nonce] = parts;
+    await this.storage.delete(this.stateKey(nonce));
   }
 
   async redirectToAuthorization(authUrl: URL): Promise<void> {

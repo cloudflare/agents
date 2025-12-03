@@ -39,7 +39,7 @@ function createMockAuthProvider(
     redirectToAuthorization: vi.fn(),
     saveCodeVerifier: vi.fn(),
     codeVerifier: vi.fn(),
-    async validateState(
+    async checkState(
       state: string
     ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
       const parts = state.split(".");
@@ -51,11 +51,19 @@ function createMockAuthProvider(
       if (!stored) {
         return { valid: false, error: "State not found or already used" };
       }
-      stateStorage.storage.delete(nonce);
+      // Note: checkState does NOT consume the state - that's done by consumeState
       if (stored.serverId !== serverId) {
         return { valid: false, error: "State serverId mismatch" };
       }
       return { valid: true, serverId };
+    },
+    async consumeState(state: string): Promise<void> {
+      const parts = state.split(".");
+      if (parts.length !== 2) {
+        return;
+      }
+      const [nonce] = parts;
+      stateStorage.storage.delete(nonce);
     },
     async deleteCodeVerifier(): Promise<void> {
       // No-op for tests
@@ -968,7 +976,8 @@ describe("MCPClientManager OAuth Integration", () => {
         }),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateState: vi.fn().mockResolvedValue({ valid: true }),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
@@ -1071,7 +1080,8 @@ describe("MCPClientManager OAuth Integration", () => {
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateState: vi.fn().mockResolvedValue({ valid: true }),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
@@ -1880,7 +1890,8 @@ describe("MCPClientManager OAuth Integration", () => {
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateState: vi.fn().mockResolvedValue({ valid: true }),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 

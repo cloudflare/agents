@@ -676,7 +676,7 @@ export class MCPClientManager {
 
     if (!serverId) {
       throw new Error(
-        `No serverId found in state parameter. Expected format: {nonce}.{serverId}`
+        "No serverId found in state parameter. Expected format: {nonce}.{serverId}"
       );
     }
 
@@ -703,7 +703,9 @@ export class MCPClientManager {
     const authProvider = conn.options.transport.authProvider;
     authProvider.serverId = serverId;
 
-    const stateValidation = await authProvider.validateState(state);
+    // Two-phase state validation: check first (non-destructive), consume later
+    // This prevents DoS attacks where attacker consumes valid state before legitimate callback
+    const stateValidation = await authProvider.checkState(state);
     if (!stateValidation.valid) {
       throw new Error(`Invalid state: ${stateValidation.error}`);
     }
@@ -743,6 +745,8 @@ export class MCPClientManager {
     }
 
     try {
+      // Consume state only after all checks pass, right before token exchange
+      await authProvider.consumeState(state);
       await conn.completeAuthorization(code);
       await authProvider.deleteCodeVerifier();
       this.clearServerAuthUrl(serverId);

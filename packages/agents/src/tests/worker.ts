@@ -399,7 +399,7 @@ export class TestOAuthAgent extends Agent<Env> {
             clientId: "test-client-id",
             serverId: serverId,
             authUrl: "http://example.com/oauth/authorize",
-            async validateState(
+            async checkState(
               state: string
             ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
               const parts = state.split(".");
@@ -414,7 +414,7 @@ export class TestOAuthAgent extends Agent<Env> {
                   error: "State not found or already used"
                 };
               }
-              self.mockStateStorage.delete(nonce);
+              // Note: checkState does NOT consume the state
               if (stored.serverId !== stateServerId) {
                 return { valid: false, error: "State serverId mismatch" };
               }
@@ -423,6 +423,14 @@ export class TestOAuthAgent extends Agent<Env> {
                 return { valid: false, error: "State expired" };
               }
               return { valid: true, serverId: stateServerId };
+            },
+            async consumeState(state: string): Promise<void> {
+              const parts = state.split(".");
+              if (parts.length !== 2) {
+                return;
+              }
+              const [nonce] = parts;
+              self.mockStateStorage.delete(nonce);
             },
             async deleteCodeVerifier(): Promise<void> {
               // No-op for tests
