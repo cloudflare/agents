@@ -48,7 +48,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   }
 
   get redirectUrl() {
-    return `${this.baseRedirectUrl}/${this.serverId}`;
+    return this.baseRedirectUrl;
   }
 
   get clientId() {
@@ -124,14 +124,10 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return this._authUrl_;
   }
 
-  /**
-   * Because this operates on the server side (but we need browser auth), we send this url back to the user
-   * and require user interact to initiate the redirect flow
-   */
   async redirectToAuthorization(authUrl: URL): Promise<void> {
-    // Generate secure random token for state parameter
-    const stateToken = nanoid();
-    authUrl.searchParams.set("state", stateToken);
+    const nonce = nanoid();
+    const state = `${nonce}.${this.serverId}`;
+    authUrl.searchParams.set("state", state);
     this._authUrl_ = authUrl.toString();
   }
 

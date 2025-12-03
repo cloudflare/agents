@@ -411,7 +411,6 @@ export class TestOAuthAgent extends Agent<Env> {
     callbackUrl: string,
     clientId?: string | null
   ): void {
-    // Save server to database with callback URL using SQL directly
     this.sql`
       INSERT OR REPLACE INTO cf_agents_mcp_servers (
         id, name, server_url, client_id, auth_url, callback_url, server_options
@@ -421,7 +420,7 @@ export class TestOAuthAgent extends Agent<Env> {
         ${serverUrl},
         ${clientId ?? null},
         ${null},
-        ${`${callbackUrl}/${serverId}`},
+        ${callbackUrl},
         ${null}
       )
     `;

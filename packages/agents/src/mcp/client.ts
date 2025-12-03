@@ -635,16 +635,10 @@ export class MCPClientManager {
     }
   }
 
-  private extractServerIdFromCallbackUrl(url: URL): string | null {
-    const callbackIndex = url.pathname.indexOf("/callback/");
-    if (callbackIndex === -1) {
-      return null;
-    }
-    const afterCallback = url.pathname.slice(
-      callbackIndex + "/callback/".length
-    );
-    const serverId = afterCallback.split("/")[0];
-    return serverId || null;
+  private extractServerIdFromState(state: string | null): string | null {
+    if (!state) return null;
+    const parts = state.split(".");
+    return parts.length === 2 ? parts[1] : null;
   }
 
   isCallbackRequest(req: Request): boolean {
@@ -652,14 +646,13 @@ export class MCPClientManager {
       return false;
     }
 
-    // Quick heuristic check: most callback URLs contain "/callback/"
-    // This avoids DB queries for obviously non-callback requests
-    if (!req.url.includes("/callback/")) {
+    if (!req.url.includes("/callback")) {
       return false;
     }
 
     const url = new URL(req.url);
-    const serverId = this.extractServerIdFromCallbackUrl(url);
+    const state = url.searchParams.get("state");
+    const serverId = this.extractServerIdFromState(state);
     if (!serverId) {
       return false;
     }
@@ -670,11 +663,16 @@ export class MCPClientManager {
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
-    const serverId = this.extractServerIdFromCallbackUrl(url);
+    const code = url.searchParams.get("code");
+    const state = url.searchParams.get("state");
+    const error = url.searchParams.get("error");
+    const errorDescription = url.searchParams.get("error_description");
+
+    const serverId = this.extractServerIdFromState(state);
 
     if (!serverId) {
       throw new Error(
-        `No serverId found in callback URL: ${req.url}. Expected format: {callback_url}/{serverId}?code=...`
+        `No serverId found in state parameter. Expected format: {nonce}.{serverId}`
       );
     }
 
@@ -683,13 +681,9 @@ export class MCPClientManager {
 
     if (!serverExists) {
       throw new Error(
-        `No server found with id "${serverId}" for callback URL: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
+        `No server found with id "${serverId}". Was the request matched with \`isCallbackRequest()\`?`
       );
     }
-    const code = url.searchParams.get("code");
-    const state = url.searchParams.get("state");
-    const error = url.searchParams.get("error");
-    const errorDescription = url.searchParams.get("error_description");
 
     // Handle OAuth error responses from the provider
     if (error) {
