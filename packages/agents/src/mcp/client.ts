@@ -745,7 +745,6 @@ export class MCPClientManager {
     }
 
     try {
-      // Consume state only after all checks pass, right before token exchange
       await authProvider.consumeState(state);
       await conn.completeAuthorization(code);
       await authProvider.deleteCodeVerifier();

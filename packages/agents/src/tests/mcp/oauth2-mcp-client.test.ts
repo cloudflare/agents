@@ -488,3 +488,87 @@ describe("OAuth2 MCP Client - State Security", () => {
     expect(await response.text()).toContain("State serverId mismatch");
   });
 });
+
+describe("OAuth2 MCP Client - Custom Handler", () => {
+  it("should use custom handler for OAuth callback response", async () => {
+    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentStub = env.TestOAuthAgent.get(agentId);
+    const serverId = nanoid(8);
+    const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+
+    await agentStub.setName("default");
+    await agentStub.onStart();
+
+    // Configure custom JSON handler (functions can't cross DO boundary, so use flag)
+    await agentStub.configureOAuthForTest({ useJsonHandler: true });
+
+    agentStub.sql`
+      INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
+    `;
+
+    await agentStub.setupMockMcpConnection(
+      serverId,
+      "test",
+      "http://example.com/mcp",
+      callbackUrl,
+      "client-id"
+    );
+
+    const state = createStateWithSetup(agentStub, serverId);
+    const response = await agentStub.fetch(
+      new Request(`${callbackUrl}?code=test-code&state=${state}`)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+
+    const body = (await response.json()) as {
+      custom: boolean;
+      serverId: string;
+      success: boolean;
+    };
+    expect(body.custom).toBe(true);
+    expect(body.serverId).toBe(serverId);
+    expect(body.success).toBe(true);
+  });
+
+  it("should use custom handler for OAuth error response", async () => {
+    const agentId = env.TestOAuthAgent.newUniqueId();
+    const agentStub = env.TestOAuthAgent.get(agentId);
+    const serverId = nanoid(8);
+    const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
+
+    await agentStub.setName("default");
+    await agentStub.onStart();
+
+    // Configure custom JSON handler
+    await agentStub.configureOAuthForTest({ useJsonHandler: true });
+
+    agentStub.sql`
+      INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
+      VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
+    `;
+
+    await agentStub.setupMockMcpConnection(
+      serverId,
+      "test",
+      "http://example.com/mcp",
+      callbackUrl,
+      "client-id"
+    );
+
+    const state = createStateWithSetup(agentStub, serverId);
+    // Send OAuth error
+    const response = await agentStub.fetch(
+      new Request(
+        `${callbackUrl}?error=access_denied&error_description=User%20denied&state=${state}`
+      )
+    );
+
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as { custom: boolean; error: string };
+    expect(body.custom).toBe(true);
+    expect(body.error).toBe("User denied");
+  });
+});

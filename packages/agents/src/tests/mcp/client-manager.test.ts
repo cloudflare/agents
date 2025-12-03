@@ -15,6 +15,13 @@ function createMockStateStorage() {
       const nonce = nanoid();
       storage.set(nonce, { serverId, createdAt: Date.now() });
       return `${nonce}.${serverId}`;
+    },
+    createExpiredState(serverId: string): string {
+      const nonce = nanoid();
+      // Create state that's 11 minutes old (expired - TTL is 10 minutes)
+      const expiredTime = Date.now() - 11 * 60 * 1000;
+      storage.set(nonce, { serverId, createdAt: expiredTime });
+      return `${nonce}.${serverId}`;
     }
   };
 }
@@ -54,6 +61,11 @@ function createMockAuthProvider(
       // Note: checkState does NOT consume the state - that's done by consumeState
       if (stored.serverId !== serverId) {
         return { valid: false, error: "State serverId mismatch" };
+      }
+      // Check expiration (10 minute TTL)
+      const age = Date.now() - stored.createdAt;
+      if (age > 10 * 60 * 1000) {
+        return { valid: false, error: "State expired" };
       }
       return { valid: true, serverId };
     },
@@ -628,6 +640,45 @@ describe("MCPClientManager OAuth Integration", () => {
       ).rejects.toThrow("State not found or already used");
     });
 
+    it("should reject expired state (10 minute TTL)", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      manager.mcpConnections[serverId] = connection;
+
+      // Create an expired state (11 minutes old, TTL is 10 minutes)
+      const expiredState = stateStorage.createExpiredState(serverId);
+
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=test-code&state=${expiredState}`
+      );
+      await expect(
+        manager.handleCallbackRequest(callbackRequest)
+      ).rejects.toThrow("State expired");
+    });
+
     it("should only match callbacks with valid state for existing servers", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";
@@ -723,6 +774,172 @@ describe("MCPClientManager OAuth Integration", () => {
       // auth_url should be cleared
       const server = mockStorageData.get(serverId);
       expect(server?.auth_url).toBe(null);
+    });
+
+    it("should handle OAuth error from authorization server", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: "http://auth.example.com/authorize",
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId] = connection;
+
+      const state = stateStorage.createState(serverId);
+      // OAuth server returns error instead of code
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.serverId).toBe(serverId);
+      expect(result.authError).toBe("User denied access");
+    });
+
+    it("should handle OAuth error without description", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId] = connection;
+
+      const state = stateStorage.createState(serverId);
+      // OAuth server returns error without description
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=server_error&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("server_error");
+    });
+
+    it("should handle token exchange failure", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      // Mock completeAuthorization to fail (simulating token exchange failure)
+      connection.completeAuthorization = vi
+        .fn()
+        .mockRejectedValue(new Error("Token exchange failed: invalid_grant"));
+      manager.mcpConnections[serverId] = connection;
+
+      const state = stateStorage.createState(serverId);
+      const callbackRequest = new Request(
+        `${callbackUrl}?code=valid-code&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("invalid_grant");
+    });
+
+    it("should handle concurrent OAuth attempts (second attempt while first in progress)", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      connection.completeAuthorization = vi.fn().mockResolvedValue(undefined);
+      manager.mcpConnections[serverId] = connection;
+
+      // Create two different states (simulating user starting OAuth twice)
+      const state1 = stateStorage.createState(serverId);
+      const state2 = stateStorage.createState(serverId);
+
+      // First callback succeeds
+      const result1 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code1&state=${state1}`)
+      );
+      expect(result1.authSuccess).toBe(true);
+
+      // Reset connection state for second attempt
+      connection.connectionState = "authenticating";
+
+      // Second callback also succeeds (different state, not reused)
+      const result2 = await manager.handleCallbackRequest(
+        new Request(`${callbackUrl}?code=code2&state=${state2}`)
+      );
+      expect(result2.authSuccess).toBe(true);
     });
   });
 

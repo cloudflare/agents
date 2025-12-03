@@ -184,6 +184,11 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
   async consumeState(state: string): Promise<void> {
     const parts = state.split(".");
     if (parts.length !== 2) {
+      // This should never happen since checkState validates format first.
+      // Log for debugging but don't throw - state consumption is best-effort.
+      console.warn(
+        `[OAuth] consumeState called with invalid state format: ${state.substring(0, 20)}...`
+      );
       return;
     }
     const [nonce] = parts;

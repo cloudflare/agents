@@ -369,8 +369,32 @@ export class TestOAuthAgent extends Agent<Env> {
   configureOAuthForTest(config: {
     successRedirect?: string;
     errorRedirect?: string;
+    useJsonHandler?: boolean; // Use built-in JSON response handler for testing
   }): void {
-    this.mcp.configureOAuthCallback(config);
+    if (config.useJsonHandler) {
+      this.mcp.configureOAuthCallback({
+        customHandler: (result: {
+          serverId: string;
+          authSuccess: boolean;
+          authError?: string;
+        }) => {
+          return new Response(
+            JSON.stringify({
+              custom: true,
+              serverId: result.serverId,
+              success: result.authSuccess,
+              error: result.authError
+            }),
+            {
+              status: result.authSuccess ? 200 : 401,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+      });
+    } else {
+      this.mcp.configureOAuthCallback(config);
+    }
   }
 
   private mockStateStorage: Map<
