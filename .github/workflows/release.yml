@@ -28,6 +28,7 @@ jobs:
         with:
           node-version: 20
           cache: "npm"
+          registry-url: https://registry.npmjs.org
 
       - name: Get Playwright version
         id: playwright-version
