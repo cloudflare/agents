@@ -399,7 +399,7 @@ export class TestOAuthAgent extends Agent<Env> {
             clientId: "test-client-id",
             serverId: serverId,
             authUrl: "http://example.com/oauth/authorize",
-            async validateAndConsumeState(
+            async validateState(
               state: string
             ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
               const parts = state.split(".");

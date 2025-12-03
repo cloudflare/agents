@@ -39,7 +39,7 @@ function createMockAuthProvider(
     redirectToAuthorization: vi.fn(),
     saveCodeVerifier: vi.fn(),
     codeVerifier: vi.fn(),
-    async validateAndConsumeState(
+    async validateState(
       state: string
     ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
       const parts = state.split(".");
@@ -968,7 +968,7 @@ describe("MCPClientManager OAuth Integration", () => {
         }),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateAndConsumeState: vi.fn().mockResolvedValue({ valid: true }),
+        validateState: vi.fn().mockResolvedValue({ valid: true }),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
@@ -1071,7 +1071,7 @@ describe("MCPClientManager OAuth Integration", () => {
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateAndConsumeState: vi.fn().mockResolvedValue({ valid: true }),
+        validateState: vi.fn().mockResolvedValue({ valid: true }),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
@@ -1880,7 +1880,7 @@ describe("MCPClientManager OAuth Integration", () => {
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateAndConsumeState: vi.fn().mockResolvedValue({ valid: true }),
+        validateState: vi.fn().mockResolvedValue({ valid: true }),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 

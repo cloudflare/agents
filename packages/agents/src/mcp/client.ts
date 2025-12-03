@@ -703,7 +703,7 @@ export class MCPClientManager {
     const authProvider = conn.options.transport.authProvider;
     authProvider.serverId = serverId;
 
-    const stateValidation = await authProvider.validateAndConsumeState(state);
+    const stateValidation = await authProvider.validateState(state);
     if (!stateValidation.valid) {
       throw new Error(`Invalid state: ${stateValidation.error}`);
     }

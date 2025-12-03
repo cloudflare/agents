@@ -686,9 +686,7 @@ describe("MCP Client Connection Integration", () => {
               redirectToAuthorization: vi.fn(),
               saveCodeVerifier: vi.fn(),
               codeVerifier: vi.fn(),
-              validateAndConsumeState: vi
-                .fn()
-                .mockResolvedValue({ valid: true }),
+              validateState: vi.fn().mockResolvedValue({ valid: true }),
               deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
             }
           },
@@ -788,7 +786,7 @@ describe("MCP Client Connection Integration", () => {
           if (!stored) throw new Error("No code verifier found");
           return stored as string;
         }),
-        validateAndConsumeState: vi.fn().mockResolvedValue({ valid: true }),
+        validateState: vi.fn().mockResolvedValue({ valid: true }),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
@@ -832,7 +830,7 @@ describe("MCP Client Connection Integration", () => {
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateAndConsumeState: vi.fn().mockResolvedValue({ valid: true }),
+        validateState: vi.fn().mockResolvedValue({ valid: true }),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
@@ -905,7 +903,7 @@ describe("MCP Client Connection Integration", () => {
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
         codeVerifier: vi.fn(),
-        validateAndConsumeState: vi.fn().mockResolvedValue({ valid: true }),
+        validateState: vi.fn().mockResolvedValue({ valid: true }),
         deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 

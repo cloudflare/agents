@@ -21,7 +21,7 @@ export interface AgentsOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
   serverId: string | undefined;
-  validateAndConsumeState(
+  validateState(
     state: string
   ): Promise<{ valid: boolean; serverId?: string; error?: string }>;
   deleteCodeVerifier(): Promise<void>;
@@ -155,7 +155,7 @@ export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
     return state;
   }
 
-  async validateAndConsumeState(
+  async validateState(
     state: string
   ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
     const parts = state.split(".");
