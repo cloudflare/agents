@@ -73,8 +73,11 @@ describe("OAuth2 MCP Client - Hibernation", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    // Verify callback URL is recognized after restoration
-    expect(await agentStub.isCallbackUrlRegistered(fullCallbackUrl)).toBe(true);
+    // Verify callback URL with valid state is recognized after restoration
+    const callbackWithState = `${callbackUrl}?code=test&state=${nanoid()}.${serverId}`;
+    expect(await agentStub.isCallbackUrlRegistered(callbackWithState)).toBe(
+      true
+    );
   });
 });
 
