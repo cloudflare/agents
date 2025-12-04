@@ -310,6 +310,141 @@ export class TimeAwareAgent extends Agent {
 }
 ```
 
+### 🎯 Tasks: Long-Running Operations
+
+Tasks provide lifecycle management for operations that take time - API calls, file processing, AI agent runs, or any async work that needs progress tracking and cancellation.
+
+#### Creating Tasks
+
+```ts
+import { Agent, callable, type TaskContext } from "agents";
+
+export class MyAgent extends Agent {
+  // Expose a method to start a task
+  @callable()
+  async startAnalysis(repoUrl: string) {
+    // this.task() returns immediately with a handle
+    const task = await this.task(
+      "analyzeRepo",
+      { repoUrl },
+      {
+        timeout: "10m" // Optional timeout
+      }
+    );
+
+    return { taskId: task.id, status: task.status };
+  }
+
+  // The actual work - runs asynchronously with full tracking
+  async analyzeRepo(input: { repoUrl: string }, ctx: TaskContext) {
+    // Emit events for real-time updates
+    ctx.emit("phase", { name: "cloning" });
+    ctx.setProgress(10);
+
+    const repo = await this.cloneRepo(input.repoUrl);
+
+    // Check for cancellation between phases
+    if (ctx.signal.aborted) throw new Error("Cancelled");
+
+    ctx.emit("phase", { name: "analyzing" });
+    ctx.setProgress(50);
+
+    const results = await this.runAnalysis(repo);
+
+    ctx.setProgress(100);
+    return results; // Stored as task.result
+  }
+}
+```
+
+#### Task Lifecycle
+
+Tasks automatically transition through states:
+
+```
+pending → running → completed
+                 ↘ failed
+                 ↘ aborted
+```
+
+Each state change persists to SQLite and broadcasts to connected clients.
+
+#### Managing Tasks
+
+```ts
+// Get a specific task
+const task = this.tasks.get(taskId);
+
+// List tasks by status
+const running = this.tasks.list({ status: "running" });
+const failed = this.tasks.list({ status: "failed" });
+
+// Cancel a running task
+await this.tasks.cancel(taskId, "User requested cancellation");
+
+// Clean up old tasks
+await this.tasks.cleanup(24 * 60 * 60 * 1000); // Older than 24h
+```
+
+#### React Integration
+
+Track task progress in real-time:
+
+```tsx
+import { useAgent, useTask } from "agents/react";
+
+function TaskProgress({ taskId }: { taskId: string }) {
+  const agent = useAgent({ agent: "my-agent" });
+  const task = useTask(agent, taskId, {
+    onEvent: (event) => console.log("Event:", event),
+    onComplete: (result) => console.log("Done:", result),
+    onError: (error) => console.error("Failed:", error)
+  });
+
+  return (
+    <div>
+      <div>Status: {task.status}</div>
+      <progress value={task.progress} max={100} />
+
+      <div>
+        {task.events.map((e) => (
+          <div key={e.id}>
+            [{e.type}] {JSON.stringify(e.data)}
+          </div>
+        ))}
+      </div>
+
+      {task.isRunning && <button onClick={() => task.abort()}>Cancel</button>}
+
+      {task.isCompleted && <div>Result: {JSON.stringify(task.result)}</div>}
+      {task.isError && <div>Error: {task.error}</div>}
+    </div>
+  );
+}
+```
+
+#### TaskContext API
+
+The `ctx` parameter in task methods provides:
+
+| Method                   | Description                                          |
+| ------------------------ | ---------------------------------------------------- |
+| `ctx.emit(type, data)`   | Send a progress event to clients                     |
+| `ctx.setProgress(0-100)` | Update completion percentage                         |
+| `ctx.signal`             | AbortSignal - check `.aborted` or add event listener |
+| `ctx.taskId`             | The task's unique ID                                 |
+
+#### Task Options
+
+```ts
+await this.task("methodName", input, {
+  id: "custom-id", // Optional: provide your own ID
+  timeout: "5m", // Timeout as string ("30s", "5m", "2h")
+  timeout: 300000, // Or milliseconds
+  retries: 3 // Retry on failure (with exponential backoff)
+});
+```
+
 ### 💬 AI Dialogue
 
 Create meaningful conversations with intelligence:

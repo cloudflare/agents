@@ -28,4 +28,28 @@ export type AgentObservabilityEvent =
       {
         connectionId: string;
       }
+    >
+  // Task lifecycle events
+  | BaseEvent<
+      | "task:created"
+      | "task:started"
+      | "task:progress"
+      | "task:completed"
+      | "task:failed"
+      | "task:aborted"
+      | "task:event",
+      {
+        taskId: string;
+        method?: string;
+        input?: unknown;
+        timeoutMs?: number;
+        deadline?: number | null;
+        progress?: number;
+        result?: unknown;
+        error?: string;
+        reason?: string;
+        duration?: number;
+        eventType?: string;
+        eventData?: unknown;
+      }
     >;
