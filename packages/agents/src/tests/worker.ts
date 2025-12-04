@@ -11,6 +11,7 @@ import { McpAgent } from "../mcp/index.ts";
 import {
   Agent,
   callable,
+  getCurrentAgent,
   routeAgentRequest,
   type AgentEmail,
   type Connection,
@@ -571,12 +572,40 @@ export class TestOAuthAgent extends Agent<Env> {
 
 export class TestChatAgent extends AIChatAgent<Env> {
   observability = undefined;
+  // Store captured context for testing
+  private _capturedContext: {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null = null;
 
   async onChatMessage() {
+    // Capture getCurrentAgent() context for testing
+    const { agent, connection } = getCurrentAgent();
+    this._capturedContext = {
+      hasAgent: agent !== undefined,
+      hasConnection: connection !== undefined,
+      connectionId: connection?.id
+    };
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
     });
+  }
+
+  @callable()
+  getCapturedContext(): {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null {
+    return this._capturedContext;
+  }
+
+  @callable()
+  clearCapturedContext(): void {
+    this._capturedContext = null;
   }
 
   @callable()

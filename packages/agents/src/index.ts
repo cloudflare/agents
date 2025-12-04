@@ -234,7 +234,7 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
-const agentContext = new AsyncLocalStorage<{
+export const agentContext = new AsyncLocalStorage<{
   agent: Agent<unknown, unknown>;
   connection: Connection | undefined;
   request: Request | undefined;
