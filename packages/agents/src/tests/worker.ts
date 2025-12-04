@@ -578,6 +578,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
     hasConnection: boolean;
     connectionId: string | undefined;
   } | null = null;
+  // Store context captured from nested async function (simulates tool execute)
+  private _nestedContext: {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null = null;
 
   async onChatMessage() {
     // Capture getCurrentAgent() context for testing
@@ -588,10 +594,28 @@ export class TestChatAgent extends AIChatAgent<Env> {
       connectionId: connection?.id
     };
 
+    // Simulate what happens inside a tool's execute function:
+    // It's a nested async function called from within onChatMessage
+    await this._simulateToolExecute();
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
     });
+  }
+
+  // This simulates an AI SDK tool's execute function being called
+  private async _simulateToolExecute(): Promise<void> {
+    // Add a small delay to ensure we're in a new microtask (like real tool execution)
+    await Promise.resolve();
+
+    // Capture context inside the "tool execute" function
+    const { agent, connection } = getCurrentAgent();
+    this._nestedContext = {
+      hasAgent: agent !== undefined,
+      hasConnection: connection !== undefined,
+      connectionId: connection?.id
+    };
   }
 
   @callable()
@@ -604,8 +628,18 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   @callable()
+  getNestedContext(): {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null {
+    return this._nestedContext;
+  }
+
+  @callable()
   clearCapturedContext(): void {
     this._capturedContext = null;
+    this._nestedContext = null;
   }
 
   @callable()

@@ -11,12 +11,12 @@ import type {
 } from "ai";
 import {
   Agent,
-  agentContext,
   type AgentContext,
   type Connection,
   type ConnectionContext,
   type WSMessage
 } from "./";
+import { agentContext } from "./context";
 import {
   MessageType,
   type IncomingMessage,

@@ -22,7 +22,7 @@ async function connectChatWS(path: string) {
 }
 
 describe("AIChatAgent Connection Context - Issue #711", () => {
-  it("getCurrentAgent() should return connection in onChatMessage", async () => {
+  it("getCurrentAgent() should return connection in onChatMessage and nested async functions (tool execute)", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
@@ -82,6 +82,19 @@ describe("AIChatAgent Connection Context - Issue #711", () => {
     expect(capturedContext?.hasConnection).toBe(true);
     // The connection ID should be defined
     expect(capturedContext?.connectionId).toBeDefined();
+
+    // Check the nested context
+    // Tools called from onChatMessage couldn't access connection context
+    const nestedContext = await agentStub.getNestedContext();
+
+    expect(nestedContext).not.toBeNull();
+    // The agent should be available in nested async functions
+    expect(nestedContext?.hasAgent).toBe(true);
+    // The connection should ALSO be available in nested async functions (tool execute)
+    // Before the fix, this would be false
+    expect(nestedContext?.hasConnection).toBe(true);
+    // The connection ID should match between onChatMessage and nested function
+    expect(nestedContext?.connectionId).toBe(capturedContext?.connectionId);
 
     ws.close();
   });
