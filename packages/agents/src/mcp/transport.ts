@@ -291,6 +291,15 @@ export class StreamableHTTPServerTransport implements Transport {
 
       // handle each message
       for (const message of messages) {
+        if (this.messageInterceptor) {
+          const handled = await this.messageInterceptor(message, {
+            authInfo,
+            requestInfo
+          });
+          if (handled) {
+            continue; // Message was handled by interceptor, skip onmessage
+          }
+        }
         this.onmessage?.(message, { authInfo, requestInfo });
       }
       // The server SHOULD NOT close the SSE stream before sending all JSON-RPC responses
