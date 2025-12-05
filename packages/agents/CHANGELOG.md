@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.2.30
+
+### Patch Changes
+
+- [#716](https://github.com/cloudflare/agents/pull/716) [`569e184`](https://github.com/cloudflare/agents/commit/569e1840966c8c537bca1a6cf01b04cf3567972b) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix elicitation response handling in MCP StreamableHTTP transport by adding a message interceptor
+
 ## 0.2.29
 
 ### Patch Changes
