@@ -39,7 +39,6 @@ export interface MCPStorageApi {
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
-  protocolVersion?: string;
 }
 
 export interface WorkerTransportOptions {
@@ -69,7 +68,6 @@ export class WorkerTransport implements Transport {
   private requestToStreamMapping = new Map<RequestId, string>();
   private requestResponseMap = new Map<RequestId, JSONRPCMessage>();
   private corsOptions?: CORSOptions;
-  private protocolVersion?: string;
   private storage?: MCPStorageApi;
   private stateRestored = false;
 
@@ -100,7 +98,6 @@ export class WorkerTransport implements Transport {
     if (state) {
       this.sessionId = state.sessionId;
       this.initialized = state.initialized;
-      this.protocolVersion = state.protocolVersion;
     }
 
     this.stateRestored = true;
@@ -116,8 +113,7 @@ export class WorkerTransport implements Transport {
 
     const state: TransportState = {
       sessionId: this.sessionId,
-      initialized: this.initialized,
-      protocolVersion: this.protocolVersion
+      initialized: this.initialized
     };
 
     await Promise.resolve(this.storage.set(state));
@@ -689,21 +685,6 @@ export class WorkerTransport implements Transport {
     message: JSONRPCMessage,
     options?: TransportSendOptions
   ): Promise<void> {
-    // Capture the negotiated protocol version from the SDK's initialize response.
-    // This is the version clients MUST use in subsequent request headers.
-    // in future it would be nice to have this set on the transport by the server directly
-    if (
-      isJSONRPCResponse(message) &&
-      typeof message.result === "object" &&
-      message.result !== null &&
-      "protocolVersion" in message.result
-    ) {
-      const version = (message.result as { protocolVersion: string })
-        .protocolVersion;
-      this.protocolVersion = version;
-      await this.saveState();
-    }
-
     // Check relatedRequestId FIRST to route server-to-client requests through the same stream as the originating client request
     let requestId: RequestId | undefined = options?.relatedRequestId;
 

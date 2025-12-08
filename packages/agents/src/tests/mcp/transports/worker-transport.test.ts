@@ -707,22 +707,11 @@ describe("WorkerTransport", () => {
       expect(storedState).toBeDefined();
       expect(storedState?.sessionId).toBe("persistent-session");
       expect(storedState?.initialized).toBe(true);
-      expect(storedState?.protocolVersion).toBe("2025-06-18");
     });
+
     it("should negotiate down to latest supported version when client requests unsupported version", async () => {
       const server = createTestServer();
-      let storedState: TransportState | undefined;
-
-      const mockStorage = {
-        get: async () => storedState,
-        set: async (state: TransportState) => {
-          storedState = state;
-        }
-      };
-
       const transport = await setupTransport(server, {
-        sessionIdGenerator: () => "negotiate-session",
-        storage: mockStorage,
         enableJsonResponse: true
       });
 
@@ -752,17 +741,13 @@ describe("WorkerTransport", () => {
 
       // Server should respond with latest supported version
       expect(body.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
-
-      // And that version should be persisted
-      expect(storedState?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
     });
 
     it("should restore session state from storage", async () => {
       const server = createTestServer();
       const existingState = {
         sessionId: "restored-session",
-        initialized: true,
-        protocolVersion: "2025-06-18" as const
+        initialized: true
       };
 
       const mockStorage = {
@@ -839,8 +824,7 @@ describe("WorkerTransport", () => {
           getCalls++;
           return {
             sessionId: "restored-session",
-            initialized: true,
-            protocolVersion: "2025-03-26" as const
+            initialized: true
           };
         },
         set: async () => {}
