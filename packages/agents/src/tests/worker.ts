@@ -11,6 +11,7 @@ import { McpAgent } from "../mcp/index.ts";
 import {
   Agent,
   callable,
+  getCurrentAgent,
   routeAgentRequest,
   type AgentEmail,
   type Connection,
@@ -37,6 +38,7 @@ export type Env = {
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
+  TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
 };
 
 type State = unknown;
@@ -311,6 +313,31 @@ export class TestDestroyScheduleAgent extends Agent<Env, { status: string }> {
   }
 }
 
+export class TestScheduleAgent extends Agent<Env> {
+  observability = undefined;
+
+  // A no-op callback method for testing schedules
+  testCallback() {
+    // Intentionally empty - used for testing schedule creation
+  }
+
+  @callable()
+  async cancelScheduleById(id: string): Promise<boolean> {
+    return this.cancelSchedule(id);
+  }
+
+  @callable()
+  async getScheduleById(id: string) {
+    return this.getSchedule(id);
+  }
+
+  @callable()
+  async createSchedule(delaySeconds: number): Promise<string> {
+    const schedule = await this.schedule(delaySeconds, "testCallback");
+    return schedule.id;
+  }
+}
+
 // An Agent that tags connections in onConnect,
 // then echoes whether the tag was observed in onMessage
 export class TestRaceAgent extends Agent<Env> {
@@ -343,15 +370,45 @@ export class TestOAuthAgent extends Agent<Env> {
   configureOAuthForTest(config: {
     successRedirect?: string;
     errorRedirect?: string;
+    useJsonHandler?: boolean; // Use built-in JSON response handler for testing
   }): void {
-    this.mcp.configureOAuthCallback(config);
+    if (config.useJsonHandler) {
+      this.mcp.configureOAuthCallback({
+        customHandler: (result: {
+          serverId: string;
+          authSuccess: boolean;
+          authError?: string;
+        }) => {
+          return new Response(
+            JSON.stringify({
+              custom: true,
+              serverId: result.serverId,
+              success: result.authSuccess,
+              error: result.authError
+            }),
+            {
+              status: result.authSuccess ? 200 : 401,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+      });
+    } else {
+      this.mcp.configureOAuthCallback(config);
+    }
   }
+
+  private mockStateStorage: Map<
+    string,
+    { serverId: string; createdAt: number }
+  > = new Map();
 
   private createMockMcpConnection(
     serverId: string,
     serverUrl: string,
     connectionState: "ready" | "authenticating" | "connecting" = "ready"
   ): MCPClientConnection {
+    const self = this;
     return {
       url: new URL(serverUrl),
       connectionState,
@@ -365,7 +422,44 @@ export class TestOAuthAgent extends Agent<Env> {
         transport: {
           authProvider: {
             clientId: "test-client-id",
-            authUrl: "http://example.com/oauth/authorize"
+            serverId: serverId,
+            authUrl: "http://example.com/oauth/authorize",
+            async checkState(
+              state: string
+            ): Promise<{ valid: boolean; serverId?: string; error?: string }> {
+              const parts = state.split(".");
+              if (parts.length !== 2) {
+                return { valid: false, error: "Invalid state format" };
+              }
+              const [nonce, stateServerId] = parts;
+              const stored = self.mockStateStorage.get(nonce);
+              if (!stored) {
+                return {
+                  valid: false,
+                  error: "State not found or already used"
+                };
+              }
+              // Note: checkState does NOT consume the state
+              if (stored.serverId !== stateServerId) {
+                return { valid: false, error: "State serverId mismatch" };
+              }
+              const age = Date.now() - stored.createdAt;
+              if (age > 10 * 60 * 1000) {
+                return { valid: false, error: "State expired" };
+              }
+              return { valid: true, serverId: stateServerId };
+            },
+            async consumeState(state: string): Promise<void> {
+              const parts = state.split(".");
+              if (parts.length !== 2) {
+                return;
+              }
+              const [nonce] = parts;
+              self.mockStateStorage.delete(nonce);
+            },
+            async deleteCodeVerifier(): Promise<void> {
+              // No-op for tests
+            }
           }
         }
       },
@@ -378,6 +472,10 @@ export class TestOAuthAgent extends Agent<Env> {
     } as unknown as MCPClientConnection;
   }
 
+  saveStateForTest(nonce: string, serverId: string): void {
+    this.mockStateStorage.set(nonce, { serverId, createdAt: Date.now() });
+  }
+
   setupMockMcpConnection(
     serverId: string,
     serverName: string,
@@ -385,7 +483,6 @@ export class TestOAuthAgent extends Agent<Env> {
     callbackUrl: string,
     clientId?: string | null
   ): void {
-    // Save server to database with callback URL using SQL directly
     this.sql`
       INSERT OR REPLACE INTO cf_agents_mcp_servers (
         id, name, server_url, client_id, auth_url, callback_url, server_options
@@ -395,7 +492,7 @@ export class TestOAuthAgent extends Agent<Env> {
         ${serverUrl},
         ${clientId ?? null},
         ${null},
-        ${`${callbackUrl}/${serverId}`},
+        ${callbackUrl},
         ${null}
       )
     `;
@@ -455,6 +552,10 @@ export class TestOAuthAgent extends Agent<Env> {
     return this.mcp.isCallbackRequest(new Request(callbackUrl));
   }
 
+  testIsCallbackRequest(request: Request): boolean {
+    return this.mcp.isCallbackRequest(request);
+  }
+
   removeMcpConnection(serverId: string): void {
     delete this.mcp.mcpConnections[serverId];
   }
@@ -472,15 +573,80 @@ export class TestOAuthAgent extends Agent<Env> {
 export class TestChatAgent extends AIChatAgent<Env> {
   observability = undefined;
   // Use batch mode with shorter timeouts for faster tests
-  chatProcessingMode = "batch" as const;
-  chatIdleTimeout = 300;
-  chatTypingTimeout = 150;
+  static override options = {
+    ...AIChatAgent.options,
+    chatProcessingMode: "batch" as const,
+    chatIdleTimeout: 300,
+    chatTypingTimeout: 150
+  };
+  // Store captured context for testing
+  private _capturedContext: {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null = null;
+  // Store context captured from nested async function (simulates tool execute)
+  private _nestedContext: {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null = null;
 
   async onChatMessage() {
+    // Capture getCurrentAgent() context for testing
+    const { agent, connection } = getCurrentAgent();
+    this._capturedContext = {
+      hasAgent: agent !== undefined,
+      hasConnection: connection !== undefined,
+      connectionId: connection?.id
+    };
+
+    // Simulate what happens inside a tool's execute function:
+    // It's a nested async function called from within onChatMessage
+    await this._simulateToolExecute();
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
     });
+  }
+
+  // This simulates an AI SDK tool's execute function being called
+  private async _simulateToolExecute(): Promise<void> {
+    // Add a small delay to ensure we're in a new microtask (like real tool execution)
+    await Promise.resolve();
+
+    // Capture context inside the "tool execute" function
+    const { agent, connection } = getCurrentAgent();
+    this._nestedContext = {
+      hasAgent: agent !== undefined,
+      hasConnection: connection !== undefined,
+      connectionId: connection?.id
+    };
+  }
+
+  @callable()
+  getCapturedContext(): {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null {
+    return this._capturedContext;
+  }
+
+  @callable()
+  getNestedContext(): {
+    hasAgent: boolean;
+    hasConnection: boolean;
+    connectionId: string | undefined;
+  } | null {
+    return this._nestedContext;
+  }
+
+  @callable()
+  clearCapturedContext(): void {
+    this._capturedContext = null;
+    this._nestedContext = null;
   }
 
   @callable()

@@ -95,7 +95,11 @@ export abstract class McpAgent<
         return new McpSSETransport();
       }
       case "streamable-http": {
-        return new StreamableHTTPServerTransport({});
+        const transport = new StreamableHTTPServerTransport({});
+        transport.messageInterceptor = async (message) => {
+          return this._handleElicitationResponse(message);
+        };
+        return transport;
       }
     }
   }

@@ -79,9 +79,8 @@ function setCacheEntry(
     }
   }
 
-  const expiresAt = cacheTtl
-    ? Date.now() + cacheTtl
-    : Date.now() + 5 * 60 * 1000; // Default 5 minutes
+  const expiresAt =
+    cacheTtl !== undefined ? Date.now() + cacheTtl : Date.now() + 5 * 60 * 1000; // Default 5 minutes
   queryCache.set(key, { promise: value, refCount: 1, expiresAt, cacheTtl });
 }
 
@@ -97,6 +96,15 @@ function decrementCacheEntry(targetKey: unknown[]): boolean {
   }
   return false;
 }
+
+// Export for testing purposes
+export const _testUtils = {
+  queryCache,
+  setCacheEntry,
+  findCacheEntry,
+  decrementCacheEntry,
+  clearCache: () => queryCache.clear()
+};
 
 function createCacheKey(
   agentNamespace: string,

@@ -615,6 +615,8 @@ export class MCPClientManager {
             auth_url: authUrl,
             client_id: clientId ?? null
           });
+          // Broadcast again so clients receive the auth_url
+          this._onServerStateChanged.fire();
         }
 
         return {
@@ -635,46 +637,81 @@ export class MCPClientManager {
     }
   }
 
+  private extractServerIdFromState(state: string | null): string | null {
+    if (!state) return null;
+    const parts = state.split(".");
+    return parts.length === 2 ? parts[1] : null;
+  }
+
   isCallbackRequest(req: Request): boolean {
     if (req.method !== "GET") {
       return false;
     }
 
-    // Quick heuristic check: most callback URLs contain "/callback"
-    // This avoids DB queries for obviously non-callback requests
     if (!req.url.includes("/callback")) {
       return false;
     }
 
-    // Check database for matching callback URL
+    const url = new URL(req.url);
+    const state = url.searchParams.get("state");
+    const serverId = this.extractServerIdFromState(state);
+    if (!serverId) {
+      return false;
+    }
+
     const servers = this.getServersFromStorage();
-    return servers.some(
-      (server) => server.callback_url && req.url.startsWith(server.callback_url)
-    );
+    return servers.some((server) => server.id === serverId);
   }
 
   async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
-
-    // Find the matching server from database
-    const servers = this.getServersFromStorage();
-    const matchingServer = servers.find((server: MCPServerRow) => {
-      return server.callback_url && req.url.startsWith(server.callback_url);
-    });
-
-    if (!matchingServer) {
-      throw new Error(
-        `No callback URI match found for the request url: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
-      );
-    }
-
-    const serverId = matchingServer.id;
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     const error = url.searchParams.get("error");
     const errorDescription = url.searchParams.get("error_description");
 
-    // Handle OAuth error responses from the provider
+    if (!state) {
+      throw new Error("Unauthorized: no state provided");
+    }
+
+    const serverId = this.extractServerIdFromState(state);
+
+    if (!serverId) {
+      throw new Error(
+        "No serverId found in state parameter. Expected format: {nonce}.{serverId}"
+      );
+    }
+
+    const servers = this.getServersFromStorage();
+    const serverExists = servers.some((server) => server.id === serverId);
+
+    if (!serverExists) {
+      throw new Error(
+        `No server found with id "${serverId}". Was the request matched with \`isCallbackRequest()\`?`
+      );
+    }
+
+    if (this.mcpConnections[serverId] === undefined) {
+      throw new Error(`Could not find serverId: ${serverId}`);
+    }
+
+    const conn = this.mcpConnections[serverId];
+    if (!conn.options.transport.authProvider) {
+      throw new Error(
+        "Trying to finalize authentication for a server connection without an authProvider"
+      );
+    }
+
+    const authProvider = conn.options.transport.authProvider;
+    authProvider.serverId = serverId;
+
+    // Two-phase state validation: check first (non-destructive), consume later
+    // This prevents DoS attacks where attacker consumes valid state before legitimate callback
+    const stateValidation = await authProvider.checkState(state);
+    if (!stateValidation.valid) {
+      throw new Error(`Invalid state: ${stateValidation.error}`);
+    }
+
     if (error) {
       return {
         serverId,
@@ -686,25 +723,14 @@ export class MCPClientManager {
     if (!code) {
       throw new Error("Unauthorized: no code provided");
     }
-    if (!state) {
-      throw new Error("Unauthorized: no state provided");
-    }
 
-    if (this.mcpConnections[serverId] === undefined) {
-      throw new Error(`Could not find serverId: ${serverId}`);
-    }
-
-    // If connection is already ready/connected, this is likely a duplicate callback
     if (
       this.mcpConnections[serverId].connectionState ===
         MCPConnectionState.READY ||
       this.mcpConnections[serverId].connectionState ===
         MCPConnectionState.CONNECTED
     ) {
-      // make sure auth_url is cleared
       this.clearServerAuthUrl(serverId);
-
-      // Already authenticated and ready, treat as success
       return {
         serverId,
         authSuccess: true
@@ -720,22 +746,10 @@ export class MCPClientManager {
       );
     }
 
-    const conn = this.mcpConnections[serverId];
-    if (!conn.options.transport.authProvider) {
-      throw new Error(
-        "Trying to finalize authentication for a server connection without an authProvider"
-      );
-    }
-
-    // Get clientId from auth provider (stored during redirectToAuthorization) or fallback to state for backward compatibility
-    const clientId = conn.options.transport.authProvider.clientId || state;
-
-    // Set the OAuth credentials
-    conn.options.transport.authProvider.clientId = clientId;
-    conn.options.transport.authProvider.serverId = serverId;
-
     try {
+      await authProvider.consumeState(state);
       await conn.completeAuthorization(code);
+      await authProvider.deleteCodeVerifier();
       this.clearServerAuthUrl(serverId);
       this._onServerStateChanged.fire();
 
@@ -743,9 +757,9 @@ export class MCPClientManager {
         serverId,
         authSuccess: true
       };
-    } catch (error) {
+    } catch (authError) {
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        authError instanceof Error ? authError.message : String(authError);
 
       this._onServerStateChanged.fire();
 

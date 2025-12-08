@@ -42,6 +42,10 @@
       {
         "class_name": "TestDestroyScheduleAgent",
         "name": "TestDestroyScheduleAgent"
+      },
+      {
+        "class_name": "TestScheduleAgent",
+        "name": "TestScheduleAgent"
       }
     ]
   },
@@ -57,7 +61,8 @@
         "TestChatAgent",
         "TestOAuthAgent",
         "TestMcpJurisdiction",
-        "TestDestroyScheduleAgent"
+        "TestDestroyScheduleAgent",
+        "TestScheduleAgent"
       ],
       "tag": "v1"
     }

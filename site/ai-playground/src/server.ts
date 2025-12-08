@@ -12,6 +12,7 @@ import {
   type ToolSet
 } from "ai";
 import { cleanupMessages } from "./utils";
+import { nanoid } from "nanoid";
 
 interface Env {
   AI: Ai;
@@ -121,17 +122,23 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
 
   @callable()
   async connectMCPServer(url: string, headers?: Record<string, string>) {
-    // Remove any existing server to ensure clean slate
-    // This prevents stale callback URLs from matching old servers
     const { servers } = await this.getMcpServers();
-    for (const id of Object.keys(servers)) {
-      await this.removeMcpServer(id);
+
+    // Check for duplicate URL
+    const existingServer = Object.values(servers).find(
+      (server) => server.server_url === url
+    );
+    if (existingServer) {
+      throw new Error(`Server with URL "${url}" is already connected`);
     }
 
+    // Generate unique server ID
+    const serverId = `mcp-${nanoid(8)}`;
+
     if (!headers) {
-      return await this.addMcpServer("mcp-server", url, this.env.HOST);
+      return await this.addMcpServer(serverId, url, this.env.HOST);
     }
-    return await this.addMcpServer("mcp-server", url, this.env.HOST, "agents", {
+    return await this.addMcpServer(serverId, url, this.env.HOST, "agents", {
       transport: {
         type: "auto",
         headers
