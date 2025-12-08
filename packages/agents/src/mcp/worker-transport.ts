@@ -129,15 +129,15 @@ export class WorkerTransport implements Transport {
   /**
    * Validates the MCP-Protocol-Version header on incoming requests.
    *
-   * For initialization: Version negotiation handles unknown versions gracefully
-   * (server responds with its supported version).
+   * This performs a simple check: if a version header is present, it must be
+   * in the SUPPORTED_PROTOCOL_VERSIONS list. We do not track the negotiated
+   * version or enforce version consistency across requests - the SDK handles
+   * version negotiation during initialization, and we simply reject any
+   * explicitly unsupported versions.
    *
-   * For subsequent requests with MCP-Protocol-Version header:
-   * - Accept if in supported list
-   * - 400 if unsupported
-   *
-   * For HTTP requests without the MCP-Protocol-Version header:
-   * - Accept and default to the version negotiated at initialization
+   * - Header present and supported: Accept
+   * - Header present and unsupported: 400 Bad Request
+   * - Header missing: Accept (version validation is optional)
    */
   private validateProtocolVersion(request: Request): Response | undefined {
     const protocolVersion = request.headers.get(MCP_PROTOCOL_VERSION_HEADER);

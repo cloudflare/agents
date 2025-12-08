@@ -377,7 +377,10 @@ describe("WorkerTransport", () => {
       expect(response.status).toBe(202);
     });
 
-    it("should accept different but supported version header", async () => {
+    it("should accept any supported version header regardless of negotiated version", async () => {
+      // NOTE: The transport does not enforce version consistency after negotiation.
+      // We only validate that the version header, if present, is in SUPPORTED_PROTOCOL_VERSIONS.
+      // The SDK handles version semantics - the transport just rejects unknown versions.
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
@@ -404,14 +407,14 @@ describe("WorkerTransport", () => {
 
       await transport.handleRequest(initRequest);
 
-      // Subsequent request with different but supported version
+      // Subsequent request with a different but supported version
       const followupRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
           "mcp-session-id": "test-session",
-          "MCP-Protocol-Version": "2025-06-18" // Different from negotiated but still supported
+          "MCP-Protocol-Version": "2025-06-18"
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -421,7 +424,7 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(followupRequest);
 
-      // Should accept - version is different but supported
+      // Should accept - we only check if version is in supported list, not if it matches negotiated
       expect(response.status).toBe(202);
     });
 
