@@ -9,7 +9,6 @@ import type {
 import type {
   JSONRPCMessage,
   RequestId,
-  InitializeRequest,
   RequestInfo,
   MessageExtraInfo
 } from "@modelcontextprotocol/sdk/types.js";
@@ -18,15 +17,12 @@ import {
   isJSONRPCError,
   isJSONRPCRequest,
   isJSONRPCResponse,
-  JSONRPCMessageSchema
+  JSONRPCMessageSchema,
+  SUPPORTED_PROTOCOL_VERSIONS
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CORSOptions } from "./types";
 
-const SUPPORTED_PROTOCOL_VERSIONS = ["2025-03-26", "2025-06-18"] as const;
-const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
 const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
-
-type ProtocolVersion = (typeof SUPPORTED_PROTOCOL_VERSIONS)[number];
 
 interface StreamMapping {
   writer?: WritableStreamDefaultWriter<Uint8Array>;
@@ -43,7 +39,7 @@ export interface MCPStorageApi {
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
-  protocolVersion?: ProtocolVersion;
+  protocolVersion?: string;
 }
 
 export interface WorkerTransportOptions {
@@ -73,7 +69,7 @@ export class WorkerTransport implements Transport {
   private requestToStreamMapping = new Map<RequestId, string>();
   private requestResponseMap = new Map<RequestId, JSONRPCMessage>();
   private corsOptions?: CORSOptions;
-  private protocolVersion?: ProtocolVersion;
+  private protocolVersion?: string;
   private storage?: MCPStorageApi;
   private stateRestored = false;
 
@@ -134,45 +130,32 @@ export class WorkerTransport implements Transport {
     this.started = true;
   }
 
+  /**
+   * Validates the MCP-Protocol-Version header on incoming requests.
+   *
+   * For initialization: Version negotiation handles unknown versions gracefully
+   * (server responds with its supported version).
+   *
+   * For subsequent requests with MCP-Protocol-Version header:
+   * - Accept if in supported list
+   * - 400 if unsupported
+   *
+   * For HTTP requests without the MCP-Protocol-Version header:
+   * - Accept and default to the version negotiated at initialization
+   */
   private validateProtocolVersion(request: Request): Response | undefined {
-    const versionHeader = request.headers.get(MCP_PROTOCOL_VERSION_HEADER);
-
-    if (!versionHeader) {
-      if (
-        !this.protocolVersion ||
-        this.protocolVersion === DEFAULT_PROTOCOL_VERSION
-      ) {
-        return undefined;
-      }
-      // If we negotiated a different version, the client MUST send the header
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: `Bad Request: ${MCP_PROTOCOL_VERSION_HEADER} header is required`
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
+    const protocolVersion = request.headers.get(MCP_PROTOCOL_VERSION_HEADER);
 
     if (
-      !SUPPORTED_PROTOCOL_VERSIONS.includes(versionHeader as ProtocolVersion)
+      protocolVersion !== null &&
+      !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)
     ) {
       return new Response(
         JSON.stringify({
           jsonrpc: "2.0",
           error: {
             code: -32000,
-            message: `Bad Request: Unsupported ${MCP_PROTOCOL_VERSION_HEADER}: ${versionHeader}. Supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")}`
+            message: `Bad Request: Unsupported protocol version: ${protocolVersion} (supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")})`
           },
           id: null
         }),
@@ -185,28 +168,6 @@ export class WorkerTransport implements Transport {
         }
       );
     }
-
-    // Check if it matches the negotiated version
-    if (this.protocolVersion && versionHeader !== this.protocolVersion) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: `Bad Request: ${MCP_PROTOCOL_VERSION_HEADER} mismatch. Expected: ${this.protocolVersion}, Got: ${versionHeader}`
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
     return undefined;
   }
 
@@ -504,23 +465,6 @@ export class WorkerTransport implements Transport {
         );
       }
 
-      // Capture protocol version from initialization request
-      const initRequest = messages.find(isInitializeRequest) as
-        | InitializeRequest
-        | undefined;
-      if (initRequest?.params) {
-        const version = initRequest.params.protocolVersion;
-        if (
-          version &&
-          SUPPORTED_PROTOCOL_VERSIONS.includes(version as ProtocolVersion)
-        ) {
-          this.protocolVersion = version as ProtocolVersion;
-        } else {
-          // Default to 2025-03-26 if not specified or unsupported
-          this.protocolVersion = DEFAULT_PROTOCOL_VERSION;
-        }
-      }
-
       this.sessionId = this.sessionIdGenerator?.();
       this.initialized = true;
       await this.saveState();
@@ -745,6 +689,21 @@ export class WorkerTransport implements Transport {
     message: JSONRPCMessage,
     options?: TransportSendOptions
   ): Promise<void> {
+    // Capture the negotiated protocol version from the SDK's initialize response.
+    // This is the version clients MUST use in subsequent request headers.
+    // in future it would be nice to have this set on the transport by the server directly
+    if (
+      isJSONRPCResponse(message) &&
+      typeof message.result === "object" &&
+      message.result !== null &&
+      "protocolVersion" in message.result
+    ) {
+      const version = (message.result as { protocolVersion: string })
+        .protocolVersion;
+      this.protocolVersion = version;
+      await this.saveState();
+    }
+
     // Check relatedRequestId FIRST to route server-to-client requests through the same stream as the originating client request
     let requestId: RequestId | undefined = options?.relatedRequestId;
 
