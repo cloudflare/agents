@@ -232,16 +232,26 @@ export function useAgent<State>(
 
   const ttl = cacheTtl ?? 5 * 60 * 1000;
 
+  const pendingQueryRef = useRef<{
+    key: string;
+    promise: Promise<QueryObject>;
+  } | null>(null);
+
   // Get or create the query promise
   // This runs on every render but only creates a new promise when needed
   let queryPromise: Promise<QueryObject> | null = null;
 
   if (query && typeof query === "function") {
-    // Check cache first (only if TTL > 0)
+    // Check cache first
     const cached = ttl > 0 ? getCacheEntry(cacheKey) : undefined;
 
     if (cached) {
       queryPromise = cached.promise;
+    } else if (
+      pendingQueryRef.current?.key === cacheKey &&
+      pendingQueryRef.current.promise
+    ) {
+      queryPromise = pendingQueryRef.current.promise;
     } else {
       // Create new promise
       queryPromise = query().catch((error) => {
@@ -250,12 +260,21 @@ export function useAgent<State>(
           error
         );
         deleteCacheEntry(cacheKey);
+        pendingQueryRef.current = null;
         throw error;
       });
 
-      // Cache it if TTL > 0
+      // Cache based on TTL
       if (ttl > 0) {
         setCacheEntry(cacheKey, queryPromise, ttl);
+      } else {
+        pendingQueryRef.current = { key: cacheKey, promise: queryPromise };
+      }
+
+      if (ttl === 0) {
+        queryPromise.then(() => {
+          pendingQueryRef.current = null;
+        });
       }
     }
   }
