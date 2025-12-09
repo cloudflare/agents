@@ -227,29 +227,10 @@ export function useAgent<State>(
     [agentNamespace, options.name, queryDeps]
   );
 
-  // Track when we last refreshed to detect TTL expiration
+  // Track when we need to refresh the cache
   const [refreshToken, setRefreshToken] = useState(0);
-  const expiresAtRef = useRef(0);
 
-  // Check for TTL expiration and trigger refresh if needed
-  useEffect(() => {
-    if (expiresAtRef.current === 0) return;
-
-    const timeUntilExpiry = expiresAtRef.current - Date.now();
-    if (timeUntilExpiry <= 0) {
-      // Already expired
-      setRefreshToken((t) => t + 1);
-      return;
-    }
-
-    // Schedule refresh when TTL expires
-    const timer = setTimeout(() => {
-      setRefreshToken((t) => t + 1);
-    }, timeUntilExpiry);
-
-    return () => clearTimeout(timer);
-  }, [cacheKey, refreshToken]);
-
+  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshToken intentionally triggers re-computation when TTL expires
   const queryPromise = useMemo(() => {
     if (!query || typeof query !== "function") {
       return null;
@@ -257,8 +238,7 @@ export function useAgent<State>(
 
     const cached = getCacheEntry(cacheKey);
     if (cached) {
-      expiresAtRef.current = cached.expiresAt;
-      return cached.promise;
+      return cached;
     }
 
     // Create new promise
@@ -271,18 +251,32 @@ export function useAgent<State>(
       throw error;
     });
 
-    const entry = setCacheEntry(cacheKey, promise, cacheTtl);
-    expiresAtRef.current = entry.expiresAt;
-
-    return promise;
+    return setCacheEntry(cacheKey, promise, cacheTtl);
   }, [cacheKey, query, options.agent, cacheTtl, refreshToken]);
+
+  // Schedule refresh when TTL expires
+  useEffect(() => {
+    if (!queryPromise) return;
+
+    const timeUntilExpiry = queryPromise.expiresAt - Date.now();
+    if (timeUntilExpiry <= 0) {
+      setRefreshToken((t) => t + 1);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setRefreshToken((t) => t + 1);
+    }, timeUntilExpiry);
+
+    return () => clearTimeout(timer);
+  }, [queryPromise]);
 
   let resolvedQuery: QueryObject | undefined;
 
   if (query) {
     if (typeof query === "function") {
       // Use React's use() to resolve the promise
-      const queryResult = use(queryPromise!);
+      const queryResult = use(queryPromise!.promise);
 
       // Check for non-primitive values and warn
       if (queryResult) {
