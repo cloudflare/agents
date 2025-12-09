@@ -24,10 +24,8 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.73",
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/sdk": "^1.23.0",
-    "ai": "5.0.103",
     "cron-schedule": "^6.0.0",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
@@ -40,24 +38,36 @@
     "zod-to-ts": "^2.0.0"
   },
   "devDependencies": {
+    "@ai-sdk/openai": "2.0.73",
+    "@ai-sdk/react": "2.0.103",
     "@cloudflare/workers-oauth-provider": "^0.1.0",
     "@types/react": "^19.2.7",
     "@types/yargs": "^17.0.35",
+    "ai": "5.0.103",
     "react": "^19.2.0",
     "vitest-browser-react": "^1.0.1",
     "x402": "^0.7.3"
   },
   "peerDependencies": {
+    "@ai-sdk/openai": ">=2.0.0",
+    "@ai-sdk/react": ">=1.0.0",
+    "ai": ">=5.0.0",
     "react": "^19.0.0",
     "viem": ">=2.0.0",
     "x402": "^0.7.1",
     "zod": "^3.25.0 || ^4.0.0"
   },
   "peerDependenciesMeta": {
-    "x402": {
+    "@ai-sdk/openai": {
+      "optional": true
+    },
+    "@ai-sdk/react": {
       "optional": true
     },
     "viem": {
+      "optional": true
+    },
+    "x402": {
       "optional": true
     }
   },
