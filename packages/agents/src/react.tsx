@@ -232,52 +232,37 @@ export function useAgent<State>(
 
   const ttl = cacheTtl ?? 5 * 60 * 1000;
 
-  const pendingQueryRef = useRef<{
-    key: string;
-    promise: Promise<QueryObject>;
-  } | null>(null);
-
   // Get or create the query promise
-  // This runs on every render but only creates a new promise when needed
-  let queryPromise: Promise<QueryObject> | null = null;
+  const queryPromise = useMemo(() => {
+    if (!query || typeof query !== "function") {
+      return null;
+    }
 
-  if (query && typeof query === "function") {
-    // Check cache first
-    const cached = ttl > 0 ? getCacheEntry(cacheKey) : undefined;
-
-    if (cached) {
-      queryPromise = cached.promise;
-    } else if (
-      pendingQueryRef.current?.key === cacheKey &&
-      pendingQueryRef.current.promise
-    ) {
-      queryPromise = pendingQueryRef.current.promise;
-    } else {
-      // Create new promise
-      queryPromise = query().catch((error) => {
-        console.error(
-          `[useAgent] Query failed for agent "${options.agent}":`,
-          error
-        );
-        deleteCacheEntry(cacheKey);
-        pendingQueryRef.current = null;
-        throw error;
-      });
-
-      // Cache based on TTL
-      if (ttl > 0) {
-        setCacheEntry(cacheKey, queryPromise, ttl);
-      } else {
-        pendingQueryRef.current = { key: cacheKey, promise: queryPromise };
-      }
-
-      if (ttl === 0) {
-        queryPromise.then(() => {
-          pendingQueryRef.current = null;
-        });
+    // Check cache first (only for TTL > 0)
+    if (ttl > 0) {
+      const cached = getCacheEntry(cacheKey);
+      if (cached) {
+        return cached.promise;
       }
     }
-  }
+
+    // Create new promise
+    const promise = query().catch((error) => {
+      console.error(
+        `[useAgent] Query failed for agent "${options.agent}":`,
+        error
+      );
+      deleteCacheEntry(cacheKey);
+      throw error;
+    });
+
+    // Cache it (only for TTL > 0)
+    if (ttl > 0) {
+      setCacheEntry(cacheKey, promise, ttl);
+    }
+
+    return promise;
+  }, [cacheKey, query, options.agent, ttl]);
 
   let resolvedQuery: QueryObject | undefined;
 
