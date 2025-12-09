@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef, use, useMemo } from "react";
+import { useCallback, useRef, use, useMemo, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -252,7 +252,9 @@ export function useAgent<State>(
         `[useAgent] Query failed for agent "${options.agent}":`,
         error
       );
-      deleteCacheEntry(cacheKey);
+      if (ttl > 0) {
+        deleteCacheEntry(cacheKey);
+      }
       throw error;
     });
 
@@ -263,6 +265,15 @@ export function useAgent<State>(
 
     return promise;
   }, [cacheKey, query, options.agent, ttl]);
+
+  // Clean up old cache entry when cacheKey changes or component unmounts
+  useEffect(() => {
+    if (ttl === 0) return;
+
+    return () => {
+      deleteCacheEntry(cacheKey);
+    };
+  }, [cacheKey, ttl]);
 
   let resolvedQuery: QueryObject | undefined;
 
