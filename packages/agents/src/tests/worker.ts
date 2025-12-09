@@ -572,6 +572,13 @@ export class TestOAuthAgent extends Agent<Env> {
 
 export class TestChatAgent extends AIChatAgent<Env> {
   observability = undefined;
+  // Use batch mode with shorter timeouts for faster tests
+  static override options = {
+    ...AIChatAgent.options,
+    chatProcessingMode: "batch" as const,
+    chatIdleTimeout: 300,
+    chatTypingTimeout: 150
+  };
   // Store captured context for testing
   private _capturedContext: {
     hasAgent: boolean;
@@ -789,6 +796,44 @@ export class TestChatAgent extends AIChatAgent<Env> {
   @callable()
   testRestoreActiveStream(): void {
     this._restoreActiveStream();
+  }
+
+  // Chat queue test helpers
+
+  @callable()
+  getQueueLength(): number {
+    // @ts-expect-error - accessing private property for testing
+    return this._chatQueue.length;
+  }
+
+  @callable()
+  hasPendingChatRequest(): boolean {
+    // @ts-expect-error - accessing private property for testing
+    return this._pendingChatRequest !== null;
+  }
+
+  @callable()
+  getPendingChatRequestId(): string | null {
+    // @ts-expect-error - accessing private property for testing
+    return this._pendingChatRequest?.data.id ?? null;
+  }
+
+  @callable()
+  getIsProcessingChat(): boolean {
+    // @ts-expect-error - accessing private property for testing
+    return this._isProcessingChat;
+  }
+
+  @callable()
+  hasProcessingTimer(): boolean {
+    // @ts-expect-error - accessing private property for testing
+    return this._processingTimeout !== null;
+  }
+
+  @callable()
+  getUserIsTyping(): boolean {
+    // @ts-expect-error - accessing private property for testing
+    return this._userIsTyping;
   }
 }
 
