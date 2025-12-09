@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef, use, useMemo, useEffect, useState } from "react";
+import { useCallback, useRef, use, useMemo } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -28,6 +28,7 @@ function camelCaseToKebabCase(str: string): string {
 }
 
 type QueryObject = Record<string, string | null>;
+
 interface CacheEntry {
   promise: Promise<QueryObject>;
   expiresAt: number;
@@ -47,7 +48,7 @@ function getCacheEntry(key: string): CacheEntry | undefined {
   const entry = queryCache.get(key);
   if (!entry) return undefined;
 
-  if (Date.now() > entry.expiresAt) {
+  if (Date.now() >= entry.expiresAt) {
     queryCache.delete(key);
     return undefined;
   }
@@ -58,10 +59,12 @@ function getCacheEntry(key: string): CacheEntry | undefined {
 function setCacheEntry(
   key: string,
   promise: Promise<QueryObject>,
-  cacheTtl?: number
+  cacheTtl: number
 ): CacheEntry {
-  const expiresAt = Date.now() + (cacheTtl ?? 5 * 60 * 1000);
-  const entry = { promise, expiresAt };
+  const entry: CacheEntry = {
+    promise,
+    expiresAt: Date.now() + cacheTtl
+  };
   queryCache.set(key, entry);
   return entry;
 }
@@ -227,56 +230,42 @@ export function useAgent<State>(
     [agentNamespace, options.name, queryDeps]
   );
 
-  // Track when we need to refresh the cache
-  const [refreshToken, setRefreshToken] = useState(0);
+  const ttl = cacheTtl ?? 5 * 60 * 1000;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refreshToken intentionally triggers re-computation when TTL expires
-  const queryPromise = useMemo(() => {
-    if (!query || typeof query !== "function") {
-      return null;
-    }
+  // Get or create the query promise
+  // This runs on every render but only creates a new promise when needed
+  let queryPromise: Promise<QueryObject> | null = null;
 
-    const cached = getCacheEntry(cacheKey);
+  if (query && typeof query === "function") {
+    // Check cache first (only if TTL > 0)
+    const cached = ttl > 0 ? getCacheEntry(cacheKey) : undefined;
+
     if (cached) {
-      return cached;
+      queryPromise = cached.promise;
+    } else {
+      // Create new promise
+      queryPromise = query().catch((error) => {
+        console.error(
+          `[useAgent] Query failed for agent "${options.agent}":`,
+          error
+        );
+        deleteCacheEntry(cacheKey);
+        throw error;
+      });
+
+      // Cache it if TTL > 0
+      if (ttl > 0) {
+        setCacheEntry(cacheKey, queryPromise, ttl);
+      }
     }
-
-    // Create new promise
-    const promise = query().catch((error) => {
-      console.error(
-        `[useAgent] Query failed for agent "${options.agent}":`,
-        error
-      );
-      deleteCacheEntry(cacheKey);
-      throw error;
-    });
-
-    return setCacheEntry(cacheKey, promise, cacheTtl);
-  }, [cacheKey, query, options.agent, cacheTtl, refreshToken]);
-
-  // Schedule refresh when TTL expires
-  useEffect(() => {
-    if (!queryPromise) return;
-
-    const timeUntilExpiry = queryPromise.expiresAt - Date.now();
-    if (timeUntilExpiry <= 0) {
-      setRefreshToken((t) => t + 1);
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      setRefreshToken((t) => t + 1);
-    }, timeUntilExpiry);
-
-    return () => clearTimeout(timer);
-  }, [queryPromise]);
+  }
 
   let resolvedQuery: QueryObject | undefined;
 
   if (query) {
     if (typeof query === "function") {
       // Use React's use() to resolve the promise
-      const queryResult = use(queryPromise!.promise);
+      const queryResult = use(queryPromise!);
 
       // Check for non-primitive values and warn
       if (queryResult) {

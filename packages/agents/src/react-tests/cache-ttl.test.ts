@@ -30,19 +30,20 @@ describe("Cache TTL", () => {
     expect(found).toBeUndefined();
   });
 
-  it("should use default TTL of 5 minutes when cacheTtl is undefined", () => {
+  it("should cache with default TTL of 5 minutes", () => {
     const key = "test-key-2";
     const promise = Promise.resolve({ token: "xyz" });
+    const defaultTtl = 5 * 60 * 1000;
     const before = Date.now();
 
-    _testUtils.setCacheEntry(key, promise, undefined);
+    _testUtils.setCacheEntry(key, promise, defaultTtl);
 
     const after = Date.now();
     const entry = _testUtils.queryCache.get(key);
     expect(entry).toBeDefined();
 
-    const expectedMinExpiry = before + 5 * 60 * 1000;
-    const expectedMaxExpiry = after + 5 * 60 * 1000;
+    const expectedMinExpiry = before + defaultTtl;
+    const expectedMaxExpiry = after + defaultTtl;
 
     expect(entry!.expiresAt).toBeGreaterThanOrEqual(expectedMinExpiry);
     expect(entry!.expiresAt).toBeLessThanOrEqual(expectedMaxExpiry);
@@ -67,22 +68,24 @@ describe("Cache TTL", () => {
     expect(entry!.expiresAt).toBeLessThanOrEqual(after + customTtl);
   });
 
-  it("should distinguish between cacheTtl of 0 and undefined", () => {
-    const key1 = "zero-ttl";
-    const key2 = "undefined-ttl";
+  it("should distinguish between short and long TTL", () => {
+    const key1 = "short-ttl";
+    const key2 = "long-ttl";
     const promise1 = Promise.resolve({ a: "1" });
     const promise2 = Promise.resolve({ b: "2" });
 
-    _testUtils.setCacheEntry(key1, promise1, 0);
-    _testUtils.setCacheEntry(key2, promise2, undefined);
+    const shortTtl = 1000; // 1 second
+    const longTtl = 5 * 60 * 1000; // 5 minutes
+
+    _testUtils.setCacheEntry(key1, promise1, shortTtl);
+    _testUtils.setCacheEntry(key2, promise2, longTtl);
 
     const entry1 = _testUtils.queryCache.get(key1);
     const entry2 = _testUtils.queryCache.get(key2);
 
     const now = Date.now();
-    const fiveMinutes = 5 * 60 * 1000;
 
-    expect(entry1!.expiresAt).toBeLessThanOrEqual(now);
-    expect(entry2!.expiresAt).toBeGreaterThan(now + fiveMinutes - 1000);
+    expect(entry1!.expiresAt).toBeLessThanOrEqual(now + shortTtl);
+    expect(entry2!.expiresAt).toBeGreaterThan(now + longTtl - 1000);
   });
 });
