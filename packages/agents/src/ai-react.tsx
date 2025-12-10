@@ -232,26 +232,6 @@ export function useAgentChat<
   const toolsRequiringConfirmation =
     manualToolsRequiringConfirmation ?? detectToolsRequiringConfirmation(tools);
 
-  // Dev-mode warning for mismatched clientTools and tools (only warn once per tool)
-  const warnedToolsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (
-      process.env.NODE_ENV === "development" &&
-      clientTools?.length &&
-      tools
-    ) {
-      for (const ct of clientTools) {
-        if (!tools[ct.name] && !warnedToolsRef.current.has(ct.name)) {
-          warnedToolsRef.current.add(ct.name);
-          console.warn(
-            `[useAgentChat] clientTool "${ct.name}" has no matching execute handler in tools. ` +
-              `The server may request this tool but the client won't be able to execute it.`
-          );
-        }
-      }
-    }
-  }, [clientTools, tools]);
-
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
     ((agent._url as string | null) || agent._pkurl)
@@ -560,6 +540,7 @@ export function useAgentChat<
   });
 
   const processedToolCalls = useRef(new Set<string>());
+  const isResolvingToolsRef = useRef(false);
 
   // Fix for issue #728: Track client-side tool results in local state
   // to ensure tool parts show output-available immediately after execution
@@ -597,6 +578,11 @@ export function useAgentChat<
       return;
     }
 
+    // Prevent re-entry while async operations are in progress
+    if (isResolvingToolsRef.current) {
+      return;
+    }
+
     const lastMessage =
       useChatHelpers.messages[useChatHelpers.messages.length - 1];
     if (!lastMessage || lastMessage.role !== "assistant") {
@@ -611,78 +597,86 @@ export function useAgentChat<
     );
 
     if (toolCalls.length > 0) {
-      (async () => {
-        // Use toolsRef.current to always get the latest tools without adding to dependencies
-        const currentTools = toolsRef.current;
-        const toolCallsToResolve = toolCalls.filter(
-          (part) =>
-            isToolUIPart(part) &&
-            !toolsRequiringConfirmation.includes(getToolName(part)) &&
-            currentTools?.[getToolName(part)]?.execute // Only execute if client has execute function
-        );
+      // Use toolsRef.current to always get the latest tools without adding to dependencies
+      const currentTools = toolsRef.current;
+      const toolCallsToResolve = toolCalls.filter(
+        (part) =>
+          isToolUIPart(part) &&
+          !toolsRequiringConfirmation.includes(getToolName(part)) &&
+          currentTools?.[getToolName(part)]?.execute // Only execute if client has execute function
+      );
 
-        if (toolCallsToResolve.length > 0) {
-          // Collect all tool results to apply in a single state update
-          const toolResults: Array<{
-            toolCallId: string;
-            toolName: string;
-            output: unknown;
-          }> = [];
+      if (toolCallsToResolve.length > 0) {
+        // Set guard before starting async work
+        isResolvingToolsRef.current = true;
 
-          for (const part of toolCallsToResolve) {
-            if (isToolUIPart(part)) {
-              processedToolCalls.current.add(part.toolCallId);
-              let toolOutput: unknown = null;
-              const toolName = getToolName(part);
-              const tool = currentTools?.[toolName];
+        (async () => {
+          try {
+            // Collect all tool results to apply in a single state update
+            const toolResults: Array<{
+              toolCallId: string;
+              toolName: string;
+              output: unknown;
+            }> = [];
 
-              if (tool?.execute && part.input) {
-                try {
-                  toolOutput = await tool.execute(part.input);
-                } catch (error) {
-                  toolOutput = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+            for (const part of toolCallsToResolve) {
+              if (isToolUIPart(part)) {
+                processedToolCalls.current.add(part.toolCallId);
+                let toolOutput: unknown = null;
+                const toolName = getToolName(part);
+                const tool = currentTools?.[toolName];
+
+                if (tool?.execute && part.input) {
+                  try {
+                    toolOutput = await tool.execute(part.input);
+                  } catch (error) {
+                    toolOutput = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+                  }
                 }
+
+                toolResults.push({
+                  toolCallId: part.toolCallId,
+                  toolName,
+                  output: toolOutput
+                });
               }
-
-              toolResults.push({
-                toolCallId: part.toolCallId,
-                toolName,
-                output: toolOutput
-              });
-            }
-          }
-
-          // Fix for issue #728: Track tool results in local state to ensure tool parts
-          // show output-available immediately after client-side execution
-          if (toolResults.length > 0) {
-            // Call AI SDK's addToolResult sequentially for each result.
-            for (const result of toolResults) {
-              await useChatHelpers.addToolResult({
-                tool: result.toolName,
-                toolCallId: result.toolCallId,
-                output: result.output
-              });
             }
 
-            // Then batch update local state for immediate UI feedback
-            setClientToolResults((prev) => {
-              const newMap = new Map(prev);
+            // Fix for issue #728: Track tool results in local state to ensure tool parts
+            // show output-available immediately after client-side execution
+            if (toolResults.length > 0) {
+              // Call AI SDK's addToolResult sequentially for each result.
               for (const result of toolResults) {
-                newMap.set(result.toolCallId, result.output);
+                await useChatHelpers.addToolResult({
+                  tool: result.toolName,
+                  toolCallId: result.toolCallId,
+                  output: result.output
+                });
               }
-              return newMap;
-            });
-          }
 
-          // If there are NO pending confirmations for the latest assistant message,
-          // we can continue the conversation. Otherwise, wait for the UI to resolve
-          // those confirmations; the addToolResult wrapper will send when the last
-          // pending confirmation is resolved.
-          if (pendingConfirmationsRef.current.toolCallIds.size === 0) {
-            useChatHelpers.sendMessage();
+              // Then batch update local state for immediate UI feedback
+              setClientToolResults((prev) => {
+                const newMap = new Map(prev);
+                for (const result of toolResults) {
+                  newMap.set(result.toolCallId, result.output);
+                }
+                return newMap;
+              });
+            }
+
+            // If there are NO pending confirmations for the latest assistant message,
+            // we can continue the conversation. Otherwise, wait for the UI to resolve
+            // those confirmations; the addToolResult wrapper will send when the last
+            // pending confirmation is resolved.
+            if (pendingConfirmationsRef.current.toolCallIds.size === 0) {
+              useChatHelpers.sendMessage();
+            }
+          } finally {
+            // Clear guard when done
+            isResolvingToolsRef.current = false;
           }
-        }
-      })();
+        })();
+      }
     }
   }, [
     useChatHelpers.messages,
