@@ -653,16 +653,8 @@ export function useAgentChat<
           // Fix for issue #728: Track tool results in local state to ensure tool parts
           // show output-available immediately after client-side execution
           if (toolResults.length > 0) {
-            setClientToolResults((prev) => {
-              const newMap = new Map(prev);
-              for (const result of toolResults) {
-                newMap.set(result.toolCallId, result.output);
-              }
-              return newMap;
-            });
-
-            // Also call AI SDK's addToolResult to keep states in sync
-            // (consistent with manual addToolResult wrapper)
+            // First, call AI SDK's addToolResult for all results (awaited sequentially)
+            // to ensure SDK state is updated before we trigger our own state update
             for (const result of toolResults) {
               await useChatHelpers.addToolResult({
                 tool: result.toolName,
@@ -670,6 +662,15 @@ export function useAgentChat<
                 output: result.output
               });
             }
+
+            // Then batch update local state for immediate UI feedback
+            setClientToolResults((prev) => {
+              const newMap = new Map(prev);
+              for (const result of toolResults) {
+                newMap.set(result.toolCallId, result.output);
+              }
+              return newMap;
+            });
           }
 
           // If there are NO pending confirmations for the latest assistant message,
@@ -993,7 +994,13 @@ export function useAgentChat<
     return useChatHelpers.messages.map((msg) => ({
       ...msg,
       parts: msg.parts.map((p) => {
-        if (!("toolCallId" in p) || !clientToolResults.has(p.toolCallId)) {
+        // Only modify tool parts that have both toolCallId and state fields
+        // This ensures type safety - only ToolUIPart-like objects are modified
+        if (
+          !("toolCallId" in p) ||
+          !("state" in p) ||
+          !clientToolResults.has(p.toolCallId)
+        ) {
           return p;
         }
         return {
@@ -1003,6 +1010,44 @@ export function useAgentChat<
         };
       })
     })) as ChatMessage[];
+  }, [useChatHelpers.messages, clientToolResults]);
+
+  // Cleanup stale entries from clientToolResults when messages change
+  // to prevent memory leak in long conversations
+  useEffect(() => {
+    if (clientToolResults.size === 0) return;
+
+    // Collect all current toolCallIds from messages
+    const currentToolCallIds = new Set<string>();
+    for (const msg of useChatHelpers.messages) {
+      for (const part of msg.parts) {
+        if ("toolCallId" in part && part.toolCallId) {
+          currentToolCallIds.add(part.toolCallId);
+        }
+      }
+    }
+
+    // Check if any entries in clientToolResults are stale
+    let hasStaleEntries = false;
+    for (const toolCallId of clientToolResults.keys()) {
+      if (!currentToolCallIds.has(toolCallId)) {
+        hasStaleEntries = true;
+        break;
+      }
+    }
+
+    // Only update state if there are stale entries to remove
+    if (hasStaleEntries) {
+      setClientToolResults((prev) => {
+        const newMap = new Map<string, unknown>();
+        for (const [id, output] of prev) {
+          if (currentToolCallIds.has(id)) {
+            newMap.set(id, output);
+          }
+        }
+        return newMap;
+      });
+    }
   }, [useChatHelpers.messages, clientToolResults]);
 
   return {
