@@ -6,7 +6,7 @@ import {
   useAgentChat,
   type PrepareSendMessagesRequestOptions,
   type PrepareSendMessagesRequestResult,
-  type ClientTool
+  type AITool
 } from "../ai-react";
 import type { useAgent } from "../react";
 
@@ -255,15 +255,15 @@ describe("useAgentChat", () => {
       .toHaveTextContent("0");
   });
 
-  it("should accept clientTools option (simple API)", async () => {
+  it("should auto-extract schemas from tools with execute functions", async () => {
     const agent = createAgent({
       name: "thread-client-tools",
       url: "ws://localhost:3000/agents/chat/thread-client-tools?_pk=abc"
     });
 
-    const clientTools: ClientTool[] = [
-      {
-        name: "showAlert",
+    // Tools with execute functions have their schemas auto-extracted and sent to server
+    const tools: Record<string, AITool<unknown, unknown>> = {
+      showAlert: {
         description: "Shows an alert dialog to the user",
         parameters: {
           type: "object",
@@ -271,25 +271,33 @@ describe("useAgentChat", () => {
             message: { type: "string", description: "The message to display" }
           },
           required: ["message"]
+        },
+        execute: async (input) => {
+          // Client-side execution
+          const { message } = input as { message: string };
+          return { shown: true, message };
         }
       },
-      {
-        name: "changeBackgroundColor",
+      changeBackgroundColor: {
         description: "Changes the page background color",
         parameters: {
           type: "object",
           properties: {
             color: { type: "string" }
           }
+        },
+        execute: async (input) => {
+          const { color } = input as { color: string };
+          return { success: true, color };
         }
       }
-    ];
+    };
 
     const TestComponent = () => {
       const chat = useAgentChat({
         agent,
         getInitialMessages: null,
-        clientTools
+        tools
       });
       return <div data-testid="messages-count">{chat.messages.length}</div>;
     };
@@ -310,18 +318,18 @@ describe("useAgentChat", () => {
       .toHaveTextContent("0");
   });
 
-  it("should combine clientTools with prepareSendMessagesRequest", async () => {
+  it("should combine auto-extracted tools with prepareSendMessagesRequest", async () => {
     const agent = createAgent({
       name: "thread-combined",
       url: "ws://localhost:3000/agents/chat/thread-combined?_pk=abc"
     });
 
-    const clientTools: ClientTool[] = [
-      {
-        name: "showAlert",
-        description: "Shows an alert"
+    const tools: Record<string, AITool> = {
+      showAlert: {
+        description: "Shows an alert",
+        execute: async () => ({ shown: true })
       }
-    ];
+    };
 
     const prepareSendMessagesRequest = vi.fn(
       (
@@ -341,7 +349,7 @@ describe("useAgentChat", () => {
       const chat = useAgentChat({
         agent,
         getInitialMessages: null,
-        clientTools,
+        tools,
         prepareSendMessagesRequest
       });
       return <div data-testid="messages-count">{chat.messages.length}</div>;
@@ -363,32 +371,31 @@ describe("useAgentChat", () => {
       .toHaveTextContent("0");
   });
 
-  it("should work with clientTools and client-side tool execution", async () => {
+  it("should work with tools that have execute functions for client-side execution", async () => {
     const agent = createAgent({
       name: "thread-tools-execution",
       url: "ws://localhost:3000/agents/chat/thread-tools-execution?_pk=abc"
     });
 
-    const clientTools: ClientTool[] = [
-      {
-        name: "showAlert",
-        description: "Shows an alert"
-      }
-    ];
-
     const mockExecute = vi.fn().mockResolvedValue({ success: true });
+
+    // Single unified tools object - schema + execute in one place
+    const tools: Record<string, AITool> = {
+      showAlert: {
+        description: "Shows an alert",
+        parameters: {
+          type: "object",
+          properties: { message: { type: "string" } }
+        },
+        execute: mockExecute
+      }
+    };
 
     const TestComponent = () => {
       const chat = useAgentChat({
         agent,
         getInitialMessages: null,
-        clientTools,
-        tools: {
-          showAlert: {
-            description: "Shows an alert",
-            execute: mockExecute
-          }
-        }
+        tools
       });
       return <div data-testid="messages-count">{chat.messages.length}</div>;
     };

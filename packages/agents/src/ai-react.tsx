@@ -13,12 +13,6 @@ import type { OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
 
-export type AITool<Input = unknown, Output = unknown> = {
-  description?: string;
-  inputSchema?: unknown;
-  execute?: (input: Input) => Output | Promise<Output>;
-};
-
 /**
  * JSON Schema type for tool parameters.
  * Supports common JSON Schema properties with an index signature
@@ -49,16 +43,59 @@ export type JSONSchemaType = {
 };
 
 /**
- * Definition for a client-side tool that can be sent to the server.
+ * Definition for a tool that can be executed on the client.
+ * Tools with an `execute` function are automatically registered with the server.
  */
-export type ClientTool = {
+export type AITool<Input = unknown, Output = unknown> = {
+  /** Human-readable description of what the tool does */
+  description?: string;
+  /** JSON Schema defining the tool's input parameters */
+  parameters?: JSONSchemaType;
+  /**
+   * @deprecated Use `parameters` instead. Will be removed in a future version.
+   */
+  inputSchema?: unknown;
+  /**
+   * Function to execute the tool on the client.
+   * If provided, the tool schema is automatically sent to the server.
+   */
+  execute?: (input: Input) => Output | Promise<Output>;
+};
+
+/**
+ * Schema for a client tool sent to the server.
+ * This is the wire format - what gets sent in the request body.
+ */
+export type ClientToolSchema = {
   /** Unique name for the tool */
   name: string;
   /** Human-readable description of what the tool does */
-  description: string;
+  description?: string;
   /** JSON Schema defining the tool's input parameters */
-  parameters?: JSONSchemaType;
+  parameters?: JSONSchemaType | unknown;
 };
+
+/**
+ * Extracts tool schemas from tools that have client-side execute functions.
+ * These schemas are automatically sent to the server with each request.
+ * @param tools - Record of tool name to tool definition
+ * @returns Array of tool schemas to send to server, or undefined if none
+ */
+export function extractClientToolSchemas(
+  tools?: Record<string, AITool<unknown, unknown>>
+): ClientToolSchema[] | undefined {
+  if (!tools) return undefined;
+
+  const schemas = Object.entries(tools)
+    .filter(([_, tool]) => tool.execute) // Only tools with client-side execute
+    .map(([name, tool]) => ({
+      name,
+      description: tool.description,
+      parameters: tool.parameters ?? tool.inputSchema
+    }));
+
+  return schemas.length > 0 ? schemas : undefined;
+}
 
 type GetInitialMessagesOptions = {
   agent: string;
@@ -147,13 +184,13 @@ type UseAgentChatOptions<
    */
   experimental_automaticToolResolution?: boolean;
   /**
-   * @description Tools object for automatic detection of confirmation requirements.
-   * Tools without execute function will require confirmation.
+   * Tools that can be executed on the client.
+
    */
   tools?: Record<string, AITool<unknown, unknown>>;
   /**
    * @description Manual override for tools requiring confirmation.
-   * If not provided, will auto-detect from tools object.
+   * If not provided, will auto-detect from tools object (tools without execute require confirmation).
    */
   toolsRequiringConfirmation?: string[];
   /**
@@ -168,13 +205,11 @@ type UseAgentChatOptions<
    */
   resume?: boolean;
   /**
-   * Client-side tool definitions to send to the server with each request.
-   * This is the simple way to register tools that can be executed on the client.
-   * The server will receive these tool schemas and can include them when calling the AI model.
-   */
-  clientTools?: ClientTool[];
-  /**
    * Callback to customize the request before sending messages.
+   * Use this for advanced scenarios like adding custom headers or dynamic context.
+   *
+   * Note: Client tool schemas are automatically sent when tools have `execute` functions.
+   * This callback can add additional data alongside the auto-extracted schemas.
    */
   prepareSendMessagesRequest?: (
     options: PrepareSendMessagesRequestOptions<ChatMessage>
@@ -223,7 +258,6 @@ export function useAgentChat<
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
     autoSendAfterAllConfirmationsResolved = true,
     resume = true, // Enable stream resumption by default
-    clientTools,
     prepareSendMessagesRequest,
     ...rest
   } = options;
@@ -465,11 +499,6 @@ export function useAgentChat<
     toolsRef.current = tools;
   }, [tools]);
 
-  const clientToolsRef = useRef(clientTools);
-  useEffect(() => {
-    clientToolsRef.current = clientTools;
-  }, [clientTools]);
-
   const prepareSendMessagesRequestRef = useRef(prepareSendMessagesRequest);
   useEffect(() => {
     prepareSendMessagesRequestRef.current = prepareSendMessagesRequest;
@@ -482,23 +511,25 @@ export function useAgentChat<
           typeof DefaultChatTransport.prototype.sendMessages
         >[0]
       ) => {
+        // Extract schemas from tools with execute functions
+        const clientToolSchemas = extractClientToolSchemas(toolsRef.current);
+
         const combinedPrepare =
-          clientToolsRef.current?.length ||
-          prepareSendMessagesRequestRef.current
+          clientToolSchemas || prepareSendMessagesRequestRef.current
             ? async (
                 prepareOptions: PrepareSendMessagesRequestOptions<ChatMessage>
               ): Promise<InternalPrepareResult> => {
-                // Start with clientTools in the body (or empty body)
+                // Start with auto-extracted client tool schemas
                 let body: Record<string, unknown> = {};
                 let headers: HeadersInit | undefined;
                 let credentials: RequestCredentials | undefined;
                 let api: string | undefined;
 
-                if (clientToolsRef.current?.length) {
-                  body = { clientTools: clientToolsRef.current };
+                if (clientToolSchemas) {
+                  body = { clientTools: clientToolSchemas };
                 }
 
-                // Apply prepareSendMessagesRequest callback
+                // Apply prepareSendMessagesRequest callback for additional customization
                 if (prepareSendMessagesRequestRef.current) {
                   const userResult =
                     await prepareSendMessagesRequestRef.current(prepareOptions);

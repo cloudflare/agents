@@ -9,6 +9,7 @@ import type {
   ToolUIPart,
   UIMessageChunk
 } from "ai";
+import { tool, jsonSchema } from "ai";
 import {
   Agent,
   type AgentContext,
@@ -24,6 +25,61 @@ import {
 } from "./ai-types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import { nanoid } from "nanoid";
+
+/**
+ * Schema for a client-defined tool sent from the browser.
+ * These tools are executed on the client, not the server.
+ */
+export type ClientToolSchema = {
+  /** Unique name for the tool */
+  name: string;
+  /** Human-readable description of what the tool does */
+  description?: string;
+  /** JSON Schema defining the tool's input parameters */
+  parameters?: Record<string, unknown>;
+};
+
+/**
+ * Options passed to the onChatMessage handler.
+ */
+export type OnChatMessageOptions = {
+  /** AbortSignal for cancelling the request */
+  abortSignal?: AbortSignal;
+  /**
+   * Tool schemas sent from the client for dynamic tool registration.
+   * These represent tools that will be executed on the client side.
+   * Use `createToolsFromClientSchemas()` to convert these to AI SDK tool format.
+   */
+  clientTools?: ClientToolSchema[];
+};
+
+/**
+ * Converts client tool schemas to AI SDK tool format.
+ *
+ * These tools have no `execute` function - when the AI model calls them,
+ * the tool call is sent back to the client for execution.
+ *
+ * @param clientTools - Array of tool schemas from the client
+ * @returns Record of AI SDK tools that can be spread into your tools object
+ */
+export function createToolsFromClientSchemas(
+  clientTools?: ClientToolSchema[]
+): ToolSet {
+  if (!clientTools || clientTools.length === 0) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    clientTools.map((t) => [
+      t.name,
+      tool({
+        description: t.description ?? "",
+        inputSchema: jsonSchema(t.parameters ?? { type: "object" })
+        // No execute function = tool call is sent back to client
+      })
+    ])
+  );
+}
 
 /** Number of chunks to buffer before flushing to SQLite */
 const CHUNK_BUFFER_SIZE = 10;
@@ -183,7 +239,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           data.init.method === "POST"
         ) {
           const { body } = data.init;
-          const { messages } = JSON.parse(body as string);
+          const parsed = JSON.parse(body as string);
+          const { messages, clientTools } = parsed as {
+            messages: ChatMessage[];
+            clientTools?: ClientToolSchema[];
+          };
 
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
@@ -238,7 +298,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                       this.ctx
                     );
                   },
-                  abortSignal ? { abortSignal } : undefined
+                  {
+                    abortSignal,
+                    clientTools
+                  }
                 );
 
                 if (response) {
@@ -596,14 +659,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
-   * @param options.signal A signal to pass to any child requests which can be used to cancel them
+   * @param options Options including abort signal and client-defined tools
    * @returns Response to send to the client or undefined
    */
   async onChatMessage(
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
-    options?: { abortSignal: AbortSignal | undefined }
+    options?: OnChatMessageOptions
   ): Promise<Response | undefined> {
     throw new Error(
       "recieved a chat message, override onChatMessage and return a Response to send to the client"

@@ -517,56 +517,54 @@ This creates:
 
 #### Client-Defined Tools
 
-For scenarios where each client needs to register its own tools dynamically, use the `clientTools` option:
+For scenarios where each client needs to register its own tools dynamically (e.g., embeddable chat widgets), use the `tools` option with `execute` functions.
 
-##### Simple API with `clientTools`
+Tools with an `execute` function are automatically:
+
+1. Sent to the server as schemas with each request
+2. Executed on the client when the AI model calls them
+
+##### Client-Side Tool Definition
 
 ```tsx
 import { useAgent } from "agents/react";
-import { useAgentChat, type ClientTool } from "agents/ai-react";
+import { useAgentChat, type AITool } from "agents/ai-react";
 
 // Define tools outside component to avoid recreation on every render
-const clientTools: ClientTool[] = [
-  {
-    name: "showAlert",
+const tools: Record<string, AITool> = {
+  showAlert: {
     description: "Shows an alert dialog to the user",
     parameters: {
       type: "object",
       properties: { message: { type: "string" } },
       required: ["message"]
+    },
+    execute: async (input) => {
+      const { message } = input as { message: string };
+      alert(message);
+      return { success: true };
     }
   },
-  {
-    name: "changeBackgroundColor",
+  changeBackgroundColor: {
     description: "Changes the page background color",
     parameters: {
       type: "object",
       properties: { color: { type: "string" } }
+    },
+    execute: async (input) => {
+      const { color } = input as { color: string };
+      document.body.style.backgroundColor = color;
+      return { success: true, color };
     }
   }
-];
+};
 
 function EmbeddableChat() {
   const agent = useAgent({ agent: "chat-widget" });
 
   const { messages, input, handleInputChange, handleSubmit } = useAgentChat({
     agent,
-    clientTools,
-    // Define client-side tool execution
-    tools: {
-      showAlert: {
-        execute: async ({ message }) => {
-          alert(message);
-          return { success: true };
-        }
-      },
-      changeBackgroundColor: {
-        execute: async ({ color }) => {
-          document.body.style.backgroundColor = color;
-          return { success: true, color };
-        }
-      }
-    }
+    tools // Schema + execute in one place
   });
 
   return (
@@ -582,17 +580,51 @@ function EmbeddableChat() {
 }
 ```
 
-##### Advanced API with `prepareSendMessagesRequest`
+##### Server-Side Tool Handling
 
-For more control (dynamic data, custom headers), use `prepareSendMessagesRequest`:
+On the server, use `createToolsFromClientSchemas` to convert client tool schemas to AI SDK format:
+
+```typescript
+import {
+  AIChatAgent,
+  createToolsFromClientSchemas
+} from "agents/ai-chat-agent";
+import { openai } from "@ai-sdk/openai";
+import { streamText, convertToModelMessages } from "ai";
+
+export class ChatWidget extends AIChatAgent {
+  async onChatMessage(onFinish, options) {
+    const result = streamText({
+      model: openai("gpt-4o"),
+      messages: convertToModelMessages(this.messages),
+      tools: {
+        // Server-side tools (execute on server)
+        getWeather: tool({
+          description: "Get weather for a city",
+          parameters: z.object({ city: z.string() }),
+          execute: async ({ city }) => fetchWeather(city)
+        }),
+        // Client-side tools (sent back to client for execution)
+        ...createToolsFromClientSchemas(options?.clientTools)
+      },
+      onFinish
+    });
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+##### Advanced: Custom Request Data
+
+For additional control (custom headers, dynamic context), use `prepareSendMessagesRequest`:
 
 ```tsx
 const { messages, handleSubmit } = useAgentChat({
   agent,
-  clientTools, // Still works alongside prepareSendMessagesRequest
+  tools, // Tool schemas auto-extracted and sent
   prepareSendMessagesRequest: ({ id, messages }) => ({
     body: {
-      // Add dynamic context
+      // Add dynamic context alongside auto-extracted tool schemas
       currentUrl: window.location.href,
       userTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone
     },
@@ -603,8 +635,6 @@ const { messages, handleSubmit } = useAgentChat({
   })
 });
 ```
-
-Both options can be combined - `clientTools` are automatically added to the request body, and `prepareSendMessagesRequest` can add additional data or headers.
 
 ### 🔗 MCP (Model Context Protocol) Integration
 
