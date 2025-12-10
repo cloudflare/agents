@@ -634,6 +634,7 @@ export function useAgentChat<
   const pendingConfirmationsRef = useRef(pendingConfirmations);
   pendingConfirmationsRef.current = pendingConfirmations;
 
+  // Automatic tool resolution effect.
   useEffect(() => {
     if (!experimental_automaticToolResolution) {
       return;
@@ -658,22 +659,20 @@ export function useAgentChat<
     );
 
     if (toolCalls.length > 0) {
-      // Use toolsRef.current to always get the latest tools without adding to dependencies
+      // Capture tools synchronously before async work
       const currentTools = toolsRef.current;
       const toolCallsToResolve = toolCalls.filter(
         (part) =>
           isToolUIPart(part) &&
           !toolsRequiringConfirmation.includes(getToolName(part)) &&
-          currentTools?.[getToolName(part)]?.execute // Only execute if client has execute function
+          currentTools?.[getToolName(part)]?.execute
       );
 
       if (toolCallsToResolve.length > 0) {
-        // Set guard before starting async work
         isResolvingToolsRef.current = true;
 
         (async () => {
           try {
-            // Collect all tool results to apply in a single state update
             const toolResults: Array<{
               toolCallId: string;
               toolName: string;
@@ -686,7 +685,6 @@ export function useAgentChat<
                 const toolName = getToolName(part);
                 const tool = currentTools?.[toolName];
 
-                // Use strict undefined check - null is a valid input value
                 if (tool?.execute && part.input !== undefined) {
                   try {
                     toolOutput = await tool.execute(part.input);
@@ -695,7 +693,6 @@ export function useAgentChat<
                   }
                 }
 
-                // Mark as processed AFTER successful execution to allow retry on failure
                 processedToolCalls.current.add(part.toolCallId);
 
                 toolResults.push({
@@ -706,10 +703,7 @@ export function useAgentChat<
               }
             }
 
-            // Fix for issue #728: Track tool results in local state to ensure tool parts
-            // show output-available immediately after client-side execution
             if (toolResults.length > 0) {
-              // Submit all tool results in parallel for better performance
               await Promise.all(
                 toolResults.map((result) =>
                   useChatHelpers.addToolResult({
@@ -720,7 +714,6 @@ export function useAgentChat<
                 )
               );
 
-              // Then batch update local state for immediate UI feedback
               setClientToolResults((prev) => {
                 const newMap = new Map(prev);
                 for (const result of toolResults) {
@@ -730,15 +723,10 @@ export function useAgentChat<
               });
             }
 
-            // If there are NO pending confirmations for the latest assistant message,
-            // we can continue the conversation. Otherwise, wait for the UI to resolve
-            // those confirmations; the addToolResult wrapper will send when the last
-            // pending confirmation is resolved.
             if (pendingConfirmationsRef.current.toolCallIds.size === 0) {
               useChatHelpers.sendMessage();
             }
           } finally {
-            // Clear guard when done
             isResolvingToolsRef.current = false;
           }
         })();
