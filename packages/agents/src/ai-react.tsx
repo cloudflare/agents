@@ -660,6 +660,16 @@ export function useAgentChat<
               }
               return newMap;
             });
+
+            // Also call AI SDK's addToolResult to keep states in sync
+            // (consistent with manual addToolResult wrapper)
+            for (const result of toolResults) {
+              await useChatHelpers.addToolResult({
+                tool: result.toolName,
+                toolCallId: result.toolCallId,
+                output: result.output
+              });
+            }
           }
 
           // If there are NO pending confirmations for the latest assistant message,
@@ -864,16 +874,20 @@ export function useAgentChat<
                   break;
                 }
                 case "tool-output-available": {
-                  // Update existing tool part with output
-                  const toolPart = activeMsg.parts.find(
+                  // Update existing tool part with output using immutable pattern
+                  const toolPartIndex = activeMsg.parts.findIndex(
                     (p) =>
                       "toolCallId" in p && p.toolCallId === chunkData.toolCallId
                   );
-                  if (toolPart && "state" in toolPart) {
-                    (toolPart as Record<string, unknown>).state =
-                      "output-available";
-                    (toolPart as Record<string, unknown>).output =
-                      chunkData.output;
+                  if (toolPartIndex !== -1) {
+                    const existingPart = activeMsg.parts[toolPartIndex];
+                    if ("state" in existingPart) {
+                      activeMsg.parts[toolPartIndex] = {
+                        ...existingPart,
+                        state: "output-available",
+                        output: chunkData.output
+                      } as ChatMessage["parts"][number];
+                    }
                   }
                   break;
                 }
@@ -998,6 +1012,7 @@ export function useAgentChat<
     clearHistory: () => {
       useChatHelpers.setMessages([]);
       setClientToolResults(new Map());
+      processedToolCalls.current.clear();
       agent.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_CHAT_CLEAR
