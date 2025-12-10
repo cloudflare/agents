@@ -273,17 +273,15 @@ export function useAgent<State>(
     if (!entry) return;
 
     const timeUntilExpiry = entry.expiresAt - Date.now();
-    if (timeUntilExpiry <= 0) {
-      // Already expired, invalidate immediately
-      deleteCacheEntry(cacheKey);
-      setCacheInvalidatedAt(Date.now());
-      return;
-    }
 
-    const timer = setTimeout(() => {
-      deleteCacheEntry(cacheKey);
-      setCacheInvalidatedAt(Date.now());
-    }, timeUntilExpiry);
+    // Always set a timer (with min 0ms) to ensure cleanup function is returned
+    const timer = setTimeout(
+      () => {
+        deleteCacheEntry(cacheKey);
+        setCacheInvalidatedAt(Date.now());
+      },
+      Math.max(0, timeUntilExpiry)
+    );
 
     return () => clearTimeout(timer);
   }, [cacheKey, queryPromise, ttl]);
