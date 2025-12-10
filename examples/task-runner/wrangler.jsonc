@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "task-runner-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-02-11",
+  "compatibility_flags": ["nodejs_compat", "enable_ctx_exports"],
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "task-runner",
+        "class_name": "TaskRunner"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TaskRunner"]
+    }
+  ],
+  "workflows": [
+    {
+      "name": "analysis-workflow",
+      "binding": "ANALYSIS_WORKFLOW",
+      "class_name": "AnalysisWorkflow"
+    }
+  ]
+}
