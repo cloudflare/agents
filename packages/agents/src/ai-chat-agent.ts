@@ -69,6 +69,17 @@ export function createToolsFromClientSchemas(
     return {};
   }
 
+  // Check for duplicate tool names
+  const seenNames = new Set<string>();
+  for (const t of clientTools) {
+    if (seenNames.has(t.name)) {
+      console.warn(
+        `[createToolsFromClientSchemas] Duplicate tool name "${t.name}" found. Later definitions will override earlier ones.`
+      );
+    }
+    seenNames.add(t.name);
+  }
+
   return Object.fromEntries(
     clientTools.map((t) => [
       t.name,

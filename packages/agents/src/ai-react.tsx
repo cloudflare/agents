@@ -65,6 +65,7 @@ export type AITool<Input = unknown, Output = unknown> = {
 /**
  * Schema for a client tool sent to the server.
  * This is the wire format - what gets sent in the request body.
+ * Must match the server-side ClientToolSchema type in ai-chat-agent.ts.
  */
 export type ClientToolSchema = {
   /** Unique name for the tool */
@@ -72,7 +73,7 @@ export type ClientToolSchema = {
   /** Human-readable description of what the tool does */
   description?: string;
   /** JSON Schema defining the tool's input parameters */
-  parameters?: JSONSchemaType | unknown;
+  parameters?: Record<string, unknown>;
 };
 
 /**
@@ -86,13 +87,24 @@ export function extractClientToolSchemas(
 ): ClientToolSchema[] | undefined {
   if (!tools) return undefined;
 
-  const schemas = Object.entries(tools)
+  const schemas: ClientToolSchema[] = Object.entries(tools)
     .filter(([_, tool]) => tool.execute) // Only tools with client-side execute
-    .map(([name, tool]) => ({
-      name,
-      description: tool.description,
-      parameters: tool.parameters ?? tool.inputSchema
-    }));
+    .map(([name, tool]) => {
+      const params = tool.parameters ?? tool.inputSchema;
+
+      // Add deprecation warning for inputSchema usage
+      if (tool.inputSchema && !tool.parameters) {
+        console.warn(
+          `[useAgentChat] Tool "${name}" uses deprecated 'inputSchema'. Please migrate to 'parameters'.`
+        );
+      }
+
+      return {
+        name,
+        description: tool.description,
+        parameters: params as Record<string, unknown> | undefined
+      };
+    });
 
   return schemas.length > 0 ? schemas : undefined;
 }
@@ -494,15 +506,13 @@ export function useAgentChat<
     []
   );
 
+  // Use synchronous ref updates to avoid race conditions between effect runs.
+  // This ensures the ref always has the latest value before any effect reads it.
   const toolsRef = useRef(tools);
-  useEffect(() => {
-    toolsRef.current = tools;
-  }, [tools]);
+  toolsRef.current = tools;
 
   const prepareSendMessagesRequestRef = useRef(prepareSendMessagesRequest);
-  useEffect(() => {
-    prepareSendMessagesRequestRef.current = prepareSendMessagesRequest;
-  }, [prepareSendMessagesRequest]);
+  prepareSendMessagesRequestRef.current = prepareSendMessagesRequest;
 
   const customTransport: ChatTransport<ChatMessage> = useMemo(
     () => ({
@@ -676,14 +686,16 @@ export function useAgentChat<
             // Fix for issue #728: Track tool results in local state to ensure tool parts
             // show output-available immediately after client-side execution
             if (toolResults.length > 0) {
-              // Call AI SDK's addToolResult sequentially for each result.
-              for (const result of toolResults) {
-                await useChatHelpers.addToolResult({
-                  tool: result.toolName,
-                  toolCallId: result.toolCallId,
-                  output: result.output
-                });
-              }
+              // Submit all tool results in parallel for better performance
+              await Promise.all(
+                toolResults.map((result) =>
+                  useChatHelpers.addToolResult({
+                    tool: result.toolName,
+                    toolCallId: result.toolCallId,
+                    output: result.output
+                  })
+                )
+              );
 
               // Then batch update local state for immediate UI feedback
               setClientToolResults((prev) => {
@@ -1036,10 +1048,10 @@ export function useAgentChat<
   }, [useChatHelpers.messages, clientToolResults]);
 
   // Cleanup stale entries from clientToolResults when messages change
-  // to prevent memory leak in long conversations
+  // to prevent memory leak in long conversations.
+  // Note: We intentionally exclude clientToolResults from deps to avoid infinite loops.
+  // The functional update form gives us access to the previous state.
   useEffect(() => {
-    if (clientToolResults.size === 0) return;
-
     // Collect all current toolCallIds from messages
     const currentToolCallIds = new Set<string>();
     for (const msg of useChatHelpers.messages) {
@@ -1050,28 +1062,32 @@ export function useAgentChat<
       }
     }
 
-    // Check if any entries in clientToolResults are stale
-    let hasStaleEntries = false;
-    for (const toolCallId of clientToolResults.keys()) {
-      if (!currentToolCallIds.has(toolCallId)) {
-        hasStaleEntries = true;
-        break;
-      }
-    }
+    // Use functional update to check and clean stale entries atomically
+    setClientToolResults((prev) => {
+      if (prev.size === 0) return prev;
 
-    // Only update state if there are stale entries to remove
-    if (hasStaleEntries) {
-      setClientToolResults((prev) => {
-        const newMap = new Map<string, unknown>();
-        for (const [id, output] of prev) {
-          if (currentToolCallIds.has(id)) {
-            newMap.set(id, output);
-          }
+      // Check if any entries are stale
+      let hasStaleEntries = false;
+      for (const toolCallId of prev.keys()) {
+        if (!currentToolCallIds.has(toolCallId)) {
+          hasStaleEntries = true;
+          break;
         }
-        return newMap;
-      });
-    }
-  }, [useChatHelpers.messages, clientToolResults]);
+      }
+
+      // Only create new Map if there are stale entries to remove
+      if (!hasStaleEntries) return prev;
+
+      const newMap = new Map<string, unknown>();
+      for (const [id, output] of prev) {
+        if (currentToolCallIds.has(id)) {
+          newMap.set(id, output);
+        }
+      }
+      return newMap;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [useChatHelpers.messages]);
 
   return {
     ...useChatHelpers,
