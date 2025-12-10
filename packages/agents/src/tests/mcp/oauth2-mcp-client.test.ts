@@ -1,6 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { type Env, TestOAuthAgent } from "../worker";
+import worker, { type Env, type TestOAuthAgent } from "../worker";
 import { nanoid } from "nanoid";
 
 declare module "cloudflare:test" {

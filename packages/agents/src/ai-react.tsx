@@ -8,7 +8,7 @@ import type {
 } from "ai";
 import { DefaultChatTransport } from "ai";
 import { nanoid } from "nanoid";
-import { use, useCallback, useEffect, useMemo, useRef } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutgoingMessage } from "./ai-types";
 import { MessageType } from "./ai-types";
 import type { useAgent } from "./react";
@@ -21,6 +21,8 @@ export type AITool<Input = unknown, Output = unknown> = {
 
 /**
  * JSON Schema type for tool parameters.
+ * Supports common JSON Schema properties with an index signature
+ * for extension properties like $ref, format, minimum, maximum, etc.
  */
 export type JSONSchemaType = {
   type?: "object" | "string" | "number" | "boolean" | "array" | "null";
@@ -30,6 +32,19 @@ export type JSONSchemaType = {
   description?: string;
   enum?: (string | number | boolean | null)[];
   default?: unknown;
+  // Additional JSON Schema properties
+  $ref?: string;
+  $id?: string;
+  $schema?: string;
+  title?: string;
+  format?: string;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  additionalProperties?: boolean | JSONSchemaType;
+  // Allow other JSON Schema extension properties
   [key: string]: unknown;
 };
 
@@ -542,6 +557,12 @@ export function useAgentChat<
 
   const processedToolCalls = useRef(new Set<string>());
 
+  // Fix for issue #728: Track client-side tool results in local state
+  // to ensure tool parts show output-available immediately after execution
+  const [clientToolResults, setClientToolResults] = useState<
+    Map<string, unknown>
+  >(new Map());
+
   // Calculate pending confirmations for the latest assistant message
   const lastMessage =
     useChatHelpers.messages[useChatHelpers.messages.length - 1];
@@ -599,10 +620,17 @@ export function useAgentChat<
         );
 
         if (toolCallsToResolve.length > 0) {
+          // Collect all tool results to apply in a single state update
+          const toolResults: Array<{
+            toolCallId: string;
+            toolName: string;
+            output: unknown;
+          }> = [];
+
           for (const part of toolCallsToResolve) {
             if (isToolUIPart(part)) {
               processedToolCalls.current.add(part.toolCallId);
-              let toolOutput = null;
+              let toolOutput: unknown = null;
               const toolName = getToolName(part);
               const tool = tools?.[toolName];
 
@@ -614,13 +642,26 @@ export function useAgentChat<
                 }
               }
 
-              await useChatHelpers.addToolResult({
+              toolResults.push({
                 toolCallId: part.toolCallId,
-                tool: toolName,
+                toolName,
                 output: toolOutput
               });
             }
           }
+
+          // Fix for issue #728: Track tool results in local state to ensure tool parts
+          // show output-available immediately after client-side execution
+          if (toolResults.length > 0) {
+            setClientToolResults((prev) => {
+              const newMap = new Map(prev);
+              for (const result of toolResults) {
+                newMap.set(result.toolCallId, result.output);
+              }
+              return newMap;
+            });
+          }
+
           // If there are NO pending confirmations for the latest assistant message,
           // we can continue the conversation. Otherwise, wait for the UI to resolve
           // those confirmations; the addToolResult wrapper will send when the last
@@ -897,7 +938,13 @@ export function useAgentChat<
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
     async (args) => {
       const { toolCallId } = args;
+      const output = "output" in args ? args.output : undefined;
 
+      // Fix for issue #728: Track tool result in local state to ensure
+      // the tool part shows output-available immediately
+      setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+
+      // Also call AI SDK's addToolResult for compatibility
       await useChatHelpers.addToolResult(args);
 
       if (!autoSendAfterAllConfirmationsResolved) {
@@ -923,11 +970,34 @@ export function useAgentChat<
       }
     };
 
+  // Fix for issue #728: Merge client-side tool results with messages
+  // so tool parts show output-available immediately after execution
+  const messagesWithToolResults = useMemo(() => {
+    if (clientToolResults.size === 0) {
+      return useChatHelpers.messages;
+    }
+    return useChatHelpers.messages.map((msg) => ({
+      ...msg,
+      parts: msg.parts.map((p) => {
+        if (!("toolCallId" in p) || !clientToolResults.has(p.toolCallId)) {
+          return p;
+        }
+        return {
+          ...p,
+          state: "output-available" as const,
+          output: clientToolResults.get(p.toolCallId)
+        };
+      })
+    })) as ChatMessage[];
+  }, [useChatHelpers.messages, clientToolResults]);
+
   return {
     ...useChatHelpers,
+    messages: messagesWithToolResults,
     addToolResult: addToolResultAndSendMessage,
     clearHistory: () => {
       useChatHelpers.setMessages([]);
+      setClientToolResults(new Map());
       agent.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_CHAT_CLEAR
