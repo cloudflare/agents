@@ -77,6 +77,25 @@ export type ClientToolSchema = {
 };
 
 /**
+ * Converts a tool's parameters to the wire format expected by the server.
+ * JSONSchemaType is compatible with Record<string, unknown> due to its index signature.
+ * @internal
+ */
+function toParametersRecord(
+  params: JSONSchemaType | unknown | undefined
+): Record<string, unknown> | undefined {
+  if (params === undefined || params === null) {
+    return undefined;
+  }
+  // JSONSchemaType and plain objects are compatible with Record<string, unknown>
+  if (typeof params === "object") {
+    return params as Record<string, unknown>;
+  }
+  // Primitive values shouldn't be used as parameters, but handle gracefully
+  return undefined;
+}
+
+/**
  * Extracts tool schemas from tools that have client-side execute functions.
  * These schemas are automatically sent to the server with each request.
  * @param tools - Record of tool name to tool definition
@@ -90,6 +109,7 @@ export function extractClientToolSchemas(
   const schemas: ClientToolSchema[] = Object.entries(tools)
     .filter(([_, tool]) => tool.execute) // Only tools with client-side execute
     .map(([name, tool]) => {
+      // Prefer parameters over deprecated inputSchema
       const params = tool.parameters ?? tool.inputSchema;
 
       // Add deprecation warning for inputSchema usage
@@ -102,7 +122,7 @@ export function extractClientToolSchemas(
       return {
         name,
         description: tool.description,
-        parameters: params as Record<string, unknown> | undefined
+        parameters: toParametersRecord(params)
       };
     });
 
@@ -584,7 +604,7 @@ export function useAgentChat<
   const isResolvingToolsRef = useRef(false);
 
   // Fix for issue #728: Track client-side tool results in local state
-  // to ensure tool parts show output-available immediately after execution
+  // to ensure tool parts show output-available immediately after execution.
   const [clientToolResults, setClientToolResults] = useState<
     Map<string, unknown>
   >(new Map());
@@ -662,18 +682,21 @@ export function useAgentChat<
 
             for (const part of toolCallsToResolve) {
               if (isToolUIPart(part)) {
-                processedToolCalls.current.add(part.toolCallId);
                 let toolOutput: unknown = null;
                 const toolName = getToolName(part);
                 const tool = currentTools?.[toolName];
 
-                if (tool?.execute && part.input) {
+                // Use strict undefined check - null is a valid input value
+                if (tool?.execute && part.input !== undefined) {
                   try {
                     toolOutput = await tool.execute(part.input);
                   } catch (error) {
                     toolOutput = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
                   }
                 }
+
+                // Mark as processed AFTER successful execution to allow retry on failure
+                processedToolCalls.current.add(part.toolCallId);
 
                 toolResults.push({
                   toolCallId: part.toolCallId,
