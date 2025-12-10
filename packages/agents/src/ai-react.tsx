@@ -480,7 +480,11 @@ export function useAgentChat<
     []
   );
 
-  // Store clientTools and prepareSendMessagesRequest in refs to avoid recreating transport on every render
+  const toolsRef = useRef(tools);
+  useEffect(() => {
+    toolsRef.current = tools;
+  }, [tools]);
+
   const clientToolsRef = useRef(clientTools);
   useEffect(() => {
     clientToolsRef.current = clientTools;
@@ -588,10 +592,6 @@ export function useAgentChat<
   const pendingConfirmationsRef = useRef(pendingConfirmations);
   pendingConfirmationsRef.current = pendingConfirmations;
 
-  // tools can be a different object everytime it's called,
-  // which might lead to this effect being called multiple times with different tools objects.
-  // we need to fix this, but that's a bigger refactor.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: we need to fix this
   useEffect(() => {
     if (!experimental_automaticToolResolution) {
       return;
@@ -612,11 +612,13 @@ export function useAgentChat<
 
     if (toolCalls.length > 0) {
       (async () => {
+        // Use toolsRef.current to always get the latest tools without adding to dependencies
+        const currentTools = toolsRef.current;
         const toolCallsToResolve = toolCalls.filter(
           (part) =>
             isToolUIPart(part) &&
             !toolsRequiringConfirmation.includes(getToolName(part)) &&
-            tools?.[getToolName(part)]?.execute // Only execute if client has execute function
+            currentTools?.[getToolName(part)]?.execute // Only execute if client has execute function
         );
 
         if (toolCallsToResolve.length > 0) {
@@ -632,7 +634,7 @@ export function useAgentChat<
               processedToolCalls.current.add(part.toolCallId);
               let toolOutput: unknown = null;
               const toolName = getToolName(part);
-              const tool = tools?.[toolName];
+              const tool = currentTools?.[toolName];
 
               if (tool?.execute && part.input) {
                 try {
@@ -653,8 +655,7 @@ export function useAgentChat<
           // Fix for issue #728: Track tool results in local state to ensure tool parts
           // show output-available immediately after client-side execution
           if (toolResults.length > 0) {
-            // First, call AI SDK's addToolResult for all results (awaited sequentially)
-            // to ensure SDK state is updated before we trigger our own state update
+            // Call AI SDK's addToolResult sequentially for each result.
             for (const result of toolResults) {
               await useChatHelpers.addToolResult({
                 tool: result.toolName,
@@ -949,14 +950,12 @@ export function useAgentChat<
     };
   }, [agent, useChatHelpers.setMessages, resume]);
 
-  // Wrapper that sends only when the last pending confirmation is resolved
+  // Wrapper that sends only when the last pending confirmation is resolved.
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
     async (args) => {
       const { toolCallId } = args;
       const output = "output" in args ? args.output : undefined;
 
-      // Fix for issue #728: Track tool result in local state to ensure
-      // the tool part shows output-available immediately
       setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
 
       // Also call AI SDK's addToolResult for compatibility
@@ -994,11 +993,10 @@ export function useAgentChat<
     return useChatHelpers.messages.map((msg) => ({
       ...msg,
       parts: msg.parts.map((p) => {
-        // Only modify tool parts that have both toolCallId and state fields
-        // This ensures type safety - only ToolUIPart-like objects are modified
         if (
           !("toolCallId" in p) ||
           !("state" in p) ||
+          p.state !== "input-available" ||
           !clientToolResults.has(p.toolCallId)
         ) {
           return p;
