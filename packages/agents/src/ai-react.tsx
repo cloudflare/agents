@@ -876,20 +876,20 @@ export function useAgentChat<
                 }
                 case "tool-output-available": {
                   // Update existing tool part with output using immutable pattern
-                  const toolPartIndex = activeMsg.parts.findIndex(
-                    (p) =>
-                      "toolCallId" in p && p.toolCallId === chunkData.toolCallId
-                  );
-                  if (toolPartIndex !== -1) {
-                    const existingPart = activeMsg.parts[toolPartIndex];
-                    if ("state" in existingPart) {
-                      activeMsg.parts[toolPartIndex] = {
-                        ...existingPart,
+                  activeMsg.parts = activeMsg.parts.map((p) => {
+                    if (
+                      "toolCallId" in p &&
+                      p.toolCallId === chunkData.toolCallId &&
+                      "state" in p
+                    ) {
+                      return {
+                        ...p,
                         state: "output-available",
                         output: chunkData.output
                       } as ChatMessage["parts"][number];
                     }
-                  }
+                    return p;
+                  });
                   break;
                 }
                 case "step-start": {
