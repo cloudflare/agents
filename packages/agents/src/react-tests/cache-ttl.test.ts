@@ -88,4 +88,68 @@ describe("Cache TTL", () => {
     expect(entry1!.expiresAt).toBeLessThanOrEqual(now + shortTtl);
     expect(entry2!.expiresAt).toBeGreaterThan(now + longTtl - 1000);
   });
+
+  it("should return cached entry when not expired", () => {
+    const key = "valid-cache";
+    const promise = Promise.resolve({ token: "valid" });
+    const ttl = 60000; // 1 minute
+
+    _testUtils.setCacheEntry(key, promise, ttl);
+
+    // Entry should be retrievable immediately
+    const found = _testUtils.getCacheEntry(key);
+    expect(found).toBeDefined();
+    expect(found?.promise).toBe(promise);
+  });
+
+  it("should return undefined for expired entries", async () => {
+    vi.useFakeTimers();
+    const key = "expired-cache";
+    const promise = Promise.resolve({ token: "expired" });
+    const ttl = 1000; // 1 second
+
+    _testUtils.setCacheEntry(key, promise, ttl);
+
+    // Entry should exist initially
+    expect(_testUtils.getCacheEntry(key)).toBeDefined();
+
+    // Advance time past TTL
+    vi.advanceTimersByTime(1001);
+
+    // Entry should now be expired and removed
+    const found = _testUtils.getCacheEntry(key);
+    expect(found).toBeUndefined();
+
+    // Cache should be cleaned up
+    expect(_testUtils.queryCache.has(key)).toBe(false);
+  });
+
+  it("should deduplicate concurrent requests with same cache key", () => {
+    const key = "dedup-key";
+    const promise1 = Promise.resolve({ token: "first" });
+    const promise2 = Promise.resolve({ token: "second" });
+    const ttl = 60000;
+
+    // First entry
+    _testUtils.setCacheEntry(key, promise1, ttl);
+
+    // Second entry with same key should overwrite
+    _testUtils.setCacheEntry(key, promise2, ttl);
+
+    const found = _testUtils.getCacheEntry(key);
+    expect(found?.promise).toBe(promise2);
+    expect(_testUtils.queryCache.size).toBe(1);
+  });
+
+  it("should delete cache entry correctly", () => {
+    const key = "delete-test";
+    const promise = Promise.resolve({ token: "delete-me" });
+
+    _testUtils.setCacheEntry(key, promise, 60000);
+    expect(_testUtils.queryCache.has(key)).toBe(true);
+
+    _testUtils.deleteCacheEntry(key);
+    expect(_testUtils.queryCache.has(key)).toBe(false);
+    expect(_testUtils.getCacheEntry(key)).toBeUndefined();
+  });
 });

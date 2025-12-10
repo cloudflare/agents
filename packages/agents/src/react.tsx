@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef, use, useMemo } from "react";
+import { useCallback, useRef, use, useMemo, useState, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -78,6 +78,7 @@ export const _testUtils = {
   queryCache,
   setCacheEntry,
   getCacheEntry,
+  deleteCacheEntry,
   clearCache: () => queryCache.clear()
 };
 
@@ -232,18 +233,20 @@ export function useAgent<State>(
 
   const ttl = cacheTtl ?? 5 * 60 * 1000;
 
+  // Track cache invalidation to force re-render when TTL expires
+  const [cacheInvalidatedAt, setCacheInvalidatedAt] = useState<number>(0);
+
   // Get or create the query promise
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cacheInvalidatedAt intentionally forces re-evaluation when TTL expires
   const queryPromise = useMemo(() => {
     if (!query || typeof query !== "function") {
       return null;
     }
 
-    // Check cache first (only for TTL > 0)
-    if (ttl > 0) {
-      const cached = getCacheEntry(cacheKey);
-      if (cached) {
-        return cached.promise;
-      }
+    // Always check cache first to deduplicate concurrent requests
+    const cached = getCacheEntry(cacheKey);
+    if (cached) {
+      return cached.promise;
     }
 
     // Create new promise
@@ -252,19 +255,38 @@ export function useAgent<State>(
         `[useAgent] Query failed for agent "${options.agent}":`,
         error
       );
-      if (ttl > 0) {
-        deleteCacheEntry(cacheKey);
-      }
+      deleteCacheEntry(cacheKey);
       throw error;
     });
 
-    // Cache it (only for TTL > 0)
-    if (ttl > 0) {
-      setCacheEntry(cacheKey, promise, ttl);
-    }
+    // Always cache to deduplicate concurrent requests
+    setCacheEntry(cacheKey, promise, ttl);
 
     return promise;
-  }, [cacheKey, query, options.agent, ttl]);
+  }, [cacheKey, query, options.agent, ttl, cacheInvalidatedAt]);
+
+  // Schedule cache invalidation when TTL expires
+  useEffect(() => {
+    if (!queryPromise || ttl <= 0) return;
+
+    const entry = getCacheEntry(cacheKey);
+    if (!entry) return;
+
+    const timeUntilExpiry = entry.expiresAt - Date.now();
+    if (timeUntilExpiry <= 0) {
+      // Already expired, invalidate immediately
+      deleteCacheEntry(cacheKey);
+      setCacheInvalidatedAt(Date.now());
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      deleteCacheEntry(cacheKey);
+      setCacheInvalidatedAt(Date.now());
+    }, timeUntilExpiry);
+
+    return () => clearTimeout(timer);
+  }, [cacheKey, queryPromise, ttl]);
 
   let resolvedQuery: QueryObject | undefined;
 
