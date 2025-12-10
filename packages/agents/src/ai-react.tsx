@@ -19,6 +19,32 @@ export type AITool<Input = unknown, Output = unknown> = {
   execute?: (input: Input) => Output | Promise<Output>;
 };
 
+/**
+ * JSON Schema type for tool parameters.
+ */
+export type JSONSchemaType = {
+  type?: "object" | "string" | "number" | "boolean" | "array" | "null";
+  properties?: Record<string, JSONSchemaType>;
+  items?: JSONSchemaType;
+  required?: string[];
+  description?: string;
+  enum?: (string | number | boolean | null)[];
+  default?: unknown;
+  [key: string]: unknown;
+};
+
+/**
+ * Definition for a client-side tool that can be sent to the server.
+ */
+export type ClientTool = {
+  /** Unique name for the tool */
+  name: string;
+  /** Human-readable description of what the tool does */
+  description: string;
+  /** JSON Schema defining the tool's input parameters */
+  parameters?: JSONSchemaType;
+};
+
 type GetInitialMessagesOptions = {
   agent: string;
   name: string;
@@ -28,6 +54,60 @@ type GetInitialMessagesOptions = {
 // v5 useChat parameters
 type UseChatParams<M extends UIMessage = UIMessage> = ChatInit<M> &
   UseChatOptions<M>;
+
+/**
+ * Options for preparing the send messages request.
+ * Used by prepareSendMessagesRequest callback.
+ */
+export type PrepareSendMessagesRequestOptions<
+  ChatMessage extends UIMessage = UIMessage
+> = {
+  /** The chat ID */
+  id: string;
+  /** Messages to send */
+  messages: ChatMessage[];
+  /** What triggered this request */
+  trigger: "submit-message" | "regenerate-message";
+  /** ID of the message being sent (if applicable) */
+  messageId?: string;
+  /** Request metadata */
+  requestMetadata?: unknown;
+  /** Current body (if any) */
+  body?: Record<string, unknown>;
+  /** Current credentials (if any) */
+  credentials?: RequestCredentials;
+  /** Current headers (if any) */
+  headers?: HeadersInit;
+  /** API endpoint */
+  api?: string;
+};
+
+/**
+ * Return type for prepareSendMessagesRequest callback.
+ * Allows customizing headers, body, and credentials for each request.
+ * All fields are optional; only specify what you need to customize.
+ */
+export type PrepareSendMessagesRequestResult = {
+  /** Custom headers to send with the request */
+  headers?: HeadersInit;
+  /** Custom body data to merge with the request */
+  body?: Record<string, unknown>;
+  /** Custom credentials option */
+  credentials?: RequestCredentials;
+  /** Custom API endpoint */
+  api?: string;
+};
+
+/**
+ * Internal type for AI SDK transport
+ * @internal
+ */
+type InternalPrepareResult = {
+  body: Record<string, unknown>;
+  headers?: HeadersInit;
+  credentials?: RequestCredentials;
+  api?: string;
+};
 
 /**
  * Options for the useAgentChat hook
@@ -72,6 +152,20 @@ type UseAgentChatOptions<
    * @default true
    */
   resume?: boolean;
+  /**
+   * Client-side tool definitions to send to the server with each request.
+   * This is the simple way to register tools that can be executed on the client.
+   * The server will receive these tool schemas and can include them when calling the AI model.
+   */
+  clientTools?: ClientTool[];
+  /**
+   * Callback to customize the request before sending messages.
+   */
+  prepareSendMessagesRequest?: (
+    options: PrepareSendMessagesRequestOptions<ChatMessage>
+  ) =>
+    | PrepareSendMessagesRequestResult
+    | Promise<PrepareSendMessagesRequestResult>;
 };
 
 const requestCache = new Map<string, Promise<Message[]>>();
@@ -114,12 +208,34 @@ export function useAgentChat<
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
     autoSendAfterAllConfirmationsResolved = true,
     resume = true, // Enable stream resumption by default
+    clientTools,
+    prepareSendMessagesRequest,
     ...rest
   } = options;
 
   // Auto-detect tools requiring confirmation, or use manual override
   const toolsRequiringConfirmation =
     manualToolsRequiringConfirmation ?? detectToolsRequiringConfirmation(tools);
+
+  // Dev-mode warning for mismatched clientTools and tools (only warn once per tool)
+  const warnedToolsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (
+      process.env.NODE_ENV === "development" &&
+      clientTools?.length &&
+      tools
+    ) {
+      for (const ct of clientTools) {
+        if (!tools[ct.name] && !warnedToolsRef.current.has(ct.name)) {
+          warnedToolsRef.current.add(ct.name);
+          console.warn(
+            `[useAgentChat] clientTool "${ct.name}" has no matching execute handler in tools. ` +
+              `The server may request this tool but the client won't be able to execute it.`
+          );
+        }
+      }
+    }
+  }, [clientTools, tools]);
 
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
@@ -349,18 +465,65 @@ export function useAgentChat<
     []
   );
 
+  // Store clientTools and prepareSendMessagesRequest in refs to avoid recreating transport on every render
+  const clientToolsRef = useRef(clientTools);
+  useEffect(() => {
+    clientToolsRef.current = clientTools;
+  }, [clientTools]);
+
+  const prepareSendMessagesRequestRef = useRef(prepareSendMessagesRequest);
+  useEffect(() => {
+    prepareSendMessagesRequestRef.current = prepareSendMessagesRequest;
+  }, [prepareSendMessagesRequest]);
+
   const customTransport: ChatTransport<ChatMessage> = useMemo(
     () => ({
       sendMessages: async (
-        options: Parameters<
+        sendMessageOptions: Parameters<
           typeof DefaultChatTransport.prototype.sendMessages
         >[0]
       ) => {
+        const combinedPrepare =
+          clientToolsRef.current?.length ||
+          prepareSendMessagesRequestRef.current
+            ? async (
+                prepareOptions: PrepareSendMessagesRequestOptions<ChatMessage>
+              ): Promise<InternalPrepareResult> => {
+                // Start with clientTools in the body (or empty body)
+                let body: Record<string, unknown> = {};
+                let headers: HeadersInit | undefined;
+                let credentials: RequestCredentials | undefined;
+                let api: string | undefined;
+
+                if (clientToolsRef.current?.length) {
+                  body = { clientTools: clientToolsRef.current };
+                }
+
+                // Apply prepareSendMessagesRequest callback
+                if (prepareSendMessagesRequestRef.current) {
+                  const userResult =
+                    await prepareSendMessagesRequestRef.current(prepareOptions);
+
+                  // user's callback can override or extend
+                  headers = userResult.headers;
+                  credentials = userResult.credentials;
+                  api = userResult.api;
+                  body = {
+                    ...body,
+                    ...(userResult.body ?? {})
+                  };
+                }
+
+                return { body, headers, credentials, api };
+              }
+            : undefined;
+
         const transport = new DefaultChatTransport<ChatMessage>({
           api: agentUrlString,
-          fetch: aiFetch
+          fetch: aiFetch,
+          prepareSendMessagesRequest: combinedPrepare
         });
-        return transport.sendMessages(options);
+        return transport.sendMessages(sendMessageOptions);
       },
       reconnectToStream: async () => null
     }),

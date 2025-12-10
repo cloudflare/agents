@@ -515,6 +515,97 @@ This creates:
 - Intuitive input handling
 - Easy conversation reset
 
+#### Client-Defined Tools
+
+For scenarios where each client needs to register its own tools dynamically, use the `clientTools` option:
+
+##### Simple API with `clientTools`
+
+```tsx
+import { useAgent } from "agents/react";
+import { useAgentChat, type ClientTool } from "agents/ai-react";
+
+// Define tools outside component to avoid recreation on every render
+const clientTools: ClientTool[] = [
+  {
+    name: "showAlert",
+    description: "Shows an alert dialog to the user",
+    parameters: {
+      type: "object",
+      properties: { message: { type: "string" } },
+      required: ["message"]
+    }
+  },
+  {
+    name: "changeBackgroundColor",
+    description: "Changes the page background color",
+    parameters: {
+      type: "object",
+      properties: { color: { type: "string" } }
+    }
+  }
+];
+
+function EmbeddableChat() {
+  const agent = useAgent({ agent: "chat-widget" });
+
+  const { messages, input, handleInputChange, handleSubmit } = useAgentChat({
+    agent,
+    clientTools,
+    // Define client-side tool execution
+    tools: {
+      showAlert: {
+        execute: async ({ message }) => {
+          alert(message);
+          return { success: true };
+        }
+      },
+      changeBackgroundColor: {
+        execute: async ({ color }) => {
+          document.body.style.backgroundColor = color;
+          return { success: true, color };
+        }
+      }
+    }
+  });
+
+  return (
+    <div className="chat-widget">
+      {messages.map((message) => (
+        <div key={message.id}>{/* Render message */}</div>
+      ))}
+      <form onSubmit={handleSubmit}>
+        <input value={input} onChange={handleInputChange} />
+      </form>
+    </div>
+  );
+}
+```
+
+##### Advanced API with `prepareSendMessagesRequest`
+
+For more control (dynamic data, custom headers), use `prepareSendMessagesRequest`:
+
+```tsx
+const { messages, handleSubmit } = useAgentChat({
+  agent,
+  clientTools, // Still works alongside prepareSendMessagesRequest
+  prepareSendMessagesRequest: ({ id, messages }) => ({
+    body: {
+      // Add dynamic context
+      currentUrl: window.location.href,
+      userTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+    },
+    headers: {
+      "X-Widget-Version": "1.0.0",
+      "X-Request-ID": crypto.randomUUID()
+    }
+  })
+});
+```
+
+Both options can be combined - `clientTools` are automatically added to the request body, and `prepareSendMessagesRequest` can add additional data or headers.
+
 ### 🔗 MCP (Model Context Protocol) Integration
 
 Agents can seamlessly integrate with the Model Context Protocol, allowing them to act as both MCP servers (providing tools to AI assistants) and MCP clients (using tools from other services).

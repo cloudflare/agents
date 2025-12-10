@@ -1,7 +1,13 @@
 import { StrictMode, Suspense, act } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import { useAgentChat } from "../ai-react";
+import type { UIMessage } from "ai";
+import {
+  useAgentChat,
+  type PrepareSendMessagesRequestOptions,
+  type PrepareSendMessagesRequestResult,
+  type ClientTool
+} from "../ai-react";
 import type { useAgent } from "../react";
 
 function createAgent({ name, url }: { name: string; url: string }) {
@@ -151,4 +157,260 @@ describe("useAgentChat", () => {
       expect.objectContaining({ name: "thread-b" })
     );
   });
+
+  it("should accept prepareSendMessagesRequest option without errors", async () => {
+    const agent = createAgent({
+      name: "thread-with-tools",
+      url: "ws://localhost:3000/agents/chat/thread-with-tools?_pk=abc"
+    });
+
+    const prepareSendMessagesRequest = vi.fn(
+      (
+        _options: PrepareSendMessagesRequestOptions<UIMessage>
+      ): PrepareSendMessagesRequestResult => ({
+        body: {
+          clientTools: [
+            {
+              name: "showAlert",
+              description: "Shows an alert to the user",
+              parameters: { message: { type: "string" } }
+            }
+          ]
+        },
+        headers: {
+          "X-Client-Tool-Count": "1"
+        }
+      })
+    );
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null, // Skip fetching initial messages
+        prepareSendMessagesRequest
+      });
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    const screen = await act(() =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    // Verify component renders without errors
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+  });
+
+  it("should handle async prepareSendMessagesRequest", async () => {
+    const agent = createAgent({
+      name: "thread-async-prepare",
+      url: "ws://localhost:3000/agents/chat/thread-async-prepare?_pk=abc"
+    });
+
+    const prepareSendMessagesRequest = vi.fn(
+      async (
+        _options: PrepareSendMessagesRequestOptions<UIMessage>
+      ): Promise<PrepareSendMessagesRequestResult> => {
+        // Simulate async operation like fetching tool definitions
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        return {
+          body: {
+            clientTools: [
+              { name: "navigateToPage", description: "Navigates to a page" }
+            ]
+          }
+        };
+      }
+    );
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        prepareSendMessagesRequest
+      });
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    const screen = await act(() =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    // Verify component renders without errors
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+  });
+
+  it("should accept clientTools option (simple API)", async () => {
+    const agent = createAgent({
+      name: "thread-client-tools",
+      url: "ws://localhost:3000/agents/chat/thread-client-tools?_pk=abc"
+    });
+
+    const clientTools: ClientTool[] = [
+      {
+        name: "showAlert",
+        description: "Shows an alert dialog to the user",
+        parameters: {
+          type: "object",
+          properties: {
+            message: { type: "string", description: "The message to display" }
+          },
+          required: ["message"]
+        }
+      },
+      {
+        name: "changeBackgroundColor",
+        description: "Changes the page background color",
+        parameters: {
+          type: "object",
+          properties: {
+            color: { type: "string" }
+          }
+        }
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        clientTools
+      });
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    const screen = await act(() =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    // Verify component renders without errors
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+  });
+
+  it("should combine clientTools with prepareSendMessagesRequest", async () => {
+    const agent = createAgent({
+      name: "thread-combined",
+      url: "ws://localhost:3000/agents/chat/thread-combined?_pk=abc"
+    });
+
+    const clientTools: ClientTool[] = [
+      {
+        name: "showAlert",
+        description: "Shows an alert"
+      }
+    ];
+
+    const prepareSendMessagesRequest = vi.fn(
+      (
+        _options: PrepareSendMessagesRequestOptions<UIMessage>
+      ): PrepareSendMessagesRequestResult => ({
+        body: {
+          customData: "extra-context",
+          userTimezone: "America/New_York"
+        },
+        headers: {
+          "X-Custom-Header": "custom-value"
+        }
+      })
+    );
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        clientTools,
+        prepareSendMessagesRequest
+      });
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    const screen = await act(() =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    // Verify component renders without errors
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+  });
+
+  it("should work with clientTools and client-side tool execution", async () => {
+    const agent = createAgent({
+      name: "thread-tools-execution",
+      url: "ws://localhost:3000/agents/chat/thread-tools-execution?_pk=abc"
+    });
+
+    const clientTools: ClientTool[] = [
+      {
+        name: "showAlert",
+        description: "Shows an alert"
+      }
+    ];
+
+    const mockExecute = vi.fn().mockResolvedValue({ success: true });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        clientTools,
+        tools: {
+          showAlert: {
+            description: "Shows an alert",
+            execute: mockExecute
+          }
+        }
+      });
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    const screen = await act(() =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    // Verify component renders without errors
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+  });
 });
+
+// Note: Integration tests that verify actual request payload behavior
+// would require mocking DefaultChatTransport, which isn't possible in
+// browser ESM tests. Such tests should be added to the workers test suite
+// or run in a Node.js environment where module mocking is supported.
