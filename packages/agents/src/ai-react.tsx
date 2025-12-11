@@ -36,6 +36,10 @@ export type AITool<Input = unknown, Output = unknown> = {
   /** JSON Schema defining the tool's input parameters */
   parameters?: JSONSchema7;
   /**
+   * @deprecated Use `parameters` instead. Will be removed in a future version.
+   */
+  inputSchema?: JSONSchema7;
+  /**
    * Function to execute the tool on the client.
    * If provided, the tool schema is automatically sent to the server.
    */
@@ -69,11 +73,18 @@ export function extractClientToolSchemas(
 
   const schemas: ClientToolSchema[] = Object.entries(tools)
     .filter(([_, tool]) => tool.execute) // Only tools with client-side execute
-    .map(([name, tool]) => ({
-      name,
-      description: tool.description,
-      parameters: tool.parameters
-    }));
+    .map(([name, tool]) => {
+      if (tool.inputSchema && !tool.parameters) {
+        console.warn(
+          `[useAgentChat] Tool "${name}" uses deprecated 'inputSchema'. Please migrate to 'parameters'.`
+        );
+      }
+      return {
+        name,
+        description: tool.description,
+        parameters: tool.parameters ?? tool.inputSchema
+      };
+    });
 
   return schemas.length > 0 ? schemas : undefined;
 }
