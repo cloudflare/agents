@@ -393,4 +393,107 @@ describe("Client-side tool execution duplicate message bug", () => {
 
     ws.close();
   });
+
+  it("CF_AGENT_TOOL_RESULT: server applies tool result to existing message", async () => {
+    /**
+     * This test verifies the new server-authoritative tool result flow:
+     * 1. Server has an assistant message with tool call in "input-available" state
+     * 2. Client sends CF_AGENT_TOOL_RESULT with toolCallId and output
+     * 3. Server applies the result to the existing message (no duplicates)
+     * 4. Server broadcasts CF_AGENT_MESSAGE_UPDATED to clients
+     */
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      {
+        headers: { Upgrade: "websocket" }
+      }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+
+    const toolCallId = "call_tool_result_test";
+
+    // User message
+    const userMessage: ChatMessage = {
+      id: "user-tool-result-test",
+      role: "user",
+      parts: [{ type: "text", text: "Execute tool" }]
+    };
+
+    // Assistant message with tool in input-available state
+    const assistantWithTool: ChatMessage = {
+      id: "assistant-tool-result-test",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-testTool",
+          toolCallId: toolCallId,
+          state: "input-available",
+          input: { param: "value" }
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    // Persist initial messages
+    await agentStub.persistMessages([userMessage, assistantWithTool]);
+
+    // Verify initial state
+    let messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(messages.length).toBe(2);
+
+    const initialAssistant = messages.find((m) => m.role === "assistant");
+    const initialToolPart = initialAssistant?.parts[0] as {
+      state: string;
+      output?: unknown;
+    };
+    expect(initialToolPart.state).toBe("input-available");
+    expect(initialToolPart.output).toBeUndefined();
+
+    // Now simulate sending CF_AGENT_TOOL_RESULT via WebSocket
+    // This is what the client does when a client-side tool executes
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: toolCallId,
+        toolName: "testTool",
+        output: { success: true, data: "tool result" }
+      })
+    );
+
+    // Wait for the server to process
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Verify the message was updated, not duplicated
+    messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    // Should still have exactly 2 messages
+    expect(messages.length).toBe(2);
+
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages.length).toBe(1);
+
+    // The tool part should now have output-available state
+    const finalAssistant = assistantMessages[0];
+    expect(finalAssistant.id).toBe("assistant-tool-result-test");
+
+    const finalToolPart = finalAssistant.parts[0] as {
+      state: string;
+      output?: unknown;
+    };
+    expect(finalToolPart.state).toBe("output-available");
+    expect(finalToolPart.output).toEqual({
+      success: true,
+      data: "tool result"
+    });
+
+    ws.close();
+  });
 });

@@ -386,6 +386,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           }
           return;
         }
+
+        // Handle client-side tool result
+        if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
+          const { toolCallId, toolName, output } = data;
+          this._applyToolResult(toolCallId, toolName, output);
+          return;
+        }
       }
 
       // Forward unhandled messages to consumer's onMessage
@@ -705,9 +712,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
-    // When a message contains tool results (output-available), we need to check
-    // if there's an existing message with the same toolCallId that should be updated.
-    for (const message of messages) {
+    // Merge incoming messages with existing server state to preserve tool outputs.
+    // This is critical for client-side tools: the client sends messages without
+    // tool outputs, but the server has them via _applyToolResult.
+    const mergedMessages = this._mergeIncomingWithServerState(messages);
+
+    // Persist the merged messages
+    for (const message of mergedMessages) {
       const messageToSave = this._resolveMessageForToolMerge(message);
       this.sql`
         insert into cf_ai_chat_agent_messages (id, message)
@@ -721,11 +732,73 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     this.messages = autoTransformMessages(persisted);
     this._broadcastChatMessage(
       {
-        messages: messages,
+        messages: mergedMessages,
         type: MessageType.CF_AGENT_CHAT_MESSAGES
       },
       excludeBroadcastIds
     );
+  }
+
+  /**
+   * Merges incoming messages with existing server state.
+   * This preserves tool outputs that the server has (via _applyToolResult)
+   * but the client doesn't have yet.
+   *
+   * @param incomingMessages - Messages from the client
+   * @returns Messages with server's tool outputs preserved
+   */
+  private _mergeIncomingWithServerState(
+    incomingMessages: ChatMessage[]
+  ): ChatMessage[] {
+    // Build a map of toolCallId -> output from existing server messages
+    const serverToolOutputs = new Map<string, unknown>();
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant") continue;
+      for (const part of msg.parts) {
+        if (
+          "toolCallId" in part &&
+          "state" in part &&
+          part.state === "output-available" &&
+          "output" in part
+        ) {
+          serverToolOutputs.set(
+            part.toolCallId as string,
+            (part as { output: unknown }).output
+          );
+        }
+      }
+    }
+
+    // If server has no tool outputs, return incoming messages as-is
+    if (serverToolOutputs.size === 0) {
+      return incomingMessages;
+    }
+
+    // Merge server's tool outputs into incoming messages
+    return incomingMessages.map((msg) => {
+      if (msg.role !== "assistant") return msg;
+
+      let hasChanges = false;
+      const updatedParts = msg.parts.map((part) => {
+        // If this is a tool part in input-available state and server has the output
+        if (
+          "toolCallId" in part &&
+          "state" in part &&
+          part.state === "input-available" &&
+          serverToolOutputs.has(part.toolCallId as string)
+        ) {
+          hasChanges = true;
+          return {
+            ...part,
+            state: "output-available" as const,
+            output: serverToolOutputs.get(part.toolCallId as string)
+          };
+        }
+        return part;
+      }) as ChatMessage["parts"];
+
+      return hasChanges ? { ...msg, parts: updatedParts } : msg;
+    });
   }
 
   /**
@@ -789,6 +862,83 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }
     }
     return undefined;
+  }
+
+  /**
+   * Applies a tool result to an existing assistant message.
+   * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
+   * The server is the source of truth, so we update the message here and broadcast
+   * the update to all clients.
+   *
+   * @param toolCallId - The tool call ID this result is for
+   * @param toolName - The name of the tool
+   * @param output - The output from the tool execution
+   * @returns true if the result was applied, false if the message was not found
+   */
+  private _applyToolResult(
+    toolCallId: string,
+    _toolName: string,
+    output: unknown
+  ): boolean {
+    // Find the message with this tool call
+    const message = this._findMessageByToolCallId(toolCallId);
+    if (!message) {
+      console.warn(
+        `[AIChatAgent] _applyToolResult: No message found with toolCallId ${toolCallId}`
+      );
+      return false;
+    }
+
+    // Update the tool part with the output
+    let updated = false;
+    const updatedParts = message.parts.map((part) => {
+      if (
+        "toolCallId" in part &&
+        part.toolCallId === toolCallId &&
+        "state" in part &&
+        part.state === "input-available"
+      ) {
+        updated = true;
+        return {
+          ...part,
+          state: "output-available" as const,
+          output
+        };
+      }
+      return part;
+    }) as ChatMessage["parts"];
+
+    if (!updated) {
+      console.warn(
+        `[AIChatAgent] _applyToolResult: Tool part with toolCallId ${toolCallId} not in input-available state`
+      );
+      return false;
+    }
+
+    // Create the updated message
+    const updatedMessage: ChatMessage = {
+      ...message,
+      parts: updatedParts
+    };
+
+    // Persist the updated message
+    this.sql`
+      update cf_ai_chat_agent_messages 
+      set message = ${JSON.stringify(updatedMessage)}
+      where id = ${message.id}
+    `;
+
+    // Reload messages to update in-memory state
+    const persisted = this._loadMessagesFromDb();
+    this.messages = autoTransformMessages(persisted);
+
+    // Broadcast the update to all clients
+    this._broadcastChatMessage({
+      type: MessageType.CF_AGENT_MESSAGE_UPDATED,
+      message: updatedMessage
+    });
+
+    return true;
   }
 
   private async _reply(
