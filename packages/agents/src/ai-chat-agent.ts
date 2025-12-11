@@ -32,9 +32,8 @@ import { nanoid } from "nanoid";
  * Schema for a client-defined tool sent from the browser.
  * These tools are executed on the client, not the server.
  *
- * This is the wire format for tools - it uses `parameters` (JSON Schema)
- * instead of `inputSchema` (AI SDK's FlexibleSchema) and includes `name`
- * (which is normally the key in a ToolSet record).
+ * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema` (FlexibleSchema)
+ * because this is the wire format. Zod schemas cannot be serialized.
  */
 export type ClientToolSchema = {
   /** Unique name for the tool */
@@ -322,7 +321,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 );
 
                 if (response) {
-                  await this._reply(data.id, response);
+                  await this._reply(data.id, response, [connection.id]);
                 } else {
                   console.warn(
                     `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
@@ -726,7 +725,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     );
   }
 
-  private async _reply(id: string, response: Response) {
+  private async _reply(
+    id: string,
+    response: Response,
+    excludeBroadcastIds: string[] = []
+  ) {
     return this._tryCatchChat(async () => {
       if (!response.body) {
         // Send empty response if no body
@@ -1396,7 +1399,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }
 
       if (message.parts.length > 0) {
-        await this.persistMessages([...this.messages, message]);
+        await this.persistMessages(
+          [...this.messages, message],
+          excludeBroadcastIds
+        );
       }
     });
   }

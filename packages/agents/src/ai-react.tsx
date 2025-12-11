@@ -25,16 +25,16 @@ export type JSONSchemaType = JSONSchema7;
 /**
  * Definition for a tool that can be executed on the client.
  * Tools with an `execute` function are automatically registered with the server.
+ *
+ * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema` (FlexibleSchema)
+ * because client tools must be serializable for the wire format. Zod schemas cannot be
+ * serialized, so we require raw JSON Schema here.
  */
 export type AITool<Input = unknown, Output = unknown> = {
   /** Human-readable description of what the tool does */
   description?: Tool["description"];
   /** JSON Schema defining the tool's input parameters */
   parameters?: JSONSchema7;
-  /**
-   * @deprecated Use `parameters` instead. Will be removed in a future version.
-   */
-  inputSchema?: unknown;
   /**
    * Function to execute the tool on the client.
    * If provided, the tool schema is automatically sent to the server.
@@ -69,22 +69,11 @@ export function extractClientToolSchemas(
 
   const schemas: ClientToolSchema[] = Object.entries(tools)
     .filter(([_, tool]) => tool.execute) // Only tools with client-side execute
-    .map(([name, tool]) => {
-      // Add deprecation warning for inputSchema usage
-      if (tool.inputSchema && !tool.parameters) {
-        console.warn(
-          `[useAgentChat] Tool "${name}" uses deprecated 'inputSchema'. Please migrate to 'parameters'.`
-        );
-      }
-
-      return {
-        name,
-        description: tool.description,
-        // Prefer parameters; fall back to inputSchema for backwards compatibility
-        parameters:
-          tool.parameters ?? (tool.inputSchema as JSONSchema7 | undefined)
-      };
-    });
+    .map(([name, tool]) => ({
+      name,
+      description: tool.description,
+      parameters: tool.parameters
+    }));
 
   return schemas.length > 0 ? schemas : undefined;
 }
