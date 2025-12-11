@@ -556,7 +556,12 @@ export function useAgentChat<
                 let api: string | undefined;
 
                 if (clientToolSchemas) {
-                  body = { clientTools: clientToolSchemas };
+                  body = {
+                    id: prepareOptions.id,
+                    messages: prepareOptions.messages,
+                    trigger: prepareOptions.trigger,
+                    clientTools: clientToolSchemas
+                  };
                 }
 
                 // Apply prepareSendMessagesRequest callback for additional customization
