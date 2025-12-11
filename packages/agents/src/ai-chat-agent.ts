@@ -705,10 +705,13 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
+    // When a message contains tool results (output-available), we need to check
+    // if there's an existing message with the same toolCallId that should be updated.
     for (const message of messages) {
+      const messageToSave = this._resolveMessageForToolMerge(message);
       this.sql`
         insert into cf_ai_chat_agent_messages (id, message)
-        values (${message.id}, ${JSON.stringify(message)})
+        values (${messageToSave.id}, ${JSON.stringify(messageToSave)})
         on conflict(id) do update set message = excluded.message
       `;
     }
@@ -723,6 +726,69 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       },
       excludeBroadcastIds
     );
+  }
+
+  /**
+   * Resolves a message for persistence, handling tool result merging.
+   * If the message contains tool parts with output-available state, checks if there's
+   * an existing message with the same toolCallId that should be updated instead of
+   * creating a duplicate. This prevents the "Duplicate item found" error from OpenAI
+   * when client-side tool results arrive in a new request.
+   *
+   * @param message - The message to potentially merge
+   * @returns The message with the correct ID (either original or merged)
+   */
+  private _resolveMessageForToolMerge(message: ChatMessage): ChatMessage {
+    if (message.role !== "assistant") {
+      return message;
+    }
+
+    // Check if this message has tool parts with output-available state
+    for (const part of message.parts) {
+      if (
+        "toolCallId" in part &&
+        "state" in part &&
+        part.state === "output-available"
+      ) {
+        const toolCallId = part.toolCallId as string;
+
+        // Look for an existing message with this toolCallId in input-available state
+        const existingMessage = this._findMessageByToolCallId(toolCallId);
+        if (existingMessage && existingMessage.id !== message.id) {
+          // Found a match - merge by using the existing message's ID
+          // This ensures the SQL upsert updates the existing row
+          return {
+            ...message,
+            id: existingMessage.id
+          };
+        }
+      }
+    }
+
+    return message;
+  }
+
+  /**
+   * Finds an existing assistant message that contains a tool part with the given toolCallId.
+   * Used to detect when a tool result should update an existing message rather than
+   * creating a new one.
+   *
+   * @param toolCallId - The tool call ID to search for
+   * @returns The existing message if found, undefined otherwise
+   */
+  private _findMessageByToolCallId(
+    toolCallId: string
+  ): ChatMessage | undefined {
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant") continue;
+
+      for (const part of msg.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          return msg;
+        }
+      }
+    }
+    return undefined;
   }
 
   private async _reply(
