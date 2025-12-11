@@ -55,7 +55,7 @@ export class ClientToolsAgent extends AIChatAgent<Env> {
 
     // Using gpt-4o-mini - change to "o3-mini" or other reasoning model to see itemId duplicates
     const result = streamText({
-      model: openai("gpt-5-mini"),
+      model: openai("gpt-4o-mini"),
       messages: convertToModelMessages(this.messages),
       tools: {
         ...clientTools // Tools WITHOUT execute - client will run them
