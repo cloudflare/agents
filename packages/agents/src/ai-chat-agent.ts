@@ -1,10 +1,12 @@
 import type {
   UIMessage as ChatMessage,
   DynamicToolUIPart,
+  JSONSchema7,
   ProviderMetadata,
   ReasoningUIPart,
   StreamTextOnFinishCallback,
   TextUIPart,
+  Tool,
   ToolSet,
   ToolUIPart,
   UIMessageChunk
@@ -29,14 +31,18 @@ import { nanoid } from "nanoid";
 /**
  * Schema for a client-defined tool sent from the browser.
  * These tools are executed on the client, not the server.
+ *
+ * This is the wire format for tools - it uses `parameters` (JSON Schema)
+ * instead of `inputSchema` (AI SDK's FlexibleSchema) and includes `name`
+ * (which is normally the key in a ToolSet record).
  */
 export type ClientToolSchema = {
   /** Unique name for the tool */
   name: string;
   /** Human-readable description of what the tool does */
-  description?: string;
+  description?: Tool["description"];
   /** JSON Schema defining the tool's input parameters */
-  parameters?: Record<string, unknown>;
+  parameters?: JSONSchema7;
 };
 
 /**

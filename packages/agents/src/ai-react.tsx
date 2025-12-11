@@ -3,6 +3,8 @@ import { getToolName, isToolUIPart } from "ai";
 import type {
   ChatInit,
   ChatTransport,
+  JSONSchema7,
+  Tool,
   UIMessage as Message,
   UIMessage
 } from "ai";
@@ -15,32 +17,10 @@ import type { useAgent } from "./react";
 
 /**
  * JSON Schema type for tool parameters.
- * Supports common JSON Schema properties with an index signature
- * for extension properties like $ref, format, minimum, maximum, etc.
+ * Re-exported from the AI SDK for convenience.
+ * @deprecated Import JSONSchema7 directly from "ai" instead.
  */
-export type JSONSchemaType = {
-  type?: "object" | "string" | "number" | "boolean" | "array" | "null";
-  properties?: Record<string, JSONSchemaType>;
-  items?: JSONSchemaType;
-  required?: string[];
-  description?: string;
-  enum?: (string | number | boolean | null)[];
-  default?: unknown;
-  // Additional JSON Schema properties
-  $ref?: string;
-  $id?: string;
-  $schema?: string;
-  title?: string;
-  format?: string;
-  minimum?: number;
-  maximum?: number;
-  minLength?: number;
-  maxLength?: number;
-  pattern?: string;
-  additionalProperties?: boolean | JSONSchemaType;
-  // Allow other JSON Schema extension properties
-  [key: string]: unknown;
-};
+export type JSONSchemaType = JSONSchema7;
 
 /**
  * Definition for a tool that can be executed on the client.
@@ -48,9 +28,9 @@ export type JSONSchemaType = {
  */
 export type AITool<Input = unknown, Output = unknown> = {
   /** Human-readable description of what the tool does */
-  description?: string;
+  description?: Tool["description"];
   /** JSON Schema defining the tool's input parameters */
-  parameters?: JSONSchemaType;
+  parameters?: JSONSchema7;
   /**
    * @deprecated Use `parameters` instead. Will be removed in a future version.
    */
@@ -71,29 +51,10 @@ export type ClientToolSchema = {
   /** Unique name for the tool */
   name: string;
   /** Human-readable description of what the tool does */
-  description?: string;
+  description?: Tool["description"];
   /** JSON Schema defining the tool's input parameters */
-  parameters?: Record<string, unknown>;
+  parameters?: JSONSchema7;
 };
-
-/**
- * Converts a tool's parameters to the wire format expected by the server.
- * JSONSchemaType is compatible with Record<string, unknown> due to its index signature.
- * @internal
- */
-function toParametersRecord(
-  params: JSONSchemaType | unknown | undefined
-): Record<string, unknown> | undefined {
-  if (params === undefined || params === null) {
-    return undefined;
-  }
-  // JSONSchemaType and plain objects are compatible with Record<string, unknown>
-  if (typeof params === "object") {
-    return params as Record<string, unknown>;
-  }
-  // Primitive values shouldn't be used as parameters, but handle gracefully
-  return undefined;
-}
 
 /**
  * Extracts tool schemas from tools that have client-side execute functions.
@@ -109,9 +70,6 @@ export function extractClientToolSchemas(
   const schemas: ClientToolSchema[] = Object.entries(tools)
     .filter(([_, tool]) => tool.execute) // Only tools with client-side execute
     .map(([name, tool]) => {
-      // Prefer parameters over deprecated inputSchema
-      const params = tool.parameters ?? tool.inputSchema;
-
       // Add deprecation warning for inputSchema usage
       if (tool.inputSchema && !tool.parameters) {
         console.warn(
@@ -122,7 +80,9 @@ export function extractClientToolSchemas(
       return {
         name,
         description: tool.description,
-        parameters: toParametersRecord(params)
+        // Prefer parameters; fall back to inputSchema for backwards compatibility
+        parameters:
+          tool.parameters ?? (tool.inputSchema as JSONSchema7 | undefined)
       };
     });
 
