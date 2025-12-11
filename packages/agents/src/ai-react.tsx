@@ -669,6 +669,19 @@ export function useAgentChat<
             }
 
             if (toolResults.length > 0) {
+              // Send tool results to server first (server is source of truth)
+              for (const result of toolResults) {
+                agentRef.current.send(
+                  JSON.stringify({
+                    type: MessageType.CF_AGENT_TOOL_RESULT,
+                    toolCallId: result.toolCallId,
+                    toolName: result.toolName,
+                    output: result.output
+                  })
+                );
+              }
+
+              // Also update local state via AI SDK for immediate UI feedback
               await Promise.all(
                 toolResults.map((result) =>
                   useChatHelpers.addToolResult({
@@ -743,6 +756,24 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_CHAT_MESSAGES:
           useChatHelpers.setMessages(data.messages);
+          break;
+
+        case MessageType.CF_AGENT_MESSAGE_UPDATED:
+          // Server updated a message (e.g., applied tool result)
+          // Update the specific message in local state
+          useChatHelpers.setMessages((prevMessages: ChatMessage[]) => {
+            const updatedMessage = data.message;
+            const idx = prevMessages.findIndex(
+              (m) => m.id === updatedMessage.id
+            );
+            if (idx >= 0) {
+              const updated = [...prevMessages];
+              updated[idx] = updatedMessage;
+              return updated;
+            }
+            // Message not found, append it
+            return [...prevMessages, updatedMessage];
+          });
           break;
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
@@ -967,7 +998,18 @@ export function useAgentChat<
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
     async (args) => {
       const { toolCallId } = args;
+      const toolName = "tool" in args ? args.tool : "";
       const output = "output" in args ? args.output : undefined;
+
+      // Send tool result to server (server is source of truth)
+      agentRef.current.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId,
+          toolName,
+          output
+        })
+      );
 
       setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
 
