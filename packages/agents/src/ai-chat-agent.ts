@@ -160,6 +160,21 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   protected _activeRequestId: string | null = null;
 
   /**
+   * The message currently being streamed. Used to apply tool results
+   * before the message is persisted.
+   * @internal
+   */
+  private _streamingMessage: ChatMessage | null = null;
+
+  /**
+   * Promise that resolves when the current stream completes.
+   * Used to wait for message persistence before continuing after tool results.
+   * @internal
+   */
+  private _streamCompletionPromise: Promise<void> | null = null;
+  private _streamCompletionResolve: (() => void) | null = null;
+
+  /**
    * Current chunk index for the active stream
    */
   private _streamChunkIndex = 0;
@@ -390,58 +405,79 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         // Handle client-side tool result
         if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
           const { toolCallId, toolName, output, autoContinue } = data;
-          const applied = this._applyToolResult(toolCallId, toolName, output);
 
-          // Only auto-continue if client requested it (opt-in behavior)
-          // This mimics server-executed tool behavior where the LLM
-          // automatically continues after seeing tool results
-          if (applied && autoContinue) {
-            const continuationId = nanoid();
-            const abortSignal = this._getAbortSignal(continuationId);
-
-            this._tryCatchChat(async () => {
-              return agentContext.run(
-                {
-                  agent: this,
-                  connection,
-                  request: undefined,
-                  email: undefined
-                },
-                async () => {
-                  const response = await this.onChatMessage(
-                    async (_finishResult) => {
-                      this._removeAbortController(continuationId);
-
-                      this.observability?.emit(
-                        {
-                          displayMessage:
-                            "Chat message response (tool continuation)",
-                          id: continuationId,
-                          payload: {},
-                          timestamp: Date.now(),
-                          type: "message:response"
-                        },
-                        this.ctx
-                      );
-                    },
-                    {
-                      abortSignal
-                    }
-                  );
-
-                  if (response) {
-                    // Pass continuation flag to merge parts into last assistant message
-                    await this._reply(
-                      continuationId,
-                      response,
-                      [connection.id],
-                      { continuation: true }
-                    );
+          // Apply the tool result
+          this._applyToolResult(toolCallId, toolName, output).then(
+            (applied) => {
+              // Only auto-continue if client requested it (opt-in behavior)
+              // This mimics server-executed tool behavior where the LLM
+              // automatically continues after seeing tool results
+              if (applied && autoContinue) {
+                // Wait for the original stream to complete and message to be persisted
+                // before calling onChatMessage, so this.messages includes the tool result
+                const waitForStream = async () => {
+                  if (this._streamCompletionPromise) {
+                    await this._streamCompletionPromise;
+                  } else {
+                    // If no promise, wait a bit for the stream to finish
+                    await new Promise((resolve) => setTimeout(resolve, 500));
                   }
-                }
-              );
-            });
-          }
+                };
+
+                waitForStream().then(() => {
+                  const continuationId = nanoid();
+                  const abortSignal = this._getAbortSignal(continuationId);
+
+                  this._tryCatchChat(async () => {
+                    return agentContext.run(
+                      {
+                        agent: this,
+                        connection,
+                        request: undefined,
+                        email: undefined
+                      },
+                      async () => {
+                        const response = await this.onChatMessage(
+                          async (_finishResult) => {
+                            this._removeAbortController(continuationId);
+
+                            this.observability?.emit(
+                              {
+                                displayMessage:
+                                  "Chat message response (tool continuation)",
+                                id: continuationId,
+                                payload: {},
+                                timestamp: Date.now(),
+                                type: "message:response"
+                              },
+                              this.ctx
+                            );
+                          },
+                          {
+                            abortSignal
+                          }
+                        );
+
+                        if (response) {
+                          // Pass continuation flag to merge parts into last assistant message
+                          // Note: We pass an empty excludeBroadcastIds array because the sender
+                          // NEEDS to receive the continuation stream. Unlike regular chat requests
+                          // where aiFetch handles the response, tool continuations have no listener
+                          // waiting - the client relies on the broadcast.
+                          await this._reply(
+                            continuationId,
+                            response,
+                            [], // Don't exclude sender - they need the continuation
+                            { continuation: true }
+                          );
+                        }
+                      }
+                    );
+                  });
+                });
+              }
+            }
+          );
           return;
         }
       }
@@ -1048,37 +1084,105 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @param output - The output from the tool execution
    * @returns true if the result was applied, false if the message was not found
    */
-  private _applyToolResult(
+  private async _applyToolResult(
     toolCallId: string,
     _toolName: string,
     output: unknown
-  ): boolean {
+  ): Promise<boolean> {
     // Find the message with this tool call
-    const message = this._findMessageByToolCallId(toolCallId);
+    // First check the currently streaming message
+    let message: ChatMessage | undefined;
+
+    // Check streaming message first
+    if (this._streamingMessage) {
+      for (const part of this._streamingMessage.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          message = this._streamingMessage;
+          break;
+        }
+      }
+    }
+
+    // If not found in streaming message, retry persisted messages
+    if (!message) {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        message = this._findMessageByToolCallId(toolCallId);
+        if (message) break;
+        // Wait 100ms before retrying
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
     if (!message) {
       // The tool result will be included when
       // the client sends the follow-up message via sendMessage().
+      console.warn(
+        `[AIChatAgent] _applyToolResult: Could not find message with toolCallId ${toolCallId} after retries`
+      );
       return false;
     }
 
+    // Check if this is the streaming message (not yet persisted)
+    const isStreamingMessage = message === this._streamingMessage;
+
     // Update the tool part with the output
     let updated = false;
-    const updatedParts = message.parts.map((part) => {
-      if (
-        "toolCallId" in part &&
-        part.toolCallId === toolCallId &&
-        "state" in part &&
-        part.state === "input-available"
-      ) {
-        updated = true;
-        return {
-          ...part,
-          state: "output-available" as const,
-          output
-        };
+    if (isStreamingMessage) {
+      // Update in place - the message will be persisted when streaming completes
+      for (const part of message.parts) {
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          part.state === "input-available"
+        ) {
+          (part as { state: string; output?: unknown }).state =
+            "output-available";
+          (part as { state: string; output?: unknown }).output = output;
+          updated = true;
+          break;
+        }
       }
-      return part;
-    }) as ChatMessage["parts"];
+    } else {
+      // For persisted messages, create updated parts
+      const updatedParts = message.parts.map((part) => {
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          part.state === "input-available"
+        ) {
+          updated = true;
+          return {
+            ...part,
+            state: "output-available" as const,
+            output
+          };
+        }
+        return part;
+      }) as ChatMessage["parts"];
+
+      if (updated) {
+        // Create the updated message and strip OpenAI item IDs
+        const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence(
+          {
+            ...message,
+            parts: updatedParts
+          }
+        );
+
+        // Persist the updated message
+        this.sql`
+          update cf_ai_chat_agent_messages 
+          set message = ${JSON.stringify(updatedMessage)}
+          where id = ${message.id}
+        `;
+
+        // Reload messages to update in-memory state
+        const persisted = this._loadMessagesFromDb();
+        this.messages = autoTransformMessages(persisted);
+      }
+    }
 
     if (!updated) {
       console.warn(
@@ -1087,28 +1191,18 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       return false;
     }
 
-    // Create the updated message and strip OpenAI item IDs
-    const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence({
-      ...message,
-      parts: updatedParts
-    });
-
-    // Persist the updated message
-    this.sql`
-      update cf_ai_chat_agent_messages 
-      set message = ${JSON.stringify(updatedMessage)}
-      where id = ${message.id}
-    `;
-
-    // Reload messages to update in-memory state
-    const persisted = this._loadMessagesFromDb();
-    this.messages = autoTransformMessages(persisted);
-
-    // Broadcast the update to all clients
-    this._broadcastChatMessage({
-      type: MessageType.CF_AGENT_MESSAGE_UPDATED,
-      message: updatedMessage
-    });
+    // Broadcast the update to all clients (only for persisted messages)
+    // For streaming messages, the update will be included when persisted
+    if (!isStreamingMessage) {
+      // Re-fetch the message for broadcast since we modified it
+      const broadcastMessage = this._findMessageByToolCallId(toolCallId);
+      if (broadcastMessage) {
+        this._broadcastChatMessage({
+          type: MessageType.CF_AGENT_MESSAGE_UPDATED,
+          message: broadcastMessage
+        });
+      }
+    }
 
     // Note: We don't automatically continue the conversation here.
     // The client is responsible for sending a follow-up request if needed.
@@ -1159,6 +1253,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         role: "assistant",
         parts: []
       };
+      // Track the streaming message so tool results can be applied before persistence
+      this._streamingMessage = message;
+      // Set up completion promise for tool continuation to wait on
+      this._streamCompletionPromise = new Promise((resolve) => {
+        this._streamCompletionResolve = resolve;
+      });
       let activeTextParts: Record<string, TextUIPart> = {};
       let activeReasoningParts: Record<string, ReasoningUIPart> = {};
       const partialToolCalls: Record<
@@ -1830,6 +1930,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             excludeBroadcastIds
           );
         }
+      }
+
+      // Clear the streaming message reference and resolve completion promise
+      this._streamingMessage = null;
+      if (this._streamCompletionResolve) {
+        this._streamCompletionResolve();
+        this._streamCompletionResolve = null;
+        this._streamCompletionPromise = null;
       }
     });
   }
