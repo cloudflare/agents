@@ -7,24 +7,6 @@ declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
 
-// Helper type for parts with providerMetadata
-type PartWithMetadata = ChatMessage["parts"][number] & {
-  providerMetadata?: {
-    openai?: {
-      itemId?: string;
-      [key: string]: unknown;
-    };
-    [key: string]: unknown;
-  };
-  callProviderMetadata?: {
-    openai?: {
-      itemId?: string;
-      [key: string]: unknown;
-    };
-    [key: string]: unknown;
-  };
-};
-
 describe("Client-side tool duplicate message prevention", () => {
   it("merges tool output into existing message by toolCallId", async () => {
     const room = crypto.randomUUID();
