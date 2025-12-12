@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.2.32
+
+### Patch Changes
+
+- [#729](https://github.com/cloudflare/agents/pull/729) [`79843bd`](https://github.com/cloudflare/agents/commit/79843bdc6c7da825f0fe0b8a9c1faef1c6f7a0c0) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - add client-defined tools and prepareSendMessagesRequest options
+
+- [#726](https://github.com/cloudflare/agents/pull/726) [`59ac254`](https://github.com/cloudflare/agents/commit/59ac254b0abc84d4b24f46bf52a972c691b170e0) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix cache ttl
+
 ## 0.2.31
 
 ### Patch Changes
