@@ -1140,6 +1140,13 @@ export function useAgentChat<
       }
       return newMap;
     });
+
+    // Also cleanup processedToolCalls to prevent issues in long conversations
+    for (const toolCallId of processedToolCalls.current) {
+      if (!currentToolCallIds.has(toolCallId)) {
+        processedToolCalls.current.delete(toolCallId);
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [useChatHelpers.messages]);
 
