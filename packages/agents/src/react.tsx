@@ -6,6 +6,17 @@ import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
 import { MessageType } from "./ai-types";
 
+// Re-export useChat hook and types
+export {
+  useChat,
+  type Tool,
+  type PendingToolCall,
+  type PendingToolCall as PendingConfirmation,
+  type UseChatOptions,
+  type UseChatHelpers,
+  TOOL_CONFIRMATION
+} from "./use-chat";
+
 /**
  * Convert a camelCase string to a kebab-case string
  * @param str The string to convert

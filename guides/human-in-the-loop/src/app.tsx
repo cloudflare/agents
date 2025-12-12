@@ -1,10 +1,9 @@
 import type { UIMessage as Message } from "ai";
 import { getToolName, isToolUIPart } from "ai";
 import { clientTools } from "./tools";
-import { APPROVAL, toolsRequiringConfirmation } from "./utils";
 import "./styles.css";
-import { useAgentChat, type AITool } from "agents/ai-react";
-import { useAgent } from "agents/react";
+// New unified hook - replaces useAgent + useAgentChat
+import { useChat, type PendingToolCall } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export default function Chat() {
@@ -18,11 +17,9 @@ export default function Chat() {
   }, []);
 
   useEffect(() => {
-    // Set initial theme
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  // Scroll to bottom on mount
   useEffect(() => {
     scrollToBottom();
   }, [scrollToBottom]);
@@ -33,17 +30,18 @@ export default function Chat() {
     document.documentElement.setAttribute("data-theme", newTheme);
   };
 
-  const agent = useAgent({
-    agent: "human-in-the-loop"
-  });
-
-  const { messages, sendMessage, addToolResult, clearHistory } = useAgentChat({
-    agent,
-    experimental_automaticToolResolution: true,
-    toolsRequiringConfirmation,
-    tools: clientTools satisfies Record<string, AITool>,
-    // Enable server auto-continuation after tool results for seamless UX
-    autoContinueAfterToolResult: true
+  // New unified useChat hook - single hook with declarative tool config
+  const {
+    messages,
+    sendMessage,
+    pendingToolCalls,
+    approve,
+    deny,
+    clearHistory,
+    sessionId
+  } = useChat({
+    agent: "human-in-the-loop",
+    tools: clientTools
   });
 
   const [input, setInput] = useState("");
@@ -55,7 +53,6 @@ export default function Chat() {
         const startTime = Date.now();
         sendMessage({ role: "user", parts: [{ type: "text", text: input }] });
         setInput("");
-        // Simulate response time tracking
         setTimeout(() => {
           setLastResponseTime(Date.now() - startTime);
         }, 1000);
@@ -68,19 +65,12 @@ export default function Chat() {
     setInput(e.target.value);
   };
 
-  // Scroll to bottom when messages change
   useEffect(() => {
     messages.length > 0 && scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  // Tools requiring confirmation are auto-detected by useAgentChat from tools object
-  // Tools without execute function need confirmation (getWeatherInformation)
-  // Tools with execute function are automatic (getLocalTime)
-  const pendingToolCallConfirmation = messages.some((m: Message) =>
-    m.parts?.some(
-      (part) => isToolUIPart(part) && part.state === "input-available"
-    )
-  );
+  // Simple check using the new pendingToolCalls array
+  const hasPendingToolCalls = pendingToolCalls.length > 0;
 
   return (
     <>
@@ -95,7 +85,7 @@ export default function Chat() {
           <div className="theme-switch-handle" />
         </button>
         <button type="button" onClick={clearHistory} className="clear-history">
-          🗑️ Clear History
+          Clear History
         </button>
         <button
           type="button"
@@ -103,11 +93,10 @@ export default function Chat() {
           className="clear-history"
           style={{ marginLeft: "10px" }}
         >
-          {showMetadata ? "📊 Hide" : "📊 Show"} Metadata
+          {showMetadata ? "Hide" : "Show"} Metadata
         </button>
       </div>
 
-      {/* Metadata Display Panel */}
       {showMetadata && (
         <div
           style={{
@@ -120,7 +109,7 @@ export default function Chat() {
           }}
         >
           <h3 style={{ margin: "0 0 10px 0", color: "var(--text-primary)" }}>
-            📊 Response Metadata
+            Response Metadata
           </h3>
           <div
             style={{
@@ -145,10 +134,10 @@ export default function Chat() {
               {Object.keys(clientTools).length}
             </div>
             <div>
-              <strong>Human-in-Loop:</strong> ✓ Enabled
+              <strong>Human-in-Loop:</strong> Enabled
             </div>
             <div>
-              <strong>Session ID:</strong> {agent.id || "Active"}
+              <strong>Session ID:</strong> {sessionId || "Connecting..."}
             </div>
             {lastResponseTime && (
               <div>
@@ -190,7 +179,7 @@ export default function Chat() {
                       const toolCallId = part.toolCallId;
                       const toolName = getToolName(part);
 
-                      // Show tool results for automatic tools
+                      // Show tool results
                       if (part.state === "output-available") {
                         return (
                           <div key={toolCallId} className="tool-invocation">
@@ -203,11 +192,15 @@ export default function Chat() {
                         );
                       }
 
-                      // render confirmation tool (client-side tool with user interaction)
+                      // Show pending tool calls
                       if (part.state === "input-available") {
-                        const tool = clientTools[toolName];
-                        // Don't show confirmation UI for server-executed tools
-                        if (!toolsRequiringConfirmation.includes(toolName)) {
+                        // Check if this tool is in pendingToolCalls
+                        const pending = pendingToolCalls.find(
+                          (p: PendingToolCall) => p.toolCallId === toolCallId
+                        );
+
+                        // Not in pending = auto-executing
+                        if (!pending) {
                           return (
                             <div key={toolCallId} className="tool-invocation">
                               <span className="dynamic-info">{toolName}</span>{" "}
@@ -215,6 +208,8 @@ export default function Chat() {
                             </div>
                           );
                         }
+
+                        // Show confirmation UI - now using simple approve/deny
                         return (
                           <div key={toolCallId} className="tool-invocation">
                             Run <span className="dynamic-info">{toolName}</span>{" "}
@@ -226,35 +221,14 @@ export default function Chat() {
                               <button
                                 type="button"
                                 className="button-approve"
-                                onClick={async () => {
-                                  // If it's a client-side tool requiring approval
-                                  // we execute it and set the result, otherwise we
-                                  // set the approval and let the server handle it
-                                  const output = tool.execute
-                                    ? await tool.execute(part.input)
-                                    : APPROVAL.YES;
-                                  addToolResult({
-                                    tool: toolName,
-                                    output,
-                                    toolCallId
-                                  });
-                                }}
+                                onClick={() => approve(toolCallId)}
                               >
                                 Yes
                               </button>
                               <button
                                 type="button"
                                 className="button-reject"
-                                onClick={() => {
-                                  const output = tool.execute
-                                    ? "User declined to run tool"
-                                    : APPROVAL.NO;
-                                  addToolResult({
-                                    tool: toolName,
-                                    output,
-                                    toolCallId
-                                  });
-                                }}
+                                onClick={() => deny(toolCallId)}
                               >
                                 No
                               </button>
@@ -274,7 +248,7 @@ export default function Chat() {
 
         <form onSubmit={handleSubmit}>
           <input
-            disabled={pendingToolCallConfirmation}
+            disabled={hasPendingToolCalls}
             className="chat-input"
             value={input}
             placeholder="Say something..."
