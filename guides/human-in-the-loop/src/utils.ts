@@ -1,15 +1,35 @@
+/**
+ * Server-side utilities for processing tool confirmations.
+ *
+ * When a user approves/denies a tool call via the useChat hook,
+ * these utilities process that confirmation on the server side.
+ */
+
 import type { UIMessage } from "@ai-sdk/react";
 import type { ToolSet } from "ai";
 import type { z } from "zod";
+import { TOOL_CONFIRMATION } from "agents/react";
+import { toolsRequiringConfirmation } from "./tools";
 
-// Helper type to infer tool arguments from Zod schema
+// Re-export for backwards compatibility
+// @deprecated Use TOOL_CONFIRMATION from "agents/react" instead
+export const APPROVAL = {
+  YES: TOOL_CONFIRMATION.APPROVED,
+  NO: TOOL_CONFIRMATION.DENIED
+} as const;
+
+// =============================================================================
+// TYPE HELPERS
+// =============================================================================
+
+/** Infers the input type from a tool's Zod schema */
 type InferToolArgs<T> = T extends { inputSchema: infer S }
   ? S extends z.ZodType
     ? z.infer<S>
     : never
   : never;
 
-// Type guard to check if part has required properties
+/** Type guard for tool confirmation message parts */
 function isToolConfirmationPart(part: unknown): part is {
   type: string;
   output: string;
@@ -25,47 +45,63 @@ function isToolConfirmationPart(part: unknown): part is {
   );
 }
 
-export const APPROVAL = {
-  NO: "No, denied.",
-  YES: "Yes, confirmed."
-} as const;
+// =============================================================================
+// CONFIRMATION DETECTION
+// =============================================================================
 
 /**
- * Tools that require Human-In-The-Loop
- */
-export const toolsRequiringConfirmation = [
-  "getLocalTime",
-  "getWeatherInformation"
-];
-
-/**
- * Check if a message contains tool confirmations
+ * Checks if a message contains tool confirmation responses.
+ *
+ * Called by AIChatAgent.onChatMessage() to determine if the incoming
+ * message is a user responding to a tool confirmation prompt.
+ *
+ * @param message - The latest user message
+ * @returns true if message contains tool confirmation(s)
  */
 export function hasToolConfirmation(message: UIMessage): boolean {
-  return (
-    message?.parts?.some(
-      (part) =>
-        part.type?.startsWith("tool-") &&
-        toolsRequiringConfirmation.includes(part.type?.slice("tool-".length)) &&
-        "output" in part
-    ) || false
-  );
+  if (!message?.parts) return false;
+
+  return message.parts.some((part) => {
+    // Tool parts have type like "tool-getWeatherInformation"
+    if (!part.type?.startsWith("tool-")) return false;
+
+    const toolName = part.type.slice("tool-".length);
+
+    // Only check tools that require confirmation
+    if (!toolsRequiringConfirmation.includes(toolName)) return false;
+
+    // Must have an output (the user's response)
+    return "output" in part;
+  });
 }
 
-/**
- * Weather tool implementation
- */
-export async function getWeatherInformation(args: unknown): Promise<string> {
-  const { city } = args as { city: string };
-  const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-  return `The weather in ${city} is ${
-    conditions[Math.floor(Math.random() * conditions.length)]
-  }.`;
-}
+// =============================================================================
+// TOOL EXECUTION
+// =============================================================================
 
 /**
- * Processes tool invocations where human input is required, executing tools when authorized.
- * using UIMessageStreamWriter
+ * Processes tool confirmations and executes approved tools.
+ *
+ * When a user approves a tool:
+ * 1. Finds the tool confirmation in the message
+ * 2. Executes the tool with the original input
+ * 3. Replaces the confirmation signal with the actual result
+ *
+ * @param context - Messages and tool definitions
+ * @param executeFunctions - Server-side tool implementations
+ * @returns Updated messages with tool results
+ *
+ * @example
+ * ```ts
+ * // In AIChatAgent.onChatMessage():
+ * if (hasToolConfirmation(lastMessage)) {
+ *   const updatedMessages = await processToolCalls(
+ *     { messages: this.messages, tools },
+ *     { getWeatherInformation }  // Server-side implementations
+ *   );
+ *   this.messages = updatedMessages;
+ * }
+ * ```
  */
 export async function processToolCalls<
   Tools extends ToolSet,
@@ -79,7 +115,7 @@ export async function processToolCalls<
     messages,
     tools: _tools
   }: {
-    tools: Tools; // used for type inference
+    tools: Tools;
     messages: UIMessage[];
   },
   executeFunctions: {
@@ -91,55 +127,53 @@ export async function processToolCalls<
   }
 ): Promise<UIMessage[]> {
   const lastMessage = messages[messages.length - 1];
-  const parts = lastMessage.parts;
-  if (!parts) return messages;
+  if (!lastMessage.parts) return messages;
 
   const processedParts = await Promise.all(
-    parts.map(async (part) => {
-      // Look for tool parts with output (confirmations) - v5 format
-      if (isToolConfirmationPart(part) && part.type.startsWith("tool-")) {
-        const toolName = part.type.replace("tool-", "");
-        const output = part.output;
-        // Only process if we have an execute function for this tool
-        if (!(toolName in executeFunctions)) {
-          return part;
-        }
-
-        let result: string | undefined;
-
-        if (output === APPROVAL.YES) {
-          const toolInstance =
-            executeFunctions[toolName as keyof typeof executeFunctions];
-          if (toolInstance) {
-            // Pass the input data - the tool's Zod schema will validate at runtime
-            const toolInput = part.input ?? {};
-            // We need to trust that the runtime data matches the expected type
-            // The Zod schema in the tool will validate this
-            result = await (
-              toolInstance as (args: typeof toolInput) => Promise<string>
-            )(toolInput);
-          } else {
-            result = "Error: No execute function found on tool";
-          }
-        } else if (output === APPROVAL.NO) {
-          result = "Error: User denied access to tool execution";
-        }
-
-        // Return updated part with actual tool result (not the confirmation)
-        if (result !== undefined) {
-          return {
-            ...part,
-            output: result
-          };
-        }
+    lastMessage.parts.map(async (part) => {
+      // Skip non-tool parts
+      if (!isToolConfirmationPart(part) || !part.type.startsWith("tool-")) {
         return part;
       }
-      return part; // Return unprocessed parts
+
+      const toolName = part.type.replace("tool-", "");
+      const userResponse = part.output;
+
+      // Skip if we don't have an execute function for this tool
+      if (!(toolName in executeFunctions)) {
+        return part;
+      }
+
+      let result: string;
+
+      if (userResponse === TOOL_CONFIRMATION.APPROVED) {
+        // User approved - execute the tool
+        const executeFunc =
+          executeFunctions[toolName as keyof typeof executeFunctions];
+
+        if (executeFunc) {
+          const toolInput = part.input ?? {};
+          result = await (
+            executeFunc as (args: typeof toolInput) => Promise<string>
+          )(toolInput);
+        } else {
+          result = "Error: No execute function found for tool";
+        }
+      } else if (userResponse === TOOL_CONFIRMATION.DENIED) {
+        // User denied
+        result = "Tool execution denied by user";
+      } else {
+        // Custom denial reason or unexpected response
+        result = `Tool execution denied: ${userResponse}`;
+      }
+
+      // Return part with actual tool result (not the confirmation signal)
+      return { ...part, output: result };
     })
   );
 
-  return [
-    ...messages.slice(0, -1),
-    { ...lastMessage, parts: processedParts.filter(Boolean) }
-  ];
+  return [...messages.slice(0, -1), { ...lastMessage, parts: processedParts }];
 }
+
+// Re-export getWeatherInformation for server.ts
+export { getWeatherInformation } from "./tools";
