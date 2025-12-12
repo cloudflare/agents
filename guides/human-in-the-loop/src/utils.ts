@@ -5,13 +5,25 @@
 import type { UIMessage } from "@ai-sdk/react";
 import type { ToolSet } from "ai";
 import type { z } from "zod";
-import { toolsRequiringConfirmation } from "./tools";
+import { clientTools } from "./tools";
 
-// Must match TOOL_CONFIRMATION in agents/ai-types.ts
+// Import from SDK. Falls back to inline definition for monorepo dev (pre-build).
+// After build: import { TOOL_CONFIRMATION } from "agents";
 const TOOL_CONFIRMATION = {
   APPROVED: "Yes, confirmed.",
   DENIED: "No, denied."
 } as const;
+
+type ToolConfirmationValue =
+  (typeof TOOL_CONFIRMATION)[keyof typeof TOOL_CONFIRMATION];
+
+function isValidConfirmationResponse(
+  value: string
+): value is ToolConfirmationValue {
+  return (
+    value === TOOL_CONFIRMATION.APPROVED || value === TOOL_CONFIRMATION.DENIED
+  );
+}
 
 type InferToolArgs<T> = T extends { inputSchema: infer S }
   ? S extends z.ZodType
@@ -34,9 +46,20 @@ function isToolConfirmationPart(part: unknown): part is {
   );
 }
 
+function getToolsRequiringConfirmation(): string[] {
+  return Object.entries(clientTools)
+    .filter(([_, tool]) => {
+      if (tool.confirm !== undefined) return tool.confirm;
+      return !tool.execute;
+    })
+    .map(([name]) => name);
+}
+
 /** Checks if message contains tool confirmations */
 export function hasToolConfirmation(message: UIMessage): boolean {
   if (!message?.parts) return false;
+
+  const toolsRequiringConfirmation = getToolsRequiringConfirmation();
 
   return message.parts.some((part) => {
     if (!part.type?.startsWith("tool-")) return false;
@@ -57,7 +80,7 @@ export async function processToolCalls<
 >(
   {
     messages,
-    tools: _tools
+    tools
   }: {
     tools: Tools;
     messages: UIMessage[];
@@ -91,19 +114,39 @@ export async function processToolCalls<
       if (userResponse === TOOL_CONFIRMATION.APPROVED) {
         const executeFunc =
           executeFunctions[toolName as keyof typeof executeFunctions];
+        const toolDef = tools[toolName as keyof Tools];
 
-        if (executeFunc) {
-          const toolInput = part.input ?? {};
-          result = await (
-            executeFunc as (args: typeof toolInput) => Promise<string>
-          )(toolInput);
-        } else {
+        if (!executeFunc) {
           result = "Error: No execute function found for tool";
+        } else {
+          try {
+            const toolInput = part.input ?? {};
+
+            // Validate input against schema if available
+            if (toolDef && "inputSchema" in toolDef && toolDef.inputSchema) {
+              const schema = toolDef.inputSchema as z.ZodType;
+              const parsed = schema.safeParse(toolInput);
+              if (!parsed.success) {
+                result = `Error: Invalid input - ${parsed.error.message}`;
+              } else {
+                result = await executeFunc(parsed.data);
+              }
+            } else {
+              result = await (
+                executeFunc as (args: unknown) => Promise<string>
+              )(toolInput);
+            }
+          } catch (err) {
+            result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
         }
       } else if (userResponse === TOOL_CONFIRMATION.DENIED) {
         result = "Tool execution denied by user";
-      } else {
+      } else if (!isValidConfirmationResponse(userResponse)) {
+        // Custom denial reason provided
         result = `Tool execution denied: ${userResponse}`;
+      } else {
+        result = "Tool execution denied by user";
       }
 
       return { ...part, output: result };

@@ -29,15 +29,11 @@ export { TOOL_CONFIRMATION, type ToolConfirmationSignal };
  */
 // biome-ignore lint/suspicious/noExplicitAny: Flexible typing for user-defined tool functions
 export type Tool<TInput = any, TOutput = any> = {
-  /** Description shown to the LLM */
   description?: string;
-  /** Client-side execution. If omitted, runs on server. */
   execute?: (input: TInput) => TOutput | Promise<TOutput>;
-  /** Whether user approval is required. @default true for server, false for client */
   confirm?: boolean;
 };
 
-/** A tool call waiting for user approval */
 export type PendingToolCall = {
   toolCallId: string;
   toolName: string;
@@ -45,21 +41,14 @@ export type PendingToolCall = {
   messageId: string;
 };
 
-/** Configuration for useChat */
 export type UseChatOptions = {
-  /** Agent name (Durable Object class binding) */
   agent: string;
-  /** Instance name for isolated conversations. @default "default" */
   name?: string;
-  /** Tool definitions */
   tools?: Record<string, Tool>;
-  /** Error callback */
   onError?: (error: Error) => void;
-  /** State change callback */
   onStateUpdate?: (state: unknown, source: "server" | "client") => void;
 };
 
-/** Return value from useChat */
 export type UseChatHelpers = {
   messages: UIMessage[];
   sendMessage: ReturnType<typeof useAgentChat>["sendMessage"];
@@ -183,7 +172,7 @@ export function useChat(options: UseChatOptions): UseChatHelpers {
     onError
   });
 
-  const toolsRef = useRef(tools);
+  const toolsRef = useRef<Record<string, Tool> | undefined>(tools);
   toolsRef.current = tools;
 
   const pendingToolCalls = useMemo(
@@ -191,7 +180,7 @@ export function useChat(options: UseChatOptions): UseChatHelpers {
     [chat.messages, toolsRequiringConfirmation]
   );
 
-  const pendingRef = useRef(pendingToolCalls);
+  const pendingRef = useRef<PendingToolCall[]>(pendingToolCalls);
   pendingRef.current = pendingToolCalls;
 
   const approve = useCallback(
@@ -221,9 +210,14 @@ export function useChat(options: UseChatOptions): UseChatHelpers {
         result = TOOL_CONFIRMATION.APPROVED;
       }
 
-      chat.addToolResult({ toolCallId, tool: toolName, output: result });
+      try {
+        chat.addToolResult({ toolCallId, tool: toolName, output: result });
+      } catch (err) {
+        console.error(`[useChat] Failed to send tool result: ${err}`);
+        onError?.(err instanceof Error ? err : new Error(String(err)));
+      }
     },
-    [chat.addToolResult]
+    [chat.addToolResult, onError]
   );
 
   const deny = useCallback(
@@ -232,13 +226,19 @@ export function useChat(options: UseChatOptions): UseChatHelpers {
         (p) => p.toolCallId === toolCallId
       );
       const toolName = pending?.toolName ?? "unknown";
-      chat.addToolResult({
-        toolCallId,
-        tool: toolName,
-        output: reason ?? TOOL_CONFIRMATION.DENIED
-      });
+
+      try {
+        chat.addToolResult({
+          toolCallId,
+          tool: toolName,
+          output: reason ?? TOOL_CONFIRMATION.DENIED
+        });
+      } catch (err) {
+        console.error(`[useChat] Failed to send denial: ${err}`);
+        onError?.(err instanceof Error ? err : new Error(String(err)));
+      }
     },
-    [chat.addToolResult]
+    [chat.addToolResult, onError]
   );
 
   const clearHistory = useCallback(() => {
