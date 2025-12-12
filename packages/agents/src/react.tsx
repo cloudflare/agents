@@ -9,6 +9,7 @@ import { MessageType } from "./ai-types";
 // Re-export useChat hook and types
 export {
   useChat,
+  getToolsRequiringConfirmation,
   type Tool,
   type PendingToolCall,
   type PendingToolCall as PendingConfirmation,

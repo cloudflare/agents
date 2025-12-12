@@ -2,13 +2,8 @@ import type { UIMessage } from "@ai-sdk/react";
 import type { ToolSet } from "ai";
 import type { z } from "zod";
 import { TOOL_CONFIRMATION } from "agents";
+import { getToolsRequiringConfirmation } from "agents/react";
 import { clientTools } from "./tools";
-
-type InferToolArgs<T> = T extends { inputSchema: infer S }
-  ? S extends z.ZodType
-    ? z.infer<S>
-    : never
-  : never;
 
 function isToolConfirmationPart(part: unknown): part is {
   type: string;
@@ -25,52 +20,30 @@ function isToolConfirmationPart(part: unknown): part is {
   );
 }
 
-function getToolsRequiringConfirmation(): string[] {
-  return Object.entries(clientTools)
-    .filter(([_, tool]) => {
-      if (tool.confirm !== undefined) return tool.confirm;
-      return !tool.execute;
-    })
-    .map(([name]) => name);
-}
-
-/** Checks if message contains tool confirmations */
 export function hasToolConfirmation(message: UIMessage): boolean {
   if (!message?.parts) return false;
 
-  const toolsRequiringConfirmation = getToolsRequiringConfirmation();
+  const confirmationTools = getToolsRequiringConfirmation(clientTools);
 
   return message.parts.some((part) => {
     if (!part.type?.startsWith("tool-")) return false;
     const toolName = part.type.slice("tool-".length);
-    if (!toolsRequiringConfirmation.includes(toolName)) return false;
+    if (!confirmationTools.includes(toolName)) return false;
     return "output" in part;
   });
 }
 
-/** Processes tool confirmations and executes approved tools */
-export async function processToolCalls<
-  Tools extends ToolSet,
-  ExecutableTools extends {
-    [Tool in keyof Tools as Tools[Tool] extends { execute: Function }
-      ? never
-      : Tool]: Tools[Tool];
-  }
->(
+type ExecuteFn = (args: Record<string, unknown>) => Promise<string>;
+
+export async function processToolCalls(
   {
     messages,
     tools
   }: {
-    tools: Tools;
+    tools: ToolSet;
     messages: UIMessage[];
   },
-  executeFunctions: {
-    [K in keyof ExecutableTools as ExecutableTools[K] extends {
-      inputSchema: z.ZodType;
-    }
-      ? K
-      : never]?: (args: InferToolArgs<ExecutableTools[K]>) => Promise<string>;
-  }
+  executeFunctions: Record<string, ExecuteFn>
 ): Promise<UIMessage[]> {
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage.parts) return messages;
@@ -91,9 +64,8 @@ export async function processToolCalls<
       let result: string;
 
       if (userResponse === TOOL_CONFIRMATION.APPROVED) {
-        const executeFunc =
-          executeFunctions[toolName as keyof typeof executeFunctions];
-        const toolDef = tools[toolName as keyof Tools];
+        const executeFunc = executeFunctions[toolName];
+        const toolDef = tools[toolName];
 
         if (!executeFunc) {
           result = "Error: No execute function found for tool";

@@ -64,7 +64,7 @@ function toAITools(
   return result;
 }
 
-function getToolsRequiringConfirmation(
+export function getToolsRequiringConfirmation(
   tools: Record<string, Tool> | undefined
 ): string[] {
   if (!tools) return [];
