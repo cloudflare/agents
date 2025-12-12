@@ -1,17 +1,3 @@
-/**
- * Tool Definitions - Single Source of Truth
- *
- * This file defines all tools ONCE. The same definitions are used for:
- * - Server-side (AI SDK format in AIChatAgent)
- * - Client-side (useChat hook)
- *
- * Architecture:
- * 1. Define tool implementations as standalone functions
- * 2. Create server tools using AI SDK's `tool()` helper
- * 3. Create client tools using our declarative `Tool` type
- * 4. Both reference the same implementations
- */
-
 import { tool } from "ai";
 import { z } from "zod";
 import type { Tool } from "agents/react";
@@ -73,12 +59,6 @@ const citySchema = z.object({
 
 // =============================================================================
 // SERVER TOOLS (AI SDK Format)
-// =============================================================================
-// Used in AIChatAgent.onChatMessage() with streamText().
-// The AI SDK uses these to:
-// 1. Tell the LLM what tools are available
-// 2. Validate tool call inputs
-// 3. Execute tools (if `execute` is provided)
 
 export const serverTools = {
   /**
@@ -165,12 +145,6 @@ export const clientTools: Record<string, Tool> = {
     // No confirm = auto-execute for client tools
   }
 };
-
-// =============================================================================
-// DERIVED LISTS
-// =============================================================================
-// These are computed from the tool definitions above.
-// Used by utils.ts for server-side tool processing.
 
 /**
  * Names of tools that require user confirmation.

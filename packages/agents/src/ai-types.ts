@@ -1,5 +1,52 @@
 import type { UIMessage } from "ai";
 
+// =============================================================================
+// TOOL CONFIRMATION PROTOCOL
+// =============================================================================
+
+/**
+ * Protocol constants for human-in-the-loop tool confirmation.
+ *
+ * These exact strings are sent between client and server to communicate
+ * user approval or denial of tool execution. Both client (useChat) and
+ * server (processToolCalls) must use these same values.
+ *
+ * @example Client-side (useChat hook)
+ * ```ts
+ * // When user clicks "Approve"
+ * approve(toolCallId); // Sends TOOL_CONFIRMATION.APPROVED
+ *
+ * // When user clicks "Deny"
+ * deny(toolCallId); // Sends TOOL_CONFIRMATION.DENIED
+ * ```
+ *
+ * @example Server-side (in your Agent)
+ * ```ts
+ * import { TOOL_CONFIRMATION } from "agents";
+ *
+ * if (toolOutput === TOOL_CONFIRMATION.APPROVED) {
+ *   // User approved - execute the tool
+ *   const result = await executeTool(toolName, toolInput);
+ * } else if (toolOutput === TOOL_CONFIRMATION.DENIED) {
+ *   // User denied - skip execution
+ * }
+ * ```
+ */
+export const TOOL_CONFIRMATION = {
+  /** Signal sent when user approves tool execution */
+  APPROVED: "Yes, confirmed.",
+  /** Signal sent when user denies tool execution */
+  DENIED: "No, denied."
+} as const;
+
+/** Type for tool confirmation signal values */
+export type ToolConfirmationSignal =
+  (typeof TOOL_CONFIRMATION)[keyof typeof TOOL_CONFIRMATION];
+
+// =============================================================================
+// MESSAGE TYPES
+// =============================================================================
+
 /**
  * Enum for message types to improve type safety and maintainability
  */

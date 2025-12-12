@@ -8,14 +8,22 @@
 import type { UIMessage } from "@ai-sdk/react";
 import type { ToolSet } from "ai";
 import type { z } from "zod";
-import { TOOL_CONFIRMATION } from "agents/react";
 import { toolsRequiringConfirmation } from "./tools";
 
-// Re-export for backwards compatibility
-// @deprecated Use TOOL_CONFIRMATION from "agents/react" instead
-export const APPROVAL = {
-  YES: TOOL_CONFIRMATION.APPROVED,
-  NO: TOOL_CONFIRMATION.DENIED
+/**
+ * Tool confirmation protocol constants.
+ *
+ * IMPORTANT: These MUST match the values in agents/ai-types.ts (TOOL_CONFIRMATION).
+ * The client's useChat hook sends these exact strings when user approves/denies.
+ *
+ * After building the SDK, you can import from "agents/ai-types" or "agents" directly:
+ * ```ts
+ * import { TOOL_CONFIRMATION } from "agents/ai-types";
+ * ```
+ */
+const TOOL_CONFIRMATION = {
+  APPROVED: "Yes, confirmed.",
+  DENIED: "No, denied."
 } as const;
 
 // =============================================================================

@@ -15,36 +15,10 @@ import type { PartySocket } from "partysocket";
 import { useCallback, useMemo, useRef } from "react";
 import { useAgent } from "./react";
 import { useAgentChat, type AITool } from "./ai-react";
+import { TOOL_CONFIRMATION, type ToolConfirmationSignal } from "./ai-types";
 
-// =============================================================================
-// CONSTANTS
-// =============================================================================
-
-/**
- * Protocol constants for tool confirmation signals.
- *
- * These are the exact strings sent between client and server to communicate
- * tool approval/denial. The server's processToolCalls checks for these values.
- *
- * @example
- * ```ts
- * // Server-side check in processToolCalls:
- * if (output === TOOL_CONFIRMATION.APPROVED) {
- *   // Execute the tool
- * } else if (output === TOOL_CONFIRMATION.DENIED) {
- *   // Return denial message
- * }
- * ```
- */
-export const TOOL_CONFIRMATION = {
-  /** Signal sent to server when user approves a tool call */
-  APPROVED: "Yes, confirmed.",
-  /** Signal sent to server when user denies a tool call */
-  DENIED: "No, denied."
-} as const;
-
-export type ToolConfirmationSignal =
-  (typeof TOOL_CONFIRMATION)[keyof typeof TOOL_CONFIRMATION];
+// Re-export for convenience (so users can import from "agents/react")
+export { TOOL_CONFIRMATION, type ToolConfirmationSignal };
 
 // =============================================================================
 // TYPES

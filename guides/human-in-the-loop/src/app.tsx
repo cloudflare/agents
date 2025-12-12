@@ -2,7 +2,6 @@ import type { UIMessage as Message } from "ai";
 import { getToolName, isToolUIPart } from "ai";
 import { clientTools } from "./tools";
 import "./styles.css";
-// New unified hook - replaces useAgent + useAgentChat
 import { useChat, type PendingToolCall } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -30,7 +29,6 @@ export default function Chat() {
     document.documentElement.setAttribute("data-theme", newTheme);
   };
 
-  // New unified useChat hook - single hook with declarative tool config
   const {
     messages,
     sendMessage,
@@ -69,7 +67,6 @@ export default function Chat() {
     messages.length > 0 && scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  // Simple check using the new pendingToolCalls array
   const hasPendingToolCalls = pendingToolCalls.length > 0;
 
   return (
@@ -209,7 +206,6 @@ export default function Chat() {
                           );
                         }
 
-                        // Show confirmation UI - now using simple approve/deny
                         return (
                           <div key={toolCallId} className="tool-invocation">
                             Run <span className="dynamic-info">{toolName}</span>{" "}
