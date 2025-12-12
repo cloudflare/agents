@@ -204,7 +204,8 @@ describe("Client-side tool duplicate message prevention", () => {
     );
 
     // Wait for tool result to be applied and continuation to happen
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    // Note: When there's no active stream, the continuation waits 500ms before proceeding
+    await new Promise((resolve) => setTimeout(resolve, 800));
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
