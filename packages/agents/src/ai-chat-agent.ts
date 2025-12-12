@@ -719,7 +719,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
     // Persist the merged messages
     for (const message of mergedMessages) {
-      const messageToSave = this._resolveMessageForToolMerge(message);
+      // Strip OpenAI item IDs to prevent "Duplicate item found" errors
+      // when using the OpenAI Responses API. These IDs are assigned by OpenAI
+      // and if sent back in subsequent requests, cause duplicate detection.
+      const sanitizedMessage = this._stripOpenAIItemIds(message);
+      const messageToSave = this._resolveMessageForToolMerge(sanitizedMessage);
       this.sql`
         insert into cf_ai_chat_agent_messages (id, message)
         values (${messageToSave.id}, ${JSON.stringify(messageToSave)})
@@ -865,6 +869,131 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
+   * Strips OpenAI-specific item IDs from message parts to prevent
+   * "Duplicate item found" errors when using the OpenAI Responses API.
+   *
+   * The AI SDK's @ai-sdk/openai provider (v2.0.x+) defaults to using OpenAI's
+   * Responses API (/responses endpoint) which assigns unique itemIds to each
+   * message part. When these IDs are persisted and sent back in subsequent
+   * requests, OpenAI's API rejects them as duplicates.
+   *
+   * This method removes the providerMetadata.openai.itemId from all message
+   * parts so that subsequent requests don't trigger duplicate detection.
+   *
+   * @param message - The message to sanitize
+   * @returns A new message with OpenAI item IDs stripped from all parts
+   */
+  private _stripOpenAIItemIds(message: ChatMessage): ChatMessage {
+    const sanitizedParts = message.parts.map((part) => {
+      // Check if this part has providerMetadata with OpenAI itemId
+      if (
+        "providerMetadata" in part &&
+        part.providerMetadata &&
+        typeof part.providerMetadata === "object" &&
+        "openai" in part.providerMetadata
+      ) {
+        const openaiMeta = part.providerMetadata.openai;
+        if (
+          openaiMeta &&
+          typeof openaiMeta === "object" &&
+          "itemId" in openaiMeta
+        ) {
+          // Create a new providerMetadata without the itemId
+          const { itemId: _itemId, ...restOpenai } = openaiMeta as {
+            itemId?: string;
+            [key: string]: unknown;
+          };
+
+          // If there are other OpenAI metadata fields, keep them
+          const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
+          const { openai: _openai, ...restProviderMetadata } =
+            part.providerMetadata as {
+              openai?: unknown;
+              [key: string]: unknown;
+            };
+
+          // Determine the new providerMetadata value
+          let newProviderMetadata: ProviderMetadata | undefined;
+          if (hasOtherOpenaiFields) {
+            newProviderMetadata = {
+              ...restProviderMetadata,
+              openai: restOpenai
+            } as ProviderMetadata;
+          } else if (Object.keys(restProviderMetadata).length > 0) {
+            newProviderMetadata = restProviderMetadata as ProviderMetadata;
+          }
+          // If no metadata left, don't include the field at all
+
+          // Return a new part without the itemId
+          const { providerMetadata: _pm, ...restPart } = part as typeof part & {
+            providerMetadata?: ProviderMetadata;
+          };
+
+          if (newProviderMetadata) {
+            return { ...restPart, providerMetadata: newProviderMetadata };
+          }
+          return restPart;
+        }
+      }
+
+      // Also check callProviderMetadata for tool parts
+      if (
+        "callProviderMetadata" in part &&
+        part.callProviderMetadata &&
+        typeof part.callProviderMetadata === "object" &&
+        "openai" in part.callProviderMetadata
+      ) {
+        const openaiMeta = part.callProviderMetadata.openai;
+        if (
+          openaiMeta &&
+          typeof openaiMeta === "object" &&
+          "itemId" in openaiMeta
+        ) {
+          const { itemId: _itemId, ...restOpenai } = openaiMeta as {
+            itemId?: string;
+            [key: string]: unknown;
+          };
+
+          const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
+          const { openai: _openai, ...restCallProviderMetadata } =
+            part.callProviderMetadata as {
+              openai?: unknown;
+              [key: string]: unknown;
+            };
+
+          let newCallProviderMetadata: ProviderMetadata | undefined;
+          if (hasOtherOpenaiFields) {
+            newCallProviderMetadata = {
+              ...restCallProviderMetadata,
+              openai: restOpenai
+            } as ProviderMetadata;
+          } else if (Object.keys(restCallProviderMetadata).length > 0) {
+            newCallProviderMetadata =
+              restCallProviderMetadata as ProviderMetadata;
+          }
+
+          const { callProviderMetadata: _cpm, ...restPart } =
+            part as typeof part & {
+              callProviderMetadata?: ProviderMetadata;
+            };
+
+          if (newCallProviderMetadata) {
+            return {
+              ...restPart,
+              callProviderMetadata: newCallProviderMetadata
+            };
+          }
+          return restPart;
+        }
+      }
+
+      return part;
+    }) as ChatMessage["parts"];
+
+    return { ...message, parts: sanitizedParts };
+  }
+
+  /**
    * Applies a tool result to an existing assistant message.
    * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
    * The server is the source of truth, so we update the message here and broadcast
@@ -914,11 +1043,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       return false;
     }
 
-    // Create the updated message
-    const updatedMessage: ChatMessage = {
+    // Create the updated message and strip OpenAI item IDs
+    const updatedMessage: ChatMessage = this._stripOpenAIItemIds({
       ...message,
       parts: updatedParts
-    };
+    });
 
     // Persist the updated message
     this.sql`
