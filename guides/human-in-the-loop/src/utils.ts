@@ -7,23 +7,10 @@ import type { ToolSet } from "ai";
 import type { z } from "zod";
 import { clientTools } from "./tools";
 
-// Import from SDK. Falls back to inline definition for monorepo dev (pre-build).
-// After build: import { TOOL_CONFIRMATION } from "agents";
 const TOOL_CONFIRMATION = {
   APPROVED: "Yes, confirmed.",
   DENIED: "No, denied."
 } as const;
-
-type ToolConfirmationValue =
-  (typeof TOOL_CONFIRMATION)[keyof typeof TOOL_CONFIRMATION];
-
-function isValidConfirmationResponse(
-  value: string
-): value is ToolConfirmationValue {
-  return (
-    value === TOOL_CONFIRMATION.APPROVED || value === TOOL_CONFIRMATION.DENIED
-  );
-}
 
 type InferToolArgs<T> = T extends { inputSchema: infer S }
   ? S extends z.ZodType
@@ -142,11 +129,9 @@ export async function processToolCalls<
         }
       } else if (userResponse === TOOL_CONFIRMATION.DENIED) {
         result = "Tool execution denied by user";
-      } else if (!isValidConfirmationResponse(userResponse)) {
-        // Custom denial reason provided
-        result = `Tool execution denied: ${userResponse}`;
       } else {
-        result = "Tool execution denied by user";
+        // Custom denial reason (any non-standard response)
+        result = `Tool execution denied: ${userResponse}`;
       }
 
       return { ...part, output: result };
