@@ -33,7 +33,8 @@ export function hasToolConfirmation(message: UIMessage): boolean {
   });
 }
 
-type ExecuteFn = (args: Record<string, unknown>) => Promise<string>;
+// biome-ignore lint/suspicious/noExplicitAny: Flexible typing for user-defined execute functions
+type ExecuteFn = (args: any) => Promise<string>;
 
 export async function processToolCalls(
   {
