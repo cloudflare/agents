@@ -389,8 +389,59 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
 
         // Handle client-side tool result
         if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
-          const { toolCallId, toolName, output } = data;
-          this._applyToolResult(toolCallId, toolName, output);
+          const { toolCallId, toolName, output, autoContinue } = data;
+          const applied = this._applyToolResult(toolCallId, toolName, output);
+
+          // Only auto-continue if client requested it (opt-in behavior)
+          // This mimics server-executed tool behavior where the LLM
+          // automatically continues after seeing tool results
+          if (applied && autoContinue) {
+            const continuationId = nanoid();
+            const abortSignal = this._getAbortSignal(continuationId);
+
+            this._tryCatchChat(async () => {
+              return agentContext.run(
+                {
+                  agent: this,
+                  connection,
+                  request: undefined,
+                  email: undefined
+                },
+                async () => {
+                  const response = await this.onChatMessage(
+                    async (_finishResult) => {
+                      this._removeAbortController(continuationId);
+
+                      this.observability?.emit(
+                        {
+                          displayMessage:
+                            "Chat message response (tool continuation)",
+                          id: continuationId,
+                          payload: {},
+                          timestamp: Date.now(),
+                          type: "message:response"
+                        },
+                        this.ctx
+                      );
+                    },
+                    {
+                      abortSignal
+                    }
+                  );
+
+                  if (response) {
+                    // Pass continuation flag to merge parts into last assistant message
+                    await this._reply(
+                      continuationId,
+                      response,
+                      [connection.id],
+                      { continuation: true }
+                    );
+                  }
+                }
+              );
+            });
+          }
           return;
         }
       }
@@ -722,7 +773,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       // Strip OpenAI item IDs to prevent "Duplicate item found" errors
       // when using the OpenAI Responses API. These IDs are assigned by OpenAI
       // and if sent back in subsequent requests, cause duplicate detection.
-      const sanitizedMessage = this._stripOpenAIItemIds(message);
+      const sanitizedMessage = this._sanitizeMessageForPersistence(message);
       const messageToSave = this._resolveMessageForToolMerge(sanitizedMessage);
       this.sql`
         insert into cf_ai_chat_agent_messages (id, message)
@@ -869,128 +920,121 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   }
 
   /**
-   * Strips OpenAI-specific item IDs from message parts to prevent
-   * "Duplicate item found" errors when using the OpenAI Responses API.
+   * Sanitizes a message for persistence by removing ephemeral provider-specific
+   * data that should not be stored or sent back in subsequent requests.
    *
-   * The AI SDK's @ai-sdk/openai provider (v2.0.x+) defaults to using OpenAI's
-   * Responses API (/responses endpoint) which assigns unique itemIds to each
-   * message part. When these IDs are persisted and sent back in subsequent
-   * requests, OpenAI's API rejects them as duplicates.
+   * This handles two issues with the OpenAI Responses API:
    *
-   * This method removes the providerMetadata.openai.itemId from all message
-   * parts so that subsequent requests don't trigger duplicate detection.
+   * 1. **Duplicate item IDs**: The AI SDK's @ai-sdk/openai provider (v2.0.x+)
+   *    defaults to using OpenAI's Responses API which assigns unique itemIds
+   *    to each message part. When these IDs are persisted and sent back,
+   *    OpenAI rejects them as duplicates.
+   *
+   * 2. **Empty reasoning parts**: OpenAI may return reasoning parts with empty
+   *    text and encrypted content. These cause "Non-OpenAI reasoning parts are
+   *    not supported" warnings when sent back via convertToModelMessages().
    *
    * @param message - The message to sanitize
-   * @returns A new message with OpenAI item IDs stripped from all parts
+   * @returns A new message with ephemeral provider data removed
    */
-  private _stripOpenAIItemIds(message: ChatMessage): ChatMessage {
-    const sanitizedParts = message.parts.map((part) => {
-      // Check if this part has providerMetadata with OpenAI itemId
-      if (
-        "providerMetadata" in part &&
-        part.providerMetadata &&
-        typeof part.providerMetadata === "object" &&
-        "openai" in part.providerMetadata
-      ) {
-        const openaiMeta = part.providerMetadata.openai;
-        if (
-          openaiMeta &&
-          typeof openaiMeta === "object" &&
-          "itemId" in openaiMeta
-        ) {
-          // Create a new providerMetadata without the itemId
-          const { itemId: _itemId, ...restOpenai } = openaiMeta as {
-            itemId?: string;
-            [key: string]: unknown;
-          };
-
-          // If there are other OpenAI metadata fields, keep them
-          const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
-          const { openai: _openai, ...restProviderMetadata } =
-            part.providerMetadata as {
-              openai?: unknown;
-              [key: string]: unknown;
-            };
-
-          // Determine the new providerMetadata value
-          let newProviderMetadata: ProviderMetadata | undefined;
-          if (hasOtherOpenaiFields) {
-            newProviderMetadata = {
-              ...restProviderMetadata,
-              openai: restOpenai
-            } as ProviderMetadata;
-          } else if (Object.keys(restProviderMetadata).length > 0) {
-            newProviderMetadata = restProviderMetadata as ProviderMetadata;
-          }
-          // If no metadata left, don't include the field at all
-
-          // Return a new part without the itemId
-          const { providerMetadata: _pm, ...restPart } = part as typeof part & {
-            providerMetadata?: ProviderMetadata;
-          };
-
-          if (newProviderMetadata) {
-            return { ...restPart, providerMetadata: newProviderMetadata };
-          }
-          return restPart;
+  private _sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
+    // First, filter out empty reasoning parts (they have no useful content)
+    const filteredParts = message.parts.filter((part) => {
+      if (part.type === "reasoning") {
+        const reasoningPart = part as ReasoningUIPart;
+        // Remove reasoning parts that have no text content
+        // These are typically placeholders with only encrypted content
+        if (!reasoningPart.text || reasoningPart.text.trim() === "") {
+          return false;
         }
+      }
+      return true;
+    });
+
+    // Then sanitize remaining parts by stripping OpenAI-specific ephemeral data
+    const sanitizedParts = filteredParts.map((part) => {
+      let sanitizedPart = part;
+
+      // Strip providerMetadata.openai.itemId and reasoningEncryptedContent
+      if (
+        "providerMetadata" in sanitizedPart &&
+        sanitizedPart.providerMetadata &&
+        typeof sanitizedPart.providerMetadata === "object" &&
+        "openai" in sanitizedPart.providerMetadata
+      ) {
+        sanitizedPart = this._stripOpenAIMetadata(
+          sanitizedPart,
+          "providerMetadata"
+        );
       }
 
       // Also check callProviderMetadata for tool parts
       if (
-        "callProviderMetadata" in part &&
-        part.callProviderMetadata &&
-        typeof part.callProviderMetadata === "object" &&
-        "openai" in part.callProviderMetadata
+        "callProviderMetadata" in sanitizedPart &&
+        sanitizedPart.callProviderMetadata &&
+        typeof sanitizedPart.callProviderMetadata === "object" &&
+        "openai" in sanitizedPart.callProviderMetadata
       ) {
-        const openaiMeta = part.callProviderMetadata.openai;
-        if (
-          openaiMeta &&
-          typeof openaiMeta === "object" &&
-          "itemId" in openaiMeta
-        ) {
-          const { itemId: _itemId, ...restOpenai } = openaiMeta as {
-            itemId?: string;
-            [key: string]: unknown;
-          };
-
-          const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
-          const { openai: _openai, ...restCallProviderMetadata } =
-            part.callProviderMetadata as {
-              openai?: unknown;
-              [key: string]: unknown;
-            };
-
-          let newCallProviderMetadata: ProviderMetadata | undefined;
-          if (hasOtherOpenaiFields) {
-            newCallProviderMetadata = {
-              ...restCallProviderMetadata,
-              openai: restOpenai
-            } as ProviderMetadata;
-          } else if (Object.keys(restCallProviderMetadata).length > 0) {
-            newCallProviderMetadata =
-              restCallProviderMetadata as ProviderMetadata;
-          }
-
-          const { callProviderMetadata: _cpm, ...restPart } =
-            part as typeof part & {
-              callProviderMetadata?: ProviderMetadata;
-            };
-
-          if (newCallProviderMetadata) {
-            return {
-              ...restPart,
-              callProviderMetadata: newCallProviderMetadata
-            };
-          }
-          return restPart;
-        }
+        sanitizedPart = this._stripOpenAIMetadata(
+          sanitizedPart,
+          "callProviderMetadata"
+        );
       }
 
-      return part;
+      return sanitizedPart;
     }) as ChatMessage["parts"];
 
     return { ...message, parts: sanitizedParts };
+  }
+
+  /**
+   * Helper to strip OpenAI-specific ephemeral fields from a metadata object.
+   * Removes itemId and reasoningEncryptedContent while preserving other fields.
+   */
+  private _stripOpenAIMetadata<T extends ChatMessage["parts"][number]>(
+    part: T,
+    metadataKey: "providerMetadata" | "callProviderMetadata"
+  ): T {
+    const metadata = (part as Record<string, unknown>)[metadataKey] as {
+      openai?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+
+    if (!metadata?.openai) return part;
+
+    const openaiMeta = metadata.openai;
+
+    // Remove ephemeral fields: itemId and reasoningEncryptedContent
+    const {
+      itemId: _itemId,
+      reasoningEncryptedContent: _rec,
+      ...restOpenai
+    } = openaiMeta;
+
+    // Determine what to keep
+    const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
+    const { openai: _openai, ...restMetadata } = metadata;
+
+    let newMetadata: ProviderMetadata | undefined;
+    if (hasOtherOpenaiFields) {
+      newMetadata = {
+        ...restMetadata,
+        openai: restOpenai
+      } as ProviderMetadata;
+    } else if (Object.keys(restMetadata).length > 0) {
+      newMetadata = restMetadata as ProviderMetadata;
+    }
+
+    // Create new part without the old metadata
+    const { [metadataKey]: _oldMeta, ...restPart } = part as Record<
+      string,
+      unknown
+    >;
+
+    if (newMetadata) {
+      return { ...restPart, [metadataKey]: newMetadata } as T;
+    }
+    return restPart as T;
   }
 
   /**
@@ -1044,7 +1088,7 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     }
 
     // Create the updated message and strip OpenAI item IDs
-    const updatedMessage: ChatMessage = this._stripOpenAIItemIds({
+    const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence({
       ...message,
       parts: updatedParts
     });
@@ -1076,8 +1120,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   private async _reply(
     id: string,
     response: Response,
-    excludeBroadcastIds: string[] = []
+    excludeBroadcastIds: string[] = [],
+    options: { continuation?: boolean } = {}
   ) {
+    const { continuation = false } = options;
+
     return this._tryCatchChat(async () => {
       if (!response.body) {
         // Send empty response if no body
@@ -1085,7 +1132,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           body: "",
           done: true,
           id,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          ...(continuation && { continuation: true })
         });
         return;
       }
@@ -1293,7 +1341,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
               body: "",
               done: true,
               id,
-              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+              ...(continuation && { continuation: true })
             });
             break;
           }
@@ -1700,7 +1749,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                     body: chunkBody,
                     done: false,
                     id,
-                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                    ...(continuation && { continuation: true })
                   });
                 } catch (_error) {
                   // Skip malformed JSON lines silently
@@ -1723,7 +1773,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 body: chunkBody,
                 done: false,
                 id,
-                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                ...(continuation && { continuation: true })
               });
             }
           }
@@ -1738,7 +1789,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             done: true,
             error: true,
             id,
-            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            ...(continuation && { continuation: true })
           });
         }
         throw error;
@@ -1747,10 +1799,37 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }
 
       if (message.parts.length > 0) {
-        await this.persistMessages(
-          [...this.messages, message],
-          excludeBroadcastIds
-        );
+        if (continuation) {
+          // Find the last assistant message and append parts to it
+          let lastAssistantIdx = -1;
+          for (let i = this.messages.length - 1; i >= 0; i--) {
+            if (this.messages[i].role === "assistant") {
+              lastAssistantIdx = i;
+              break;
+            }
+          }
+          if (lastAssistantIdx >= 0) {
+            const lastAssistant = this.messages[lastAssistantIdx];
+            const mergedMessage: ChatMessage = {
+              ...lastAssistant,
+              parts: [...lastAssistant.parts, ...message.parts]
+            };
+            const updatedMessages = [...this.messages];
+            updatedMessages[lastAssistantIdx] = mergedMessage;
+            await this.persistMessages(updatedMessages, excludeBroadcastIds);
+          } else {
+            // No assistant message to append to, create new one
+            await this.persistMessages(
+              [...this.messages, message],
+              excludeBroadcastIds
+            );
+          }
+        } else {
+          await this.persistMessages(
+            [...this.messages, message],
+            excludeBroadcastIds
+          );
+        }
       }
     });
   }

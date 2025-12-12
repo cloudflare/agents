@@ -41,7 +41,9 @@ export default function Chat() {
     agent,
     experimental_automaticToolResolution: true,
     toolsRequiringConfirmation,
-    tools: clientTools satisfies Record<string, AITool>
+    tools: clientTools satisfies Record<string, AITool>,
+    // Enable server auto-continuation after tool results for seamless UX
+    autoContinueAfterToolResult: true
   });
 
   const [input, setInput] = useState("");
@@ -229,7 +231,7 @@ export default function Chat() {
                                   // we execute it and set the result, otherwise we
                                   // set the approval and let the server handle it
                                   const output = tool.execute
-                                    ? await tool.execute(input)
+                                    ? await tool.execute(part.input)
                                     : APPROVAL.YES;
                                   addToolResult({
                                     tool: toolName,

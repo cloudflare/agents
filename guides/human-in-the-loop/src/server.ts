@@ -27,16 +27,43 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
     const lastMessage = this.messages[this.messages.length - 1];
 
     if (hasToolConfirmation(lastMessage)) {
-      // Process tool confirmations using UI stream
-      const stream = createUIMessageStream({
-        execute: async ({ writer }) => {
-          await processToolCalls(
-            { writer, messages: this.messages, tools },
-            { getWeatherInformation }
-          );
+      // Process tool confirmations - execute the tool and update messages
+      const updatedMessages = await processToolCalls(
+        { messages: this.messages, tools },
+        { getWeatherInformation }
+      );
+
+      // Update the agent's messages with the actual tool results
+      // This replaces "Yes, confirmed." with the actual tool output
+      this.messages = updatedMessages;
+      await this.persistMessages(this.messages);
+
+      // Now continue with streamText so the LLM can respond to the tool result
+      const result = streamText({
+        messages: convertToModelMessages(this.messages),
+        model: openai("gpt-4o"),
+        onFinish,
+        tools,
+        stopWhen: stepCountIs(5)
+      });
+
+      return result.toUIMessageStreamResponse({
+        messageMetadata: ({ part }) => {
+          if (part.type === "start") {
+            return {
+              model: "gpt-4o",
+              createdAt: Date.now(),
+              messageCount: this.messages.length
+            };
+          }
+          if (part.type === "finish") {
+            return {
+              responseTime: Date.now() - startTime,
+              totalTokens: part.totalUsage?.totalTokens
+            };
+          }
         }
       });
-      return createUIMessageStreamResponse({ stream });
     }
 
     // Use streamText directly and return with metadata

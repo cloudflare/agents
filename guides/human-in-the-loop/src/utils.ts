@@ -1,5 +1,5 @@
 import type { UIMessage } from "@ai-sdk/react";
-import type { UIMessageStreamWriter, ToolSet } from "ai";
+import type { ToolSet } from "ai";
 import type { z } from "zod";
 
 // Helper type to infer tool arguments from Zod schema
@@ -76,12 +76,10 @@ export async function processToolCalls<
   }
 >(
   {
-    writer,
     messages,
     tools: _tools
   }: {
     tools: Tools; // used for type inference
-    writer: UIMessageStreamWriter;
     messages: UIMessage[];
   },
   executeFunctions: {
@@ -107,7 +105,7 @@ export async function processToolCalls<
           return part;
         }
 
-        let result: string;
+        let result: string | undefined;
 
         if (output === APPROVAL.YES) {
           const toolInstance =
@@ -120,29 +118,6 @@ export async function processToolCalls<
             result = await (
               toolInstance as (args: typeof toolInput) => Promise<string>
             )(toolInput);
-
-            // Stream the result directly using writer
-            const messageId = crypto.randomUUID();
-            const textStream = new ReadableStream({
-              start(controller) {
-                controller.enqueue({
-                  type: "text-start",
-                  id: messageId
-                });
-                controller.enqueue({
-                  type: "text-delta",
-                  id: messageId,
-                  delta: result
-                });
-                controller.enqueue({
-                  type: "text-end",
-                  id: messageId
-                });
-                controller.close();
-              }
-            });
-
-            writer.merge(textStream);
           } else {
             result = "Error: No execute function found on tool";
           }
@@ -150,7 +125,14 @@ export async function processToolCalls<
           result = "Error: User denied access to tool execution";
         }
 
-        return part; // Return the original part
+        // Return updated part with actual tool result (not the confirmation)
+        if (result !== undefined) {
+          return {
+            ...part,
+            output: result
+          };
+        }
+        return part;
       }
       return part; // Return unprocessed parts
     })

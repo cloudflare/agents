@@ -51,6 +51,8 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       done: boolean;
       /** Whether this response contains an error */
       error?: boolean;
+      /** Whether this is a continuation (append to last assistant message) */
+      continuation?: boolean;
     }
   | {
       /** Indicates the server is resuming an active stream */
@@ -120,4 +122,6 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       toolName: string;
       /** The output from the tool execution */
       output: unknown;
+      /** Whether server should auto-continue the conversation after applying result */
+      autoContinue?: boolean;
     };

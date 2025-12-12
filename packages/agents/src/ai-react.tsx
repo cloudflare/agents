@@ -186,8 +186,24 @@ type UseAgentChatOptions<
    */
   toolsRequiringConfirmation?: string[];
   /**
+   * When true, the server automatically continues the conversation after
+   * receiving client-side tool results, similar to how server-executed tools
+   * work with maxSteps in streamText. The continuation is merged into the
+   * same assistant message.
+   *
+   * When false (default), the client calls sendMessage() after tool results
+   * to continue the conversation, which creates a new assistant message.
+   *
+   * @default false
+   */
+  autoContinueAfterToolResult?: boolean;
+  /**
    * When true (default), automatically sends the next message only after
    * all pending confirmation-required tool calls have been resolved.
+   * When false, sends immediately after each tool result.
+   *
+   * Only applies when `autoContinueAfterToolResult` is false.
+   *
    * @default true
    */
   autoSendAfterAllConfirmationsResolved?: boolean;
@@ -248,7 +264,8 @@ export function useAgentChat<
     experimental_automaticToolResolution,
     tools,
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
-    autoSendAfterAllConfirmationsResolved = true,
+    autoContinueAfterToolResult = false, // Opt-in to server auto-continuation
+    autoSendAfterAllConfirmationsResolved = true, // Legacy option for client-side batching
     resume = true, // Enable stream resumption by default
     prepareSendMessagesRequest,
     ...rest
@@ -574,6 +591,10 @@ export function useAgentChat<
     Map<string, unknown>
   >(new Map());
 
+  // Ref to access current messages in callbacks without stale closures
+  const messagesRef = useRef(useChatHelpers.messages);
+  messagesRef.current = useChatHelpers.messages;
+
   // Calculate pending confirmations for the latest assistant message
   const lastMessage =
     useChatHelpers.messages[useChatHelpers.messages.length - 1];
@@ -832,15 +853,33 @@ export function useAgentChat<
           // (handled by the aiFetch listener instead)
           if (localRequestIdsRef.current.has(data.id)) return;
 
+          // For continuations, find the last assistant message ID to append to
+          const isContinuation = data.continuation === true;
+
           // Initialize stream state for broadcasts from other tabs
           if (
             !activeStreamRef.current ||
             activeStreamRef.current.id !== data.id
           ) {
+            let messageId = nanoid();
+            let existingParts: ChatMessage["parts"] = [];
+
+            // For continuations, use the last assistant message's ID and parts
+            if (isContinuation) {
+              const currentMessages = messagesRef.current;
+              for (let i = currentMessages.length - 1; i >= 0; i--) {
+                if (currentMessages[i].role === "assistant") {
+                  messageId = currentMessages[i].id;
+                  existingParts = [...currentMessages[i].parts];
+                  break;
+                }
+              }
+            }
+
             activeStreamRef.current = {
               id: data.id,
-              messageId: nanoid(),
-              parts: []
+              messageId,
+              parts: existingParts
             };
           }
 
@@ -1026,7 +1065,7 @@ export function useAgentChat<
     };
   }, [agent, useChatHelpers.setMessages, resume]);
 
-  // Wrapper that sends tool result to server and continues conversation when appropriate.
+  // Wrapper that sends tool result to server and optionally continues conversation.
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
     async (args) => {
       const { toolCallId } = args;
@@ -1034,12 +1073,14 @@ export function useAgentChat<
       const output = "output" in args ? args.output : undefined;
 
       // Send tool result to server (server is source of truth)
+      // Include flag to tell server whether to auto-continue
       agentRef.current.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_RESULT,
           toolCallId,
           toolName,
-          output
+          output,
+          autoContinue: autoContinueAfterToolResult
         })
       );
 
@@ -1049,30 +1090,32 @@ export function useAgentChat<
       // We don't await this since clientToolResults provides immediate UI feedback
       useChatHelpers.addToolResult(args);
 
-      // For tools requiring confirmation (human-in-the-loop), we need to
-      // call sendMessage() to continue the conversation after approval.
-      // The server needs to process the tool result and generate a response.
-      if (!autoSendAfterAllConfirmationsResolved) {
-        // always send immediately
-        useChatHelpers.sendMessage();
-        return;
-      }
+      // If server auto-continuation is disabled, client needs to trigger continuation
+      if (!autoContinueAfterToolResult) {
+        // Use legacy behavior: batch confirmations or send immediately
+        if (!autoSendAfterAllConfirmationsResolved) {
+          // Always send immediately
+          useChatHelpers.sendMessage();
+          return;
+        }
 
-      // wait for all confirmations
-      const pending = pendingConfirmationsRef.current?.toolCallIds;
-      if (!pending) {
-        useChatHelpers.sendMessage();
-        return;
-      }
+        // Wait for all confirmations before sending
+        const pending = pendingConfirmationsRef.current?.toolCallIds;
+        if (!pending) {
+          useChatHelpers.sendMessage();
+          return;
+        }
 
-      const wasLast = pending.size === 1 && pending.has(toolCallId);
-      if (pending.has(toolCallId)) {
-        pending.delete(toolCallId);
-      }
+        const wasLast = pending.size === 1 && pending.has(toolCallId);
+        if (pending.has(toolCallId)) {
+          pending.delete(toolCallId);
+        }
 
-      if (wasLast || pending.size === 0) {
-        useChatHelpers.sendMessage();
+        if (wasLast || pending.size === 0) {
+          useChatHelpers.sendMessage();
+        }
       }
+      // If autoContinueAfterToolResult is true, server handles continuation
     };
 
   // Fix for issue #728: Merge client-side tool results with messages
