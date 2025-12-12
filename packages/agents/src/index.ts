@@ -30,6 +30,9 @@ import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
 
+// Export tool confirmation constants for server-side human-in-the-loop
+export { TOOL_CONFIRMATION, type ToolConfirmationSignal } from "./ai-types";
+
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
 /**

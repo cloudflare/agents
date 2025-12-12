@@ -1,76 +1,85 @@
 import { tool } from "ai";
 import { z } from "zod";
-import type { AITool } from "agents/ai-react";
+import type { Tool } from "agents/react";
 
-// Server-side tool that requires confirmation
-const getWeatherInformationTool = tool({
-  description:
-    "Get the current weather information for a specific city. Always use this tool when the user asks about weather.",
-  inputSchema: z.object({
-    city: z.string().describe("The name of the city to get weather for")
+// Tool implementations
+
+async function getLocalTime(input: { location: string }): Promise<string> {
+  console.log(`[Tool] Getting local time for ${input.location}`);
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  return `The current time in ${input.location} is 10:00 AM`;
+}
+
+export async function getWeatherInformation(input: {
+  city: string;
+}): Promise<string> {
+  console.log(`[Tool] Getting weather for ${input.city}`);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  const conditions = ["sunny", "cloudy", "rainy", "snowy"];
+  const condition = conditions[Math.floor(Math.random() * conditions.length)];
+  return `The weather in ${input.city} is ${condition}, 72°F`;
+}
+
+async function getLocalNews(input: { location: string }): Promise<string> {
+  console.log(`[Tool] Getting news for ${input.location}`);
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  return `Breaking: ${input.location} kittens found drinking tea this weekend!`;
+}
+
+// Schemas
+
+const locationSchema = z.object({
+  location: z.string().describe("The location to query")
+});
+
+const citySchema = z.object({
+  city: z.string().describe("The city name")
+});
+
+// Server tools (AI SDK format for AIChatAgent)
+
+export const serverTools = {
+  getLocalTime: tool({
+    description: "Get the current local time for a location",
+    inputSchema: locationSchema
+  }),
+
+  getWeatherInformation: tool({
+    description:
+      "Get current weather for a city. Use this when users ask about weather.",
+    inputSchema: citySchema
+  }),
+
+  getLocalNews: tool({
+    description: "Get local news headlines for a location",
+    inputSchema: locationSchema,
+    execute: getLocalNews
   })
-  // no execute function, we want human in the loop
-});
-
-// Client-side tool that requires confirmation
-const getLocalTimeTool = tool({
-  description: "get the local time for a specified location",
-  inputSchema: z.object({ location: z.string() }),
-  execute: async ({ location }) => {
-    console.log(`Getting local time for ${location}`);
-    await new Promise((res) => setTimeout(res, 2000));
-    return "10am";
-  }
-});
-
-// Server-side tool that does NOT require confirmation
-const getLocalNewsTool = tool({
-  description: "get local news for a specified location",
-  inputSchema: z.object({ location: z.string() }),
-  execute: async ({ location }) => {
-    console.log(`Getting local news for ${location}`);
-    await new Promise((res) => setTimeout(res, 2000));
-    return `${location} kittens found drinking tea this last weekend`;
-  }
-});
-
-// Export AI SDK tools for server-side use
-export const tools = {
-  getLocalTime: {
-    description: getLocalTimeTool.description,
-    inputSchema: getLocalTimeTool.inputSchema
-  },
-  getWeatherInformation: getWeatherInformationTool,
-  getLocalNews: getLocalNewsTool
 };
 
-// Export AITool format for client-side use
-// AITool uses JSON Schema (not Zod) because it needs to be serialized over the wire.
-// Only tools with `execute` need `parameters` - they get extracted and sent to the server.
-// Tools without `execute` are server-side only and just need description for display.
-export const clientTools: Record<string, AITool> = {
+export const tools = serverTools;
+
+// Client tools (useChat format)
+// execute + confirm determines behavior:
+// - execute yes, confirm false: auto-runs on client
+// - execute yes, confirm true: user approves, runs on client
+// - execute no, confirm true: user approves, runs on server
+// - execute no, confirm false: auto-runs on server
+
+export const clientTools: Record<string, Tool> = {
   getLocalTime: {
-    description: "get the local time for a specified location",
-    parameters: {
-      type: "object",
-      properties: {
-        location: { type: "string" }
-      },
-      required: ["location"]
-    },
-    execute: async (input) => {
-      const { location } = input as { location: string };
-      console.log(`Getting local time for ${location}`);
-      await new Promise((res) => setTimeout(res, 2000));
-      return "10am";
-    }
+    description: "Get the current local time for a location",
+    execute: getLocalTime,
+    confirm: true
   },
-  // Server-side tools: no execute, no parameters needed (schema lives on server)
+
   getWeatherInformation: {
     description:
-      "Get the current weather information for a specific city. Always use this tool when the user asks about weather."
+      "Get current weather for a city. Use this when users ask about weather."
   },
+
   getLocalNews: {
-    description: "get local news for a specified location"
+    description: "Get local news headlines for a location",
+    execute: getLocalNews
   }
 };

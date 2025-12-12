@@ -1,15 +1,10 @@
 import type { UIMessage } from "@ai-sdk/react";
 import type { ToolSet } from "ai";
 import type { z } from "zod";
+import { TOOL_CONFIRMATION } from "agents";
+import { getToolsRequiringConfirmation } from "agents/react";
+import { clientTools } from "./tools";
 
-// Helper type to infer tool arguments from Zod schema
-type InferToolArgs<T> = T extends { inputSchema: infer S }
-  ? S extends z.ZodType
-    ? z.infer<S>
-    : never
-  : never;
-
-// Type guard to check if part has required properties
 function isToolConfirmationPart(part: unknown): part is {
   type: string;
   output: string;
@@ -25,121 +20,90 @@ function isToolConfirmationPart(part: unknown): part is {
   );
 }
 
-export const APPROVAL = {
-  NO: "No, denied.",
-  YES: "Yes, confirmed."
-} as const;
-
-/**
- * Tools that require Human-In-The-Loop
- */
-export const toolsRequiringConfirmation = [
-  "getLocalTime",
-  "getWeatherInformation"
-];
-
-/**
- * Check if a message contains tool confirmations
- */
 export function hasToolConfirmation(message: UIMessage): boolean {
-  return (
-    message?.parts?.some(
-      (part) =>
-        part.type?.startsWith("tool-") &&
-        toolsRequiringConfirmation.includes(part.type?.slice("tool-".length)) &&
-        "output" in part
-    ) || false
-  );
+  if (!message?.parts) return false;
+
+  const confirmationTools = getToolsRequiringConfirmation(clientTools);
+
+  return message.parts.some((part) => {
+    if (!part.type?.startsWith("tool-")) return false;
+    const toolName = part.type.slice("tool-".length);
+    if (!confirmationTools.includes(toolName)) return false;
+    return "output" in part;
+  });
 }
 
-/**
- * Weather tool implementation
- */
-export async function getWeatherInformation(args: unknown): Promise<string> {
-  const { city } = args as { city: string };
-  const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-  return `The weather in ${city} is ${
-    conditions[Math.floor(Math.random() * conditions.length)]
-  }.`;
-}
+// biome-ignore lint/suspicious/noExplicitAny: Flexible typing for user-defined execute functions
+type ExecuteFn = (args: any) => Promise<string>;
 
-/**
- * Processes tool invocations where human input is required, executing tools when authorized.
- * using UIMessageStreamWriter
- */
-export async function processToolCalls<
-  Tools extends ToolSet,
-  ExecutableTools extends {
-    [Tool in keyof Tools as Tools[Tool] extends { execute: Function }
-      ? never
-      : Tool]: Tools[Tool];
-  }
->(
+export async function processToolCalls(
   {
     messages,
-    tools: _tools
+    tools
   }: {
-    tools: Tools; // used for type inference
+    tools: ToolSet;
     messages: UIMessage[];
   },
-  executeFunctions: {
-    [K in keyof ExecutableTools as ExecutableTools[K] extends {
-      inputSchema: z.ZodType;
-    }
-      ? K
-      : never]?: (args: InferToolArgs<ExecutableTools[K]>) => Promise<string>;
-  }
+  executeFunctions: Record<string, ExecuteFn>
 ): Promise<UIMessage[]> {
   const lastMessage = messages[messages.length - 1];
-  const parts = lastMessage.parts;
-  if (!parts) return messages;
+  if (!lastMessage.parts) return messages;
 
   const processedParts = await Promise.all(
-    parts.map(async (part) => {
-      // Look for tool parts with output (confirmations) - v5 format
-      if (isToolConfirmationPart(part) && part.type.startsWith("tool-")) {
-        const toolName = part.type.replace("tool-", "");
-        const output = part.output;
-        // Only process if we have an execute function for this tool
-        if (!(toolName in executeFunctions)) {
-          return part;
-        }
-
-        let result: string | undefined;
-
-        if (output === APPROVAL.YES) {
-          const toolInstance =
-            executeFunctions[toolName as keyof typeof executeFunctions];
-          if (toolInstance) {
-            // Pass the input data - the tool's Zod schema will validate at runtime
-            const toolInput = part.input ?? {};
-            // We need to trust that the runtime data matches the expected type
-            // The Zod schema in the tool will validate this
-            result = await (
-              toolInstance as (args: typeof toolInput) => Promise<string>
-            )(toolInput);
-          } else {
-            result = "Error: No execute function found on tool";
-          }
-        } else if (output === APPROVAL.NO) {
-          result = "Error: User denied access to tool execution";
-        }
-
-        // Return updated part with actual tool result (not the confirmation)
-        if (result !== undefined) {
-          return {
-            ...part,
-            output: result
-          };
-        }
+    lastMessage.parts.map(async (part) => {
+      if (!isToolConfirmationPart(part) || !part.type.startsWith("tool-")) {
         return part;
       }
-      return part; // Return unprocessed parts
+
+      const toolName = part.type.replace("tool-", "");
+      const userResponse = part.output;
+
+      if (!(toolName in executeFunctions)) {
+        return part;
+      }
+
+      let result: string;
+
+      if (userResponse === TOOL_CONFIRMATION.APPROVED) {
+        const executeFunc = executeFunctions[toolName];
+        const toolDef = tools[toolName];
+
+        if (!executeFunc) {
+          result = "Error: No execute function found for tool";
+        } else {
+          try {
+            const toolInput = part.input ?? {};
+
+            // Validate input against schema if available
+            if (toolDef && "inputSchema" in toolDef && toolDef.inputSchema) {
+              const schema = toolDef.inputSchema as z.ZodType;
+              const parsed = schema.safeParse(toolInput);
+              if (!parsed.success) {
+                result = `Error: Invalid input - ${parsed.error.message}`;
+              } else {
+                result = await executeFunc(parsed.data);
+              }
+            } else {
+              result = await (
+                executeFunc as (args: unknown) => Promise<string>
+              )(toolInput);
+            }
+          } catch (err) {
+            result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        }
+      } else if (userResponse === TOOL_CONFIRMATION.DENIED) {
+        result = "Tool execution denied by user";
+      } else {
+        // Custom denial reason (any non-standard response)
+        result = `Tool execution denied: ${userResponse}`;
+      }
+
+      return { ...part, output: result };
     })
   );
 
-  return [
-    ...messages.slice(0, -1),
-    { ...lastMessage, parts: processedParts.filter(Boolean) }
-  ];
+  return [...messages.slice(0, -1), { ...lastMessage, parts: processedParts }];
 }
+
+export { getWeatherInformation } from "./tools";
