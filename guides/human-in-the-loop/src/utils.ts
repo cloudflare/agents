@@ -1,16 +1,8 @@
-/**
- * Server-side utilities for processing tool confirmations.
- */
-
 import type { UIMessage } from "@ai-sdk/react";
 import type { ToolSet } from "ai";
 import type { z } from "zod";
+import { TOOL_CONFIRMATION } from "agents";
 import { clientTools } from "./tools";
-
-const TOOL_CONFIRMATION = {
-  APPROVED: "Yes, confirmed.",
-  DENIED: "No, denied."
-} as const;
 
 type InferToolArgs<T> = T extends { inputSchema: infer S }
   ? S extends z.ZodType

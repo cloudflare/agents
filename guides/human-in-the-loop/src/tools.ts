@@ -83,11 +83,3 @@ export const clientTools: Record<string, Tool> = {
     execute: getLocalNews
   }
 };
-
-// Derived from clientTools config
-export const toolsRequiringConfirmation = Object.entries(clientTools)
-  .filter(([_, tool]) => {
-    if (tool.confirm !== undefined) return tool.confirm;
-    return !tool.execute;
-  })
-  .map(([name]) => name);

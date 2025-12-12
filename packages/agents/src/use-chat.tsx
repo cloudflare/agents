@@ -1,9 +1,3 @@
-/**
- * useChat - Simplified React hook for AI chat with human-in-the-loop support.
- * Combines useAgent + useAgentChat with declarative tool configuration.
- * @module
- */
-
 import type { UIMessage } from "ai";
 import { getToolName, isToolUIPart } from "ai";
 import type { PartySocket } from "partysocket";
@@ -14,19 +8,6 @@ import { TOOL_CONFIRMATION, type ToolConfirmationSignal } from "./ai-types";
 
 export { TOOL_CONFIRMATION, type ToolConfirmationSignal };
 
-/**
- * Tool definition with declarative behavior.
- *
- * | execute | confirm | Behavior                    |
- * |---------|---------|---------------------------- |
- * | yes     | false   | Auto-runs on client         |
- * | yes     | true    | User approves, runs client  |
- * | no      | true    | User approves, runs server  |
- * | no      | false   | Auto-runs on server         |
- *
- * Defaults: client tools (has execute) don't require confirm,
- * server tools (no execute) require confirm.
- */
 // biome-ignore lint/suspicious/noExplicitAny: Flexible typing for user-defined tool functions
 export type Tool<TInput = any, TOutput = any> = {
   description?: string;
@@ -124,20 +105,6 @@ function extractPendingToolCalls(
   return pending;
 }
 
-/**
- * React hook for AI chat with human-in-the-loop tool confirmation.
- *
- * @example
- * ```tsx
- * const { messages, sendMessage, pendingToolCalls, approve, deny } = useChat({
- *   agent: "my-agent",
- *   tools: {
- *     search: { execute: searchFn },
- *     deleteItem: { confirm: true }
- *   }
- * });
- * ```
- */
 export function useChat(options: UseChatOptions): UseChatHelpers {
   const {
     agent: agentName,
@@ -201,10 +168,7 @@ export function useChat(options: UseChatOptions): UseChatHelpers {
         try {
           result = await tool.execute(input);
         } catch (err) {
-          result = {
-            error: true,
-            message: err instanceof Error ? err.message : String(err)
-          };
+          result = `Error: ${err instanceof Error ? err.message : String(err)}`;
         }
       } else {
         result = TOOL_CONFIRMATION.APPROVED;
@@ -217,7 +181,7 @@ export function useChat(options: UseChatOptions): UseChatHelpers {
         onError?.(err instanceof Error ? err : new Error(String(err)));
       }
     },
-    [chat.addToolResult, onError]
+    [chat, onError]
   );
 
   const deny = useCallback(
@@ -238,12 +202,12 @@ export function useChat(options: UseChatOptions): UseChatHelpers {
         onError?.(err instanceof Error ? err : new Error(String(err)));
       }
     },
-    [chat.addToolResult, onError]
+    [chat, onError]
   );
 
   const clearHistory = useCallback(() => {
     chat.clearHistory();
-  }, [chat.clearHistory]);
+  }, [chat]);
 
   return {
     messages: chat.messages,
