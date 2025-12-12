@@ -1,133 +1,55 @@
 import type { UIMessage } from "ai";
 
-// =============================================================================
-// TOOL CONFIRMATION PROTOCOL
-// =============================================================================
-
 /**
  * Protocol constants for human-in-the-loop tool confirmation.
- *
- * These exact strings are sent between client and server to communicate
- * user approval or denial of tool execution. Both client (useChat) and
- * server (processToolCalls) must use these same values.
- *
- * @example Client-side (useChat hook)
- * ```ts
- * // When user clicks "Approve"
- * approve(toolCallId); // Sends TOOL_CONFIRMATION.APPROVED
- *
- * // When user clicks "Deny"
- * deny(toolCallId); // Sends TOOL_CONFIRMATION.DENIED
- * ```
- *
- * @example Server-side (in your Agent)
- * ```ts
- * import { TOOL_CONFIRMATION } from "agents";
- *
- * if (toolOutput === TOOL_CONFIRMATION.APPROVED) {
- *   // User approved - execute the tool
- *   const result = await executeTool(toolName, toolInput);
- * } else if (toolOutput === TOOL_CONFIRMATION.DENIED) {
- *   // User denied - skip execution
- * }
- * ```
+ * These strings are sent between client and server to signal user approval/denial.
  */
 export const TOOL_CONFIRMATION = {
-  /** Signal sent when user approves tool execution */
   APPROVED: "Yes, confirmed.",
-  /** Signal sent when user denies tool execution */
   DENIED: "No, denied."
 } as const;
 
-/** Type for tool confirmation signal values */
 export type ToolConfirmationSignal =
   (typeof TOOL_CONFIRMATION)[keyof typeof TOOL_CONFIRMATION];
 
-// =============================================================================
-// MESSAGE TYPES
-// =============================================================================
-
-/**
- * Enum for message types to improve type safety and maintainability
- */
+/** Message types for client-server communication */
 export enum MessageType {
   CF_AGENT_CHAT_MESSAGES = "cf_agent_chat_messages",
   CF_AGENT_USE_CHAT_REQUEST = "cf_agent_use_chat_request",
   CF_AGENT_USE_CHAT_RESPONSE = "cf_agent_use_chat_response",
   CF_AGENT_CHAT_CLEAR = "cf_agent_chat_clear",
   CF_AGENT_CHAT_REQUEST_CANCEL = "cf_agent_chat_request_cancel",
-
-  /** Sent by server when client connects and there's an active stream to resume */
   CF_AGENT_STREAM_RESUMING = "cf_agent_stream_resuming",
-  /** Sent by client to acknowledge stream resuming notification and request chunks */
   CF_AGENT_STREAM_RESUME_ACK = "cf_agent_stream_resume_ack",
-
   CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
   CF_MCP_AGENT_EVENT = "cf_mcp_agent_event",
   CF_AGENT_STATE = "cf_agent_state",
   RPC = "rpc",
-
-  /** Client sends tool result to server (for client-side tools) */
   CF_AGENT_TOOL_RESULT = "cf_agent_tool_result",
-  /** Server notifies client that a message was updated (e.g., tool result applied) */
   CF_AGENT_MESSAGE_UPDATED = "cf_agent_message_updated"
 }
 
-/**
- * Types of messages sent from the Agent to clients
- */
+/** Messages sent from Agent to clients */
 export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
+  | { type: MessageType.CF_AGENT_CHAT_CLEAR }
+  | { type: MessageType.CF_AGENT_CHAT_MESSAGES; messages: ChatMessage[] }
   | {
-      /** Indicates this message is a command to clear chat history */
-      type: MessageType.CF_AGENT_CHAT_CLEAR;
-    }
-  | {
-      /** Indicates this message contains updated chat messages */
-      type: MessageType.CF_AGENT_CHAT_MESSAGES;
-      /** Array of chat messages */
-      messages: ChatMessage[];
-    }
-  | {
-      /** Indicates this message is a response to a chat request */
       type: MessageType.CF_AGENT_USE_CHAT_RESPONSE;
-      /** Unique ID of the request this response corresponds to */
       id: string;
-      /** Content body of the response */
       body: string;
-      /** Whether this is the final chunk of the response */
       done: boolean;
-      /** Whether this response contains an error */
       error?: boolean;
-      /** Whether this is a continuation (append to last assistant message) */
       continuation?: boolean;
     }
-  | {
-      /** Indicates the server is resuming an active stream */
-      type: MessageType.CF_AGENT_STREAM_RESUMING;
-      /** The request ID of the stream being resumed */
-      id: string;
-    }
-  | {
-      /** Server notifies client that a message was updated (e.g., tool result applied) */
-      type: MessageType.CF_AGENT_MESSAGE_UPDATED;
-      /** The updated message */
-      message: ChatMessage;
-    };
+  | { type: MessageType.CF_AGENT_STREAM_RESUMING; id: string }
+  | { type: MessageType.CF_AGENT_MESSAGE_UPDATED; message: ChatMessage };
 
-/**
- * Types of messages sent from clients to the Agent
- */
+/** Messages sent from clients to Agent */
 export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
+  | { type: MessageType.CF_AGENT_CHAT_CLEAR }
   | {
-      /** Indicates this message is a command to clear chat history */
-      type: MessageType.CF_AGENT_CHAT_CLEAR;
-    }
-  | {
-      /** Indicates this message is a request to the chat API */
       type: MessageType.CF_AGENT_USE_CHAT_REQUEST;
-      /** Unique ID for this request */
       id: string;
-      /** Request initialization options */
       init: Pick<
         RequestInit,
         | "method"
@@ -143,32 +65,13 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
         | "window"
       >;
     }
+  | { type: MessageType.CF_AGENT_CHAT_MESSAGES; messages: ChatMessage[] }
+  | { type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL; id: string }
+  | { type: MessageType.CF_AGENT_STREAM_RESUME_ACK; id: string }
   | {
-      /** Indicates this message contains updated chat messages */
-      type: MessageType.CF_AGENT_CHAT_MESSAGES;
-      /** Array of chat messages */
-      messages: ChatMessage[];
-    }
-  | {
-      /** Indicates the user wants to stop generation of this message */
-      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL;
-      id: string;
-    }
-  | {
-      /** Client acknowledges stream resuming notification and is ready to receive chunks */
-      type: MessageType.CF_AGENT_STREAM_RESUME_ACK;
-      /** The request ID of the stream being resumed */
-      id: string;
-    }
-  | {
-      /** Client sends tool result to server (for client-side tools) */
       type: MessageType.CF_AGENT_TOOL_RESULT;
-      /** The tool call ID this result is for */
       toolCallId: string;
-      /** The name of the tool */
       toolName: string;
-      /** The output from the tool execution */
       output: unknown;
-      /** Whether server should auto-continue the conversation after applying result */
       autoContinue?: boolean;
     };
