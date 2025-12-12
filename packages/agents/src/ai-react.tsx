@@ -701,9 +701,8 @@ export function useAgentChat<
               });
             }
 
-            if (pendingConfirmationsRef.current.toolCallIds.size === 0) {
-              useChatHelpers.sendMessage();
-            }
+            // Note: We don't call sendMessage() here anymore.
+            // The server will continue the conversation after applying tool results.
           } finally {
             isResolvingToolsRef.current = false;
           }
@@ -714,7 +713,6 @@ export function useAgentChat<
     useChatHelpers.messages,
     experimental_automaticToolResolution,
     useChatHelpers.addToolResult,
-    useChatHelpers.sendMessage,
     toolsRequiringConfirmation
   ]);
 
@@ -763,12 +761,46 @@ export function useAgentChat<
           // Update the specific message in local state
           useChatHelpers.setMessages((prevMessages: ChatMessage[]) => {
             const updatedMessage = data.message;
-            const idx = prevMessages.findIndex(
-              (m) => m.id === updatedMessage.id
-            );
+
+            // First try to find by message ID
+            let idx = prevMessages.findIndex((m) => m.id === updatedMessage.id);
+
+            // If not found by ID, try to find by toolCallId
+            // This handles the case where client has AI SDK-generated IDs
+            // but server has server-generated IDs
+            if (idx < 0) {
+              const updatedToolCallIds = new Set(
+                updatedMessage.parts
+                  .filter(
+                    (p: ChatMessage["parts"][number]) =>
+                      "toolCallId" in p && p.toolCallId
+                  )
+                  .map(
+                    (p: ChatMessage["parts"][number]) =>
+                      (p as { toolCallId: string }).toolCallId
+                  )
+              );
+
+              if (updatedToolCallIds.size > 0) {
+                idx = prevMessages.findIndex((m) =>
+                  m.parts.some(
+                    (p) =>
+                      "toolCallId" in p &&
+                      updatedToolCallIds.has(
+                        (p as { toolCallId: string }).toolCallId
+                      )
+                  )
+                );
+              }
+            }
+
             if (idx >= 0) {
               const updated = [...prevMessages];
-              updated[idx] = updatedMessage;
+              // Preserve the client's message ID but update the content
+              updated[idx] = {
+                ...updatedMessage,
+                id: prevMessages[idx].id
+              };
               return updated;
             }
             // Message not found, append it
@@ -994,7 +1026,7 @@ export function useAgentChat<
     };
   }, [agent, useChatHelpers.setMessages, resume]);
 
-  // Wrapper that sends only when the last pending confirmation is resolved.
+  // Wrapper that sends tool result to server and continues conversation when appropriate.
   const addToolResultAndSendMessage: typeof useChatHelpers.addToolResult =
     async (args) => {
       const { toolCallId } = args;
@@ -1013,9 +1045,13 @@ export function useAgentChat<
 
       setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
 
-      // Also call AI SDK's addToolResult for compatibility
-      await useChatHelpers.addToolResult(args);
+      // Call AI SDK's addToolResult for local state update (non-blocking)
+      // We don't await this since clientToolResults provides immediate UI feedback
+      useChatHelpers.addToolResult(args);
 
+      // For tools requiring confirmation (human-in-the-loop), we need to
+      // call sendMessage() to continue the conversation after approval.
+      // The server needs to process the tool result and generate a response.
       if (!autoSendAfterAllConfirmationsResolved) {
         // always send immediately
         useChatHelpers.sendMessage();

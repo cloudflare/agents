@@ -883,9 +883,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     // Find the message with this tool call
     const message = this._findMessageByToolCallId(toolCallId);
     if (!message) {
-      console.warn(
-        `[AIChatAgent] _applyToolResult: No message found with toolCallId ${toolCallId}`
-      );
+      // The tool result will be included when
+      // the client sends the follow-up message via sendMessage().
       return false;
     }
 
@@ -937,6 +936,10 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       type: MessageType.CF_AGENT_MESSAGE_UPDATED,
       message: updatedMessage
     });
+
+    // Note: We don't automatically continue the conversation here.
+    // The client is responsible for sending a follow-up request if needed.
+    // This avoids re-entering onChatMessage with unexpected state.
 
     return true;
   }

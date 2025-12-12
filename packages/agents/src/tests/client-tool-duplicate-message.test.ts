@@ -474,7 +474,7 @@ describe("Client-side tool execution duplicate message bug", () => {
     // Verify the message was updated, not duplicated
     messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
 
-    // Should still have exactly 2 messages
+    // Should still have exactly 2 messages (no auto-continuation)
     expect(messages.length).toBe(2);
 
     const assistantMessages = messages.filter((m) => m.role === "assistant");
