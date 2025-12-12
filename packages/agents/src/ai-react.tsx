@@ -697,7 +697,8 @@ export function useAgentChat<
                     type: MessageType.CF_AGENT_TOOL_RESULT,
                     toolCallId: result.toolCallId,
                     toolName: result.toolName,
-                    output: result.output
+                    output: result.output,
+                    autoContinue: autoContinueAfterToolResult
                   })
                 );
               }
@@ -734,7 +735,8 @@ export function useAgentChat<
     useChatHelpers.messages,
     experimental_automaticToolResolution,
     useChatHelpers.addToolResult,
-    toolsRequiringConfirmation
+    toolsRequiringConfirmation,
+    autoContinueAfterToolResult
   ]);
 
   /**
