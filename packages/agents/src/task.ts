@@ -665,7 +665,6 @@ export class TaskTracker {
 
   /**
    * Get workflow info for a task (for cancellation)
-   * @deprecated Use getWorkflowInstanceId and isDurable instead
    */
   getWorkflowInfo(
     taskId: string
