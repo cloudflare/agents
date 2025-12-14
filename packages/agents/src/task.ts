@@ -1237,24 +1237,34 @@ export function createSimpleTaskContext(
 }
 
 /**
+ * Subset of WorkflowStep methods used by TaskContext.
+ * This interface mirrors the Cloudflare WorkflowStep API but with relaxed
+ * serialization constraints for internal use. The actual WorkflowStep
+ * from cloudflare:workers enforces Serializable<T> at runtime.
+ *
+ * @see https://developers.cloudflare.com/workflows/build/workflows-api/
+ */
+export interface WorkflowStepLike {
+  do<T>(name: string, fn: () => Promise<T>): Promise<T>;
+  sleep(name: string, duration: string): Promise<void>;
+  waitForEvent<T>(
+    name: string,
+    options: { type: string; timeout?: string }
+  ): Promise<T>;
+}
+
+/**
  * Create a TaskContext for durable task execution (workflow-backed)
  * This is called from within the workflow with access to WorkflowStep
  */
 export function createDurableTaskContext(
   taskId: string,
   tracker: TaskTracker,
-  workflowStep: {
-    do: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
-    sleep: (name: string, duration: string) => Promise<void>;
-    waitForEvent: <T>(
-      name: string,
-      options: { type: string; timeout?: string }
-    ) => Promise<T>;
-  },
+  workflowStep: WorkflowStepLike,
   notifyAgent: (update: {
     event?: { type: string; data?: unknown };
     progress?: number;
-  }) => Promise<void>
+  }) => Promise<boolean>
 ): TaskContext {
   const signal = new AbortController().signal; // Workflows handle their own cancellation
 

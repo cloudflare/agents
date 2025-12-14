@@ -237,17 +237,18 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
 
   /**
    * Send update to Agent
+   * @returns true if notification succeeded, false otherwise
    */
   private async sendUpdateToAgent(
     binding: string,
     agentName: string,
     update: WorkflowUpdate,
     maxRetries = 3
-  ): Promise<void> {
+  ): Promise<boolean> {
     const agentNS = this.env[binding] as DurableObjectNamespace;
     if (!agentNS) {
       console.error(`[DurableTaskWorkflow] Binding ${binding} not found`);
-      return;
+      return false;
     }
 
     const agentId = agentNS.idFromName(agentName);
@@ -263,7 +264,7 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
           })
         );
 
-        if (response.ok) return;
+        if (response.ok) return true;
 
         if (
           response.status >= 400 &&
@@ -273,7 +274,7 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
           console.error(
             `[DurableTaskWorkflow] Non-retryable error: ${response.status}`
           );
-          return;
+          return false;
         }
       } catch (error) {
         if (attempt === maxRetries - 1) {
@@ -287,6 +288,7 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
         );
       }
     }
+    return false;
   }
 }
 
@@ -416,17 +418,18 @@ export abstract class AgentWorkflow<
 
   /**
    * Send update to Agent
+   * @returns true if notification succeeded, false otherwise
    */
   private async notifyAgent(
     binding: string,
     agentName: string,
     update: WorkflowUpdate,
     maxRetries = 3
-  ): Promise<void> {
+  ): Promise<boolean> {
     const agentNS = this.env[binding] as DurableObjectNamespace;
     if (!agentNS) {
       console.error(`[AgentWorkflow] Binding ${binding} not found`);
-      return;
+      return false;
     }
 
     const agentId = agentNS.idFromName(agentName);
@@ -442,7 +445,7 @@ export abstract class AgentWorkflow<
           })
         );
 
-        if (response.ok) return;
+        if (response.ok) return true;
 
         if (
           response.status >= 400 &&
@@ -452,7 +455,7 @@ export abstract class AgentWorkflow<
           console.error(
             `[AgentWorkflow] Non-retryable error: ${response.status}`
           );
-          return;
+          return false;
         }
       } catch (error) {
         if (attempt === maxRetries - 1) {
@@ -466,6 +469,7 @@ export abstract class AgentWorkflow<
         );
       }
     }
+    return false;
   }
 }
 

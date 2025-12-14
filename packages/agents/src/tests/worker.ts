@@ -13,9 +13,12 @@ import {
   callable,
   getCurrentAgent,
   routeAgentRequest,
+  task,
   type AgentEmail,
   type Connection,
-  type WSMessage
+  type WSMessage,
+  type TaskContext,
+  type Task
 } from "../index.ts";
 import { AIChatAgent } from "../ai-chat-agent.ts";
 import type { UIMessage as ChatMessage } from "ai";
@@ -39,6 +42,7 @@ export type Env = {
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
+  TestTaskAgent: DurableObjectNamespace<TestTaskAgent>;
 };
 
 type State = unknown;
@@ -812,6 +816,157 @@ export class TestMcpJurisdiction extends McpAgent<Env> {
         return { content: [{ text: `Echo: ${message}`, type: "text" }] };
       }
     );
+  }
+}
+
+// Test Task Agent for task system tests
+export class TestTaskAgent extends Agent<Env> {
+  observability = undefined;
+
+  @task({ timeout: "30s" })
+  async simpleTask(
+    input: { value: number },
+    _ctx: TaskContext
+  ): Promise<{ doubled: number }> {
+    return { doubled: input.value * 2 };
+  }
+
+  @task({ timeout: "30s" })
+  async failingTask(_input: unknown, _ctx: TaskContext): Promise<void> {
+    throw new Error("intentional failure");
+  }
+
+  @task({ timeout: "30s" })
+  async slowTask(
+    input: { durationMs: number },
+    _ctx: TaskContext
+  ): Promise<string> {
+    await new Promise((r) => setTimeout(r, input.durationMs));
+    return "done";
+  }
+
+  @task({ timeout: "30s" })
+  async abortAwareTask(_input: unknown, ctx: TaskContext): Promise<string> {
+    for (let i = 0; i < 100; i++) {
+      if (ctx.signal.aborted) {
+        throw new Error("aborted");
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return "completed";
+  }
+
+  @task({ timeout: "500ms" })
+  async timeoutTask(_input: unknown, _ctx: TaskContext): Promise<string> {
+    await new Promise((r) => setTimeout(r, 2000));
+    return "should not reach";
+  }
+
+  @task({ timeout: "30s" })
+  async progressTask(_input: unknown, ctx: TaskContext): Promise<void> {
+    ctx.setProgress(25);
+    await new Promise((r) => setTimeout(r, 10));
+    ctx.setProgress(50);
+    await new Promise((r) => setTimeout(r, 10));
+    ctx.setProgress(75);
+    await new Promise((r) => setTimeout(r, 10));
+    ctx.setProgress(100);
+  }
+
+  @task({ timeout: "30s" })
+  async eventTask(_input: unknown, ctx: TaskContext): Promise<void> {
+    ctx.emit("phase", { name: "start" });
+    await new Promise((r) => setTimeout(r, 10));
+    ctx.emit("phase", { name: "end" });
+  }
+
+  // Callable wrappers that invoke @task methods (which return handles)
+  // Note: @task decorator transforms methods to only take input (ctx is injected)
+  @callable()
+  startSimpleTask(input: { value: number }) {
+    // @ts-expect-error - decorator transforms signature
+    return this.simpleTask(input);
+  }
+
+  @callable()
+  startFailingTask() {
+    // @ts-expect-error - decorator transforms signature
+    return this.failingTask({});
+  }
+
+  @callable()
+  startSlowTask(durationMs: number) {
+    // @ts-expect-error - decorator transforms signature
+    return this.slowTask({ durationMs });
+  }
+
+  @callable()
+  startAbortAwareTask() {
+    // @ts-expect-error - decorator transforms signature
+    return this.abortAwareTask({});
+  }
+
+  @callable()
+  startTimeoutTask() {
+    // @ts-expect-error - decorator transforms signature
+    return this.timeoutTask({});
+  }
+
+  @callable()
+  startProgressTask() {
+    // @ts-expect-error - decorator transforms signature
+    return this.progressTask({});
+  }
+
+  @callable()
+  startEventTask() {
+    // @ts-expect-error - decorator transforms signature
+    return this.eventTask({});
+  }
+
+  @callable()
+  getTaskById(taskId: string): Task | null {
+    return this.tasks.get(taskId) ?? null;
+  }
+
+  @callable()
+  cancelTaskById(taskId: string): Promise<boolean> {
+    return this.tasks.cancel(taskId);
+  }
+
+  @callable()
+  deleteTaskById(taskId: string): boolean {
+    return this.tasks.delete(taskId);
+  }
+
+  @callable()
+  listAllTasks(): Task[] {
+    return this.tasks.list();
+  }
+
+  @callable()
+  listTasksByStatus(status: string): Task[] {
+    return this.tasks.list({
+      status: status as
+        | "pending"
+        | "running"
+        | "completed"
+        | "failed"
+        | "aborted"
+    });
+  }
+
+  @callable()
+  async waitForTask(taskId: string, timeoutMs: number): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const task = this.tasks.get(taskId);
+      if (task && ["completed", "failed", "aborted"].includes(task.status)) {
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
   }
 }
 
