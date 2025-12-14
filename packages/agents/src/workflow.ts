@@ -159,7 +159,6 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
         : undefined;
 
       // Execute the task method on the agent
-      // biome-ignore lint/suspicious/noExplicitAny: Workflow type coercion
       const result = await step.do(
         `execute-${_methodName}`,
         retryConfig ? { retries: retryConfig } : {},
@@ -247,7 +246,7 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
   ): Promise<void> {
     const agentNS = this.env[binding] as DurableObjectNamespace;
     if (!agentNS) {
-      console.error("[DurableTaskWorkflow] Binding " + binding + " not found");
+      console.error(`[DurableTaskWorkflow] Binding ${binding} not found`);
       return;
     }
 
@@ -272,7 +271,7 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
           response.status !== 429
         ) {
           console.error(
-            "[DurableTaskWorkflow] Non-retryable error: " + response.status
+            `[DurableTaskWorkflow] Non-retryable error: ${response.status}`
           );
           return;
         }
@@ -426,7 +425,7 @@ export abstract class AgentWorkflow<
   ): Promise<void> {
     const agentNS = this.env[binding] as DurableObjectNamespace;
     if (!agentNS) {
-      console.error("[AgentWorkflow] Binding " + binding + " not found");
+      console.error(`[AgentWorkflow] Binding ${binding} not found`);
       return;
     }
 
@@ -451,7 +450,7 @@ export abstract class AgentWorkflow<
           response.status !== 429
         ) {
           console.error(
-            "[AgentWorkflow] Non-retryable error: " + response.status
+            `[AgentWorkflow] Non-retryable error: ${response.status}`
           );
           return;
         }
@@ -515,7 +514,7 @@ export class CloudflareWorkflowAdapter implements WorkflowAdapter {
     } | null;
 
     if (!workflowNS?.create) {
-      throw new Error("Workflow binding " + binding + " not found");
+      throw new Error(`Workflow binding ${binding} not found`);
     }
 
     const inputObj =
@@ -548,7 +547,7 @@ export class CloudflareWorkflowAdapter implements WorkflowAdapter {
     } | null;
 
     if (!workflowNS?.get) {
-      throw new Error("Workflow binding " + binding + " not found");
+      throw new Error(`Workflow binding ${binding} not found`);
     }
 
     const instance = await workflowNS.get(instanceId);
@@ -576,7 +575,7 @@ export class CloudflareWorkflowAdapter implements WorkflowAdapter {
       try {
         const { status } = await instance.status();
         if (["complete", "errored", "terminated"].includes(status)) {
-          return { success: false, reason: "already_" + status };
+          return { success: false, reason: `already_${status}` };
         }
       } catch {
         // Status check failed, try to terminate anyway
