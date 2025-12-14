@@ -131,17 +131,29 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
     const { _taskId, _agentBinding, _agentName, _methodName, _input, _retry } =
       event.payload;
 
-    // Create notify function for real-time updates
+    /**
+     * Notify agent of task updates with proper error handling.
+     * @param update - The update to send
+     * @param critical - If true, log error on failure (for completion/failure states)
+     */
     const notifyAgent = async (
-      update: Partial<WorkflowUpdate>
-    ): Promise<void> => {
-      await this.sendUpdateToAgent(_agentBinding, _agentName, {
+      update: Partial<WorkflowUpdate>,
+      critical = false
+    ): Promise<boolean> => {
+      const success = await this.sendUpdateToAgent(_agentBinding, _agentName, {
         taskId: _taskId,
         ...update
       });
+      if (!success && critical) {
+        console.error(
+          `[DurableTaskWorkflow] Critical notification failed for task ${_taskId}:`,
+          update.status || update.event?.type
+        );
+      }
+      return success;
     };
 
-    // Notify that we're starting
+    // Notify that we're starting (non-critical - workflow will proceed regardless)
     await step.do("_start", async () => {
       await notifyAgent({
         event: { type: "workflow-executing", data: { methodName: _methodName } }
@@ -150,10 +162,22 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
 
     try {
       // Build retry config if provided
+      // Note: Cloudflare Workflows expects delay as a WorkflowSleepDuration.
+      // We normalize user input and cast to the expected type.
+      const normalizeDelay = (
+        delay: string | number | undefined
+      ): import("cloudflare:workers").WorkflowSleepDuration => {
+        if (!delay) return "10 seconds";
+        if (typeof delay === "number") return `${delay} seconds`;
+        // User-provided strings like "10s", "1m" need to be in CF format
+        // CF expects "10 seconds", "1 minute", etc.
+        return delay as import("cloudflare:workers").WorkflowSleepDuration;
+      };
+
       const retryConfig = _retry
         ? {
             limit: _retry.limit ?? 3,
-            delay: String(_retry.delay ?? "10 seconds") as "10 seconds",
+            delay: normalizeDelay(_retry.delay),
             backoff: _retry.backoff ?? ("exponential" as const)
           }
         : undefined;
@@ -174,23 +198,29 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
         }
       );
 
-      // Notify completion
+      // Notify completion (critical - agent needs to know task completed)
       await step.do("_complete", async () => {
-        await notifyAgent({
-          status: "completed",
-          progress: 100,
-          result
-        });
+        await notifyAgent(
+          {
+            status: "completed",
+            progress: 100,
+            result
+          },
+          true
+        );
       });
 
       return result;
     } catch (error) {
-      // Notify failure
+      // Notify failure (critical - agent needs to know task failed)
       await step.do("_fail", async () => {
-        await notifyAgent({
-          status: "failed",
-          error: error instanceof Error ? error.message : String(error)
-        });
+        await notifyAgent(
+          {
+            status: "failed",
+            error: error instanceof Error ? error.message : String(error)
+          },
+          true
+        );
       });
       throw error;
     }

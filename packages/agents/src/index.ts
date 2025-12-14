@@ -945,11 +945,6 @@ export class Agent<
       !workflowNS ||
       typeof (workflowNS as { create?: unknown }).create !== "function"
     ) {
-      // Fallback: run as simple task if workflow not configured
-      console.warn(
-        `[Agent] ${workflowBinding} not found. Running durable task as simple task. ` +
-          "Configure the DURABLE_TASKS_WORKFLOW binding for true durability."
-      );
       this._taskTracker.fail(task.id, "Durable workflow not configured");
       throw new Error(
         `Durable tasks require ${workflowBinding} binding. ` +
@@ -1272,89 +1267,98 @@ export class Agent<
     // Mark task as running and get abort controller
     const controller = this._taskTracker.markRunning(taskId);
 
-    // Create task context
-    const ctx = createTaskContext(taskId, this._taskTracker);
+    try {
+      // Create task context
+      const ctx = createTaskContext(taskId, this._taskTracker);
 
-    // Get the method to execute
-    // If method was decorated with @task(), get the original implementation
-    const methodOrWrapper = this[methodName as keyof this];
-    if (typeof methodOrWrapper !== "function") {
-      this._taskTracker.fail(taskId, `Method ${methodName} not found`);
-      return;
-    }
-
-    // Check if this is a @task() decorated method - use original implementation
-    const className = this.constructor.name;
-    const taskKey = getTaskMethodKey(className, methodName);
-    const originalMethod = taskMethodOriginals.get(taskKey);
-    const method = originalMethod || methodOrWrapper;
-
-    // Safety check: if original is same as wrapper, we'd loop forever
-    if (originalMethod && originalMethod === methodOrWrapper) {
-      this._taskTracker.fail(taskId, "Internal error: task method loop");
-      return;
-    }
-
-    // Execute with retries
-    let lastError: Error | undefined;
-
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      // Check for abort or timeout (deadline-based, no setTimeout accumulation)
-      if (controller.signal.aborted || this._taskTracker.checkTimeout(taskId)) {
+      // Get the method to execute
+      // If method was decorated with @task(), get the original implementation
+      const methodOrWrapper = this[methodName as keyof this];
+      if (typeof methodOrWrapper !== "function") {
+        this._taskTracker.fail(taskId, `Method ${methodName} not found`);
         return;
       }
 
-      try {
-        const result = await (method as Function).call(this, input, ctx);
-        // Final timeout check before completing
-        if (!this._taskTracker.checkTimeout(taskId)) {
-          this._taskTracker.complete(taskId, result);
-        }
+      // Check if this is a @task() decorated method - use original implementation
+      const className = this.constructor.name;
+      const taskKey = getTaskMethodKey(className, methodName);
+      const originalMethod = taskMethodOriginals.get(taskKey);
+      const method = originalMethod || methodOrWrapper;
+
+      // Safety check: if original is same as wrapper, we'd loop forever
+      if (originalMethod && originalMethod === methodOrWrapper) {
+        this._taskTracker.fail(taskId, "Internal error: task method loop");
         return;
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
+      }
 
-        if (attempt < retries && !controller.signal.aborted) {
-          // Check timeout before retry
-          if (this._taskTracker.checkTimeout(taskId)) {
-            return;
+      // Execute with retries
+      let lastError: Error | undefined;
+
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        // Check for abort or timeout (deadline-based, no setTimeout accumulation)
+        if (
+          controller.signal.aborted ||
+          this._taskTracker.checkTimeout(taskId)
+        ) {
+          return;
+        }
+
+        try {
+          const result = await (method as Function).call(this, input, ctx);
+          // Final timeout check before completing
+          if (!this._taskTracker.checkTimeout(taskId)) {
+            this._taskTracker.complete(taskId, result);
           }
-          // Add retry event
-          this._taskTracker.addEvent(taskId, "retry", {
-            attempt: attempt + 1,
-            maxRetries: retries,
-            error: lastError.message
-          });
+          return;
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
 
-          // Exponential backoff with deadline checking
-          // Note: For durable retries, use this.workflow() with Cloudflare Workflows
-          // which has built-in retry support via step.do({ retries: {...} })
-          const backoffMs = Math.min(1000 * 2 ** attempt, 30000);
-          const checkInterval = 1000; // Check deadline every second during backoff
-          let waited = 0;
-          while (waited < backoffMs) {
-            if (
-              controller.signal.aborted ||
-              this._taskTracker.checkTimeout(taskId)
-            ) {
+          if (attempt < retries && !controller.signal.aborted) {
+            // Check timeout before retry
+            if (this._taskTracker.checkTimeout(taskId)) {
               return;
             }
-            const waitTime = Math.min(checkInterval, backoffMs - waited);
-            await new Promise((r) => setTimeout(r, waitTime));
-            waited += waitTime;
+            // Add retry event
+            this._taskTracker.addEvent(taskId, "retry", {
+              attempt: attempt + 1,
+              maxRetries: retries,
+              error: lastError.message
+            });
+
+            // Exponential backoff with deadline checking
+            // Note: For durable retries, use this.workflow() with Cloudflare Workflows
+            // which has built-in retry support via step.do({ retries: {...} })
+            const backoffMs = Math.min(1000 * 2 ** attempt, 30000);
+            const checkInterval = 1000; // Check deadline every second during backoff
+            let waited = 0;
+            while (waited < backoffMs) {
+              if (
+                controller.signal.aborted ||
+                this._taskTracker.checkTimeout(taskId)
+              ) {
+                return;
+              }
+              const waitTime = Math.min(checkInterval, backoffMs - waited);
+              await new Promise((r) => setTimeout(r, waitTime));
+              waited += waitTime;
+            }
           }
         }
       }
-    }
 
-    // All retries exhausted - verify task is still in running state before failing
-    // This prevents race condition where timeout could mark task as aborted
-    // between the checkTimeout() call and the fail() call
-    if (!controller.signal.aborted) {
-      const task = this._taskTracker.get(taskId);
-      if (task?.status === "running") {
-        this._taskTracker.fail(taskId, lastError?.message || "Unknown error");
+      // All retries exhausted - verify task is still in running state before failing
+      // This prevents race condition where timeout could mark task as aborted
+      // between the checkTimeout() call and the fail() call
+      if (!controller.signal.aborted) {
+        const task = this._taskTracker.get(taskId);
+        if (task?.status === "running") {
+          this._taskTracker.fail(taskId, lastError?.message || "Unknown error");
+        }
       }
+    } finally {
+      // Always clean up the abort controller to prevent memory leaks
+      // This is safe even if complete/fail/abort already cleaned it up
+      this._taskTracker.cleanupController(taskId);
     }
   }
 

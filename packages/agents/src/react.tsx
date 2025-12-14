@@ -593,7 +593,15 @@ export function useAgent<
           return getStatus() === "aborted";
         },
         abort: async () => {
-          await call("abortTask", [taskId]);
+          const status = getStatus();
+          // Only abort if task is in a non-terminal state
+          if (
+            status === "pending" ||
+            status === "running" ||
+            status === "waiting"
+          ) {
+            await call("abortTask", [taskId]);
+          }
         }
       };
       return ref;
@@ -794,14 +802,23 @@ export function useTask<TResult = unknown>(
     }
   }, [task]);
 
-  // Abort action
+  // Abort action - only abort if task is in a non-terminal state
   const abort = useCallback(async () => {
+    const currentStatus = task?.status;
+    if (
+      currentStatus === "completed" ||
+      currentStatus === "failed" ||
+      currentStatus === "aborted"
+    ) {
+      // Task is already in terminal state, no need to abort
+      return;
+    }
     try {
       await agent.call("abortTask", [taskId]);
     } catch (err) {
       console.error("[useTask] Failed to abort task:", err);
     }
-  }, [agent, taskId]);
+  }, [agent, taskId, task?.status]);
 
   // Refresh action
   const refresh = useCallback(async () => {

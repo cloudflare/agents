@@ -415,6 +415,54 @@ export interface TaskExecutionPayload {
 export type StateSyncCallback = (taskId: string, task: Task | null) => void;
 
 // ============================================================================
+// Duration Parsing
+// ============================================================================
+
+/**
+ * Parse duration string to milliseconds.
+ * Supports formats like "5s", "10m", "1h", "2d", "500ms",
+ * as well as verbose forms like "5 seconds", "10 minutes".
+ *
+ * @param duration - Duration string (e.g., "5m", "1h", "30s", "500ms")
+ * @returns Duration in milliseconds
+ * @throws Error if duration format is invalid
+ */
+export function parseDuration(duration: string): number {
+  const match = duration.match(
+    /^(\d+)\s*(ms|s|m|h|d|seconds?|minutes?|hours?|days?)?$/i
+  );
+  if (!match) {
+    throw new Error(`Invalid duration: ${duration}`);
+  }
+
+  const value = Number.parseInt(match[1], 10);
+  const unit = (match[2] || "ms").toLowerCase();
+
+  switch (unit) {
+    case "ms":
+      return value;
+    case "s":
+    case "second":
+    case "seconds":
+      return value * 1000;
+    case "m":
+    case "minute":
+    case "minutes":
+      return value * 60 * 1000;
+    case "h":
+    case "hour":
+    case "hours":
+      return value * 60 * 60 * 1000;
+    case "d":
+    case "day":
+    case "days":
+      return value * 24 * 60 * 60 * 1000;
+    default:
+      return value;
+  }
+}
+
+// ============================================================================
 // Task Tracker
 // ============================================================================
 
@@ -481,6 +529,11 @@ export interface TaskObservabilityEvent {
  * - SQL for persistence and queries
  * - State sync callback for real-time updates to clients
  * - Supports both simple and durable tasks
+ *
+ * SQL Safety: This class uses Cloudflare's SQL template literal API which
+ * automatically parameterizes all interpolated values. Values like
+ * `${JSON.stringify(input)}` are bound as parameters, not string-concatenated,
+ * preventing SQL injection attacks.
  */
 export class TaskTracker {
   private sql: SqlExecutor;
@@ -706,11 +759,16 @@ export class TaskTracker {
   }
 
   /**
-   * Mark task as running
+   * Mark task as running and start timeout tracking.
+   *
+   * The deadline is computed from the current time, not task creation time.
+   * This ensures timeouts are measured from when execution actually begins,
+   * avoiding race conditions where a task could timeout before starting.
    */
   markRunning(taskId: string): AbortController {
     const now = Date.now();
     const task = this.get(taskId);
+    // Deadline is relative to execution start, not creation time
     const deadline = task?.timeoutMs ? now + task.timeoutMs : null;
 
     this.sql`
@@ -1043,8 +1101,33 @@ export class TaskTracker {
     return before.length - after.length;
   }
 
-  private cleanupController(taskId: string): void {
+  /**
+   * Clean up abort controller for a task.
+   * Safe to call multiple times - idempotent operation.
+   * @internal Exposed for callers to ensure cleanup in finally blocks
+   */
+  cleanupController(taskId: string): void {
     this.abortControllers.delete(taskId);
+    this.deadlineCache.delete(taskId);
+  }
+
+  /**
+   * Clean up any orphaned abort controllers.
+   * Removes controllers for tasks that are no longer running/pending.
+   * Call periodically to prevent memory leaks from unexpected failures.
+   */
+  cleanupOrphanedControllers(): number {
+    let cleaned = 0;
+    for (const taskId of this.abortControllers.keys()) {
+      const task = this.get(taskId);
+      // Clean up if task doesn't exist or is in a terminal state
+      if (!task || ["completed", "failed", "aborted"].includes(task.status)) {
+        this.abortControllers.delete(taskId);
+        this.deadlineCache.delete(taskId);
+        cleaned++;
+      }
+    }
+    return cleaned;
   }
 
   private rowToTask(row: TaskRow): Task {
@@ -1071,26 +1154,10 @@ export class TaskTracker {
   private parseTimeout(timeout?: string | number): number | undefined {
     if (!timeout) return undefined;
     if (typeof timeout === "number") return timeout;
-
-    const match = timeout.match(/^(\d+)(ms|s|m|h|d)?$/);
-    if (!match) return undefined;
-
-    const value = Number.parseInt(match[1], 10);
-    const unit = match[2] || "ms";
-
-    switch (unit) {
-      case "ms":
-        return value;
-      case "s":
-        return value * 1000;
-      case "m":
-        return value * 60 * 1000;
-      case "h":
-        return value * 60 * 60 * 1000;
-      case "d":
-        return value * 24 * 60 * 60 * 1000;
-      default:
-        return value;
+    try {
+      return parseDuration(timeout);
+    } catch {
+      return undefined;
     }
   }
 }
@@ -1313,47 +1380,6 @@ export function createDurableTaskContext(
     }
   };
 }
-
-/**
- * Parse duration string to milliseconds
- */
-function parseDuration(duration: string): number {
-  const match = duration.match(
-    /^(\d+)\s*(ms|s|m|h|d|seconds?|minutes?|hours?|days?)?$/i
-  );
-  if (!match) {
-    throw new Error(`Invalid duration: ${duration}`);
-  }
-
-  const value = Number.parseInt(match[1], 10);
-  const unit = (match[2] || "ms").toLowerCase();
-
-  switch (unit) {
-    case "ms":
-      return value;
-    case "s":
-    case "second":
-    case "seconds":
-      return value * 1000;
-    case "m":
-    case "minute":
-    case "minutes":
-      return value * 60 * 1000;
-    case "h":
-    case "hour":
-    case "hours":
-      return value * 60 * 60 * 1000;
-    case "d":
-    case "day":
-    case "days":
-      return value * 24 * 60 * 60 * 1000;
-    default:
-      return value;
-  }
-}
-
-// Export for use in workflow.ts
-export { parseDuration };
 
 /**
  * @deprecated Use createSimpleTaskContext instead
