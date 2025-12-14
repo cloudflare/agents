@@ -474,11 +474,26 @@ export abstract class AgentWorkflow<
 }
 
 // ============================================================================
-// Workflow Adapter (for testing/mocking)
+// Workflow Adapter (for testing/mocking and custom implementations)
 // ============================================================================
 
 /**
  * Workflow adapter interface for flexible workflow implementations.
+ *
+ * This interface allows you to:
+ * - Mock workflow behavior in tests
+ * - Implement custom workflow backends
+ * - Add instrumentation/logging around workflow operations
+ *
+ * @example
+ * ```typescript
+ * // Mock adapter for testing
+ * class MockWorkflowAdapter implements WorkflowAdapter {
+ *   async dispatch() { return { instanceId: "mock-123" }; }
+ *   async getStatus() { return { status: "complete", output: { result: "test" } }; }
+ *   async terminate() { return { success: true }; }
+ * }
+ * ```
  */
 export interface WorkflowAdapter {
   dispatch(
@@ -501,7 +516,24 @@ export interface WorkflowAdapter {
 }
 
 /**
- * Default Cloudflare Workflows adapter
+ * Default Cloudflare Workflows adapter.
+ *
+ * Provides the standard implementation for interacting with Cloudflare Workflows.
+ * Used internally by the task system, but can also be used directly for
+ * custom workflow management.
+ *
+ * @example
+ * ```typescript
+ * const adapter = new CloudflareWorkflowAdapter(env);
+ * const { instanceId } = await adapter.dispatch(
+ *   "MY_WORKFLOW",
+ *   { data: "input" },
+ *   "task-123",
+ *   "MY_AGENT",
+ *   "agent-name"
+ * );
+ * const status = await adapter.getStatus("MY_WORKFLOW", instanceId);
+ * ```
  */
 export class CloudflareWorkflowAdapter implements WorkflowAdapter {
   constructor(private env: Record<string, unknown>) {}

@@ -1347,9 +1347,14 @@ export class Agent<
       }
     }
 
-    // All retries exhausted - check timeout one more time
-    if (!controller.signal.aborted && !this._taskTracker.checkTimeout(taskId)) {
-      this._taskTracker.fail(taskId, lastError?.message || "Unknown error");
+    // All retries exhausted - verify task is still in running state before failing
+    // This prevents race condition where timeout could mark task as aborted
+    // between the checkTimeout() call and the fail() call
+    if (!controller.signal.aborted) {
+      const task = this._taskTracker.get(taskId);
+      if (task?.status === "running") {
+        this._taskTracker.fail(taskId, lastError?.message || "Unknown error");
+      }
     }
   }
 
@@ -1370,6 +1375,33 @@ export class Agent<
   private _pendingFinalBroadcasts = new Map<string, Task>();
 
   /**
+   * Clean up stale broadcast cache entries.
+   * Removes entries for tasks that no longer exist or are in final states.
+   * Called automatically when cache grows large, or can be called manually.
+   * @internal
+   */
+  private _cleanupBroadcastCaches(): void {
+    const now = Date.now();
+    const staleThresholdMs = 60000; // 1 minute
+
+    for (const [taskId, entry] of this._lastTaskBroadcast) {
+      // Remove if entry is stale (no updates for 1 minute)
+      if (now - entry.time > staleThresholdMs) {
+        this._lastTaskBroadcast.delete(taskId);
+        this._pendingFinalBroadcasts.delete(taskId);
+        continue;
+      }
+
+      // Remove if task no longer exists or is in final state
+      const task = this._taskTracker?.get(taskId);
+      if (!task || ["completed", "failed", "aborted"].includes(task.status)) {
+        this._lastTaskBroadcast.delete(taskId);
+        this._pendingFinalBroadcasts.delete(taskId);
+      }
+    }
+  }
+
+  /**
    * Broadcast task update to all connected clients.
    *
    * Rate limiting strategy (single-threaded DO, no race conditions):
@@ -1382,6 +1414,10 @@ export class Agent<
    * state even if the immediate broadcast was missed (e.g., due to WebSocket issues).
    */
   private _syncTaskToState(taskId: string, task: Task | null): void {
+    // Periodic cleanup when cache grows large (prevents unbounded growth)
+    if (this._lastTaskBroadcast.size > 100) {
+      this._cleanupBroadcastCaches();
+    }
     // Task deleted - always broadcast
     if (!task) {
       this._lastTaskBroadcast.delete(taskId);

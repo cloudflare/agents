@@ -56,6 +56,8 @@ Durable tasks provide:
 - **Survives restarts** - the workflow engine manages execution
 - **Real-time updates** via `ctx.emit()` and `ctx.setProgress()`
 
+> **Note:** With `@task({ durable: true })`, the **entire method** is wrapped in a single workflow step with retry semantics. This means if the task fails partway through, it restarts from the beginning. For fine-grained checkpointing where each step is independently retried and replayed, use a [Custom Workflow](#custom-workflows) with `AgentWorkflow`.
+
 ## Retry Configuration
 
 Configure automatic retries:
@@ -85,6 +87,13 @@ Use `@task({ durable: true })` for:
 
 - Long-running operations that need retry guarantees
 - Operations that must survive agent restarts
+- Tasks where restarting from the beginning on failure is acceptable
+
+Use `AgentWorkflow` (custom workflow) for:
+
+- Multi-step operations where each step needs individual checkpointing
+- Tasks with expensive steps that shouldn't be repeated on failure
+- Long waits between steps (e.g., rate limiting, scheduled delays)
 
 ## Custom Workflows
 
