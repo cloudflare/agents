@@ -564,6 +564,47 @@ export class Agent<
             }
           }
 
+          // Handle durable task execution from DurableTaskWorkflow
+          if (
+            url.pathname === "/_execute-durable-task" &&
+            request.method === "POST"
+          ) {
+            try {
+              const json = (await request.json()) as {
+                taskId: string;
+                methodName: string;
+                input: unknown;
+              };
+
+              const { taskId, methodName, input } = json;
+
+              if (!taskId || !methodName) {
+                return new Response("Missing taskId or methodName", {
+                  status: 400
+                });
+              }
+
+              const result = await this._executeDurableTaskMethod(
+                taskId,
+                methodName,
+                input
+              );
+
+              return new Response(JSON.stringify(result), {
+                status: 200,
+                headers: { "Content-Type": "application/json" }
+              });
+            } catch (error) {
+              console.error("[Agent] Failed to execute durable task:", error);
+              return new Response(
+                JSON.stringify({
+                  error: error instanceof Error ? error.message : String(error)
+                }),
+                { status: 500, headers: { "Content-Type": "application/json" } }
+              );
+            }
+          }
+
           // Handle MCP OAuth callback if this is one
           const oauthResponse = await this.handleMcpOAuthCallback(request);
           if (oauthResponse) {
@@ -839,8 +880,25 @@ export class Agent<
     input: TInput,
     options: TaskOptions = {}
   ): Promise<TaskHandle<TResult>> {
+    // Route to durable or simple task based on options
+    if (options.durable) {
+      return this._runDurableTask<TInput, TResult>(methodName, input, options);
+    }
+    return this._runTask<TInput, TResult>(methodName, input, options);
+  }
+
+  /**
+   * Run a simple (non-durable) task in the Durable Object.
+   * Called by the @task() decorator for non-durable tasks.
+   * @internal
+   */
+  async _runTask<TInput, TResult = unknown>(
+    methodName: string,
+    input: TInput,
+    options: TaskOptions = {}
+  ): Promise<TaskHandle<TResult>> {
     // Validate method exists
-    const method = this[methodName];
+    const method = this[methodName as keyof this];
     if (typeof method !== "function") {
       throw new Error(`Method ${methodName} does not exist on this agent`);
     }
@@ -863,6 +921,76 @@ export class Agent<
     this._taskTracker.linkToQueue(task.id, queueId);
 
     // 3. Return handle immediately (task runs in background)
+    return this._taskTracker.getHandle<TResult>(task.id)!;
+  }
+
+  /**
+   * Run a durable task backed by Cloudflare Workflows.
+   * Called by the @task({ durable: true }) decorator.
+   *
+   * This dispatches to a generated workflow that will call back into the agent
+   * to execute the actual task method with durable step/sleep/waitForEvent support.
+   * @internal
+   */
+  async _runDurableTask<TInput, TResult = unknown>(
+    methodName: string,
+    input: TInput,
+    options: TaskOptions = {}
+  ): Promise<TaskHandle<TResult>> {
+    // 1. Create task record with durable flag
+    const task = this._taskTracker.create(methodName, input, {
+      ...options,
+      durable: true
+    });
+
+    // 2. Get the workflow binding for durable tasks
+    // Convention: DURABLE_TASKS_WORKFLOW binding should be configured
+    const workflowBinding = "DURABLE_TASKS_WORKFLOW";
+    const workflowNS = (this.env as Record<string, unknown>)[workflowBinding];
+
+    if (
+      !workflowNS ||
+      typeof (workflowNS as { create?: unknown }).create !== "function"
+    ) {
+      // Fallback: run as simple task if workflow not configured
+      console.warn(
+        `[Agent] ${workflowBinding} not found. Running durable task as simple task. ` +
+          "Configure the DURABLE_TASKS_WORKFLOW binding for true durability."
+      );
+      this._taskTracker.fail(task.id, "Durable workflow not configured");
+      throw new Error(
+        `Durable tasks require ${workflowBinding} binding. ` +
+          "Add it to your wrangler.jsonc or use @task() without durable: true."
+      );
+    }
+
+    // 3. Dispatch workflow with task tracking info
+    const agentBinding = camelCaseToKebabCase(this._ParentClass.name);
+    const instance = await (
+      workflowNS as {
+        create: (opts: { params: unknown }) => Promise<{ id: string }>;
+      }
+    ).create({
+      params: {
+        _taskId: task.id,
+        _agentBinding: agentBinding,
+        _agentName: (this as unknown as { name: string }).name || "default",
+        _methodName: methodName,
+        _input: input,
+        _timeout: options.timeout,
+        _retry: options.retry
+      }
+    });
+
+    // 4. Link task to workflow instance
+    this._taskTracker.linkToWorkflow(task.id, instance.id, workflowBinding);
+    this._taskTracker.addEvent(task.id, "workflow-started", {
+      instanceId: instance.id,
+      methodName,
+      durable: true
+    });
+
+    // 5. Return handle immediately
     return this._taskTracker.getHandle<TResult>(task.id)!;
   }
 
@@ -1095,6 +1223,37 @@ export class Agent<
     if (status === "failed") {
       this._taskTracker.fail(taskId, error || "Workflow failed");
     }
+  }
+
+  /**
+   * Execute a durable task method (called by DurableTaskWorkflow via HTTP)
+   * @internal
+   */
+  private async _executeDurableTaskMethod(
+    taskId: string,
+    methodName: string,
+    input: unknown
+  ): Promise<unknown> {
+    // Validate method exists
+    const methodOrWrapper = this[methodName as keyof this];
+    if (typeof methodOrWrapper !== "function") {
+      throw new Error(`Method ${methodName} does not exist on this agent`);
+    }
+
+    // Get the original method implementation (before @task() wrapper)
+    const className = this.constructor.name;
+    const taskKey = getTaskMethodKey(className, methodName);
+    const originalMethod = taskMethodOriginals.get(taskKey);
+    const method = originalMethod || methodOrWrapper;
+
+    // Mark task as running if not already
+    const existingTask = this._taskTracker.get(taskId);
+    if (existingTask && existingTask.status === "pending") {
+      this._taskTracker.markRunning(taskId);
+    }
+
+    const ctx = createTaskContext(taskId, this._taskTracker);
+    return (method as Function).call(this, input, ctx);
   }
 
   /**
@@ -1589,7 +1748,7 @@ export class Agent<
       try {
         const result = this.ctx.storage.sql
           .exec(
-            `SELECT * FROM cf_agents_queues WHERE json_extract(payload, ?) = ?`,
+            "SELECT * FROM cf_agents_queues WHERE json_extract(payload, ?) = ?",
             `$.${key}`,
             value
           )
@@ -2685,9 +2844,14 @@ export type {
 };
 
 // Re-export workflow types for durable task execution
-export { AgentWorkflow, CloudflareWorkflowAdapter } from "./workflow";
+export {
+  AgentWorkflow,
+  CloudflareWorkflowAdapter,
+  DurableTaskWorkflow
+} from "./workflow";
 export type {
   WorkflowTaskContext,
   WorkflowUpdate,
-  WorkflowAdapter
+  WorkflowAdapter,
+  DurableTaskWorkflowPayload
 } from "./workflow";

@@ -488,6 +488,8 @@ function TaskCard({
           border-radius: 8px;
           padding: 1rem;
           background: white;
+          overflow: hidden;
+          max-width: 100%;
         }
 
         .task-header {
@@ -546,16 +548,21 @@ function TaskCard({
           gap: 0.5rem;
           padding: 0.25rem 0;
           border-bottom: 1px solid #f0f0f0;
+          overflow: hidden;
         }
 
         .event-type {
           font-weight: 600;
           color: #0066ff;
+          flex-shrink: 0;
         }
 
         .event-data {
           color: #666;
           font-family: monospace;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
 
         .task-result {
@@ -565,10 +572,14 @@ function TaskCard({
           font-size: 0.875rem;
           margin-bottom: 0.75rem;
           border: 1px solid #e9ecef;
+          overflow: hidden;
+          word-wrap: break-word;
+          overflow-wrap: break-word;
         }
 
         .result-section {
           margin-bottom: 1rem;
+          overflow: hidden;
         }
 
         .result-section:last-of-type {
@@ -588,6 +599,8 @@ function TaskCard({
           margin: 0;
           color: #212529;
           line-height: 1.5;
+          word-wrap: break-word;
+          overflow-wrap: break-word;
         }
 
         .result-section ul {
@@ -598,12 +611,15 @@ function TaskCard({
 
         .result-section li {
           margin-bottom: 0.25rem;
+          word-wrap: break-word;
+          overflow-wrap: break-word;
         }
 
         .tags {
           display: flex;
           flex-wrap: wrap;
           gap: 0.5rem;
+          max-width: 100%;
         }
 
         .tag {
@@ -613,6 +629,8 @@ function TaskCard({
           border-radius: 4px;
           font-size: 0.75rem;
           font-weight: 500;
+          word-break: break-word;
+          max-width: 100%;
         }
 
         .result-meta {

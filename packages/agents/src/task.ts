@@ -1,23 +1,26 @@
 /**
- * Task System for Agents SDK
+ * Unified Task System for Agents SDK
  *
- * Tasks provide lifecycle tracking on top of the existing primitives:
- * - Queue handles execution (when/how to run)
- * - SQL handles persistence (queries, history)
- * - State handles real-time sync (automatic broadcast to clients)
+ * A single abstraction for all background work - whether quick operations
+ * or long-running durable workflows. Same API, same mental model.
  *
  * @example
  * ```typescript
  * class MyAgent extends Agent<Env> {
- *   async createTask(input: string) {
- *     const task = await this.task("processData", { input });
- *     return { taskId: task.id };
+ *   // Quick task - runs in Durable Object
+ *   @task()
+ *   async quickProcess(input: Input, ctx: TaskContext) {
+ *     ctx.emit("working");
+ *     ctx.setProgress(50);
+ *     return await doWork(input);
  *   }
  *
- *   async processData(input: { input: string }, ctx: TaskContext) {
- *     ctx.emit("starting");
- *     // ... do work ...
- *     return { result: "done" };
+ *   // Durable task - backed by Cloudflare Workflow
+ *   @task({ durable: true })
+ *   async longProcess(input: Input, ctx: TaskContext) {
+ *     const data = await ctx.step("fetch", () => fetchData(input));
+ *     await ctx.sleep("throttle", "5 minutes");
+ *     return await ctx.step("process", () => process(data));
  *   }
  * }
  * ```
@@ -38,7 +41,8 @@ export type TaskStatus =
   | "running"
   | "completed"
   | "failed"
-  | "aborted";
+  | "aborted"
+  | "waiting"; // For durable tasks waiting on sleep/event
 
 /**
  * A task event emitted during execution
@@ -84,30 +88,54 @@ export interface Task<TResult = unknown> {
   timeoutMs?: number;
   /** Queue item ID (links to queue system) */
   queueId?: string;
-  /** Workflow instance ID (for workflow tasks) */
+  /** Workflow instance ID (for durable tasks) */
   workflowInstanceId?: string;
-  /** Workflow binding name (for workflow tasks) */
-  workflowBinding?: string;
+  /** Whether this is a durable task */
+  durable?: boolean;
+  /** Current step name (for durable tasks) */
+  currentStep?: string;
 }
 
 /**
- * Options for creating a task
+ * Options for the @task() decorator
  */
-export interface TaskOptions {
-  /** Timeout duration (e.g., "5m", "300s", or milliseconds) */
+export interface TaskDecoratorOptions {
+  /** Timeout duration (e.g., "5m", "1h", or milliseconds) */
   timeout?: string | number;
-  /** Number of retry attempts on failure */
-  retries?: number;
+  /**
+   * Run as a durable task backed by Cloudflare Workflows.
+   * Enables ctx.step(), ctx.sleep(), ctx.waitForEvent()
+   */
+  durable?: boolean;
+  /**
+   * Retry configuration (only for durable tasks)
+   */
+  retry?: {
+    /** Maximum retry attempts */
+    limit?: number;
+    /** Delay between retries (e.g., "10s", "1m") */
+    delay?: string | number;
+    /** Backoff strategy */
+    backoff?: "constant" | "linear" | "exponential";
+  };
+}
+
+/**
+ * Options for creating a task programmatically
+ */
+export interface TaskOptions extends TaskDecoratorOptions {
   /** Custom task ID (defaults to auto-generated) */
   id?: string;
+  /** @deprecated Use retry.limit instead */
+  retries?: number;
 }
 
 /**
  * Metadata stored for @task() decorated methods
  */
-export interface TaskMethodMetadata {
-  timeout?: string | number;
-  retries?: number;
+export interface TaskMethodMetadata extends TaskDecoratorOptions {
+  /** Method name (set during decoration) */
+  methodName?: string;
 }
 
 /** Storage for task method metadata */
@@ -115,6 +143,9 @@ export const taskMethodMetadata = new Map<Function, TaskMethodMetadata>();
 
 /** Storage for original task method implementations by class+method name */
 export const taskMethodOriginals = new Map<string, Function>();
+
+/** Storage for durable task methods that need workflow generation */
+export const durableTaskMethods = new Map<string, TaskMethodMetadata>();
 
 /** Helper to create a unique key for a task method */
 export function getTaskMethodKey(
@@ -124,39 +155,161 @@ export function getTaskMethodKey(
   return `${className}::${methodName}`;
 }
 
+// ============================================================================
+// Unified TaskContext
+// ============================================================================
+
 /**
- * Decorator that marks a method as a task
+ * Options for waiting on an external event
+ */
+export interface WaitForEventOptions {
+  /** Event type to wait for */
+  type: string;
+  /** Timeout duration (e.g., "1h", "24h", "7d") */
+  timeout?: string;
+}
+
+/**
+ * Unified context provided to all task methods.
  *
- * When called, the method will be executed as a tracked task with:
- * - Automatic progress/event broadcasting
+ * For simple tasks (@task()), step/sleep/waitForEvent are pass-through or no-ops.
+ * For durable tasks (@task({ durable: true })), they use Cloudflare Workflows.
+ */
+export interface TaskContext {
+  /** Task ID */
+  taskId: string;
+
+  /** Abort signal - check this to handle cancellation */
+  signal: AbortSignal;
+
+  /**
+   * Emit a custom event (syncs to clients in real-time)
+   */
+  emit(type: string, data?: unknown): void;
+
+  /**
+   * Set progress percentage (0-100)
+   */
+  setProgress(progress: number): void;
+
+  /**
+   * Execute a durable step with automatic retry.
+   *
+   * - In simple tasks: executes immediately (no durability)
+   * - In durable tasks: creates a checkpoint, survives restarts
+   *
+   * @param name - Step name for observability
+   * @param fn - Async function to execute
+   * @returns The result of the function
+   */
+  step<T>(name: string, fn: () => Promise<T>): Promise<T>;
+
+  /**
+   * Sleep for a duration.
+   *
+   * - In simple tasks: uses setTimeout (non-durable)
+   * - In durable tasks: durable sleep that survives restarts
+   *
+   * @param name - Step name for observability
+   * @param duration - Duration string (e.g., "5m", "1h", "7d")
+   */
+  sleep(name: string, duration: string): Promise<void>;
+
+  /**
+   * Wait for an external event.
+   *
+   * - In simple tasks: throws an error (not supported)
+   * - In durable tasks: pauses until event is received or timeout
+   *
+   * @param name - Step name for observability
+   * @param options - Event type and timeout
+   * @returns The event payload when received
+   */
+  waitForEvent<T = unknown>(
+    name: string,
+    options: WaitForEventOptions
+  ): Promise<T>;
+}
+
+/**
+ * Extended context for durable tasks with access to workflow primitives
+ * @internal
+ */
+export interface DurableTaskContext extends TaskContext {
+  /** @internal Workflow step reference */
+  _workflowStep?: unknown;
+  /** @internal Whether this is running in durable mode */
+  _isDurable: boolean;
+}
+
+// ============================================================================
+// Task Handle
+// ============================================================================
+
+/**
+ * Handle returned when a task is started.
+ * Use this to track progress, get results, or cancel.
+ */
+export interface TaskHandle<TResult = unknown> {
+  /** Task ID */
+  id: string;
+  /** Current status */
+  status: TaskStatus;
+  /** Result (if completed) */
+  result?: TResult;
+  /** Error (if failed) */
+  error?: string;
+  /** Progress percentage */
+  progress?: number;
+  /** When created */
+  createdAt: number;
+  /** Whether this is a durable task */
+  durable?: boolean;
+}
+
+// ============================================================================
+// @task() Decorator
+// ============================================================================
+
+/**
+ * Decorator that marks a method as a task.
+ *
+ * Tasks are tracked operations with:
+ * - Automatic progress/event broadcasting to clients
  * - Persistence in SQLite
  * - Cancellation support
- * - Optional timeout and retries (non-durable, in-memory)
- *
- * Note: For durable retries that survive restarts, use `this.workflow()` with
- * Cloudflare Workflows which has built-in retry support via `step.do({ retries: {...} })`.
+ * - Optional durability via Cloudflare Workflows
  *
  * @example
  * ```typescript
  * class MyAgent extends Agent<Env> {
+ *   // Simple task - runs in Durable Object
  *   @task({ timeout: "5m" })
- *   async analyzeRepo(input: { repoUrl: string }, ctx: TaskContext) {
- *     ctx.emit("phase", { name: "fetching" });
+ *   async quickWork(input: Input, ctx: TaskContext) {
+ *     ctx.emit("starting");
  *     ctx.setProgress(50);
- *     // ... do work ...
- *     return { result: "done" };
+ *     return await doWork(input);
+ *   }
+ *
+ *   // Durable task - backed by Workflow
+ *   @task({ durable: true, timeout: "1h" })
+ *   async longWork(input: Input, ctx: TaskContext) {
+ *     const data = await ctx.step("fetch", () => fetch(input.url));
+ *     await ctx.sleep("rate-limit", "1m");
+ *     return await ctx.step("process", () => process(data));
  *   }
  * }
- *
- * // Call it - returns TaskHandle immediately
- * const handle = await agent.analyzeRepo({ repoUrl: "..." });
- * console.log(handle.id, handle.status); // task_xxx, "pending"
  * ```
  */
-export function task(options: TaskMethodMetadata = {}) {
+export function task(options: TaskDecoratorOptions = {}) {
   return function taskDecorator<
     This extends {
-      task: (
+      _runTask: (
+        method: string,
+        input: unknown,
+        opts: TaskOptions
+      ) => Promise<TaskHandle>;
+      _runDurableTask: (
         method: string,
         input: unknown,
         opts: TaskOptions
@@ -172,26 +325,44 @@ export function task(options: TaskMethodMetadata = {}) {
     const methodName = String(context.name);
 
     // Store metadata for the original method
-    taskMethodMetadata.set(target, options);
+    const metadata: TaskMethodMetadata = { ...options, methodName };
+    taskMethodMetadata.set(target, metadata);
 
-    // Return a wrapper that calls this.task() instead of the method directly
+    // Return a wrapper that calls the appropriate task runner
     async function wrapper(
       this: This,
       input: Args[0]
     ): Promise<TaskHandle<Return>> {
-      return this.task(methodName, input, {
+      const taskOptions: TaskOptions = {
         timeout: options.timeout,
-        retries: options.retries
-      }) as Promise<TaskHandle<Return>>;
+        durable: options.durable,
+        retry: options.retry
+      };
+
+      // Route to appropriate runner based on durable flag
+      if (options.durable) {
+        return this._runDurableTask(methodName, input, taskOptions) as Promise<
+          TaskHandle<Return>
+        >;
+      }
+      return this._runTask(methodName, input, taskOptions) as Promise<
+        TaskHandle<Return>
+      >;
     }
 
-    // Store the original method once we know the class name
+    // Store the original method for later execution
     context.addInitializer(function () {
       const instance = this as This;
       const className = instance.constructor.name;
       const key = getTaskMethodKey(className, methodName);
+
       if (!taskMethodOriginals.has(key)) {
         taskMethodOriginals.set(key, target);
+      }
+
+      // Track durable methods for workflow generation
+      if (options.durable) {
+        durableTaskMethods.set(key, metadata);
       }
     });
 
@@ -202,37 +373,9 @@ export function task(options: TaskMethodMetadata = {}) {
   };
 }
 
-/**
- * Context provided to task methods during execution
- */
-export interface TaskContext {
-  /** Emit a progress event */
-  emit(type: string, data?: unknown): void;
-  /** Set progress percentage (0-100) */
-  setProgress(progress: number): void;
-  /** Abort signal - check this to handle cancellation */
-  signal: AbortSignal;
-  /** Task ID */
-  taskId: string;
-}
-
-/**
- * Handle returned when a task is started
- */
-export interface TaskHandle<TResult = unknown> {
-  /** Task ID */
-  id: string;
-  /** Current status */
-  status: TaskStatus;
-  /** Result (if completed) */
-  result?: TResult;
-  /** Error (if failed) */
-  error?: string;
-  /** Progress percentage */
-  progress?: number;
-  /** When created */
-  createdAt: number;
-}
+// ============================================================================
+// Filter and Query Types
+// ============================================================================
 
 /**
  * Filter options for listing tasks
@@ -242,6 +385,8 @@ export interface TaskFilter {
   status?: TaskStatus | TaskStatus[];
   /** Filter by method name */
   method?: string;
+  /** Filter by durable flag */
+  durable?: boolean;
   /** Only tasks created after this timestamp */
   createdAfter?: number;
   /** Only tasks created before this timestamp */
@@ -258,6 +403,9 @@ export interface TaskExecutionPayload {
   methodName: string;
   input: unknown;
   timeoutMs?: number;
+  durable?: boolean;
+  retry?: TaskDecoratorOptions["retry"];
+  /** @deprecated Use retry.limit instead */
   retries?: number;
 }
 
@@ -295,6 +443,8 @@ interface TaskRow {
   queue_id: string | null;
   workflow_instance_id: string | null;
   workflow_binding: string | null;
+  durable: number | null;
+  current_step: string | null;
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
@@ -316,7 +466,10 @@ export interface TaskObservabilityEvent {
     | "task:completed"
     | "task:failed"
     | "task:aborted"
-    | "task:event";
+    | "task:event"
+    | "task:step"
+    | "task:sleep"
+    | "task:waiting";
   taskId: string;
   method?: string;
   data?: Record<string, unknown>;
@@ -327,28 +480,20 @@ export interface TaskObservabilityEvent {
  * Tracks task lifecycle and state.
  * - SQL for persistence and queries
  * - State sync callback for real-time updates to clients
- * - Execution handled by queue system
- * - Timeouts use deadline-based checking (no setTimeout accumulation)
- * - In-memory deadline cache for performance
+ * - Supports both simple and durable tasks
  */
 export class TaskTracker {
   private sql: SqlExecutor;
   private syncToState: StateSyncCallback;
   private abortControllers = new Map<string, AbortController>();
   private observabilityCallback?: TaskObservabilityCallback;
-
-  /**
-   * In-memory cache for task deadlines to avoid repeated DB queries
-   * Key: taskId, Value: deadline timestamp (or null for no deadline)
-   */
   private deadlineCache = new Map<string, number | null>();
 
   constructor(sql: SqlExecutor, syncToState: StateSyncCallback) {
     this.sql = sql;
     this.syncToState = syncToState;
 
-    // Create tasks table if not exists
-    // deadline_at: when the task should timeout (calculated from timeout_ms + started_at)
+    // Create tasks table
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_tasks (
         id TEXT PRIMARY KEY NOT NULL,
@@ -364,26 +509,45 @@ export class TaskTracker {
         queue_id TEXT,
         workflow_instance_id TEXT,
         workflow_binding TEXT,
+        durable INTEGER DEFAULT 0,
+        current_step TEXT,
         created_at INTEGER DEFAULT (unixepoch() * 1000),
         started_at INTEGER,
         completed_at INTEGER
       )
     `;
 
-    // Create index on status for efficient queries
+    // Migrate: add columns for existing tables (SQLite doesn't have ADD COLUMN IF NOT EXISTS)
+    const columns = this.sql<{ name: string }>`
+      PRAGMA table_info(cf_agents_tasks)
+    `;
+    const columnNames = new Set(columns.map((c) => c.name));
+
+    if (!columnNames.has("durable")) {
+      this
+        .sql`ALTER TABLE cf_agents_tasks ADD COLUMN durable INTEGER DEFAULT 0`;
+    }
+    if (!columnNames.has("current_step")) {
+      this.sql`ALTER TABLE cf_agents_tasks ADD COLUMN current_step TEXT`;
+    }
+    if (!columnNames.has("workflow_binding")) {
+      this.sql`ALTER TABLE cf_agents_tasks ADD COLUMN workflow_binding TEXT`;
+    }
+
+    // Create indexes
     this.sql`
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON cf_agents_tasks(status)
     `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_tasks_durable ON cf_agents_tasks(durable)
+    `;
 
-    // Clean up stale @task() tasks from previous runs
-    // Note: Workflow tasks (identified by workflow_instance_id) are preserved
-    // because their state is managed by Cloudflare Workflows and will be
-    // updated when the workflow completes/fails via the callback mechanism
+    // Clean up stale simple tasks from previous runs
     this.sql`
       UPDATE cf_agents_tasks 
       SET status = 'failed', error = 'Agent restarted', completed_at = ${Date.now()}
       WHERE status IN ('pending', 'running')
-      AND workflow_instance_id IS NULL
+      AND durable = 0
     `;
   }
 
@@ -413,9 +577,7 @@ export class TaskTracker {
   }
 
   /**
-   * Sync task state to callback.
-   * Rate limiting is handled by the Agent's _syncTaskToState, so we always call immediately.
-   * This ensures consistent ordering - no debouncing means no out-of-order updates.
+   * Sync task state to callback for real-time client updates
    */
   private sync(taskId: string): void {
     const task = this.get(taskId);
@@ -423,7 +585,7 @@ export class TaskTracker {
   }
 
   /**
-   * Create a task record (called before queueing)
+   * Create a task record
    */
   create<TInput>(
     method: string,
@@ -433,6 +595,7 @@ export class TaskTracker {
     const id = options.id || `task_${nanoid(12)}`;
     const now = Date.now();
     const timeoutMs = this.parseTimeout(options.timeout);
+    const durable = options.durable ? 1 : 0;
 
     const task: Task = {
       id,
@@ -441,12 +604,12 @@ export class TaskTracker {
       status: "pending",
       events: [],
       createdAt: now,
-      timeoutMs
+      timeoutMs,
+      durable: !!options.durable
     };
 
-    // Persist to SQL
     this.sql`
-      INSERT INTO cf_agents_tasks (id, method, input, status, events, timeout_ms, created_at)
+      INSERT INTO cf_agents_tasks (id, method, input, status, events, timeout_ms, durable, created_at)
       VALUES (
         ${id},
         ${method},
@@ -454,24 +617,23 @@ export class TaskTracker {
         'pending',
         '[]',
         ${timeoutMs ?? null},
+        ${durable},
         ${now}
       )
     `;
 
-    // Emit observability event
     this.emitObservability("task:created", id, method, {
       input: input as Record<string, unknown>,
-      timeoutMs
+      timeoutMs,
+      durable: !!options.durable
     });
 
-    // Sync to state for real-time updates
     this.sync(id);
-
     return task;
   }
 
   /**
-   * Link task to its queue item
+   * Link task to its queue item (for simple tasks)
    */
   linkToQueue(taskId: string, queueId: string): void {
     this.sql`
@@ -480,18 +642,30 @@ export class TaskTracker {
   }
 
   /**
-   * Link task to a workflow instance for cancellation support
+   * Link task to a workflow instance (for durable tasks)
+   * @param taskId - Task ID
+   * @param instanceId - Workflow instance ID
+   * @param binding - Optional workflow binding name (for backward compat)
    */
-  linkToWorkflow(taskId: string, instanceId: string, binding: string): void {
-    this.sql`
-      UPDATE cf_agents_tasks 
-      SET workflow_instance_id = ${instanceId}, workflow_binding = ${binding}
-      WHERE id = ${taskId}
-    `;
+  linkToWorkflow(taskId: string, instanceId: string, binding?: string): void {
+    if (binding) {
+      this.sql`
+        UPDATE cf_agents_tasks 
+        SET workflow_instance_id = ${instanceId}, workflow_binding = ${binding}
+        WHERE id = ${taskId}
+      `;
+    } else {
+      this.sql`
+        UPDATE cf_agents_tasks 
+        SET workflow_instance_id = ${instanceId}
+        WHERE id = ${taskId}
+      `;
+    }
   }
 
   /**
    * Get workflow info for a task (for cancellation)
+   * @deprecated Use getWorkflowInstanceId and isDurable instead
    */
   getWorkflowInfo(
     taskId: string
@@ -503,18 +677,37 @@ export class TaskTracker {
       SELECT workflow_instance_id, workflow_binding 
       FROM cf_agents_tasks WHERE id = ${taskId}
     `;
-    if (!rows?.[0]?.workflow_instance_id || !rows?.[0]?.workflow_binding) {
+    if (!rows?.[0]?.workflow_instance_id) {
       return null;
     }
     return {
       instanceId: rows[0].workflow_instance_id,
-      binding: rows[0].workflow_binding
+      binding: rows[0].workflow_binding || ""
     };
   }
 
   /**
-   * Mark task as running (called when queue executes it)
-   * Sets deadline based on timeout_ms for deadline-based timeout checking
+   * Get workflow instance ID for a task
+   */
+  getWorkflowInstanceId(taskId: string): string | null {
+    const rows = this.sql<{ workflow_instance_id: string | null }>`
+      SELECT workflow_instance_id FROM cf_agents_tasks WHERE id = ${taskId}
+    `;
+    return rows?.[0]?.workflow_instance_id ?? null;
+  }
+
+  /**
+   * Check if a task is durable
+   */
+  isDurable(taskId: string): boolean {
+    const rows = this.sql<{ durable: number }>`
+      SELECT durable FROM cf_agents_tasks WHERE id = ${taskId}
+    `;
+    return rows?.[0]?.durable === 1;
+  }
+
+  /**
+   * Mark task as running
    */
   markRunning(taskId: string): AbortController {
     const now = Date.now();
@@ -527,38 +720,64 @@ export class TaskTracker {
       WHERE id = ${taskId}
     `;
 
-    // Cache the deadline for fast timeout checks
     this.deadlineCache.set(taskId, deadline);
 
-    // Create abort controller for this task
     const controller = new AbortController();
     this.abortControllers.set(taskId, controller);
 
-    // Emit observability event
     this.emitObservability("task:started", taskId, task?.method, {
       deadline,
-      timeoutMs: task?.timeoutMs
+      timeoutMs: task?.timeoutMs,
+      durable: task?.durable
     });
 
-    // Sync to state - immediate for status change
     this.sync(taskId);
-
     return controller;
   }
 
   /**
+   * Update current step for durable tasks
+   */
+  setCurrentStep(taskId: string, stepName: string): void {
+    this.sql`
+      UPDATE cf_agents_tasks SET current_step = ${stepName} WHERE id = ${taskId}
+    `;
+
+    this.emitObservability("task:step", taskId, undefined, { step: stepName });
+    this.sync(taskId);
+  }
+
+  /**
+   * Mark task as waiting (for sleep/event)
+   */
+  markWaiting(taskId: string, reason: string): void {
+    this.sql`
+      UPDATE cf_agents_tasks SET status = 'waiting' WHERE id = ${taskId}
+    `;
+
+    this.emitObservability("task:waiting", taskId, undefined, { reason });
+    this.sync(taskId);
+  }
+
+  /**
+   * Resume task from waiting state
+   */
+  resumeFromWaiting(taskId: string): void {
+    this.sql`
+      UPDATE cf_agents_tasks SET status = 'running' WHERE id = ${taskId}
+    `;
+    this.sync(taskId);
+  }
+
+  /**
    * Check if a task has exceeded its deadline
-   * Called by Agent during execution to enforce timeouts
-   * Uses in-memory cache for performance, falls back to DB if not cached
    */
   checkTimeout(taskId: string): boolean {
     const task = this.get(taskId);
     if (!task || task.status !== "running") return false;
 
-    // Check cache first for performance
     let deadline = this.deadlineCache.get(taskId);
 
-    // If not in cache, fetch from DB and cache it
     if (deadline === undefined) {
       const rows = this.sql<{ deadline_at: number | null }>`
         SELECT deadline_at FROM cf_agents_tasks WHERE id = ${taskId}
@@ -575,7 +794,7 @@ export class TaskTracker {
   }
 
   /**
-   * Mark task as completed with result
+   * Mark task as completed
    */
   complete(taskId: string, result: unknown): void {
     const now = Date.now();
@@ -588,21 +807,19 @@ export class TaskTracker {
     `;
 
     this.cleanupController(taskId);
-    this.cleanupDeadlineCache(taskId);
+    this.deadlineCache.delete(taskId);
     this.addEventInternal(taskId, "completed", { result });
 
-    // Emit observability event
     this.emitObservability("task:completed", taskId, task?.method, {
       result: result as Record<string, unknown>,
       duration: task?.startedAt ? now - task.startedAt : undefined
     });
 
-    // Immediate sync for completion - final state guaranteed to broadcast
     this.sync(taskId);
   }
 
   /**
-   * Mark task as failed with error
+   * Mark task as failed
    */
   fail(taskId: string, error: string): void {
     const now = Date.now();
@@ -615,37 +832,33 @@ export class TaskTracker {
     `;
 
     this.cleanupController(taskId);
-    this.cleanupDeadlineCache(taskId);
+    this.deadlineCache.delete(taskId);
     this.addEventInternal(taskId, "failed", { error });
 
-    // Emit observability event
     this.emitObservability("task:failed", taskId, task?.method, {
       error,
       duration: task?.startedAt ? now - task.startedAt : undefined
     });
 
-    // Immediate sync for failure - final state guaranteed to broadcast
     this.sync(taskId);
   }
 
   /**
-   * Abort a running task
+   * Abort a task
    */
   abort(taskId: string, reason?: string): boolean {
     const task = this.get(taskId);
     if (!task) return false;
 
-    if (task.status !== "pending" && task.status !== "running") {
+    if (!["pending", "running", "waiting"].includes(task.status)) {
       return false;
     }
 
-    // Signal abort to the running task
     const controller = this.abortControllers.get(taskId);
     if (controller) {
       controller.abort(reason);
     }
 
-    // Update status
     const now = Date.now();
     this.sql`
       UPDATE cf_agents_tasks
@@ -654,23 +867,20 @@ export class TaskTracker {
     `;
 
     this.cleanupController(taskId);
-    this.cleanupDeadlineCache(taskId);
+    this.deadlineCache.delete(taskId);
     this.addEventInternal(taskId, "aborted", { reason });
 
-    // Emit observability event
     this.emitObservability("task:aborted", taskId, task.method, {
       reason,
       duration: task.startedAt ? now - task.startedAt : undefined
     });
 
-    // Immediate sync for abort - final state guaranteed to broadcast
     this.sync(taskId);
-
     return true;
   }
 
   /**
-   * Get abort signal for a task (used during execution)
+   * Get abort signal for a task
    */
   getAbortSignal(taskId: string): AbortSignal | undefined {
     return this.abortControllers.get(taskId)?.signal;
@@ -682,19 +892,14 @@ export class TaskTracker {
   addEvent(taskId: string, type: string, data?: unknown): void {
     this.addEventInternal(taskId, type, data);
 
-    // Emit observability event
     this.emitObservability("task:event", taskId, undefined, {
       eventType: type,
       eventData: data as Record<string, unknown>
     });
 
-    // Debounced sync for events
     this.sync(taskId);
   }
 
-  /**
-   * Add event without syncing (internal use)
-   */
   private addEventInternal(taskId: string, type: string, data?: unknown): void {
     const event: TaskEvent = {
       id: nanoid(8),
@@ -725,12 +930,10 @@ export class TaskTracker {
       WHERE id = ${taskId}
     `;
 
-    // Emit observability event (only for significant changes)
     this.emitObservability("task:progress", taskId, undefined, {
       progress: clampedProgress
     });
 
-    // Debounced sync for progress updates
     this.sync(taskId);
   }
 
@@ -762,60 +965,21 @@ export class TaskTracker {
       result: task.result as TResult,
       error: task.error,
       progress: task.progress,
-      createdAt: task.createdAt
+      createdAt: task.createdAt,
+      durable: task.durable
     };
   }
 
   /**
    * List tasks with optional filtering
-   * Uses SQL-level filtering for better performance
    */
   list(filter: TaskFilter = {}): Task[] {
-    // Build dynamic query with SQL-level filtering
-    let query = "SELECT * FROM cf_agents_tasks WHERE 1=1";
-    const params: (string | number)[] = [];
-
-    if (filter.status) {
-      const statuses = Array.isArray(filter.status)
-        ? filter.status
-        : [filter.status];
-      const placeholders = statuses.map(() => "?").join(", ");
-      query += ` AND status IN (${placeholders})`;
-      params.push(...statuses);
-    }
-
-    if (filter.method) {
-      query += " AND method = ?";
-      params.push(filter.method);
-    }
-
-    if (filter.createdAfter) {
-      query += " AND created_at > ?";
-      params.push(filter.createdAfter);
-    }
-
-    if (filter.createdBefore) {
-      query += " AND created_at < ?";
-      params.push(filter.createdBefore);
-    }
-
-    query += " ORDER BY created_at DESC";
-
-    if (filter.limit) {
-      query += " LIMIT ?";
-      params.push(filter.limit);
-    }
-
-    // Execute the dynamic query
-    // Note: We need to use the raw sql exec for dynamic queries
     try {
       const rows = this.sql<TaskRow>`
         SELECT * FROM cf_agents_tasks
         ORDER BY created_at DESC
       `;
 
-      // Apply filters (fallback to JS filtering for now since sql template doesn't support dynamic queries)
-      // TODO: Refactor to use ctx.storage.sql.exec for dynamic query support
       return (rows || [])
         .map((row) => this.rowToTask(row))
         .filter((task) => {
@@ -826,6 +990,8 @@ export class TaskTracker {
             if (!statuses.includes(task.status)) return false;
           }
           if (filter.method && task.method !== filter.method) return false;
+          if (filter.durable !== undefined && task.durable !== filter.durable)
+            return false;
           if (filter.createdAfter && task.createdAt <= filter.createdAfter)
             return false;
           if (filter.createdBefore && task.createdAt >= filter.createdBefore)
@@ -852,20 +1018,17 @@ export class TaskTracker {
     const task = this.get(taskId);
     if (!task) return false;
 
-    if (task.status === "pending" || task.status === "running") {
+    if (["pending", "running", "waiting"].includes(task.status)) {
       throw new Error(`Cannot delete ${task.status} task. Abort it first.`);
     }
 
     this.sql`DELETE FROM cf_agents_tasks WHERE id = ${taskId}`;
-
-    // Remove from state
     this.syncToState(taskId, null);
-
     return true;
   }
 
   /**
-   * Clean up old completed/failed/aborted tasks
+   * Clean up old tasks
    */
   cleanupOldTasks(olderThanMs: number = 24 * 60 * 60 * 1000): number {
     const cutoff = Date.now() - olderThanMs;
@@ -881,19 +1044,8 @@ export class TaskTracker {
     return before.length - after.length;
   }
 
-  // ============================================================================
-  // Private methods
-  // ============================================================================
-
   private cleanupController(taskId: string): void {
     this.abortControllers.delete(taskId);
-  }
-
-  /**
-   * Clean up deadline cache entry for a task
-   */
-  private cleanupDeadlineCache(taskId: string): void {
-    this.deadlineCache.delete(taskId);
   }
 
   private rowToTask(row: TaskRow): Task {
@@ -909,7 +1061,8 @@ export class TaskTracker {
       timeoutMs: row.timeout_ms ?? undefined,
       queueId: row.queue_id ?? undefined,
       workflowInstanceId: row.workflow_instance_id ?? undefined,
-      workflowBinding: row.workflow_binding ?? undefined,
+      durable: row.durable === 1,
+      currentStep: row.current_step ?? undefined,
       createdAt: row.created_at,
       startedAt: row.started_at ?? undefined,
       completedAt: row.completed_at ?? undefined
@@ -920,7 +1073,7 @@ export class TaskTracker {
     if (!timeout) return undefined;
     if (typeof timeout === "number") return timeout;
 
-    const match = timeout.match(/^(\d+)(ms|s|m|h)?$/);
+    const match = timeout.match(/^(\d+)(ms|s|m|h|d)?$/);
     if (!match) return undefined;
 
     const value = Number.parseInt(match[1], 10);
@@ -935,6 +1088,8 @@ export class TaskTracker {
         return value * 60 * 1000;
       case "h":
         return value * 60 * 60 * 1000;
+      case "d":
+        return value * 24 * 60 * 60 * 1000;
       default:
         return value;
     }
@@ -961,7 +1116,7 @@ export type WorkflowCancelCallback = (
 ) => Promise<WorkflowCancelResult>;
 
 /**
- * Accessor object for task operations
+ * Accessor object for task operations.
  * Provides a clean API: this.tasks.get(id), this.tasks.cancel(id), etc.
  */
 export class TasksAccessor {
@@ -1001,15 +1156,13 @@ export class TasksAccessor {
   }
 
   /**
-   * Cancel/abort a task (also terminates workflow if applicable)
-   * @returns true if task was cancelled, false otherwise
+   * Cancel a task (also terminates workflow if durable)
    */
   async cancel(taskId: string, reason?: string): Promise<boolean> {
-    // Try to cancel workflow first if this is a workflow task
-    if (this.workflowCancelCallback) {
+    // Try to cancel workflow first if this is a durable task
+    if (this.workflowCancelCallback && this.tracker.isDurable(taskId)) {
       const result = await this.workflowCancelCallback(taskId);
-      // Add event if workflow cancellation had issues
-      if (!result.success && result.reason !== "not_a_workflow") {
+      if (!result.success && result.reason !== "not_found") {
         this.tracker.addEvent(taskId, "workflow-cancel-failed", {
           reason: result.reason
         });
@@ -1034,13 +1187,13 @@ export class TasksAccessor {
 }
 
 // ============================================================================
-// Helper to create TaskContext
+// TaskContext Factories
 // ============================================================================
 
 /**
- * Create a TaskContext for use during task execution
+ * Create a TaskContext for simple (non-durable) task execution
  */
-export function createTaskContext(
+export function createSimpleTaskContext(
   taskId: string,
   tracker: TaskTracker
 ): TaskContext {
@@ -1049,11 +1202,152 @@ export function createTaskContext(
   return {
     taskId,
     signal,
-    emit: (type: string, data?: unknown) => {
+
+    emit(type: string, data?: unknown): void {
       tracker.addEvent(taskId, type, data);
     },
-    setProgress: (progress: number) => {
+
+    setProgress(progress: number): void {
       tracker.setProgress(taskId, progress);
+    },
+
+    // For simple tasks, step just executes the function directly
+    async step<T>(name: string, fn: () => Promise<T>): Promise<T> {
+      tracker.setCurrentStep(taskId, name);
+      return fn();
+    },
+
+    // For simple tasks, sleep uses setTimeout (non-durable)
+    async sleep(name: string, duration: string): Promise<void> {
+      tracker.setCurrentStep(taskId, `sleep:${name}`);
+      const ms = parseDuration(duration);
+      await new Promise((resolve) => setTimeout(resolve, ms));
+    },
+
+    // For simple tasks, waitForEvent is not supported
+    async waitForEvent<T>(
+      _name: string,
+      _options: WaitForEventOptions
+    ): Promise<T> {
+      throw new Error(
+        "waitForEvent() is only available in durable tasks. " +
+          "Use @task({ durable: true }) to enable this feature."
+      );
     }
   };
 }
+
+/**
+ * Create a TaskContext for durable task execution (workflow-backed)
+ * This is called from within the workflow with access to WorkflowStep
+ */
+export function createDurableTaskContext(
+  taskId: string,
+  tracker: TaskTracker,
+  workflowStep: {
+    do: <T>(name: string, fn: () => Promise<T>) => Promise<T>;
+    sleep: (name: string, duration: string) => Promise<void>;
+    waitForEvent: <T>(
+      name: string,
+      options: { type: string; timeout?: string }
+    ) => Promise<T>;
+  },
+  notifyAgent: (update: {
+    event?: { type: string; data?: unknown };
+    progress?: number;
+  }) => Promise<void>
+): TaskContext {
+  const signal = new AbortController().signal; // Workflows handle their own cancellation
+
+  return {
+    taskId,
+    signal,
+
+    emit(type: string, data?: unknown): void {
+      // Queue notification to be sent at next step boundary
+      notifyAgent({ event: { type, data } }).catch(console.error);
+      tracker.addEvent(taskId, type, data);
+    },
+
+    setProgress(progress: number): void {
+      notifyAgent({ progress }).catch(console.error);
+      tracker.setProgress(taskId, progress);
+    },
+
+    async step<T>(name: string, fn: () => Promise<T>): Promise<T> {
+      tracker.setCurrentStep(taskId, name);
+      // Use workflow's durable step.do()
+      return workflowStep.do(name, fn);
+    },
+
+    async sleep(name: string, duration: string): Promise<void> {
+      tracker.setCurrentStep(taskId, `sleep:${name}`);
+      tracker.markWaiting(taskId, `Sleeping: ${duration}`);
+      // Use workflow's durable sleep
+      await workflowStep.sleep(name, duration);
+      tracker.resumeFromWaiting(taskId);
+    },
+
+    async waitForEvent<T>(
+      name: string,
+      options: WaitForEventOptions
+    ): Promise<T> {
+      tracker.setCurrentStep(taskId, `wait:${name}`);
+      tracker.markWaiting(taskId, `Waiting for event: ${options.type}`);
+      // Use workflow's durable waitForEvent
+      const result = await workflowStep.waitForEvent<T>(name, {
+        type: options.type,
+        timeout: options.timeout
+      });
+      tracker.resumeFromWaiting(taskId);
+      return result;
+    }
+  };
+}
+
+/**
+ * Parse duration string to milliseconds
+ */
+function parseDuration(duration: string): number {
+  const match = duration.match(
+    /^(\d+)\s*(ms|s|m|h|d|seconds?|minutes?|hours?|days?)?$/i
+  );
+  if (!match) {
+    throw new Error(`Invalid duration: ${duration}`);
+  }
+
+  const value = Number.parseInt(match[1], 10);
+  const unit = (match[2] || "ms").toLowerCase();
+
+  switch (unit) {
+    case "ms":
+      return value;
+    case "s":
+    case "second":
+    case "seconds":
+      return value * 1000;
+    case "m":
+    case "minute":
+    case "minutes":
+      return value * 60 * 1000;
+    case "h":
+    case "hour":
+    case "hours":
+      return value * 60 * 60 * 1000;
+    case "d":
+    case "day":
+    case "days":
+      return value * 24 * 60 * 60 * 1000;
+    default:
+      return value;
+  }
+}
+
+// Export for use in workflow.ts
+export { parseDuration };
+
+/**
+ * @deprecated Use createSimpleTaskContext instead
+ * Backward compatibility alias
+ */
+export const createTaskContext = createSimpleTaskContext;

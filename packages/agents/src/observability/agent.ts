@@ -37,7 +37,10 @@ export type AgentObservabilityEvent =
       | "task:completed"
       | "task:failed"
       | "task:aborted"
-      | "task:event",
+      | "task:event"
+      | "task:step"
+      | "task:sleep"
+      | "task:waiting",
       {
         taskId: string;
         method?: string;
@@ -51,5 +54,7 @@ export type AgentObservabilityEvent =
         duration?: number;
         eventType?: string;
         eventData?: unknown;
+        step?: string;
+        durable?: boolean;
       }
     >;

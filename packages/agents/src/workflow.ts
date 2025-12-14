@@ -1,13 +1,311 @@
 /**
  * Workflow Integration for Agents SDK
  *
- * Provides a base class for Cloudflare Workflows that integrates with the
- * Agent task system. Workflows get a familiar ctx.emit()/ctx.setProgress() API
- * that syncs updates back to the Agent for real-time client notifications.
+ * This module provides:
+ * 1. DurableTaskWorkflow - The built-in workflow for @task({ durable: true })
+ * 2. AgentWorkflow - Base class for custom workflows that integrate with agents
+ * 3. Utilities for workflow-agent communication
  *
  * @example
  * ```typescript
- * // Define a workflow
+ * // Using @task({ durable: true }) - the recommended approach
+ * class MyAgent extends Agent<Env> {
+ *   @task({ durable: true })
+ *   async processOrder(input: OrderInput, ctx: TaskContext) {
+ *     const order = await ctx.step("validate", () => validate(input));
+ *     await ctx.sleep("rate-limit", "1m");
+ *     return await ctx.step("process", () => process(order));
+ *   }
+ * }
+ *
+ * // Or using a custom workflow for advanced use cases
+ * export class CustomWorkflow extends AgentWorkflow<Env, Params> {
+ *   async run(ctx) {
+ *     // Custom workflow logic
+ *   }
+ * }
+ * ```
+ */
+
+import {
+  WorkflowEntrypoint,
+  type WorkflowEvent,
+  type WorkflowStep
+} from "cloudflare:workers";
+
+// ============================================================================
+// Types
+// ============================================================================
+
+/**
+ * Internal payload for durable task workflow
+ */
+export interface DurableTaskWorkflowPayload {
+  _taskId: string;
+  _agentBinding: string;
+  _agentName: string;
+  _methodName: string;
+  _input: unknown;
+  _timeout?: string | number;
+  _retry?: {
+    limit?: number;
+    delay?: string | number;
+    backoff?: "constant" | "linear" | "exponential";
+  };
+}
+
+/**
+ * Internal payload added by Agent when dispatching workflow (legacy)
+ */
+export interface WorkflowTaskPayload {
+  _taskId: string;
+  _agentBinding: string;
+  _agentName: string;
+}
+
+/**
+ * Update sent from Workflow to Agent
+ */
+export interface WorkflowUpdate {
+  taskId: string;
+  event?: { type: string; data?: unknown };
+  progress?: number;
+  status?: "completed" | "failed";
+  result?: unknown;
+  error?: string;
+}
+
+/**
+ * Context provided to custom workflow run() method
+ */
+export interface WorkflowTaskContext<TParams = unknown> {
+  /** Workflow params (excluding internal fields) */
+  params: TParams;
+  /** Task ID for tracking */
+  taskId: string;
+  /** Execute a durable step */
+  step<T>(name: string, fn: () => Promise<T>): Promise<T>;
+  /** Sleep for a duration (durable) */
+  sleep(name: string, duration: string): Promise<void>;
+  /** Emit a progress event */
+  emit(type: string, data?: unknown): void;
+  /** Set progress percentage */
+  setProgress(progress: number): void;
+}
+
+// ============================================================================
+// DurableTaskWorkflow - Built-in workflow for @task({ durable: true })
+// ============================================================================
+
+/**
+ * The built-in workflow that executes @task({ durable: true }) methods.
+ *
+ * This workflow is automatically used when you decorate a method with
+ * @task({ durable: true }). It calls back into the agent to execute
+ * the actual task method with durable step/sleep/waitForEvent support.
+ *
+ * To use durable tasks, add this to your wrangler.jsonc:
+ * ```jsonc
+ * {
+ *   "workflows": [{
+ *     "name": "durable-tasks",
+ *     "binding": "DURABLE_TASKS_WORKFLOW",
+ *     "class_name": "DurableTaskWorkflow"
+ *   }]
+ * }
+ * ```
+ *
+ * And export it from your worker:
+ * ```typescript
+ * export { DurableTaskWorkflow } from "agents/workflow";
+ * ```
+ */
+export class DurableTaskWorkflow extends WorkflowEntrypoint<
+  Record<string, unknown>,
+  DurableTaskWorkflowPayload
+> {
+  async run(
+    event: WorkflowEvent<DurableTaskWorkflowPayload>,
+    step: WorkflowStep
+  ): Promise<unknown> {
+    const { _taskId, _agentBinding, _agentName, _methodName, _input, _retry } =
+      event.payload;
+
+    // Create notify function for real-time updates
+    const notifyAgent = async (
+      update: Partial<WorkflowUpdate>
+    ): Promise<void> => {
+      await this.sendUpdateToAgent(_agentBinding, _agentName, {
+        taskId: _taskId,
+        ...update
+      });
+    };
+
+    // Notify that we're starting
+    await step.do("_start", async () => {
+      await notifyAgent({
+        event: { type: "workflow-executing", data: { methodName: _methodName } }
+      });
+    });
+
+    try {
+      // Build retry config if provided
+      const retryConfig = _retry
+        ? {
+            limit: _retry.limit ?? 3,
+            delay: String(_retry.delay ?? "10 seconds") as "10 seconds",
+            backoff: _retry.backoff ?? ("exponential" as const)
+          }
+        : undefined;
+
+      // Execute the task method on the agent
+      // biome-ignore lint/suspicious/noExplicitAny: Workflow type coercion
+      const result = await step.do(
+        `execute-${_methodName}`,
+        retryConfig ? { retries: retryConfig } : {},
+        async () => {
+          return (await this.executeTaskOnAgent(
+            _agentBinding,
+            _agentName,
+            _taskId,
+            _methodName,
+            _input
+            // biome-ignore lint/suspicious/noExplicitAny: Workflow type coercion
+          )) as any;
+        }
+      );
+
+      // Notify completion
+      await step.do("_complete", async () => {
+        await notifyAgent({
+          status: "completed",
+          progress: 100,
+          result
+        });
+      });
+
+      return result;
+    } catch (error) {
+      // Notify failure
+      await step.do("_fail", async () => {
+        await notifyAgent({
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Execute the task method on the agent via RPC
+   */
+  private async executeTaskOnAgent(
+    agentBinding: string,
+    agentName: string,
+    taskId: string,
+    methodName: string,
+    input: unknown
+  ): Promise<unknown> {
+    const agentNS = this.env[agentBinding] as DurableObjectNamespace;
+    if (!agentNS) {
+      throw new Error(`Agent binding ${agentBinding} not found`);
+    }
+
+    const agentId = agentNS.idFromName(agentName);
+    const agent = agentNS.get(agentId);
+
+    // Call the agent's internal task execution endpoint
+    const response = await agent.fetch(
+      new Request("http://internal/_execute-durable-task", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskId,
+          methodName,
+          input
+        })
+      })
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Task execution failed: ${errorText}`);
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Send update to Agent
+   */
+  private async sendUpdateToAgent(
+    binding: string,
+    agentName: string,
+    update: WorkflowUpdate,
+    maxRetries = 3
+  ): Promise<void> {
+    const agentNS = this.env[binding] as DurableObjectNamespace;
+    if (!agentNS) {
+      console.error("[DurableTaskWorkflow] Binding " + binding + " not found");
+      return;
+    }
+
+    const agentId = agentNS.idFromName(agentName);
+    const agent = agentNS.get(agentId);
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const response = await agent.fetch(
+          new Request("http://internal/_workflow-update", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(update)
+          })
+        );
+
+        if (response.ok) return;
+
+        if (
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 429
+        ) {
+          console.error(
+            "[DurableTaskWorkflow] Non-retryable error: " + response.status
+          );
+          return;
+        }
+      } catch (error) {
+        if (attempt === maxRetries - 1) {
+          console.error("[DurableTaskWorkflow] Failed to notify agent:", error);
+        }
+      }
+
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) =>
+          setTimeout(r, Math.min(100 * 2 ** attempt, 2000))
+        );
+      }
+    }
+  }
+}
+
+// ============================================================================
+// AgentWorkflow - Base class for custom workflows
+// ============================================================================
+
+/**
+ * Base class for custom Workflows that integrate with the Agent task system.
+ *
+ * Use this when you need more control than @task({ durable: true }) provides.
+ * Extend this class to get:
+ * - Automatic task state sync to Agent
+ * - Familiar ctx.emit() and ctx.setProgress() API
+ * - Error handling that updates task state
+ *
+ * @example
+ * ```typescript
  * export class AnalysisWorkflow extends AgentWorkflow<Env, { repoUrl: string }> {
  *   async run(ctx) {
  *     const files = await ctx.step("fetch", async () => {
@@ -23,93 +321,7 @@
  *     });
  *   }
  * }
- *
- * // Dispatch from Agent
- * class MyAgent extends Agent<Env> {
- *   @callable()
- *   async startAnalysis(input: { repoUrl: string }) {
- *     return this.workflow("ANALYSIS_WORKFLOW", input);
- *   }
- * }
  * ```
- */
-
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-
-// ============================================================================
-// Types
-// ============================================================================
-
-/**
- * Internal payload added by Agent when dispatching workflow
- */
-export interface WorkflowTaskPayload {
-  _taskId: string;
-  _agentBinding: string;
-  _agentName: string;
-}
-
-/**
- * Context provided to workflow run() method
- * Combines Workflow step API with Task-like helpers
- */
-export interface WorkflowTaskContext<TParams = unknown> {
-  /** Workflow params (excluding internal fields) */
-  params: TParams;
-
-  /** Task ID for tracking */
-  taskId: string;
-
-  /**
-   * Execute a durable step
-   * Automatically retried on failure, state persisted
-   */
-  step<T>(name: string, fn: () => Promise<T>): Promise<T>;
-
-  /**
-   * Sleep for a duration (durable - survives restarts)
-   * @param name Step name for observability
-   * @param duration Duration string like "1h", "30m", "7d"
-   */
-  sleep(name: string, duration: string): Promise<void>;
-
-  /**
-   * Emit a progress event (syncs to Agent → clients)
-   */
-  emit(type: string, data?: unknown): void;
-
-  /**
-   * Set progress percentage (syncs to Agent → clients)
-   */
-  setProgress(progress: number): void;
-}
-
-/**
- * Update sent from Workflow to Agent
- */
-export interface WorkflowUpdate {
-  taskId: string;
-  event?: { type: string; data?: unknown };
-  progress?: number;
-  status?: "completed" | "failed";
-  result?: unknown;
-  error?: string;
-}
-
-// ============================================================================
-// AgentWorkflow Base Class
-// ============================================================================
-
-/**
- * Base class for Workflows that integrate with the Agent task system.
- *
- * Extend this instead of WorkflowEntrypoint to get:
- * - Automatic task state sync to Agent
- * - Familiar ctx.emit() and ctx.setProgress() API
- * - Error handling that updates task state
- *
- * @template Env - Environment bindings type
- * @template TParams - Workflow input parameters type
  */
 export abstract class AgentWorkflow<
   Env extends Record<string, unknown>,
@@ -130,7 +342,6 @@ export abstract class AgentWorkflow<
 
   /**
    * Entry point called by Workflows runtime
-   * Wraps run() with Agent sync
    */
   async execute(
     event: WorkflowEvent<TParams & WorkflowTaskPayload>,
@@ -138,38 +349,31 @@ export abstract class AgentWorkflow<
   ): Promise<unknown> {
     const { _taskId, _agentBinding, _agentName, ...params } = event.payload;
 
-    // Batch updates - only flushed at step boundaries (no extra durable steps)
     let pendingUpdate: WorkflowUpdate | null = null;
 
-    // Flush pending update by merging into next step (no separate durable step)
-    const flushUpdates = async () => {
+    const flushUpdates = async (): Promise<void> => {
       if (!pendingUpdate) return;
       const update = pendingUpdate;
       pendingUpdate = null;
       await this.notifyAgent(_agentBinding, _agentName, update);
     };
 
-    // Create context with Task-like API
     const ctx: WorkflowTaskContext<TParams> = {
       params: params as unknown as TParams,
       taskId: _taskId,
 
       step: async <T>(name: string, fn: () => Promise<T>): Promise<T> => {
-        // Flush pending update, then execute step
         await flushUpdates();
-        // step.do returns Serializable<T>, cast back to T for convenience
         // biome-ignore lint/suspicious/noExplicitAny: Workflow type coercion
         return step.do(name, fn as any) as unknown as Promise<T>;
       },
 
       sleep: async (name: string, duration: string): Promise<void> => {
         await flushUpdates();
-        // Cast duration string to the required WorkflowSleepDuration type
         return step.sleep(name, duration as Parameters<typeof step.sleep>[1]);
       },
 
-      // Queue event - will be sent at next step boundary
-      emit: (type: string, data?: unknown) => {
+      emit: (type: string, data?: unknown): void => {
         pendingUpdate = {
           taskId: _taskId,
           ...pendingUpdate,
@@ -177,8 +381,7 @@ export abstract class AgentWorkflow<
         };
       },
 
-      // Queue progress - will be sent at next step boundary
-      setProgress: (progress: number) => {
+      setProgress: (progress: number): void => {
         pendingUpdate = {
           taskId: _taskId,
           ...pendingUpdate,
@@ -188,10 +391,8 @@ export abstract class AgentWorkflow<
     };
 
     try {
-      // Run the workflow
       const result = await this.run(ctx);
 
-      // Notify Agent of completion (always a separate step for durability)
       await step.do("_complete", async () => {
         await this.notifyAgent(_agentBinding, _agentName, {
           taskId: _taskId,
@@ -203,7 +404,6 @@ export abstract class AgentWorkflow<
 
       return result;
     } catch (error) {
-      // Notify Agent of failure (always a separate step for durability)
       await step.do("_fail", async () => {
         await this.notifyAgent(_agentBinding, _agentName, {
           taskId: _taskId,
@@ -216,11 +416,7 @@ export abstract class AgentWorkflow<
   }
 
   /**
-   * Send update to Agent via fetch with retry logic
-   * @param binding - Agent binding name
-   * @param agentName - Agent instance name
-   * @param update - Update payload to send
-   * @param maxRetries - Maximum number of retry attempts (default: 3)
+   * Send update to Agent
    */
   private async notifyAgent(
     binding: string,
@@ -228,17 +424,14 @@ export abstract class AgentWorkflow<
     update: WorkflowUpdate,
     maxRetries = 3
   ): Promise<void> {
-    // Get the Agent's Durable Object
     const agentNS = this.env[binding] as DurableObjectNamespace;
     if (!agentNS) {
-      console.error(`[AgentWorkflow] Binding ${binding} not found`);
+      console.error("[AgentWorkflow] Binding " + binding + " not found");
       return;
     }
 
     const agentId = agentNS.idFromName(agentName);
     const agent = agentNS.get(agentId);
-
-    let lastError: Error | null = null;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
@@ -250,86 +443,41 @@ export abstract class AgentWorkflow<
           })
         );
 
-        // Check for successful response
-        if (response.ok) {
-          return; // Success!
-        }
+        if (response.ok) return;
 
-        // Non-retryable client errors (4xx except 429)
         if (
           response.status >= 400 &&
           response.status < 500 &&
           response.status !== 429
         ) {
           console.error(
-            `[AgentWorkflow] Non-retryable error notifying agent: ${response.status}`
+            "[AgentWorkflow] Non-retryable error: " + response.status
           );
           return;
         }
-
-        lastError = new Error(
-          `HTTP ${response.status}: ${response.statusText}`
-        );
       } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt === maxRetries - 1) {
+          console.error("[AgentWorkflow] Failed to notify agent:", error);
+        }
       }
 
-      // If not the last attempt, wait before retrying with exponential backoff
       if (attempt < maxRetries - 1) {
-        const backoffMs = Math.min(100 * 2 ** attempt, 2000);
-        await new Promise((resolve) => setTimeout(resolve, backoffMs));
-        console.warn(
-          `[AgentWorkflow] Retry ${attempt + 1}/${maxRetries} notifying agent...`
+        await new Promise((r) =>
+          setTimeout(r, Math.min(100 * 2 ** attempt, 2000))
         );
       }
     }
-
-    // All retries exhausted
-    console.error(
-      `[AgentWorkflow] Failed to notify agent after ${maxRetries} attempts:`,
-      lastError
-    );
   }
 }
 
 // ============================================================================
-// Workflow Adapter Pattern
+// Workflow Adapter (for testing/mocking)
 // ============================================================================
 
 /**
  * Workflow adapter interface for flexible workflow implementations.
- *
- * This pattern allows you to:
- * - Swap between different workflow backends (Cloudflare Workflows, custom, etc.)
- * - Add middleware/interceptors for workflow operations
- * - Mock workflows in tests
- *
- * @example
- * ```typescript
- * // Custom adapter for testing
- * class MockWorkflowAdapter implements WorkflowAdapter {
- *   private tasks = new Map<string, any>();
- *
- *   async dispatch(binding: string, input: unknown, taskId: string) {
- *     this.tasks.set(taskId, { status: "running", input });
- *     return { instanceId: `mock_${taskId}` };
- *   }
- *
- *   async getStatus(binding: string, instanceId: string) {
- *     return { status: "running" };
- *   }
- *
- *   async terminate(binding: string, instanceId: string) {
- *     return { success: true };
- *   }
- * }
- * ```
  */
 export interface WorkflowAdapter {
-  /**
-   * Dispatch a workflow with the given parameters
-   * @returns Object containing the workflow instance ID
-   */
   dispatch(
     binding: string,
     input: unknown,
@@ -338,17 +486,11 @@ export interface WorkflowAdapter {
     agentName: string
   ): Promise<{ instanceId: string }>;
 
-  /**
-   * Get the status of a workflow instance
-   */
   getStatus(
     binding: string,
     instanceId: string
   ): Promise<{ status: string; output?: unknown; error?: string }>;
 
-  /**
-   * Terminate a running workflow instance
-   */
   terminate(
     binding: string,
     instanceId: string
@@ -356,7 +498,7 @@ export interface WorkflowAdapter {
 }
 
 /**
- * Default Cloudflare Workflows adapter implementation
+ * Default Cloudflare Workflows adapter
  */
 export class CloudflareWorkflowAdapter implements WorkflowAdapter {
   constructor(private env: Record<string, unknown>) {}
@@ -373,10 +515,9 @@ export class CloudflareWorkflowAdapter implements WorkflowAdapter {
     } | null;
 
     if (!workflowNS?.create) {
-      throw new Error(`Workflow binding ${binding} not found`);
+      throw new Error("Workflow binding " + binding + " not found");
     }
 
-    // Ensure input is an object for spreading
     const inputObj =
       typeof input === "object" && input !== null ? input : { data: input };
 
@@ -407,7 +548,7 @@ export class CloudflareWorkflowAdapter implements WorkflowAdapter {
     } | null;
 
     if (!workflowNS?.get) {
-      throw new Error(`Workflow binding ${binding} not found`);
+      throw new Error("Workflow binding " + binding + " not found");
     }
 
     const instance = await workflowNS.get(instanceId);
@@ -432,11 +573,10 @@ export class CloudflareWorkflowAdapter implements WorkflowAdapter {
     try {
       const instance = await workflowNS.get(instanceId);
 
-      // Check status first
       try {
         const { status } = await instance.status();
         if (["complete", "errored", "terminated"].includes(status)) {
-          return { success: false, reason: `already_${status}` };
+          return { success: false, reason: "already_" + status };
         }
       } catch {
         // Status check failed, try to terminate anyway
@@ -450,14 +590,3 @@ export class CloudflareWorkflowAdapter implements WorkflowAdapter {
     }
   }
 }
-
-// ============================================================================
-// Helper to create workflow class
-// ============================================================================
-
-/**
- * Helper type for workflow run function
- */
-export type WorkflowRunFn<TParams> = (
-  ctx: WorkflowTaskContext<TParams>
-) => Promise<unknown>;

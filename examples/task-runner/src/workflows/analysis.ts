@@ -2,7 +2,7 @@
  * Analysis Workflow
  *
  * A durable workflow that analyzes GitHub repositories using AI.
- * Extends WorkflowEntrypoint for proper Cloudflare Workflows integration.
+ * Extends WorkflowEntrypoint
  */
 
 import {
