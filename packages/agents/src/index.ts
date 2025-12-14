@@ -1245,6 +1245,10 @@ export class Agent<
       this._taskTracker.markRunning(taskId);
     }
 
+    // Note: When called from DurableTaskWorkflow, the entire execution is
+    // wrapped in a workflow step.do(), providing retry semantics. Individual
+    // ctx.step() calls execute inline within this outer step. For fine-grained
+    // checkpointing, use AgentWorkflow directly.
     const ctx = createTaskContext(taskId, this._taskTracker);
     return (method as Function).call(this, input, ctx);
   }

@@ -1,6 +1,6 @@
 # Durable Tasks
 
-Durable tasks are long-running operations backed by [Cloudflare Workflows](https://developers.cloudflare.com/workflows/). They survive agent restarts and can run for hours or days.
+Durable tasks are long-running operations backed by [Cloudflare Workflows](https://developers.cloudflare.com/workflows/). They survive agent restarts and automatically retry on failure.
 
 ## Setup
 
@@ -41,60 +41,24 @@ import { Agent, task, type TaskContext } from "agents";
 class MyAgent extends Agent<Env> {
   @task({ durable: true })
   async longAnalysis(input: { repoUrl: string }, ctx: TaskContext) {
-    // Each step is checkpointed - survives restarts
-    const files = await ctx.step("fetch", () => fetchRepoFiles(input.repoUrl));
-
-    // Durable sleep - can wait for hours/days
-    await ctx.sleep("rate-limit", "1h");
-
-    const analysis = await ctx.step("analyze", () => analyzeFiles(files));
-
+    ctx.emit("started");
+    const files = await fetchRepoFiles(input.repoUrl);
+    ctx.setProgress(50);
+    const analysis = await analyzeFiles(files);
     return analysis;
   }
 }
 ```
 
-## Durable Context Methods
+Durable tasks provide:
 
-Durable tasks have additional `TaskContext` methods:
-
-### ctx.step(name, fn)
-
-Execute a checkpointed step. If the workflow restarts, completed steps are skipped and their results are replayed.
-
-```typescript
-const data = await ctx.step("fetch-data", async () => {
-  return await fetch(url).then((r) => r.json());
-});
-```
-
-### ctx.sleep(name, duration)
-
-Pause execution for a duration. The workflow hibernates and resumes automatically.
-
-```typescript
-await ctx.sleep("wait", "30m");
-await ctx.sleep("daily-check", "24h");
-```
-
-Accepts: `"30s"`, `"5m"`, `"1h"`, `"7d"`, or `"30 seconds"`, `"5 minutes"`, etc.
-
-### ctx.waitForEvent(name, options)
-
-Wait for an external event (human approval, webhook, etc).
-
-```typescript
-const approval = await ctx.waitForEvent("approval", {
-  type: "user-approved",
-  timeout: "24h"
-});
-```
-
-> Note: `waitForEvent` is only available in durable tasks.
+- **Automatic retries** on failure (configurable)
+- **Survives restarts** - the workflow engine manages execution
+- **Real-time updates** via `ctx.emit()` and `ctx.setProgress()`
 
 ## Retry Configuration
 
-Configure automatic retries for durable tasks:
+Configure automatic retries:
 
 ```typescript
 @task({
@@ -119,42 +83,68 @@ Use `@task()` (simple) for:
 
 Use `@task({ durable: true })` for:
 
-- Long-running operations (minutes to days)
-- Multi-step workflows with checkpoints
-- Operations that must survive restarts
-- Tasks requiring durable sleep or external events
+- Long-running operations that need retry guarantees
+- Operations that must survive agent restarts
 
 ## Custom Workflows
 
-For advanced control, extend `AgentWorkflow` instead:
+For multi-step workflows with individual checkpoints, extend `AgentWorkflow`:
 
 ```typescript
 import { AgentWorkflow, type WorkflowTaskContext } from "agents";
 
-export class CustomWorkflow extends AgentWorkflow<Env, { input: string }> {
-  async run(ctx: WorkflowTaskContext<{ input: string }>) {
-    ctx.emit("started");
-
-    const result = await ctx.step("process", async () => {
-      return processInput(ctx.params.input);
+export class AnalysisWorkflow extends AgentWorkflow<Env, { repoUrl: string }> {
+  async run(ctx: WorkflowTaskContext<{ repoUrl: string }>) {
+    // Each step is checkpointed - survives restarts
+    const files = await ctx.step("fetch", async () => {
+      ctx.emit("phase", { name: "fetching" });
+      return fetchRepoFiles(ctx.params.repoUrl);
     });
 
-    ctx.setProgress(100);
-    return result;
+    // Durable sleep - can wait for hours/days
+    await ctx.sleep("rate-limit", "1h");
+
+    return await ctx.step("analyze", async () => {
+      ctx.setProgress(50);
+      return analyzeFiles(files);
+    });
   }
 }
 ```
 
-Then dispatch it with `this.workflow()`:
+Add to `wrangler.jsonc`:
+
+```jsonc
+{
+  "workflows": [
+    {
+      "name": "analysis-workflow",
+      "binding": "ANALYSIS_WORKFLOW",
+      "class_name": "AnalysisWorkflow"
+    }
+  ]
+}
+```
+
+Dispatch via `this.workflow()`:
 
 ```typescript
 class MyAgent extends Agent<Env> {
   @callable()
-  async startCustom(input: { data: string }) {
-    return this.workflow("CUSTOM_WORKFLOW", input);
+  async startAnalysis(input: { repoUrl: string }) {
+    return this.workflow("ANALYSIS_WORKFLOW", input);
   }
 }
 ```
+
+### WorkflowTaskContext Methods
+
+Custom workflows have access to:
+
+- `ctx.step(name, fn)` - Checkpointed step, replayed on restart
+- `ctx.sleep(name, duration)` - Durable sleep (e.g., `"1h"`, `"7d"`)
+- `ctx.emit(type, data)` - Send events to clients
+- `ctx.setProgress(n)` - Set progress percentage
 
 ## Example
 
