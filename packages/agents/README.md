@@ -650,6 +650,127 @@ This creates:
 - Intuitive input handling
 - Easy conversation reset
 
+#### Client-Defined Tools
+
+For scenarios where each client needs to register its own tools dynamically (e.g., embeddable chat widgets), use the `tools` option with `execute` functions.
+
+Tools with an `execute` function are automatically:
+
+1. Sent to the server as schemas with each request
+2. Executed on the client when the AI model calls them
+
+##### Client-Side Tool Definition
+
+```tsx
+import { useAgent } from "agents/react";
+import { useAgentChat, type AITool } from "agents/ai-react";
+
+// Define tools outside component to avoid recreation on every render
+const tools: Record<string, AITool> = {
+  showAlert: {
+    description: "Shows an alert dialog to the user",
+    parameters: {
+      type: "object",
+      properties: { message: { type: "string" } },
+      required: ["message"]
+    },
+    execute: async (input) => {
+      const { message } = input as { message: string };
+      alert(message);
+      return { success: true };
+    }
+  },
+  changeBackgroundColor: {
+    description: "Changes the page background color",
+    parameters: {
+      type: "object",
+      properties: { color: { type: "string" } }
+    },
+    execute: async (input) => {
+      const { color } = input as { color: string };
+      document.body.style.backgroundColor = color;
+      return { success: true, color };
+    }
+  }
+};
+
+function EmbeddableChat() {
+  const agent = useAgent({ agent: "chat-widget" });
+
+  const { messages, input, handleInputChange, handleSubmit } = useAgentChat({
+    agent,
+    tools // Schema + execute in one place
+  });
+
+  return (
+    <div className="chat-widget">
+      {messages.map((message) => (
+        <div key={message.id}>{/* Render message */}</div>
+      ))}
+      <form onSubmit={handleSubmit}>
+        <input value={input} onChange={handleInputChange} />
+      </form>
+    </div>
+  );
+}
+```
+
+##### Server-Side Tool Handling
+
+On the server, use `createToolsFromClientSchemas` to convert client tool schemas to AI SDK format:
+
+```typescript
+import {
+  AIChatAgent,
+  createToolsFromClientSchemas
+} from "agents/ai-chat-agent";
+import { openai } from "@ai-sdk/openai";
+import { streamText, convertToModelMessages } from "ai";
+
+export class ChatWidget extends AIChatAgent {
+  async onChatMessage(onFinish, options) {
+    const result = streamText({
+      model: openai("gpt-4o"),
+      messages: convertToModelMessages(this.messages),
+      tools: {
+        // Server-side tools (execute on server)
+        getWeather: tool({
+          description: "Get weather for a city",
+          parameters: z.object({ city: z.string() }),
+          execute: async ({ city }) => fetchWeather(city)
+        }),
+        // Client-side tools (sent back to client for execution)
+        ...createToolsFromClientSchemas(options?.clientTools)
+      },
+      onFinish
+    });
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+##### Advanced: Custom Request Data
+
+For additional control (custom headers, dynamic context), use `prepareSendMessagesRequest`:
+
+```tsx
+const { messages, handleSubmit } = useAgentChat({
+  agent,
+  tools, // Tool schemas auto-extracted and sent
+  prepareSendMessagesRequest: ({ id, messages }) => ({
+    body: {
+      // Add dynamic context alongside auto-extracted tool schemas
+      currentUrl: window.location.href,
+      userTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+    },
+    headers: {
+      "X-Widget-Version": "1.0.0",
+      "X-Request-ID": crypto.randomUUID()
+    }
+  })
+});
+```
+
 ### 🔗 MCP (Model Context Protocol) Integration
 
 Agents can seamlessly integrate with the Model Context Protocol, allowing them to act as both MCP servers (providing tools to AI assistants) and MCP clients (using tools from other services).

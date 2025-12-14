@@ -11,3 +11,41 @@ index 02762f0..7deca89 100644
  import _addFormats from 'ajv-formats';
  function createDefaultAjvInstance() {
      const ajv = new Ajv({
+diff --git a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.js b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.js
+index 1234567..abcdefg 100644
+--- a/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.js
++++ b/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.js
+@@ -545,6 +545,14 @@ export function buildDiscoveryUrls(authorizationServerUrl) {
+         url: new URL(`${pathname}/.well-known/openid-configuration`, url.origin),
+         type: 'oidc'
+     });
++    // Fallback: Try root path discovery when path-based discovery fails.
++    // This handles cases where authorization_servers contains an endpoint path
++    // (e.g., "/api/auth") instead of the issuer URL, which violates RFC 9470
++    // but occurs in practice with some MCP server implementations.
++    urlsToTry.push({
++        url: new URL('/.well-known/oauth-authorization-server', url.origin),
++        type: 'oauth'
++    });
+     return urlsToTry;
+ }
+ /**
+diff --git a/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/auth.js b/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/auth.js
+index 1234567..abcdefg 100644
+--- a/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/auth.js
++++ b/node_modules/@modelcontextprotocol/sdk/dist/cjs/client/auth.js
+@@ -567,6 +567,14 @@ function buildDiscoveryUrls(authorizationServerUrl) {
+         url: new URL(`${pathname}/.well-known/openid-configuration`, url.origin),
+         type: 'oidc'
+     });
++    // Fallback: Try root path discovery when path-based discovery fails.
++    // This handles cases where authorization_servers contains an endpoint path
++    // (e.g., "/api/auth") instead of the issuer URL, which violates RFC 9470
++    // but occurs in practice with some MCP server implementations.
++    urlsToTry.push({
++        url: new URL('/.well-known/oauth-authorization-server', url.origin),
++        type: 'oauth'
++    });
+     return urlsToTry;
+ }
+ /**

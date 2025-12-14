@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { JSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   WorkerTransport,
@@ -279,85 +280,10 @@ describe("WorkerTransport", () => {
       // Should accept and default to 2025-03-26
       expect(response.status).toBe(200);
     });
-
-    it("should default to 2025-03-26 for unsupported version", async () => {
-      const server = createTestServer();
-      const transport = await setupTransport(server);
-
-      const request = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "1",
-          method: "initialize",
-          params: {
-            capabilities: {},
-            clientInfo: { name: "test", version: "1.0" },
-            protocolVersion: "2099-01-01" // Unsupported future version
-          }
-        })
-      });
-
-      const response = await transport.handleRequest(request);
-
-      // Should accept but use default version
-      expect(response.status).toBe(200);
-    });
   });
 
   describe("Protocol Version - Validation on subsequent requests", () => {
-    it("should allow missing header for default version 2025-03-26", async () => {
-      const server = createTestServer();
-      const transport = await setupTransport(server, {
-        sessionIdGenerator: () => "test-session"
-      });
-
-      // Initialize with 2025-03-26
-      const initRequest = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "1",
-          method: "initialize",
-          params: {
-            capabilities: {},
-            clientInfo: { name: "test", version: "1.0" },
-            protocolVersion: "2025-03-26"
-          }
-        })
-      });
-
-      await transport.handleRequest(initRequest);
-
-      // Subsequent request WITHOUT MCP-Protocol-Version header
-      const followupRequest = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          "mcp-session-id": "test-session"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "notifications/initialized"
-        })
-      });
-
-      const response = await transport.handleRequest(followupRequest);
-
-      // Should allow for backwards compatibility
-      expect(response.status).toBe(202);
-    });
-
-    it("should require header for version 2025-06-18", async () => {
+    it("should accept missing header (defaults to negotiated version)", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
@@ -400,16 +326,11 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(followupRequest);
 
-      // Should require header for version > 2025-03-26
-      expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("MCP-Protocol-Version");
-      expect(body.error.message).toContain("required");
+      // Should accept - defaults to negotiated version
+      expect(response.status).toBe(202);
     });
 
-    it("should accept correct version header on subsequent requests", async () => {
+    it("should accept negotiated version header", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
@@ -456,13 +377,16 @@ describe("WorkerTransport", () => {
       expect(response.status).toBe(202);
     });
 
-    it("should reject unsupported version header", async () => {
+    it("should accept any supported version header regardless of negotiated version", async () => {
+      // NOTE: The transport does not enforce version consistency after negotiation.
+      // We only validate that the version header, if present, is in SUPPORTED_PROTOCOL_VERSIONS.
+      // The SDK handles version semantics - the transport just rejects unknown versions.
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
       });
 
-      // Initialize
+      // Initialize with 2025-03-26
       const initRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
@@ -483,14 +407,14 @@ describe("WorkerTransport", () => {
 
       await transport.handleRequest(initRequest);
 
-      // Subsequent request with unsupported version
+      // Subsequent request with a different but supported version
       const followupRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
           "mcp-session-id": "test-session",
-          "MCP-Protocol-Version": "2099-01-01"
+          "MCP-Protocol-Version": "2025-06-18"
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -500,21 +424,17 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(followupRequest);
 
-      expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("Unsupported");
-      expect(body.error.message).toContain("MCP-Protocol-Version");
+      // Should accept - we only check if version is in supported list, not if it matches negotiated
+      expect(response.status).toBe(202);
     });
 
-    it("should reject mismatched version header", async () => {
+    it("should reject unsupported version header", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
       });
 
-      // Initialize with 2025-06-18
+      // Initialize
       const initRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
@@ -535,14 +455,14 @@ describe("WorkerTransport", () => {
 
       await transport.handleRequest(initRequest);
 
-      // Subsequent request with different version
+      // Subsequent request with unsupported version (valid format but not in supported list)
       const followupRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
           "mcp-session-id": "test-session",
-          "MCP-Protocol-Version": "2025-03-26"
+          "MCP-Protocol-Version": "1999-01-01"
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -556,17 +476,17 @@ describe("WorkerTransport", () => {
       const body = (await response.json()) as {
         error: { message: string };
       };
-      expect(body.error.message).toContain("mismatch");
-      expect(body.error.message).toContain("Expected: 2025-06-18");
-      expect(body.error.message).toContain("Got: 2025-03-26");
+      expect(body.error.message).toContain("Unsupported protocol version");
+      expect(body.error.message).toContain("1999-01-01");
     });
   });
 
   describe("Protocol Version - Validation on GET requests", () => {
-    it("should validate protocol version on SSE GET requests", async () => {
+    it("should accept GET request without version header (defaults to negotiated)", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
-        sessionIdGenerator: () => "test-session"
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
       });
 
       // Initialize with 2025-06-18
@@ -588,9 +508,10 @@ describe("WorkerTransport", () => {
         })
       });
 
-      await transport.handleRequest(initRequest);
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
 
-      // GET request without version header
+      // GET request without version header - should accept
       const getRequest = new Request("http://example.com/", {
         method: "GET",
         headers: {
@@ -601,22 +522,19 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(getRequest);
 
-      expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("MCP-Protocol-Version");
+      // Should accept - missing header defaults to negotiated version
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
     });
-  });
 
-  describe("Protocol Version - Validation on DELETE requests", () => {
-    it("should validate protocol version on DELETE requests", async () => {
+    it("should reject GET request with unsupported version header", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
-        sessionIdGenerator: () => "test-session"
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
       });
 
-      // Initialize with 2025-06-18
+      // Initialize
       const initRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
@@ -635,9 +553,58 @@ describe("WorkerTransport", () => {
         })
       });
 
-      await transport.handleRequest(initRequest);
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
 
-      // DELETE request without version header
+      // GET request with unsupported version header
+      const getRequest = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session",
+          "MCP-Protocol-Version": "1999-01-01"
+        }
+      });
+
+      const response = await transport.handleRequest(getRequest);
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Unsupported protocol version");
+    });
+  });
+
+  describe("Protocol Version - Validation on DELETE requests", () => {
+    it("should accept DELETE request without version header (defaults to negotiated)", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
+
+      // DELETE request without version header - should accept
       const deleteRequest = new Request("http://example.com/", {
         method: "DELETE",
         headers: {
@@ -647,11 +614,53 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(deleteRequest);
 
+      // Should accept - missing header defaults to negotiated version
+      expect(response.status).toBe(200);
+    });
+
+    it("should reject DELETE request with unsupported version header", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
+
+      // DELETE request with unsupported version header
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "test-session",
+          "MCP-Protocol-Version": "1999-01-01"
+        }
+      });
+
+      const response = await transport.handleRequest(deleteRequest);
+
       expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("MCP-Protocol-Version");
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Unsupported protocol version");
     });
   });
 
@@ -667,9 +676,12 @@ describe("WorkerTransport", () => {
         }
       };
 
+      // Use enableJsonResponse to get a proper JSON response instead of SSE stream
+      // This ensures the SDK response is fully processed before the promise resolves
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "persistent-session",
-        storage: mockStorage
+        storage: mockStorage,
+        enableJsonResponse: true
       });
 
       const request = new Request("http://example.com/", {
@@ -690,20 +702,55 @@ describe("WorkerTransport", () => {
         })
       });
 
-      await transport.handleRequest(request);
+      // Wait for the response to complete - this ensures the SDK has
+      // processed the request and sent its response through transport.send()
+      const response = await transport.handleRequest(request);
+      await response.json(); // Wait for response to be fully processed
 
       expect(storedState).toBeDefined();
       expect(storedState?.sessionId).toBe("persistent-session");
       expect(storedState?.initialized).toBe(true);
-      expect(storedState?.protocolVersion).toBe("2025-06-18");
+    });
+
+    it("should negotiate down to latest supported version when client requests unsupported version", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      // Client requests a future unsupported version
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2099-01-01" // Unsupported future version
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+      const body = (await response.json()) as {
+        result?: { protocolVersion: string };
+      };
+
+      // Server should respond with latest supported version
+      expect(body.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
     });
 
     it("should restore session state from storage", async () => {
       const server = createTestServer();
       const existingState = {
         sessionId: "restored-session",
-        initialized: true,
-        protocolVersion: "2025-06-18" as const
+        initialized: true
       };
 
       const mockStorage = {
@@ -780,8 +827,7 @@ describe("WorkerTransport", () => {
           getCalls++;
           return {
             sessionId: "restored-session",
-            initialized: true,
-            protocolVersion: "2025-03-26" as const
+            initialized: true
           };
         },
         set: async () => {}

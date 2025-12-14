@@ -22,34 +22,17 @@ Then, follow the steps below to setup the client:
 
 Tap "O + enter" to open the front end. It should list out all the tools, prompts, and resources available for each server added.
 
-## Transport Configuration
+## Usage
 
-The MCP client defaults to HTTP Streamable transport for better performance. You can specify transport type explicitly:
+The recommended way to add MCP servers is via `Agent.addMcpServer()`:
 
 ```typescript
-// Using MCPClientManager directly
-const mcpClient = new MCPClientManager("my-app", "1.0.0");
-
-// HTTP Streamable transport (default, recommended)
-await mcpClient.connect(serverUrl, {
-  transport: {
-    type: "streamable-http",
-    authProvider: myAuthProvider
-  }
-});
-
-// SSE transport (legacy compatibility)
-await mcpClient.connect(serverUrl, {
-  transport: {
-    type: "sse",
-    authProvider: myAuthProvider
-  }
-});
-
-// Or using Agent.addMcpServer() (as shown in the example)
 export class MyAgent extends Agent<Env, never> {
   async addServer(name: string, url: string, callbackHost: string) {
+    // Uses HTTP Streamable transport by default
     await this.addMcpServer(name, url, callbackHost);
   }
 }
 ```
+
+The MCP client handles OAuth authentication automatically using the built-in `DurableObjectOAuthClientProvider`.

@@ -685,7 +685,10 @@ describe("MCP Client Connection Integration", () => {
               saveClientInformation: vi.fn(),
               redirectToAuthorization: vi.fn(),
               saveCodeVerifier: vi.fn(),
-              codeVerifier: vi.fn()
+              codeVerifier: vi.fn(),
+              checkState: vi.fn().mockResolvedValue({ valid: true }),
+              consumeState: vi.fn().mockResolvedValue(undefined),
+              deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
             }
           },
           client: {}
@@ -783,7 +786,10 @@ describe("MCP Client Connection Integration", () => {
           const stored = storageData.get("verifier-key");
           if (!stored) throw new Error("No code verifier found");
           return stored as string;
-        })
+        }),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
       // Test the PKCE preservation logic - this tests EXPECTED behavior
@@ -825,7 +831,10 @@ describe("MCP Client Connection Integration", () => {
         saveClientInformation: vi.fn(),
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn()
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
       const connection = new MCPClientConnection(
@@ -896,7 +905,10 @@ describe("MCP Client Connection Integration", () => {
         saveClientInformation: vi.fn(),
         redirectToAuthorization: vi.fn(),
         saveCodeVerifier: vi.fn(),
-        codeVerifier: vi.fn()
+        codeVerifier: vi.fn(),
+        checkState: vi.fn().mockResolvedValue({ valid: true }),
+        consumeState: vi.fn().mockResolvedValue(undefined),
+        deleteCodeVerifier: vi.fn().mockResolvedValue(undefined)
       };
 
       const connection = new MCPClientConnection(

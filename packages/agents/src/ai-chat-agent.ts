@@ -1,14 +1,17 @@
 import type {
   UIMessage as ChatMessage,
   DynamicToolUIPart,
+  JSONSchema7,
   ProviderMetadata,
   ReasoningUIPart,
   StreamTextOnFinishCallback,
   TextUIPart,
+  Tool,
   ToolSet,
   ToolUIPart,
   UIMessageChunk
 } from "ai";
+import { tool, jsonSchema } from "ai";
 import {
   Agent,
   type AgentContext,
@@ -16,6 +19,7 @@ import {
   type ConnectionContext,
   type WSMessage
 } from "./";
+import { agentContext } from "./context";
 import {
   MessageType,
   type IncomingMessage,
@@ -23,6 +27,75 @@ import {
 } from "./ai-types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import { nanoid } from "nanoid";
+
+/**
+ * Schema for a client-defined tool sent from the browser.
+ * These tools are executed on the client, not the server.
+ *
+ * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema` (FlexibleSchema)
+ * because this is the wire format. Zod schemas cannot be serialized.
+ */
+export type ClientToolSchema = {
+  /** Unique name for the tool */
+  name: string;
+  /** Human-readable description of what the tool does */
+  description?: Tool["description"];
+  /** JSON Schema defining the tool's input parameters */
+  parameters?: JSONSchema7;
+};
+
+/**
+ * Options passed to the onChatMessage handler.
+ */
+export type OnChatMessageOptions = {
+  /** AbortSignal for cancelling the request */
+  abortSignal?: AbortSignal;
+  /**
+   * Tool schemas sent from the client for dynamic tool registration.
+   * These represent tools that will be executed on the client side.
+   * Use `createToolsFromClientSchemas()` to convert these to AI SDK tool format.
+   */
+  clientTools?: ClientToolSchema[];
+};
+
+/**
+ * Converts client tool schemas to AI SDK tool format.
+ *
+ * These tools have no `execute` function - when the AI model calls them,
+ * the tool call is sent back to the client for execution.
+ *
+ * @param clientTools - Array of tool schemas from the client
+ * @returns Record of AI SDK tools that can be spread into your tools object
+ */
+export function createToolsFromClientSchemas(
+  clientTools?: ClientToolSchema[]
+): ToolSet {
+  if (!clientTools || clientTools.length === 0) {
+    return {};
+  }
+
+  // Check for duplicate tool names
+  const seenNames = new Set<string>();
+  for (const t of clientTools) {
+    if (seenNames.has(t.name)) {
+      console.warn(
+        `[createToolsFromClientSchemas] Duplicate tool name "${t.name}" found. Later definitions will override earlier ones.`
+      );
+    }
+    seenNames.add(t.name);
+  }
+
+  return Object.fromEntries(
+    clientTools.map((t) => [
+      t.name,
+      tool({
+        description: t.description ?? "",
+        inputSchema: jsonSchema(t.parameters ?? { type: "object" })
+        // No execute function = tool call is sent back to client
+      })
+    ])
+  );
+}
 
 /** Number of chunks to buffer before flushing to SQLite */
 const CHUNK_BUFFER_SIZE = 10;
@@ -85,6 +158,21 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
    * @internal Protected for testing purposes.
    */
   protected _activeRequestId: string | null = null;
+
+  /**
+   * The message currently being streamed. Used to apply tool results
+   * before the message is persisted.
+   * @internal
+   */
+  private _streamingMessage: ChatMessage | null = null;
+
+  /**
+   * Promise that resolves when the current stream completes.
+   * Used to wait for message persistence before continuing after tool results.
+   * @internal
+   */
+  private _streamCompletionPromise: Promise<void> | null = null;
+  private _streamCompletionResolve: (() => void) | null = null;
 
   /**
    * Current chunk index for the active stream
@@ -182,7 +270,11 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           data.init.method === "POST"
         ) {
           const { body } = data.init;
-          const { messages } = JSON.parse(body as string);
+          const parsed = JSON.parse(body as string);
+          const { messages, clientTools } = parsed as {
+            messages: ChatMessage[];
+            clientTools?: ClientToolSchema[];
+          };
 
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
@@ -212,40 +304,55 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           const abortSignal = this._getAbortSignal(chatMessageId);
 
           return this._tryCatchChat(async () => {
-            const response = await this.onChatMessage(
-              async (_finishResult) => {
-                this._removeAbortController(chatMessageId);
-
-                this.observability?.emit(
-                  {
-                    displayMessage: "Chat message response",
-                    id: data.id,
-                    payload: {},
-                    timestamp: Date.now(),
-                    type: "message:response"
-                  },
-                  this.ctx
-                );
+            // Wrap in agentContext.run() to propagate connection context to onChatMessage
+            // This ensures getCurrentAgent() returns the connection inside tool execute functions
+            return agentContext.run(
+              {
+                agent: this,
+                connection,
+                request: undefined,
+                email: undefined
               },
-              abortSignal ? { abortSignal } : undefined
-            );
+              async () => {
+                const response = await this.onChatMessage(
+                  async (_finishResult) => {
+                    this._removeAbortController(chatMessageId);
 
-            if (response) {
-              await this._reply(data.id, response);
-            } else {
-              console.warn(
-                `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
-              );
-              this._broadcastChatMessage(
-                {
-                  body: "No response was generated by the agent.",
-                  done: true,
-                  id: data.id,
-                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                },
-                [connection.id]
-              );
-            }
+                    this.observability?.emit(
+                      {
+                        displayMessage: "Chat message response",
+                        id: data.id,
+                        payload: {},
+                        timestamp: Date.now(),
+                        type: "message:response"
+                      },
+                      this.ctx
+                    );
+                  },
+                  {
+                    abortSignal,
+                    clientTools
+                  }
+                );
+
+                if (response) {
+                  await this._reply(data.id, response, [connection.id]);
+                } else {
+                  console.warn(
+                    `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
+                  );
+                  this._broadcastChatMessage(
+                    {
+                      body: "No response was generated by the agent.",
+                      done: true,
+                      id: data.id,
+                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                    },
+                    [connection.id]
+                  );
+                }
+              }
+            );
           });
         }
 
@@ -292,6 +399,85 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
               this._activeRequestId
             );
           }
+          return;
+        }
+
+        // Handle client-side tool result
+        if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
+          const { toolCallId, toolName, output, autoContinue } = data;
+
+          // Apply the tool result
+          this._applyToolResult(toolCallId, toolName, output).then(
+            (applied) => {
+              // Only auto-continue if client requested it (opt-in behavior)
+              // This mimics server-executed tool behavior where the LLM
+              // automatically continues after seeing tool results
+              if (applied && autoContinue) {
+                // Wait for the original stream to complete and message to be persisted
+                // before calling onChatMessage, so this.messages includes the tool result
+                const waitForStream = async () => {
+                  if (this._streamCompletionPromise) {
+                    await this._streamCompletionPromise;
+                  } else {
+                    // If no promise, wait a bit for the stream to finish
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                  }
+                };
+
+                waitForStream().then(() => {
+                  const continuationId = nanoid();
+                  const abortSignal = this._getAbortSignal(continuationId);
+
+                  this._tryCatchChat(async () => {
+                    return agentContext.run(
+                      {
+                        agent: this,
+                        connection,
+                        request: undefined,
+                        email: undefined
+                      },
+                      async () => {
+                        const response = await this.onChatMessage(
+                          async (_finishResult) => {
+                            this._removeAbortController(continuationId);
+
+                            this.observability?.emit(
+                              {
+                                displayMessage:
+                                  "Chat message response (tool continuation)",
+                                id: continuationId,
+                                payload: {},
+                                timestamp: Date.now(),
+                                type: "message:response"
+                              },
+                              this.ctx
+                            );
+                          },
+                          {
+                            abortSignal
+                          }
+                        );
+
+                        if (response) {
+                          // Pass continuation flag to merge parts into last assistant message
+                          // Note: We pass an empty excludeBroadcastIds array because the sender
+                          // NEEDS to receive the continuation stream. Unlike regular chat requests
+                          // where aiFetch handles the response, tool continuations have no listener
+                          // waiting - the client relies on the broadcast.
+                          await this._reply(
+                            continuationId,
+                            response,
+                            [], // Don't exclude sender - they need the continuation
+                            { continuation: true }
+                          );
+                        }
+                      }
+                    );
+                  });
+                });
+              }
+            }
+          );
           return;
         }
       }
@@ -583,14 +769,14 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
   /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
-   * @param options.signal A signal to pass to any child requests which can be used to cancel them
+   * @param options Options including abort signal and client-defined tools
    * @returns Response to send to the client or undefined
    */
   async onChatMessage(
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
     onFinish: StreamTextOnFinishCallback<ToolSet>,
     // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
-    options?: { abortSignal: AbortSignal | undefined }
+    options?: OnChatMessageOptions
   ): Promise<Response | undefined> {
     throw new Error(
       "recieved a chat message, override onChatMessage and return a Response to send to the client"
@@ -613,10 +799,21 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = []
   ) {
-    for (const message of messages) {
+    // Merge incoming messages with existing server state to preserve tool outputs.
+    // This is critical for client-side tools: the client sends messages without
+    // tool outputs, but the server has them via _applyToolResult.
+    const mergedMessages = this._mergeIncomingWithServerState(messages);
+
+    // Persist the merged messages
+    for (const message of mergedMessages) {
+      // Strip OpenAI item IDs to prevent "Duplicate item found" errors
+      // when using the OpenAI Responses API. These IDs are assigned by OpenAI
+      // and if sent back in subsequent requests, cause duplicate detection.
+      const sanitizedMessage = this._sanitizeMessageForPersistence(message);
+      const messageToSave = this._resolveMessageForToolMerge(sanitizedMessage);
       this.sql`
         insert into cf_ai_chat_agent_messages (id, message)
-        values (${message.id}, ${JSON.stringify(message)})
+        values (${messageToSave.id}, ${JSON.stringify(messageToSave)})
         on conflict(id) do update set message = excluded.message
       `;
     }
@@ -626,14 +823,402 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
     this.messages = autoTransformMessages(persisted);
     this._broadcastChatMessage(
       {
-        messages: messages,
+        messages: mergedMessages,
         type: MessageType.CF_AGENT_CHAT_MESSAGES
       },
       excludeBroadcastIds
     );
   }
 
-  private async _reply(id: string, response: Response) {
+  /**
+   * Merges incoming messages with existing server state.
+   * This preserves tool outputs that the server has (via _applyToolResult)
+   * but the client doesn't have yet.
+   *
+   * @param incomingMessages - Messages from the client
+   * @returns Messages with server's tool outputs preserved
+   */
+  private _mergeIncomingWithServerState(
+    incomingMessages: ChatMessage[]
+  ): ChatMessage[] {
+    // Build a map of toolCallId -> output from existing server messages
+    const serverToolOutputs = new Map<string, unknown>();
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant") continue;
+      for (const part of msg.parts) {
+        if (
+          "toolCallId" in part &&
+          "state" in part &&
+          part.state === "output-available" &&
+          "output" in part
+        ) {
+          serverToolOutputs.set(
+            part.toolCallId as string,
+            (part as { output: unknown }).output
+          );
+        }
+      }
+    }
+
+    // If server has no tool outputs, return incoming messages as-is
+    if (serverToolOutputs.size === 0) {
+      return incomingMessages;
+    }
+
+    // Merge server's tool outputs into incoming messages
+    return incomingMessages.map((msg) => {
+      if (msg.role !== "assistant") return msg;
+
+      let hasChanges = false;
+      const updatedParts = msg.parts.map((part) => {
+        // If this is a tool part in input-available state and server has the output
+        if (
+          "toolCallId" in part &&
+          "state" in part &&
+          part.state === "input-available" &&
+          serverToolOutputs.has(part.toolCallId as string)
+        ) {
+          hasChanges = true;
+          return {
+            ...part,
+            state: "output-available" as const,
+            output: serverToolOutputs.get(part.toolCallId as string)
+          };
+        }
+        return part;
+      }) as ChatMessage["parts"];
+
+      return hasChanges ? { ...msg, parts: updatedParts } : msg;
+    });
+  }
+
+  /**
+   * Resolves a message for persistence, handling tool result merging.
+   * If the message contains tool parts with output-available state, checks if there's
+   * an existing message with the same toolCallId that should be updated instead of
+   * creating a duplicate. This prevents the "Duplicate item found" error from OpenAI
+   * when client-side tool results arrive in a new request.
+   *
+   * @param message - The message to potentially merge
+   * @returns The message with the correct ID (either original or merged)
+   */
+  private _resolveMessageForToolMerge(message: ChatMessage): ChatMessage {
+    if (message.role !== "assistant") {
+      return message;
+    }
+
+    // Check if this message has tool parts with output-available state
+    for (const part of message.parts) {
+      if (
+        "toolCallId" in part &&
+        "state" in part &&
+        part.state === "output-available"
+      ) {
+        const toolCallId = part.toolCallId as string;
+
+        // Look for an existing message with this toolCallId in input-available state
+        const existingMessage = this._findMessageByToolCallId(toolCallId);
+        if (existingMessage && existingMessage.id !== message.id) {
+          // Found a match - merge by using the existing message's ID
+          // This ensures the SQL upsert updates the existing row
+          return {
+            ...message,
+            id: existingMessage.id
+          };
+        }
+      }
+    }
+
+    return message;
+  }
+
+  /**
+   * Finds an existing assistant message that contains a tool part with the given toolCallId.
+   * Used to detect when a tool result should update an existing message rather than
+   * creating a new one.
+   *
+   * @param toolCallId - The tool call ID to search for
+   * @returns The existing message if found, undefined otherwise
+   */
+  private _findMessageByToolCallId(
+    toolCallId: string
+  ): ChatMessage | undefined {
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant") continue;
+
+      for (const part of msg.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          return msg;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Sanitizes a message for persistence by removing ephemeral provider-specific
+   * data that should not be stored or sent back in subsequent requests.
+   *
+   * This handles two issues with the OpenAI Responses API:
+   *
+   * 1. **Duplicate item IDs**: The AI SDK's @ai-sdk/openai provider (v2.0.x+)
+   *    defaults to using OpenAI's Responses API which assigns unique itemIds
+   *    to each message part. When these IDs are persisted and sent back,
+   *    OpenAI rejects them as duplicates.
+   *
+   * 2. **Empty reasoning parts**: OpenAI may return reasoning parts with empty
+   *    text and encrypted content. These cause "Non-OpenAI reasoning parts are
+   *    not supported" warnings when sent back via convertToModelMessages().
+   *
+   * @param message - The message to sanitize
+   * @returns A new message with ephemeral provider data removed
+   */
+  private _sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
+    // First, filter out empty reasoning parts (they have no useful content)
+    const filteredParts = message.parts.filter((part) => {
+      if (part.type === "reasoning") {
+        const reasoningPart = part as ReasoningUIPart;
+        // Remove reasoning parts that have no text content
+        // These are typically placeholders with only encrypted content
+        if (!reasoningPart.text || reasoningPart.text.trim() === "") {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    // Then sanitize remaining parts by stripping OpenAI-specific ephemeral data
+    const sanitizedParts = filteredParts.map((part) => {
+      let sanitizedPart = part;
+
+      // Strip providerMetadata.openai.itemId and reasoningEncryptedContent
+      if (
+        "providerMetadata" in sanitizedPart &&
+        sanitizedPart.providerMetadata &&
+        typeof sanitizedPart.providerMetadata === "object" &&
+        "openai" in sanitizedPart.providerMetadata
+      ) {
+        sanitizedPart = this._stripOpenAIMetadata(
+          sanitizedPart,
+          "providerMetadata"
+        );
+      }
+
+      // Also check callProviderMetadata for tool parts
+      if (
+        "callProviderMetadata" in sanitizedPart &&
+        sanitizedPart.callProviderMetadata &&
+        typeof sanitizedPart.callProviderMetadata === "object" &&
+        "openai" in sanitizedPart.callProviderMetadata
+      ) {
+        sanitizedPart = this._stripOpenAIMetadata(
+          sanitizedPart,
+          "callProviderMetadata"
+        );
+      }
+
+      return sanitizedPart;
+    }) as ChatMessage["parts"];
+
+    return { ...message, parts: sanitizedParts };
+  }
+
+  /**
+   * Helper to strip OpenAI-specific ephemeral fields from a metadata object.
+   * Removes itemId and reasoningEncryptedContent while preserving other fields.
+   */
+  private _stripOpenAIMetadata<T extends ChatMessage["parts"][number]>(
+    part: T,
+    metadataKey: "providerMetadata" | "callProviderMetadata"
+  ): T {
+    const metadata = (part as Record<string, unknown>)[metadataKey] as {
+      openai?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+
+    if (!metadata?.openai) return part;
+
+    const openaiMeta = metadata.openai;
+
+    // Remove ephemeral fields: itemId and reasoningEncryptedContent
+    const {
+      itemId: _itemId,
+      reasoningEncryptedContent: _rec,
+      ...restOpenai
+    } = openaiMeta;
+
+    // Determine what to keep
+    const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
+    const { openai: _openai, ...restMetadata } = metadata;
+
+    let newMetadata: ProviderMetadata | undefined;
+    if (hasOtherOpenaiFields) {
+      newMetadata = {
+        ...restMetadata,
+        openai: restOpenai
+      } as ProviderMetadata;
+    } else if (Object.keys(restMetadata).length > 0) {
+      newMetadata = restMetadata as ProviderMetadata;
+    }
+
+    // Create new part without the old metadata
+    const { [metadataKey]: _oldMeta, ...restPart } = part as Record<
+      string,
+      unknown
+    >;
+
+    if (newMetadata) {
+      return { ...restPart, [metadataKey]: newMetadata } as T;
+    }
+    return restPart as T;
+  }
+
+  /**
+   * Applies a tool result to an existing assistant message.
+   * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
+   * The server is the source of truth, so we update the message here and broadcast
+   * the update to all clients.
+   *
+   * @param toolCallId - The tool call ID this result is for
+   * @param toolName - The name of the tool
+   * @param output - The output from the tool execution
+   * @returns true if the result was applied, false if the message was not found
+   */
+  private async _applyToolResult(
+    toolCallId: string,
+    _toolName: string,
+    output: unknown
+  ): Promise<boolean> {
+    // Find the message with this tool call
+    // First check the currently streaming message
+    let message: ChatMessage | undefined;
+
+    // Check streaming message first
+    if (this._streamingMessage) {
+      for (const part of this._streamingMessage.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          message = this._streamingMessage;
+          break;
+        }
+      }
+    }
+
+    // If not found in streaming message, retry persisted messages
+    if (!message) {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        message = this._findMessageByToolCallId(toolCallId);
+        if (message) break;
+        // Wait 100ms before retrying
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    if (!message) {
+      // The tool result will be included when
+      // the client sends the follow-up message via sendMessage().
+      console.warn(
+        `[AIChatAgent] _applyToolResult: Could not find message with toolCallId ${toolCallId} after retries`
+      );
+      return false;
+    }
+
+    // Check if this is the streaming message (not yet persisted)
+    const isStreamingMessage = message === this._streamingMessage;
+
+    // Update the tool part with the output
+    let updated = false;
+    if (isStreamingMessage) {
+      // Update in place - the message will be persisted when streaming completes
+      for (const part of message.parts) {
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          part.state === "input-available"
+        ) {
+          (part as { state: string; output?: unknown }).state =
+            "output-available";
+          (part as { state: string; output?: unknown }).output = output;
+          updated = true;
+          break;
+        }
+      }
+    } else {
+      // For persisted messages, create updated parts
+      const updatedParts = message.parts.map((part) => {
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          part.state === "input-available"
+        ) {
+          updated = true;
+          return {
+            ...part,
+            state: "output-available" as const,
+            output
+          };
+        }
+        return part;
+      }) as ChatMessage["parts"];
+
+      if (updated) {
+        // Create the updated message and strip OpenAI item IDs
+        const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence(
+          {
+            ...message,
+            parts: updatedParts
+          }
+        );
+
+        // Persist the updated message
+        this.sql`
+          update cf_ai_chat_agent_messages 
+          set message = ${JSON.stringify(updatedMessage)}
+          where id = ${message.id}
+        `;
+
+        // Reload messages to update in-memory state
+        const persisted = this._loadMessagesFromDb();
+        this.messages = autoTransformMessages(persisted);
+      }
+    }
+
+    if (!updated) {
+      console.warn(
+        `[AIChatAgent] _applyToolResult: Tool part with toolCallId ${toolCallId} not in input-available state`
+      );
+      return false;
+    }
+
+    // Broadcast the update to all clients (only for persisted messages)
+    // For streaming messages, the update will be included when persisted
+    if (!isStreamingMessage) {
+      // Re-fetch the message for broadcast since we modified it
+      const broadcastMessage = this._findMessageByToolCallId(toolCallId);
+      if (broadcastMessage) {
+        this._broadcastChatMessage({
+          type: MessageType.CF_AGENT_MESSAGE_UPDATED,
+          message: broadcastMessage
+        });
+      }
+    }
+
+    // Note: We don't automatically continue the conversation here.
+    // The client is responsible for sending a follow-up request if needed.
+    // This avoids re-entering onChatMessage with unexpected state.
+
+    return true;
+  }
+
+  private async _reply(
+    id: string,
+    response: Response,
+    excludeBroadcastIds: string[] = [],
+    options: { continuation?: boolean } = {}
+  ) {
+    const { continuation = false } = options;
+
     return this._tryCatchChat(async () => {
       if (!response.body) {
         // Send empty response if no body
@@ -641,7 +1226,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
           body: "",
           done: true,
           id,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          ...(continuation && { continuation: true })
         });
         return;
       }
@@ -667,6 +1253,12 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
         role: "assistant",
         parts: []
       };
+      // Track the streaming message so tool results can be applied before persistence
+      this._streamingMessage = message;
+      // Set up completion promise for tool continuation to wait on
+      this._streamCompletionPromise = new Promise((resolve) => {
+        this._streamCompletionResolve = resolve;
+      });
       let activeTextParts: Record<string, TextUIPart> = {};
       let activeReasoningParts: Record<string, ReasoningUIPart> = {};
       const partialToolCalls: Record<
@@ -849,7 +1441,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
               body: "",
               done: true,
               id,
-              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+              ...(continuation && { continuation: true })
             });
             break;
           }
@@ -1256,7 +1849,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                     body: chunkBody,
                     done: false,
                     id,
-                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                    ...(continuation && { continuation: true })
                   });
                 } catch (_error) {
                   // Skip malformed JSON lines silently
@@ -1279,7 +1873,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
                 body: chunkBody,
                 done: false,
                 id,
-                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                ...(continuation && { continuation: true })
               });
             }
           }
@@ -1294,7 +1889,8 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
             done: true,
             error: true,
             id,
-            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+            ...(continuation && { continuation: true })
           });
         }
         throw error;
@@ -1303,7 +1899,45 @@ export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
       }
 
       if (message.parts.length > 0) {
-        await this.persistMessages([...this.messages, message]);
+        if (continuation) {
+          // Find the last assistant message and append parts to it
+          let lastAssistantIdx = -1;
+          for (let i = this.messages.length - 1; i >= 0; i--) {
+            if (this.messages[i].role === "assistant") {
+              lastAssistantIdx = i;
+              break;
+            }
+          }
+          if (lastAssistantIdx >= 0) {
+            const lastAssistant = this.messages[lastAssistantIdx];
+            const mergedMessage: ChatMessage = {
+              ...lastAssistant,
+              parts: [...lastAssistant.parts, ...message.parts]
+            };
+            const updatedMessages = [...this.messages];
+            updatedMessages[lastAssistantIdx] = mergedMessage;
+            await this.persistMessages(updatedMessages, excludeBroadcastIds);
+          } else {
+            // No assistant message to append to, create new one
+            await this.persistMessages(
+              [...this.messages, message],
+              excludeBroadcastIds
+            );
+          }
+        } else {
+          await this.persistMessages(
+            [...this.messages, message],
+            excludeBroadcastIds
+          );
+        }
+      }
+
+      // Clear the streaming message reference and resolve completion promise
+      this._streamingMessage = null;
+      if (this._streamCompletionResolve) {
+        this._streamCompletionResolve();
+        this._streamCompletionResolve = null;
+        this._streamCompletionPromise = null;
       }
     });
   }

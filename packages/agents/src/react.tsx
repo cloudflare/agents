@@ -1,6 +1,6 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
-import { useCallback, useRef, use, useMemo, useEffect, useState } from "react";
+import { useCallback, useRef, use, useMemo, useState, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
@@ -71,82 +71,58 @@ function camelCaseToKebabCase(str: string): string {
 
 type QueryObject = Record<string, string | null>;
 
-const queryCache = new Map<
-  unknown[],
-  {
-    promise: Promise<QueryObject>;
-    refCount: number;
-    expiresAt: number;
-    cacheTtl?: number;
-  }
->();
-
-function arraysEqual(a: unknown[], b: unknown[]): boolean {
-  if (a === b) return true;
-  if (a.length !== b.length) return false;
-
-  for (let i = 0; i < a.length; i++) {
-    if (!Object.is(a[i], b[i])) return false;
-  }
-  return true;
+interface CacheEntry {
+  promise: Promise<QueryObject>;
+  expiresAt: number;
 }
 
-function findCacheEntry(
-  targetKey: unknown[]
-): Promise<QueryObject> | undefined {
-  for (const [existingKey, entry] of queryCache.entries()) {
-    if (arraysEqual(existingKey, targetKey)) {
-      // Check if entry has expired
-      if (Date.now() > entry.expiresAt) {
-        queryCache.delete(existingKey);
-        return undefined;
-      }
-      entry.refCount++;
-      return entry.promise;
-    }
-  }
-  return undefined;
-}
-
-function setCacheEntry(
-  key: unknown[],
-  value: Promise<QueryObject>,
-  cacheTtl?: number
-): void {
-  // Remove any existing entry with matching members
-  for (const [existingKey] of queryCache.entries()) {
-    if (arraysEqual(existingKey, key)) {
-      queryCache.delete(existingKey);
-      break;
-    }
-  }
-
-  const expiresAt = cacheTtl
-    ? Date.now() + cacheTtl
-    : Date.now() + 5 * 60 * 1000; // Default 5 minutes
-  queryCache.set(key, { promise: value, refCount: 1, expiresAt, cacheTtl });
-}
-
-function decrementCacheEntry(targetKey: unknown[]): boolean {
-  for (const [existingKey, entry] of queryCache.entries()) {
-    if (arraysEqual(existingKey, targetKey)) {
-      entry.refCount--;
-      if (entry.refCount <= 0) {
-        queryCache.delete(existingKey);
-      }
-      return true;
-    }
-  }
-  return false;
-}
+const queryCache = new Map<string, CacheEntry>();
 
 function createCacheKey(
   agentNamespace: string,
   name: string | undefined,
   deps: unknown[]
-): unknown[] {
-  return [agentNamespace, name || "default", ...deps];
+): string {
+  return JSON.stringify([agentNamespace, name || "default", ...deps]);
 }
+
+function getCacheEntry(key: string): CacheEntry | undefined {
+  const entry = queryCache.get(key);
+  if (!entry) return undefined;
+
+  if (Date.now() >= entry.expiresAt) {
+    queryCache.delete(key);
+    return undefined;
+  }
+
+  return entry;
+}
+
+function setCacheEntry(
+  key: string,
+  promise: Promise<QueryObject>,
+  cacheTtl: number
+): CacheEntry {
+  const entry: CacheEntry = {
+    promise,
+    expiresAt: Date.now() + cacheTtl
+  };
+  queryCache.set(key, entry);
+  return entry;
+}
+
+function deleteCacheEntry(key: string): void {
+  queryCache.delete(key);
+}
+
+// Export for testing purposes
+export const _testUtils = {
+  queryCache,
+  setCacheEntry,
+  getCacheEntry,
+  deleteCacheEntry,
+  clearCache: () => queryCache.clear()
+};
 
 /**
  * Options for the useAgent hook
@@ -323,35 +299,65 @@ export function useAgent<
   const setTasksRef = useRef(setTasks);
   setTasksRef.current = setTasks;
 
-  // Handle both sync and async query patterns
-  const cacheKey = useMemo(() => {
-    const deps = queryDeps || [];
-    return createCacheKey(agentNamespace, options.name, deps);
-  }, [agentNamespace, options.name, queryDeps]);
+  const cacheKey = useMemo(
+    () => createCacheKey(agentNamespace, options.name, queryDeps || []),
+    [agentNamespace, options.name, queryDeps]
+  );
 
+  const ttl = cacheTtl ?? 5 * 60 * 1000;
+
+  // Track cache invalidation to force re-render when TTL expires
+  const [cacheInvalidatedAt, setCacheInvalidatedAt] = useState<number>(0);
+
+  // Get or create the query promise
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cacheInvalidatedAt intentionally forces re-evaluation when TTL expires
   const queryPromise = useMemo(() => {
     if (!query || typeof query !== "function") {
       return null;
     }
 
-    const existingPromise = findCacheEntry(cacheKey);
-    if (existingPromise) {
-      return existingPromise;
+    // Always check cache first to deduplicate concurrent requests
+    const cached = getCacheEntry(cacheKey);
+    if (cached) {
+      return cached.promise;
     }
 
+    // Create new promise
     const promise = query().catch((error) => {
       console.error(
         `[useAgent] Query failed for agent "${options.agent}":`,
         error
       );
-      decrementCacheEntry(cacheKey); // Remove failed promise from cache
-      throw error; // Re-throw for Suspense error boundary
+      deleteCacheEntry(cacheKey);
+      throw error;
     });
 
-    setCacheEntry(cacheKey, promise, cacheTtl);
+    // Always cache to deduplicate concurrent requests
+    setCacheEntry(cacheKey, promise, ttl);
 
     return promise;
-  }, [cacheKey, query, options.agent, cacheTtl]);
+  }, [cacheKey, query, options.agent, ttl, cacheInvalidatedAt]);
+
+  // Schedule cache invalidation when TTL expires
+  useEffect(() => {
+    if (!queryPromise || ttl <= 0) return;
+
+    const entry = getCacheEntry(cacheKey);
+    if (!entry) return;
+
+    const timeUntilExpiry = entry.expiresAt - Date.now();
+
+    // Always set a timer (with min 0ms) to ensure cleanup function is returned
+    const timer = setTimeout(
+      () => {
+        deleteCacheEntry(cacheKey);
+        setCacheInvalidatedAt(Date.now());
+      },
+      Math.max(0, timeUntilExpiry)
+    );
+
+    return () => clearTimeout(timer);
+  }, [cacheKey, queryPromise, ttl]);
 
   let resolvedQuery: QueryObject | undefined;
 
@@ -383,15 +389,6 @@ export function useAgent<
       resolvedQuery = query;
     }
   }
-
-  // Cleanup cache on unmount
-  useEffect(() => {
-    return () => {
-      if (queryPromise) {
-        decrementCacheEntry(cacheKey);
-      }
-    };
-  }, [cacheKey, queryPromise]);
 
   const agent = usePartySocket({
     party: agentNamespace,

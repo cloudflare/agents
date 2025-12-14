@@ -15,7 +15,7 @@ import type { MCPServersState } from "agents";
 import { nanoid } from "nanoid";
 import type { Playground, PlaygroundState } from "./server";
 import type { Model } from "./models";
-import type { McpComponentState } from "./components/McpServers";
+import type { McpServersComponentState } from "./components/McpServers";
 import { Streamdown } from "streamdown";
 
 const STORAGE_KEY = "playground_session_id";
@@ -26,8 +26,8 @@ const DEFAULT_PARAMS = {
   system:
     "You are a helpful assistant that can do various tasks using MCP tools."
 };
-const DEFAULT_MCP_STATUS = {
-  state: "not-connected",
+const DEFAULT_MCP_STATUS: McpServersComponentState = {
+  servers: [],
   tools: [],
   prompts: [],
   resources: []
@@ -64,7 +64,7 @@ const App = () => {
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<PlaygroundState>(DEFAULT_PARAMS);
 
-  const [mcp, setMcp] = useState<McpComponentState>(DEFAULT_MCP_STATUS);
+  const [mcp, setMcp] = useState<McpServersComponentState>(DEFAULT_MCP_STATUS);
 
   const [mcpLogs, setMcpLogs] = useState<
     Array<{ timestamp: number; status: string; serverUrl?: string }>
@@ -91,33 +91,37 @@ const App = () => {
     },
     onMcpUpdate(mcpState: MCPServersState) {
       // The SDK returns: { servers: { [id]: { state, name, ... } }, tools, prompts, resources }
-      // We need to flatten it for the McpServers component
-      const serverIds = Object.keys(mcpState.servers || {});
-      const firstServerId = serverIds[0];
-      const firstServer = firstServerId
-        ? mcpState.servers[firstServerId]
-        : null;
+      // Transform servers object to array for the McpServers component
+      const servers = Object.entries(mcpState.servers || {}).map(
+        ([id, server]) => ({
+          id,
+          name: server.name,
+          url: server.server_url,
+          state: server.state
+        })
+      );
 
-      const transformedState: McpComponentState = {
-        state: firstServer?.state || "not-connected", // Map SDK's 'state' to 'status'
+      const transformedState: McpServersComponentState = {
+        servers,
         tools: mcpState.tools || [],
         prompts: mcpState.prompts || [],
-        resources: mcpState.resources || [],
-        id: firstServerId,
-        name: firstServer?.name,
-        url: firstServer?.server_url
+        resources: mcpState.resources || []
       };
 
       setMcp(transformedState);
-      if (firstServer?.state) {
-        setMcpLogs((prev) => [
-          ...prev,
-          {
-            timestamp: Date.now(),
-            status: Object.values(mcpState.servers)[0].state,
-            serverUrl: Object.values(mcpState.servers)[0].server_url
-          }
-        ]);
+
+      // Log state changes for any server
+      for (const server of servers) {
+        if (server.state) {
+          setMcpLogs((prev) => [
+            ...prev,
+            {
+              timestamp: Date.now(),
+              status: server.state,
+              serverUrl: server.url
+            }
+          ]);
+        }
       }
     }
   });

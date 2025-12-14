@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { createCli } from "../cli.js";
+import { createCli } from "../cli/create";
 
 describe("agents CLI", () => {
   let originalConsoleLog: typeof console.log;

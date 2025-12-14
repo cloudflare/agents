@@ -45,14 +45,32 @@ export const tools = {
 };
 
 // Export AITool format for client-side use
+// AITool uses JSON Schema (not Zod) because it needs to be serialized over the wire.
+// Only tools with `execute` need `parameters` - they get extracted and sent to the server.
+// Tools without `execute` are server-side only and just need description for display.
 export const clientTools: Record<string, AITool> = {
-  getLocalTime: getLocalTimeTool as AITool,
+  getLocalTime: {
+    description: "get the local time for a specified location",
+    parameters: {
+      type: "object",
+      properties: {
+        location: { type: "string" }
+      },
+      required: ["location"]
+    },
+    execute: async (input) => {
+      const { location } = input as { location: string };
+      console.log(`Getting local time for ${location}`);
+      await new Promise((res) => setTimeout(res, 2000));
+      return "10am";
+    }
+  },
+  // Server-side tools: no execute, no parameters needed (schema lives on server)
   getWeatherInformation: {
-    description: getWeatherInformationTool.description,
-    inputSchema: getWeatherInformationTool.inputSchema
+    description:
+      "Get the current weather information for a specific city. Always use this tool when the user asks about weather."
   },
   getLocalNews: {
-    description: getLocalNewsTool.description,
-    inputSchema: getLocalNewsTool.inputSchema
+    description: "get local news for a specified location"
   }
 };

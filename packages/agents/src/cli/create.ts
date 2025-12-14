@@ -1,6 +1,3 @@
-#!/usr/bin/env node
-
-import { fileURLToPath } from "node:url";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
@@ -47,15 +44,4 @@ export function createCli(argv = process.argv) {
     .demandCommand(1, "Please provide a command")
     .strict()
     .help();
-}
-
-// Run CLI if this is the main module
-const __filename = fileURLToPath(import.meta.url);
-
-// Check if this file was run directly (not imported)
-if (
-  process.argv[1] &&
-  fileURLToPath(new URL(process.argv[1], "file://")) === __filename
-) {
-  void createCli().parse();
 }

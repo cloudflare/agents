@@ -18,7 +18,12 @@ export enum MessageType {
   CF_AGENT_MCP_SERVERS = "cf_agent_mcp_servers",
   CF_MCP_AGENT_EVENT = "cf_mcp_agent_event",
   CF_AGENT_STATE = "cf_agent_state",
-  RPC = "rpc"
+  RPC = "rpc",
+
+  /** Client sends tool result to server (for client-side tools) */
+  CF_AGENT_TOOL_RESULT = "cf_agent_tool_result",
+  /** Server notifies client that a message was updated (e.g., tool result applied) */
+  CF_AGENT_MESSAGE_UPDATED = "cf_agent_message_updated"
 }
 
 /**
@@ -46,12 +51,20 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       done: boolean;
       /** Whether this response contains an error */
       error?: boolean;
+      /** Whether this is a continuation (append to last assistant message) */
+      continuation?: boolean;
     }
   | {
       /** Indicates the server is resuming an active stream */
       type: MessageType.CF_AGENT_STREAM_RESUMING;
       /** The request ID of the stream being resumed */
       id: string;
+    }
+  | {
+      /** Server notifies client that a message was updated (e.g., tool result applied) */
+      type: MessageType.CF_AGENT_MESSAGE_UPDATED;
+      /** The updated message */
+      message: ChatMessage;
     };
 
 /**
@@ -99,4 +112,16 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_STREAM_RESUME_ACK;
       /** The request ID of the stream being resumed */
       id: string;
+    }
+  | {
+      /** Client sends tool result to server (for client-side tools) */
+      type: MessageType.CF_AGENT_TOOL_RESULT;
+      /** The tool call ID this result is for */
+      toolCallId: string;
+      /** The name of the tool */
+      toolName: string;
+      /** The output from the tool execution */
+      output: unknown;
+      /** Whether server should auto-continue the conversation after applying result */
+      autoContinue?: boolean;
     };

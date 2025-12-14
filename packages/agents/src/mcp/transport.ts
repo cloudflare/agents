@@ -123,6 +123,16 @@ export class StreamableHTTPServerTransport implements Transport {
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
 
+  /**
+   * Optional message interceptor that can intercept messages before they are passed to onmessage.
+   * If the interceptor returns true, the message is considered handled and won't be forwarded.
+   * This is used by McpAgent to intercept elicitation responses.
+   */
+  messageInterceptor?: (
+    message: JSONRPCMessage,
+    extra?: MessageExtraInfo
+  ) => Promise<boolean>;
+
   constructor(options: StreamableHTTPServerTransportOptions) {
     const { agent } = getCurrentAgent<McpAgent>();
     if (!agent)
@@ -253,6 +263,16 @@ export class StreamableHTTPServerTransport implements Transport {
     if (!hasRequests) {
       // We process without sending anything
       for (const message of messages) {
+        // check if message should be intercepted (i.e. elicitation responses)
+        if (this.messageInterceptor) {
+          const handled = await this.messageInterceptor(message, {
+            authInfo,
+            requestInfo
+          });
+          if (handled) {
+            continue; // msg was handled by interceptor, skip onmessage
+          }
+        }
         this.onmessage?.(message, { authInfo, requestInfo });
       }
     } else if (hasRequests) {
@@ -271,6 +291,15 @@ export class StreamableHTTPServerTransport implements Transport {
 
       // handle each message
       for (const message of messages) {
+        if (this.messageInterceptor) {
+          const handled = await this.messageInterceptor(message, {
+            authInfo,
+            requestInfo
+          });
+          if (handled) {
+            continue; // Message was handled by interceptor, skip onmessage
+          }
+        }
         this.onmessage?.(message, { authInfo, requestInfo });
       }
       // The server SHOULD NOT close the SSE stream before sending all JSON-RPC responses

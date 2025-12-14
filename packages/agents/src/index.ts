@@ -1,6 +1,6 @@
 import type { env } from "cloudflare:workers";
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { agentContext, type AgentEmail } from "./context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import type {
@@ -218,13 +218,6 @@ const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
-
-const agentContext = new AsyncLocalStorage<{
-  agent: Agent<unknown, unknown>;
-  connection: Connection | undefined;
-  request: Request | undefined;
-  email: AgentEmail | undefined;
-}>();
 
 export function getCurrentAgent<
   T extends Agent<unknown, unknown> = Agent<unknown, unknown>
@@ -1915,8 +1908,7 @@ export class Agent<
     const result = this.sql<Schedule<string>>`
       SELECT * FROM cf_agents_schedules WHERE id = ${id}
     `;
-    if (!result) {
-      console.error(`schedule ${id} not found`);
+    if (!result || result.length === 0) {
       return undefined;
     }
 
@@ -1973,25 +1965,28 @@ export class Agent<
   /**
    * Cancel a scheduled task
    * @param id ID of the task to cancel
-   * @returns true if the task was cancelled, false otherwise
+   * @returns true if the task was cancelled, false if the task was not found
    */
   async cancelSchedule(id: string): Promise<boolean> {
     const schedule = await this.getSchedule(id);
-    if (schedule) {
-      this.observability?.emit(
-        {
-          displayMessage: `Schedule ${id} cancelled`,
-          id: nanoid(),
-          payload: {
-            callback: schedule.callback,
-            id: schedule.id
-          },
-          timestamp: Date.now(),
-          type: "schedule:cancel"
-        },
-        this.ctx
-      );
+    if (!schedule) {
+      return false;
     }
+
+    this.observability?.emit(
+      {
+        displayMessage: `Schedule ${id} cancelled`,
+        id: nanoid(),
+        payload: {
+          callback: schedule.callback,
+          id: schedule.id
+        },
+        timestamp: Date.now(),
+        type: "schedule:cancel"
+      },
+      this.ctx
+    );
+
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
     await this._scheduleNextAlarm();
@@ -2731,16 +2726,8 @@ export async function routeAgentEmail<Env>(
   await agent._onEmail(serialisableEmail);
 }
 
-export type AgentEmail = {
-  from: string;
-  to: string;
-  getRaw: () => Promise<Uint8Array>;
-  headers: Headers;
-  rawSize: number;
-  setReject: (reason: string) => void;
-  forward: (rcptTo: string, headers?: Headers) => Promise<void>;
-  reply: (options: { from: string; to: string; raw: string }) => Promise<void>;
-};
+// AgentEmail is re-exported from ./context
+export type { AgentEmail } from "./context";
 
 export type EmailSendOptions = {
   to: string;
