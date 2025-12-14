@@ -38,6 +38,19 @@ import {
 // ============================================================================
 
 /**
+ * JSON-serializable value type.
+ * Used to ensure type safety at workflow boundaries where values must
+ * survive serialization/deserialization.
+ */
+type JsonSerializable =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonSerializable[]
+  | { [key: string]: JsonSerializable };
+
+/**
  * Internal payload for durable task workflow
  */
 export interface DurableTaskWorkflowPayload {
@@ -134,23 +147,25 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
     /**
      * Notify agent of task updates with proper error handling.
      * @param update - The update to send
-     * @param critical - If true, log error on failure (for completion/failure states)
+     * @param critical - If true, log detailed error on failure (for completion/failure states)
+     * @returns true if notification succeeded
      */
     const notifyAgent = async (
       update: Partial<WorkflowUpdate>,
       critical = false
     ): Promise<boolean> => {
-      const success = await this.sendUpdateToAgent(_agentBinding, _agentName, {
+      const result = await this.sendUpdateToAgent(_agentBinding, _agentName, {
         taskId: _taskId,
         ...update
       });
-      if (!success && critical) {
+      if (!result.success && critical) {
         console.error(
           `[DurableTaskWorkflow] Critical notification failed for task ${_taskId}:`,
-          update.status || update.event?.type
+          update.status || update.event?.type,
+          `- ${result.error}${result.attempts ? ` (${result.attempts} attempts)` : ""}`
         );
       }
-      return success;
+      return result.success;
     };
 
     // Notify that we're starting (non-critical - workflow will proceed regardless)
@@ -182,20 +197,25 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
           }
         : undefined;
 
-      // Execute the task method on the agent
+      // Execute the task method on the agent.
+      //
+      // Type Safety Note: The `as unknown` assertion is required because:
+      // 1. executeTaskOnAgent() returns data from response.json() - inherently JSON-serializable
+      // 2. Cloudflare's Serializable<T> uses recursive mapped types causing TS inference issues
+      // 3. The actual runtime value IS serializable, this is purely a type system limitation
+      //
+      // See: https://github.com/cloudflare/workerd/issues/698
       const result = await step.do(
         `execute-${_methodName}`,
         retryConfig ? { retries: retryConfig } : {},
-        async () => {
-          return (await this.executeTaskOnAgent(
+        () =>
+          this.executeTaskOnAgent(
             _agentBinding,
             _agentName,
             _taskId,
             _methodName,
             _input
-            // biome-ignore lint/suspicious/noExplicitAny: Workflow type coercion
-          )) as any;
-        }
+          ) as unknown as Promise<string>
       );
 
       // Notify completion (critical - agent needs to know task completed)
@@ -227,7 +247,11 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
   }
 
   /**
-   * Execute the task method on the agent via RPC
+   * Execute the task method on the agent via RPC.
+   *
+   * Returns a JSON-serializable result. The agent endpoint serializes the result
+   * to JSON, so the returned value is guaranteed to be serializable and safe
+   * for use with Cloudflare Workflows' step.do().
    */
   private async executeTaskOnAgent(
     agentBinding: string,
@@ -235,7 +259,7 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
     taskId: string,
     methodName: string,
     input: unknown
-  ): Promise<unknown> {
+  ): Promise<JsonSerializable> {
     const agentNS = this.env[agentBinding] as DurableObjectNamespace;
     if (!agentNS) {
       throw new Error(`Agent binding ${agentBinding} not found`);
@@ -262,27 +286,44 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
       throw new Error(`Task execution failed: ${errorText}`);
     }
 
-    return response.json();
+    // Result is JSON from the agent, guaranteed to be serializable
+    return response.json() as Promise<JsonSerializable>;
   }
 
   /**
-   * Send update to Agent
-   * @returns true if notification succeeded, false otherwise
+   * Result of attempting to send an update to the agent
    */
-  private async sendUpdateToAgent(
+  private sendUpdateToAgent(
     binding: string,
     agentName: string,
     update: WorkflowUpdate,
     maxRetries = 3
-  ): Promise<boolean> {
+  ): Promise<NotificationResult> {
+    return this.sendUpdateWithRetry(binding, agentName, update, maxRetries);
+  }
+
+  /**
+   * Send update to Agent with retry logic.
+   * Returns a result object instead of boolean to preserve error context.
+   */
+  private async sendUpdateWithRetry(
+    binding: string,
+    agentName: string,
+    update: WorkflowUpdate,
+    maxRetries: number
+  ): Promise<NotificationResult> {
     const agentNS = this.env[binding] as DurableObjectNamespace;
     if (!agentNS) {
-      console.error(`[DurableTaskWorkflow] Binding ${binding} not found`);
-      return false;
+      return {
+        success: false,
+        error: `Binding ${binding} not found`,
+        retriable: false
+      };
     }
 
     const agentId = agentNS.idFromName(agentName);
     const agent = agentNS.get(agentId);
+    let lastError: string | undefined;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
@@ -294,32 +335,56 @@ export class DurableTaskWorkflow extends WorkflowEntrypoint<
           })
         );
 
-        if (response.ok) return true;
+        if (response.ok) {
+          return { success: true };
+        }
 
+        // Non-retryable client errors (except 429 Too Many Requests)
         if (
           response.status >= 400 &&
           response.status < 500 &&
           response.status !== 429
         ) {
-          console.error(
-            `[DurableTaskWorkflow] Non-retryable error: ${response.status}`
-          );
-          return false;
+          return {
+            success: false,
+            error: `HTTP ${response.status}`,
+            retriable: false
+          };
         }
+
+        lastError = `HTTP ${response.status}`;
       } catch (error) {
-        if (attempt === maxRetries - 1) {
-          console.error("[DurableTaskWorkflow] Failed to notify agent:", error);
-        }
+        lastError = error instanceof Error ? error.message : String(error);
       }
 
+      // Exponential backoff before retry
       if (attempt < maxRetries - 1) {
         await new Promise((r) =>
           setTimeout(r, Math.min(100 * 2 ** attempt, 2000))
         );
       }
     }
-    return false;
+
+    // All retries exhausted
+    return {
+      success: false,
+      error: lastError || "Unknown error after retries",
+      retriable: true,
+      attempts: maxRetries
+    };
   }
+}
+
+/**
+ * Result of a notification attempt
+ */
+interface NotificationResult {
+  success: boolean;
+  error?: string;
+  /** Whether the error is potentially retriable */
+  retriable?: boolean;
+  /** Number of attempts made */
+  attempts?: number;
 }
 
 // ============================================================================
@@ -447,23 +512,24 @@ export abstract class AgentWorkflow<
   }
 
   /**
-   * Send update to Agent
-   * @returns true if notification succeeded, false otherwise
+   * Send update to Agent with retry logic.
+   * Logs errors with context for debugging.
    */
   private async notifyAgent(
     binding: string,
     agentName: string,
     update: WorkflowUpdate,
     maxRetries = 3
-  ): Promise<boolean> {
+  ): Promise<void> {
     const agentNS = this.env[binding] as DurableObjectNamespace;
     if (!agentNS) {
       console.error(`[AgentWorkflow] Binding ${binding} not found`);
-      return false;
+      return;
     }
 
     const agentId = agentNS.idFromName(agentName);
     const agent = agentNS.get(agentId);
+    let lastError: string | undefined;
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
@@ -475,31 +541,37 @@ export abstract class AgentWorkflow<
           })
         );
 
-        if (response.ok) return true;
+        if (response.ok) return;
 
+        // Non-retryable client errors (except 429 Too Many Requests)
         if (
           response.status >= 400 &&
           response.status < 500 &&
           response.status !== 429
         ) {
           console.error(
-            `[AgentWorkflow] Non-retryable error: ${response.status}`
+            `[AgentWorkflow] Non-retryable error for task ${update.taskId}: HTTP ${response.status}`
           );
-          return false;
+          return;
         }
+
+        lastError = `HTTP ${response.status}`;
       } catch (error) {
-        if (attempt === maxRetries - 1) {
-          console.error("[AgentWorkflow] Failed to notify agent:", error);
-        }
+        lastError = error instanceof Error ? error.message : String(error);
       }
 
+      // Exponential backoff before retry
       if (attempt < maxRetries - 1) {
         await new Promise((r) =>
           setTimeout(r, Math.min(100 * 2 ** attempt, 2000))
         );
       }
     }
-    return false;
+
+    // All retries exhausted - log the failure
+    console.error(
+      `[AgentWorkflow] Failed to notify agent for task ${update.taskId} after ${maxRetries} attempts: ${lastError}`
+    );
   }
 }
 

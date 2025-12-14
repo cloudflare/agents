@@ -529,11 +529,6 @@ export interface TaskObservabilityEvent {
  * - SQL for persistence and queries
  * - State sync callback for real-time updates to clients
  * - Supports both simple and durable tasks
- *
- * SQL Safety: This class uses Cloudflare's SQL template literal API which
- * automatically parameterizes all interpolated values. Values like
- * `${JSON.stringify(input)}` are bound as parameters, not string-concatenated,
- * preventing SQL injection attacks.
  */
 export class TaskTracker {
   private sql: SqlExecutor;
@@ -541,6 +536,23 @@ export class TaskTracker {
   private abortControllers = new Map<string, AbortController>();
   private observabilityCallback?: TaskObservabilityCallback;
   private deadlineCache = new Map<string, number | null>();
+
+  /**
+   * Serialize a value to JSON for SQL storage.
+   *
+   * This method exists to make the serialization pattern explicit and safe.
+   * The returned string is passed to Cloudflare's SQL template literal API,
+   * which binds it as a parameterized value (not string interpolation).
+   *
+   * Example: `this.sql\`UPDATE t SET data = ${this.toJSON(obj)}\``
+   * Becomes: `UPDATE t SET data = ?` with obj serialized as a bound parameter
+   *
+   * @param value - Any JSON-serializable value
+   * @returns JSON string safe for use as a SQL parameter
+   */
+  private toJSON(value: unknown): string {
+    return JSON.stringify(value);
+  }
 
   constructor(sql: SqlExecutor, syncToState: StateSyncCallback) {
     this.sql = sql;
@@ -666,7 +678,7 @@ export class TaskTracker {
       VALUES (
         ${id},
         ${method},
-        ${JSON.stringify(input)},
+        ${this.toJSON(input)},
         'pending',
         '[]',
         ${timeoutMs ?? null},
@@ -859,12 +871,12 @@ export class TaskTracker {
 
     this.sql`
       UPDATE cf_agents_tasks
-      SET status = 'completed', result = ${JSON.stringify(result)}, completed_at = ${now}, progress = 100
+      SET status = 'completed', result = ${this.toJSON(result)}, completed_at = ${now}, progress = 100
       WHERE id = ${taskId}
     `;
 
+    // cleanupController handles both abortControllers and deadlineCache
     this.cleanupController(taskId);
-    this.deadlineCache.delete(taskId);
     this.addEventInternal(taskId, "completed", { result });
 
     this.emitObservability("task:completed", taskId, task?.method, {
@@ -888,8 +900,8 @@ export class TaskTracker {
       WHERE id = ${taskId}
     `;
 
+    // cleanupController handles both abortControllers and deadlineCache
     this.cleanupController(taskId);
-    this.deadlineCache.delete(taskId);
     this.addEventInternal(taskId, "failed", { error });
 
     this.emitObservability("task:failed", taskId, task?.method, {
@@ -923,8 +935,8 @@ export class TaskTracker {
       WHERE id = ${taskId}
     `;
 
+    // cleanupController handles both abortControllers and deadlineCache
     this.cleanupController(taskId);
-    this.deadlineCache.delete(taskId);
     this.addEventInternal(taskId, "aborted", { reason });
 
     this.emitObservability("task:aborted", taskId, task.method, {
@@ -971,7 +983,7 @@ export class TaskTracker {
     const events = [...task.events, event];
     this.sql`
       UPDATE cf_agents_tasks
-      SET events = ${JSON.stringify(events)}
+      SET events = ${this.toJSON(events)}
       WHERE id = ${taskId}
     `;
   }
