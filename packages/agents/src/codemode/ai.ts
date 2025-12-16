@@ -1,6 +1,6 @@
 import { generateObject, tool, type ToolSet } from "ai";
 import { openai } from "@ai-sdk/openai";
-import { z } from "zod/v3";
+import { z } from "zod";
 import { compile as compileJsonSchemaToTs } from "json-schema-to-typescript";
 import {
   zodToTs,
