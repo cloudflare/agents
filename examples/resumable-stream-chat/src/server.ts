@@ -28,7 +28,7 @@ export class ResumableStreamingChat extends AIChatAgent {
       execute: async ({ writer }) => {
         const result = streamText({
           model: openai("gpt-4o"),
-          messages: convertToModelMessages(this.messages)
+          messages: await convertToModelMessages(this.messages)
         });
 
         writer.merge(result.toUIMessageStream());

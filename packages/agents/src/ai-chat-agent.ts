@@ -34,6 +34,10 @@ import { nanoid } from "nanoid";
  *
  * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema` (FlexibleSchema)
  * because this is the wire format. Zod schemas cannot be serialized.
+ *
+ * @deprecated Define tools on the server using `tool()` from "ai" instead.
+ * For tools that need client-side execution, omit the `execute` function
+ * and handle them via the `onToolCall` callback in `useAgentChat`.
  */
 export type ClientToolSchema = {
   /** Unique name for the tool */
@@ -54,6 +58,9 @@ export type OnChatMessageOptions = {
    * Tool schemas sent from the client for dynamic tool registration.
    * These represent tools that will be executed on the client side.
    * Use `createToolsFromClientSchemas()` to convert these to AI SDK tool format.
+   *
+   * @deprecated Define tools on the server instead. Use `onToolCall` callback
+   * in `useAgentChat` for client-side execution.
    */
   clientTools?: ClientToolSchema[];
 };
@@ -66,6 +73,32 @@ export type OnChatMessageOptions = {
  *
  * @param clientTools - Array of tool schemas from the client
  * @returns Record of AI SDK tools that can be spread into your tools object
+ *
+ * @deprecated Define tools on the server using `tool()` from "ai" instead.
+ * For tools that need client-side execution, omit the `execute` function
+ * and handle them via the `onToolCall` callback in `useAgentChat`.
+ *
+ * @example
+ * ```typescript
+ * // Server: Define tool without execute
+ * const tools = {
+ *   getLocation: tool({
+ *     description: "Get user's location",
+ *     inputSchema: z.object({})
+ *     // No execute = client must handle
+ *   })
+ * };
+ *
+ * // Client: Handle in onToolCall
+ * useAgentChat({
+ *   onToolCall: async ({ toolCall, addToolOutput }) => {
+ *     if (toolCall.toolName === 'getLocation') {
+ *       const pos = await navigator.geolocation.getCurrentPosition();
+ *       addToolOutput({ toolCallId: toolCall.toolCallId, output: pos });
+ *     }
+ *   }
+ * });
+ * ```
  */
 export function createToolsFromClientSchemas(
   clientTools?: ClientToolSchema[]
