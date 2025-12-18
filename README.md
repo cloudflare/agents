@@ -1,5 +1,8 @@
 # 🧠 Cloudflare Agents
 
+[![npm version](https://img.shields.io/npm/v/agents)](https://www.npmjs.com/package/agents)
+[![npm downloads](https://img.shields.io/npm/dw/agents)](https://www.npmjs.com/package/agents)
+
 ![npm install agents](assets/npm-install-agents.svg)
 
 _This project is in active development. Join us in shaping the future of intelligent agents._
