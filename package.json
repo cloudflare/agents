@@ -34,7 +34,7 @@
     "@changesets/changelog-github": "^0.5.1",
     "@changesets/cli": "^2.29.7",
     "@cloudflare/vite-plugin": "^1.15.3",
-    "@cloudflare/vitest-pool-workers": "^0.10.11",
+    "@cloudflare/vitest-pool-workers": "https://pkg.pr.new/@cloudflare/vitest-pool-workers@11632",
     "@cloudflare/workers-types": "^4.20251127.0",
     "@modelcontextprotocol/sdk": "^1.23.0",
     "@openai/agents": "^0.3.3",
@@ -43,8 +43,8 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
-    "@vitest/browser": "^3.2.4",
-    "@vitest/runner": "^3.2.4",
+    "@vitest/browser": "^4.0.16",
+    "@vitest/runner": "^4.0.16",
     "ai": "5.0.103",
     "autoevals": "^0.0.131",
     "concurrently": "^9.2.1",
@@ -66,10 +66,10 @@
     "typescript": "^5.9.3",
     "vite": "^7.2.4",
     "vite-plugin-devtools-json": "^1.0.0",
-    "vitest": "3.2.4",
-    "vitest-browser-react": "^1.0.1",
+    "vitest": "4.0.16",
+    "vitest-browser-react": "^2.0.2",
     "workers-ai-provider": "^2.0.0",
-    "wrangler": "^4.51.0",
+    "wrangler": "https://pkg.pr.new/wrangler@11632",
     "zod": "^3.25.76"
   },
   "workspaces": [
@@ -80,7 +80,8 @@
     "site/*"
   ],
   "overrides": {
-    "esbuild": "^0.25.1"
+    "esbuild": "^0.25.1",
+    "wrangler": "https://pkg.pr.new/wrangler@11632"
   },
   "lint-staged": {
     "*": [
