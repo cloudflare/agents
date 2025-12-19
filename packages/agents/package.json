@@ -26,7 +26,6 @@
   "dependencies": {
     "@ai-sdk/openai": "2.0.73",
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/sdk": "^1.23.0",
     "ai": "5.0.103",
     "cron-schedule": "^6.0.0",
     "json-schema": "^0.4.0",
@@ -41,12 +40,14 @@
   },
   "devDependencies": {
     "@cloudflare/workers-oauth-provider": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.23.0",
     "@types/yargs": "^17.0.35",
     "react": "*",
     "vitest-browser-react": "^1.0.1",
     "x402": "^0.7.3"
   },
   "peerDependencies": {
+    "@modelcontextprotocol/sdk": ">=1.0.0",
     "react": "*",
     "viem": ">=2.0.0",
     "x402": "^0.7.1"
