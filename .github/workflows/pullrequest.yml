@@ -5,14 +5,11 @@ on: pull_request
 jobs:
   check:
     timeout-minutes: 10
-    strategy:
-      matrix:
-        os: [
-            ubuntu-24.04
-            # windows-latest,
-            # macos-latest,
-          ]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.56.1-noble
+      options: --user 1001
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -22,17 +19,6 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
-
-      - name: Get Playwright version
-        id: playwright-version
-        run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
 
       - run: npm ci
       - run: npm run build
