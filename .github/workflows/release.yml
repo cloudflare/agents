@@ -5,10 +5,6 @@ on:
     branches:
       - main
 
-permissions:
-  id-token: write # Required for OIDC
-  contents: read
-
 jobs:
   release:
     permissions:
@@ -27,12 +23,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: "https://registry.npmjs.org"
           cache: "npm"
-
-      - name: Upgrade npm for OIDC trusted publishing
-        run: npm install -g npm@latest
 
       - name: Get Playwright version
         id: playwright-version
@@ -73,12 +66,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: "https://registry.npmjs.org"
           cache: "npm"
-
-      - name: Upgrade npm for OIDC trusted publishing
-        run: npm install -g npm@latest
 
       - name: Get Playwright version
         id: playwright-version

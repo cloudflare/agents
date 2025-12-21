@@ -11,13 +11,13 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "downshift": "^9.0.10",
+    "downshift": "^9.0.13",
     "nanoid": "^5.1.6",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
     "react-hotkeys-hook": "^5.2.1",
     "react-textarea-autosize": "^8.5.9",
-    "streamdown": "^1.6.8",
+    "streamdown": "^1.6.10",
     "workers-ai-provider": "^2.0.0",
     "zod": "^3.25.76"
   },

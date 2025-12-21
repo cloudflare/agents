@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/sdk": "^1.23.0",
+    "@modelcontextprotocol/sdk": "1.23.0",
     "cron-schedule": "^6.0.0",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
@@ -38,15 +38,15 @@
     "zod-to-ts": "^2.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/openai": "2.0.73",
-    "@ai-sdk/react": "2.0.103",
-    "@cloudflare/workers-oauth-provider": "^0.1.0",
+    "@ai-sdk/openai": "2.0.88",
+    "@ai-sdk/react": "2.0.118",
+    "@cloudflare/workers-oauth-provider": "^0.2.2",
     "@types/react": "^19.2.7",
     "@types/yargs": "^17.0.35",
-    "ai": "5.0.103",
-    "react": "^19.2.0",
+    "ai": "5.0.116",
+    "react": "^19.2.3",
     "vitest-browser-react": "^1.0.1",
-    "x402": "^0.7.3"
+    "x402": "^1.0.1"
   },
   "peerDependencies": {
     "@ai-sdk/openai": ">=2.0.0",
