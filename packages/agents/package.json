@@ -46,7 +46,7 @@
     "react": "^19.2.3",
     "vitest-browser-react": "^1.0.1",
     "x402": "^1.0.1",
-    "zod": "4.1.8"
+    "zod": "^4.1.8"
   },
   "peerDependencies": {
     "@ai-sdk/openai": ">=2.0.0",
