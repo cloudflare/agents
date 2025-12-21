@@ -31,7 +31,6 @@
     "@ai-sdk/google": "2.0.51",
     "@ai-sdk/openai": "2.0.88",
     "@ai-sdk/react": "2.0.118",
-    "@ai-sdk/ui-utils": "^1.2.11",
     "@biomejs/biome": "2.3.10",
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
@@ -71,7 +70,8 @@
     "vitest": "3.2.4",
     "vitest-browser-react": "^1.0.1",
     "workers-ai-provider": "^2.0.0",
-    "wrangler": "^4.56.0"
+    "wrangler": "^4.56.0",
+    "zod": "4.1.8"
   },
   "workspaces": [
     "examples/*",

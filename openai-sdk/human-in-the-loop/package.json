@@ -1,14 +1,14 @@
 {
+  "name": "@cloudflare/agents-openai-human-in-the-loop",
   "author": "",
   "description": "Human in the loop example with OpenAI ⨉ Cloudflare Agents",
   "keywords": [],
+  "type": "module",
+  "version": "0.0.0",
   "license": "ISC",
-  "name": "@cloudflare/agents-openai-human-in-the-loop",
   "private": true,
   "scripts": {
     "clean": "rm -rf .wrangler node_modules/.vite",
     "start": "vite dev"
-  },
-  "type": "module",
-  "version": "0.0.0"
+  }
 }
