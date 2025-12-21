@@ -7,7 +7,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     container:
-      image: mcr.microsoft.com/playwright/python:v1.56.0-noble
+      image: mcr.microsoft.com/playwright:v1.56.1-noble
       options: --user 1001
 
     steps:
@@ -19,6 +19,11 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y build-essential python3
 
       - run: npm ci
       - run: npm run build
