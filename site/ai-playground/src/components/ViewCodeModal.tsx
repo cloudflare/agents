@@ -55,14 +55,18 @@ return result.toDataStreamResponse();`;
         ? 'createOpenAI from "ai-gateway-provider/providers/openai"'
         : params.externalProvider === "anthropic"
           ? 'createAnthropic from "ai-gateway-provider/providers/anthropic"'
-          : 'createGoogleGenerativeAI from "ai-gateway-provider/providers/google"';
+          : params.externalProvider === "google"
+            ? 'createGoogleGenerativeAI from "ai-gateway-provider/providers/google"'
+            : 'createOpenAI from "ai-gateway-provider/providers/openai"'; // xAI uses OpenAI-compatible API
 
     const providerName =
       params.externalProvider === "openai"
         ? "createOpenAI"
         : params.externalProvider === "anthropic"
           ? "createAnthropic"
-          : "createGoogleGenerativeAI";
+          : params.externalProvider === "google"
+            ? "createGoogleGenerativeAI"
+            : "createOpenAI"; // xAI uses OpenAI-compatible API
 
     const accountId = params.gatewayAccountId || "YOUR_ACCOUNT_ID";
     const gatewayId = params.gatewayId || "YOUR_GATEWAY_ID";
@@ -97,31 +101,42 @@ return result.toDataStreamResponse();`;
         ? 'createOpenAI from "@ai-sdk/openai"'
         : params.externalProvider === "anthropic"
           ? 'createAnthropic from "@ai-sdk/anthropic"'
-          : 'createGoogleGenerativeAI from "@ai-sdk/google"';
+          : params.externalProvider === "google"
+            ? 'createGoogleGenerativeAI from "@ai-sdk/google"'
+            : 'createOpenAI from "@ai-sdk/openai"'; // xAI uses OpenAI-compatible API
 
     const providerName =
       params.externalProvider === "openai"
         ? "createOpenAI"
         : params.externalProvider === "anthropic"
           ? "createAnthropic"
-          : "createGoogleGenerativeAI";
+          : params.externalProvider === "google"
+            ? "createGoogleGenerativeAI"
+            : "createOpenAI"; // xAI uses OpenAI-compatible API
 
     const apiKeyEnvVar =
       params.externalProvider === "openai"
         ? "OPENAI_API_KEY"
         : params.externalProvider === "anthropic"
           ? "ANTHROPIC_API_KEY"
-          : "GOOGLE_GENERATIVE_AI_API_KEY";
+          : params.externalProvider === "google"
+            ? "GOOGLE_GENERATIVE_AI_API_KEY"
+            : "XAI_API_KEY";
+
+    const baseUrlConfig =
+      params.externalProvider === "xai"
+        ? ',\n  baseURL: "https://api.x.ai/v1"'
+        : "";
 
     return `import { streamText } from "ai";
 import { ${providerImport} };
 
-const ${params.externalProvider} = ${providerName}({
-  apiKey: env.${apiKeyEnvVar}, // Store in .dev.vars or secrets
+const ${params.externalProvider === "xai" ? "xai" : params.externalProvider} = ${providerName}({
+  apiKey: env.${apiKeyEnvVar}${baseUrlConfig}, // Store in .dev.vars or secrets
 });
 
 const result = streamText({
-  model: ${params.externalProvider}("${modelId}"),
+  model: ${params.externalProvider === "xai" ? "xai" : params.externalProvider}("${modelId}"),
   system: "${escapeString(params.system)}",
   temperature: ${params.temperature},
   messages: [
@@ -174,7 +189,9 @@ const ViewCodeModal = ({
                 ? "OpenAI"
                 : params.externalProvider === "anthropic"
                   ? "Anthropic"
-                  : "Google"}{" "}
+                  : params.externalProvider === "google"
+                    ? "Google"
+                    : "xAI"}{" "}
               with the current playground messages and settings.
               {params.authMethod === "gateway" && (
                 <>

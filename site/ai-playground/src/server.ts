@@ -38,7 +38,7 @@ export interface PlaygroundState {
   system: string;
   // External provider models mode
   useExternalProvider?: boolean;
-  externalProvider?: "openai" | "anthropic" | "google";
+  externalProvider?: "openai" | "anthropic" | "google" | "xai";
   externalModel?: string;
   authMethod?: "provider-key" | "gateway";
   // Provider key auth (BYOK)
@@ -143,6 +143,10 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
             } else if (this.state.externalProvider === "google") {
               const google = createGoogleGateway(); // No API key for unified billing
               baseModel = google.chat(modelName);
+            } else if (this.state.externalProvider === "xai") {
+              // xAI uses OpenAI-compatible API, so use OpenAI gateway provider
+              const openai = createOpenAIGateway(); // No API key for unified billing
+              baseModel = openai.chat(modelName);
             } else {
               // Fallback to Workers AI
               const fallbackModel = this.state.model as Parameters<
@@ -172,6 +176,13 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
                 apiKey: this.state.providerApiKey
               });
               modelProvider = google(modelName);
+            } else if (this.state.externalProvider === "xai") {
+              // xAI uses OpenAI-compatible API, so use OpenAI SDK with xAI base URL
+              const xai = createOpenAI({
+                apiKey: this.state.providerApiKey,
+                baseURL: "https://api.x.ai/v1"
+              });
+              modelProvider = xai(modelName);
             } else {
               // Fallback to Workers AI
               modelProvider = workersAi(

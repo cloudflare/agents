@@ -361,7 +361,8 @@ const App = () => {
                     const defaultModels: Record<string, string> = {
                       openai: "openai/gpt-5.2",
                       anthropic: "anthropic/claude-sonnet-4-5-20250929",
-                      google: "google-ai-studio/gemini-3-pro-preview"
+                      google: "google-ai-studio/gemini-3-pro-preview",
+                      xai: "xai/grok-4-1-fast-reasoning"
                     };
                     const selectedModel = useExternal
                       ? defaultModels[params.externalProvider || "openai"] ||
@@ -402,7 +403,8 @@ const App = () => {
                     const defaultModels: Record<string, string> = {
                       openai: "openai/gpt-5.2",
                       anthropic: "anthropic/claude-sonnet-4-5-20250929",
-                      google: "google-ai-studio/gemini-3-pro-preview"
+                      google: "google-ai-studio/gemini-3-pro-preview",
+                      xai: "xai/grok-4-1-fast-reasoning"
                     };
                     const selectedModel =
                       defaultModels[provider] || params.model;

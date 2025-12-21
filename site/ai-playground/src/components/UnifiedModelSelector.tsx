@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import ModelRow from "./ModelRow";
 import type { Model } from "../models";
 
-type GatewayProvider = "openai" | "anthropic" | "google";
+type GatewayProvider = "openai" | "anthropic" | "google" | "xai";
 type AuthMethod = "provider-key" | "gateway";
 
 // Latest external provider models for each provider (top 5)
@@ -102,6 +102,34 @@ const EXTERNAL_MODELS: Record<
       name: "gemini-2.5-flash-lite",
       description:
         "Fastest flash model optimized for cost-efficiency and high throughput"
+    }
+  ],
+  xai: [
+    {
+      id: "xai/grok-4-1-fast-reasoning",
+      name: "grok-4-1-fast-reasoning",
+      description:
+        "Advanced reasoning capabilities with a 2 million token context window"
+    },
+    {
+      id: "xai/grok-4-1-fast-non-reasoning",
+      name: "grok-4-1-fast-non-reasoning",
+      description: "Optimized for speed with a 2 million token context window"
+    },
+    {
+      id: "xai/grok-3",
+      name: "grok-3",
+      description: "Standard model with a 256k token context window"
+    },
+    {
+      id: "xai/grok-3-mini",
+      name: "grok-3-mini",
+      description: "Smaller, faster variant with a 256k token context window"
+    },
+    {
+      id: "xai/grok-2-vision-1212",
+      name: "grok-2-vision-1212",
+      description: "Supports image input with a 131,072 token context window"
     }
   ]
 };
@@ -464,6 +492,7 @@ const UnifiedModelSelector = ({
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
               <option value="google">Google</option>
+              <option value="xai">xAI</option>
             </select>
           </div>
 
@@ -533,7 +562,9 @@ const UnifiedModelSelector = ({
                     ? "OpenAI"
                     : externalProvider === "anthropic"
                       ? "Anthropic"
-                      : "Google"}{" "}
+                      : externalProvider === "google"
+                        ? "Google"
+                        : "xAI"}{" "}
                   API Key <span className="text-red-500">*</span>
                 </label>
                 <div className="relative">
@@ -541,7 +572,7 @@ const UnifiedModelSelector = ({
                     type={showProviderKey ? "text" : "password"}
                     value={providerApiKey || ""}
                     onChange={(e) => onProviderApiKeyChange(e.target.value)}
-                    placeholder={`Enter your ${externalProvider} API key`}
+                    placeholder={`Enter your ${externalProvider === "xai" ? "xAI" : externalProvider} API key`}
                     required
                     className="w-full p-2 pr-10 border border-gray-200 rounded-md text-sm"
                   />
@@ -554,7 +585,8 @@ const UnifiedModelSelector = ({
                   </button>
                 </div>
                 <p className="text-xs text-gray-500 mt-1">
-                  Your {externalProvider} API key for direct access
+                  Your {externalProvider === "xai" ? "xAI" : externalProvider}{" "}
+                  API key for direct access
                 </p>
               </div>
             ) : (
