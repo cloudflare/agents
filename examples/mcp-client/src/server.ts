@@ -1,12 +1,7 @@
-import { Agent, type AgentNamespace, routeAgentRequest } from "agents";
+import { Agent, routeAgentRequest } from "agents";
 import type { MCPClientOAuthResult } from "agents/mcp";
 
-type Env = {
-  MyAgent: AgentNamespace<MyAgent>;
-  HOST?: string; // Optional - will be derived from request if not provided
-};
-
-export class MyAgent extends Agent<Env, never> {
+export class MyAgent extends Agent {
   onStart() {
     // Optionally configure OAuth callback. Here we use popup-closing behavior since we're opening a window on the client
     this.mcp.configureOAuthCallback({

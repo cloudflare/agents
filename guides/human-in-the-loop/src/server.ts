@@ -14,11 +14,7 @@ import {
   getWeatherInformation
 } from "./utils";
 
-type Env = {
-  OPENAI_API_KEY: string;
-};
-
-export class HumanInTheLoop extends AIChatAgent<Env> {
+export class HumanInTheLoop extends AIChatAgent {
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
     const startTime = Date.now();
 

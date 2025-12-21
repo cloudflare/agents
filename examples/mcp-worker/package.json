@@ -7,6 +7,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
   }
 }

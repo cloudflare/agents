@@ -2,10 +2,6 @@ import { Agent, type RunResult, RunState, run, tool } from "@openai/agents";
 import { Agent as CFAgent, callable, routeAgentRequest } from "agents";
 import { z } from "zod";
 
-type Env = {
-  MyAgent: DurableObjectNamespace<MyAgent>;
-};
-
 const getWeatherTool = tool({
   description: "Get the weather for a given city",
   execute: async ({ location }) => {

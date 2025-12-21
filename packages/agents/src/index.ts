@@ -1630,6 +1630,7 @@ const wrappedClasses = new Set<typeof Agent.prototype.constructor>();
 /**
  * Namespace for creating Agent instances
  * @template Agentic Type of the Agent class
+ * @deprecated Use DurableObjectNamespace instead
  */
 export type AgentNamespace<Agentic extends Agent<Cloudflare.Env>> =
   DurableObjectNamespace<Agentic>;
@@ -1869,7 +1870,7 @@ export async function routeAgentEmail<
   }
 
   const agent = await getAgentByName(
-    namespace as unknown as AgentNamespace<Agent<Env>>,
+    namespace as unknown as DurableObjectNamespace<Agent<Env>>,
     routingInfo.agentId
   );
 
@@ -1947,7 +1948,7 @@ export async function getAgentByName<
   T extends Agent<Env> = Agent<Env>,
   Props extends Record<string, unknown> = Record<string, unknown>
 >(
-  namespace: AgentNamespace<T>,
+  namespace: DurableObjectNamespace<T>,
   name: string,
   options?: {
     jurisdiction?: DurableObjectJurisdiction;

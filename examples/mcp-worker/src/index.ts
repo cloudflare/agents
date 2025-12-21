@@ -2,8 +2,6 @@ import { createMcpHandler } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-type Env = {};
-
 const server = new McpServer({
   name: "Hello MCP Server",
   version: "1.0.0"

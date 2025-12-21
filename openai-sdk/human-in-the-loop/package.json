@@ -9,6 +9,7 @@
   "private": true,
   "scripts": {
     "clean": "rm -rf .wrangler node_modules/.vite",
-    "start": "vite dev"
+    "start": "vite dev",
+    "types": "wrangler types env.d.ts --include-runtime false"
   }
 }

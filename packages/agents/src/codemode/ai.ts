@@ -27,7 +27,7 @@ export class CodeModeProxy extends WorkerEntrypoint<
   async callFunction(options: { functionName: string; args: unknown[] }) {
     const stub = (await getAgentByName(
       // @ts-expect-error
-      env[this.ctx.props.binding] as AgentNamespace<T>,
+      env[this.ctx.props.binding] as DurableObjectNamespace<T>,
       this.ctx.props.name
     )) as DurableObjectStub;
     // @ts-expect-error
