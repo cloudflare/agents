@@ -14,14 +14,15 @@ import {
 import { cleanupMessages } from "./utils";
 import { nanoid } from "nanoid";
 import { createAiGateway } from "ai-gateway-provider";
+import { createOpenAI as createOpenAIGateway } from "ai-gateway-provider/providers/openai";
+import { createAnthropic as createAnthropicGateway } from "ai-gateway-provider/providers/anthropic";
+import { createGoogleGenerativeAI as createGoogleGateway } from "ai-gateway-provider/providers/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { env } from "cloudflare:workers";
 
-const aiGateway = createAiGateway({
-  binding: env.AI.gateway("playground")
-});
+// Gateway is now created per-request with accountId and gatewayId from state
 
 const workersAi = createWorkersAI({
   binding: env.AI,
@@ -35,9 +36,17 @@ export interface PlaygroundState {
   temperature: number;
   stream: boolean;
   system: string;
-  useGateway?: boolean;
+  // External provider models mode
+  useExternalProvider?: boolean;
+  externalProvider?: "openai" | "anthropic" | "google";
+  externalModel?: string;
+  authMethod?: "provider-key" | "gateway";
+  // Provider key auth (BYOK)
+  providerApiKey?: string;
+  // Gateway auth (Unified Billing)
+  gatewayAccountId?: string;
+  gatewayId?: string;
   gatewayApiKey?: string;
-  gatewayProvider?: "openai" | "anthropic" | "google";
 }
 
 /**
@@ -50,9 +59,9 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
     stream: true,
     system:
       "You are a helpful assistant that can do various tasks using MCP tools.",
-    useGateway: false,
-    gatewayApiKey: undefined,
-    gatewayProvider: "openai"
+    useExternalProvider: false,
+    externalProvider: "openai",
+    authMethod: "provider-key"
   };
 
   onStart() {
@@ -99,40 +108,84 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
 
         // Determine which model provider to use
         let modelProvider;
-        if (this.state.useGateway && this.state.gatewayApiKey) {
-          // Use AI Gateway with custom API key
-          // Create provider instances with user's API key, then wrap with gateway
-          const gateway = createAiGateway({
-            binding: this.env.AI.gateway("playground")
-          });
 
-          let baseModel;
-          if (this.state.gatewayProvider === "openai") {
-            const openai = createOpenAI({
+        if (
+          this.state.useExternalProvider &&
+          this.state.externalProvider &&
+          this.state.externalModel
+        ) {
+          // Extract model name from provider/model format (e.g., "openai/gpt-5.2" -> "gpt-5.2")
+          let modelName = this.state.externalModel;
+          if (modelName.includes("/")) {
+            modelName = modelName.split("/")[1];
+          }
+
+          if (
+            this.state.authMethod === "gateway" &&
+            this.state.gatewayAccountId &&
+            this.state.gatewayId &&
+            this.state.gatewayApiKey
+          ) {
+            // Use AI Gateway with unified billing
+            const gateway = createAiGateway({
+              accountId: this.state.gatewayAccountId,
+              gateway: this.state.gatewayId,
               apiKey: this.state.gatewayApiKey
             });
-            baseModel = openai(this.state.model);
-          } else if (this.state.gatewayProvider === "anthropic") {
-            const anthropic = createAnthropic({
-              apiKey: this.state.gatewayApiKey
-            });
-            baseModel = anthropic(this.state.model);
-          } else if (this.state.gatewayProvider === "google") {
-            const google = createGoogleGenerativeAI({
-              apiKey: this.state.gatewayApiKey
-            });
-            baseModel = google(this.state.model);
+
+            let baseModel;
+            if (this.state.externalProvider === "openai") {
+              const openai = createOpenAIGateway(); // No API key for unified billing
+              baseModel = openai.chat(modelName);
+            } else if (this.state.externalProvider === "anthropic") {
+              const anthropic = createAnthropicGateway(); // No API key for unified billing
+              baseModel = anthropic.chat(modelName);
+            } else if (this.state.externalProvider === "google") {
+              const google = createGoogleGateway(); // No API key for unified billing
+              baseModel = google.chat(modelName);
+            } else {
+              // Fallback to Workers AI
+              const fallbackModel = this.state.model as Parameters<
+                typeof workersAi
+              >[0];
+              baseModel = workersAi(fallbackModel);
+            }
+
+            modelProvider = gateway(baseModel);
+          } else if (
+            this.state.authMethod === "provider-key" &&
+            this.state.providerApiKey
+          ) {
+            // Use provider SDK directly with user's API key (BYOK)
+            if (this.state.externalProvider === "openai") {
+              const openai = createOpenAI({
+                apiKey: this.state.providerApiKey
+              });
+              modelProvider = openai(modelName);
+            } else if (this.state.externalProvider === "anthropic") {
+              const anthropic = createAnthropic({
+                apiKey: this.state.providerApiKey
+              });
+              modelProvider = anthropic(modelName);
+            } else if (this.state.externalProvider === "google") {
+              const google = createGoogleGenerativeAI({
+                apiKey: this.state.providerApiKey
+              });
+              modelProvider = google(modelName);
+            } else {
+              // Fallback to Workers AI
+              modelProvider = workersAi(
+                this.state.model as Parameters<typeof workersAi>[0]
+              );
+            }
           } else {
-            // Fallback to Workers AI if provider not recognized
-            baseModel = workersAi(
+            // Missing required auth, fallback to Workers AI
+            modelProvider = workersAi(
               this.state.model as Parameters<typeof workersAi>[0]
             );
           }
-
-          // Wrap the model with the gateway
-          modelProvider = gateway(baseModel);
         } else {
-          // Use Workers AI
+          // Use Workers AI (default)
           modelProvider = workersAi(
             this.state.model as Parameters<typeof workersAi>[0]
           );
