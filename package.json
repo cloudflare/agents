@@ -71,8 +71,7 @@
     "vitest": "3.2.4",
     "vitest-browser-react": "^1.0.1",
     "workers-ai-provider": "^2.0.0",
-    "wrangler": "^4.56.0",
-    "zod": "^4.1.8"
+    "wrangler": "^4.56.0"
   },
   "workspaces": [
     "examples/*",
