@@ -136,10 +136,10 @@ type StreamMetadata = {
  * Extension of Agent with built-in chat capabilities
  * @template Env Environment type containing bindings
  */
-export class AIChatAgent<Env = unknown, State = unknown> extends Agent<
-  Env,
-  State
-> {
+export class AIChatAgent<
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  State = unknown
+> extends Agent<Env, State> {
   /**
    * Map of message `id`s to `AbortController`s
    * useful to propagate request cancellation signals for any external calls made by the agent

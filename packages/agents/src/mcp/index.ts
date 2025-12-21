@@ -25,7 +25,7 @@ import {
 import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 
 export abstract class McpAgent<
-  Env = unknown,
+  Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
