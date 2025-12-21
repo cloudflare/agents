@@ -51,7 +51,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     container:
-      image: mcr.microsoft.com/playwright:v1.56.1
+      image: mcr.microsoft.com/playwright/python:v1.56.1-noble
       options: --user 1001
 
     steps:
