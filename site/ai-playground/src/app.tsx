@@ -6,6 +6,7 @@ import Header from "./components/Header";
 import { SparkleIcon } from "./components/Icons";
 import { McpServers } from "./components/McpServers";
 import ModelSelector from "./components/ModelSelector";
+import GatewayConfig from "./components/GatewayConfig";
 import ViewCodeModal from "./components/ViewCodeModal";
 import { ToolCallCard } from "./components/ToolCallCard";
 import { ReasoningCard } from "./components/ReasoningCard";
@@ -62,7 +63,12 @@ const App = () => {
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
-  const [params, setParams] = useState<PlaygroundState>(DEFAULT_PARAMS);
+  const [params, setParams] = useState<PlaygroundState>({
+    ...DEFAULT_PARAMS,
+    useGateway: false,
+    gatewayApiKey: undefined,
+    gatewayProvider: "openai"
+  });
 
   const [mcp, setMcp] = useState<McpServersComponentState>(DEFAULT_MCP_STATUS);
 
@@ -86,7 +92,10 @@ const App = () => {
         model: state.model,
         temperature: state.temperature,
         stream: state.stream,
-        system: state.system
+        system: state.system,
+        useGateway: state.useGateway,
+        gatewayApiKey: state.gatewayApiKey,
+        gatewayProvider: state.gatewayProvider
       }));
     },
     onMcpUpdate(mcpState: MCPServersState) {
@@ -327,7 +336,7 @@ const App = () => {
               </p>
 
               <div className="md:mb-4">
-                {
+                {!params.useGateway && (
                   <ModelSelector
                     models={models}
                     model={activeModel}
@@ -337,12 +346,101 @@ const App = () => {
                         model: model ? model.name : DEFAULT_PARAMS.model,
                         temperature: params.temperature,
                         stream: params.stream,
-                        system: params.system
+                        system: params.system,
+                        useGateway: params.useGateway,
+                        gatewayApiKey: params.gatewayApiKey,
+                        gatewayProvider: params.gatewayProvider
                       });
                     }}
                   />
-                }
+                )}
+                {params.useGateway && (
+                  <div>
+                    <label className="font-semibold text-sm block mb-1">
+                      Model
+                    </label>
+                    <input
+                      type="text"
+                      value={params.model}
+                      onChange={(e) => {
+                        agent.setState({
+                          model: e.target.value,
+                          temperature: params.temperature,
+                          stream: params.stream,
+                          system: params.system,
+                          useGateway: params.useGateway,
+                          gatewayApiKey: params.gatewayApiKey,
+                          gatewayProvider: params.gatewayProvider
+                        });
+                      }}
+                      placeholder="e.g., gpt-5.2, claude-sonnet-4-5-20250929, gemini-3-pro-preview"
+                      className="w-full p-3 border border-gray-200 rounded-md"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Enter the model ID for {params.gatewayProvider}
+                    </p>
+                  </div>
+                )}
               </div>
+
+              <GatewayConfig
+                useGateway={params.useGateway || false}
+                gatewayApiKey={params.gatewayApiKey}
+                gatewayProvider={params.gatewayProvider || "openai"}
+                currentModel={params.model}
+                onToggle={(enabled) => {
+                  agent.setState({
+                    model: enabled
+                      ? "gpt-5.2"
+                      : params.model || DEFAULT_PARAMS.model,
+                    temperature: params.temperature,
+                    stream: params.stream,
+                    system: params.system,
+                    useGateway: enabled,
+                    gatewayApiKey: params.gatewayApiKey,
+                    gatewayProvider: params.gatewayProvider || "openai"
+                  });
+                }}
+                onApiKeyChange={(apiKey) => {
+                  agent.setState({
+                    model: params.model,
+                    temperature: params.temperature,
+                    stream: params.stream,
+                    system: params.system,
+                    useGateway: params.useGateway,
+                    gatewayApiKey: apiKey,
+                    gatewayProvider: params.gatewayProvider
+                  });
+                }}
+                onProviderChange={(provider) => {
+                  // Set default model for the provider
+                  const defaultModels: Record<string, string> = {
+                    openai: "gpt-5.2",
+                    anthropic: "claude-sonnet-4-5-20250929",
+                    google: "gemini-3-pro-preview"
+                  };
+                  agent.setState({
+                    model: defaultModels[provider] || params.model,
+                    temperature: params.temperature,
+                    stream: params.stream,
+                    system: params.system,
+                    useGateway: params.useGateway,
+                    gatewayApiKey: params.gatewayApiKey,
+                    gatewayProvider: provider
+                  });
+                }}
+                onModelSelect={(modelId) => {
+                  agent.setState({
+                    model: modelId,
+                    temperature: params.temperature,
+                    stream: params.stream,
+                    system: params.system,
+                    useGateway: params.useGateway,
+                    gatewayApiKey: params.gatewayApiKey,
+                    gatewayProvider: params.gatewayProvider
+                  });
+                }}
+              />
 
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
@@ -361,7 +459,10 @@ const App = () => {
                       model: params.model,
                       temperature: params.temperature,
                       stream: params.stream,
-                      system: newSystem
+                      system: newSystem,
+                      useGateway: params.useGateway,
+                      gatewayApiKey: params.gatewayApiKey,
+                      gatewayProvider: params.gatewayProvider
                     });
                   }}
                 />
@@ -388,7 +489,10 @@ const App = () => {
                         model: params.model,
                         temperature,
                         stream: params.stream,
-                        system: params.system
+                        system: params.system,
+                        useGateway: params.useGateway,
+                        gatewayApiKey: params.gatewayApiKey,
+                        gatewayProvider: params.gatewayProvider
                       });
                     }}
                   />
@@ -412,7 +516,10 @@ const App = () => {
                         model: params.model,
                         temperature: params.temperature,
                         stream: e.target.checked,
-                        system: params.system
+                        system: params.system,
+                        useGateway: params.useGateway,
+                        gatewayApiKey: params.gatewayApiKey,
+                        gatewayProvider: params.gatewayProvider
                       });
                     }}
                   />

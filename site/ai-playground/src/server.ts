@@ -13,29 +13,46 @@ import {
 } from "ai";
 import { cleanupMessages } from "./utils";
 import { nanoid } from "nanoid";
+import { createAiGateway } from "ai-gateway-provider";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { env } from "cloudflare:workers";
 
-interface Env {
-  AI: Ai;
-  HOST?: string;
-}
+const aiGateway = createAiGateway({
+  binding: env.AI.gateway("playground")
+});
+
+const workersAi = createWorkersAI({
+  binding: env.AI,
+  gateway: {
+    id: "playground"
+  }
+});
 
 export interface PlaygroundState {
   model: string;
   temperature: number;
   stream: boolean;
   system: string;
+  useGateway?: boolean;
+  gatewayApiKey?: string;
+  gatewayProvider?: "openai" | "anthropic" | "google";
 }
 
 /**
  * Chat Agent implementation that handles real-time AI chat interactions
  */
 export class Playground extends AIChatAgent<Env, PlaygroundState> {
-  initialState = {
+  initialState: PlaygroundState = {
     model: "@cf/qwen/qwen3-30b-a3b-fp8",
     temperature: 1,
     stream: true,
     system:
-      "You are a helpful assistant that can do various tasks using MCP tools."
+      "You are a helpful assistant that can do various tasks using MCP tools.",
+    useGateway: false,
+    gatewayApiKey: undefined,
+    gatewayProvider: "openai"
   };
 
   onStart() {
@@ -73,13 +90,6 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
       console.error("Failed to get AI tools", e);
     }
 
-    const workersai = createWorkersAI({
-      binding: this.env.AI,
-      gateway: {
-        id: "playground"
-      }
-    });
-
     await this.ensureDestroy();
 
     const stream = createUIMessageStream({
@@ -87,10 +97,51 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
         // Clean up incomplete tool calls to prevent API errors
         const cleanedMessages = cleanupMessages(this.messages);
 
+        // Determine which model provider to use
+        let modelProvider;
+        if (this.state.useGateway && this.state.gatewayApiKey) {
+          // Use AI Gateway with custom API key
+          // Create provider instances with user's API key, then wrap with gateway
+          const gateway = createAiGateway({
+            binding: this.env.AI.gateway("playground")
+          });
+
+          let baseModel;
+          if (this.state.gatewayProvider === "openai") {
+            const openai = createOpenAI({
+              apiKey: this.state.gatewayApiKey
+            });
+            baseModel = openai(this.state.model);
+          } else if (this.state.gatewayProvider === "anthropic") {
+            const anthropic = createAnthropic({
+              apiKey: this.state.gatewayApiKey
+            });
+            baseModel = anthropic(this.state.model);
+          } else if (this.state.gatewayProvider === "google") {
+            const google = createGoogleGenerativeAI({
+              apiKey: this.state.gatewayApiKey
+            });
+            baseModel = google(this.state.model);
+          } else {
+            // Fallback to Workers AI if provider not recognized
+            baseModel = workersAi(
+              this.state.model as Parameters<typeof workersAi>[0]
+            );
+          }
+
+          // Wrap the model with the gateway
+          modelProvider = gateway(baseModel);
+        } else {
+          // Use Workers AI
+          modelProvider = workersAi(
+            this.state.model as Parameters<typeof workersAi>[0]
+          );
+        }
+
         const result = streamText({
           system: this.state.system,
           messages: convertToModelMessages(cleanedMessages),
-          model: workersai(this.state.model as Parameters<typeof workersai>[0]),
+          model: modelProvider,
           tools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof tools

@@ -8,9 +8,14 @@
     "clean": "rm -rf .wrangler node_modules/.vite dist",
     "build": "npm run clean && vite build",
     "deploy": "npm run build && wrangler deploy --var HOST:https://playground.ai.cloudflare.com --domain playground.ai.cloudflare.com",
+    "types": "wrangler types env.d.ts --include-runtime false --strict-vars false",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/anthropic": "2.0.56",
+    "@ai-sdk/google": "2.0.51",
+    "@ai-sdk/openai": "2.0.88",
+    "ai-gateway-provider": "^2.1.0",
     "downshift": "^9.0.13",
     "nanoid": "^5.1.6",
     "react": "^19.2.3",
