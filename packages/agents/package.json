@@ -34,7 +34,6 @@
     "partyserver": "^0.1.0",
     "partysocket": "1.1.10",
     "yargs": "^18.0.0",
-    "zod": "^3.25.76 || ^4.0.0",
     "zod-to-ts": "^2.0.0"
   },
   "devDependencies": {
@@ -46,7 +45,8 @@
     "ai": "5.0.116",
     "react": "^19.2.3",
     "vitest-browser-react": "^1.0.1",
-    "x402": "^1.0.1"
+    "x402": "^1.0.1",
+    "zod": "^4.2.1"
   },
   "peerDependencies": {
     "@ai-sdk/openai": ">=2.0.0",
