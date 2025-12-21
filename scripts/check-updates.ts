@@ -11,6 +11,7 @@ execSync(
   --reject vitest-browser-react \
   --reject @vitest/ui \
   --reject @modelcontextprotocol/sdk \
+  --reject zod \
   --workspaces`,
   {
     stdio: "inherit"
