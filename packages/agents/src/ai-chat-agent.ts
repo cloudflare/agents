@@ -138,7 +138,8 @@ type StreamMetadata = {
  */
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  State = unknown
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State> {
   /**
    * Map of message `id`s to `AbortController`s
@@ -238,6 +239,28 @@ export class AIChatAgent<
     this.messages = autoTransformMessages(rawMessages);
 
     this._chatMessageAbortControllers = new Map();
+
+    // a fair assumption for the AIChatAgent is that "ai"
+    // is available, but we still need to ensure .jsonSchema's
+    // been initialised on this.mcp. Let's do it as soon
+    // as we start the agent.
+    const _onStart = this.onStart.bind(this);
+    this.onStart = async (props?: Props) => {
+      return agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        async () => {
+          await this._tryCatchChat(async () => {
+            await this.mcp.ensureJsonSchema();
+            return _onStart(props);
+          });
+        }
+      );
+    };
 
     // Check for any active streams from a previous session
     this._restoreActiveStream();
