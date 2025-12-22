@@ -12,10 +12,11 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "2.0.56",
-    "@ai-sdk/google": "2.0.51",
-    "@ai-sdk/openai": "2.0.88",
-    "ai-gateway-provider": "^2.1.0",
+    "@ai-sdk/anthropic": "^3.0.0",
+    "@ai-sdk/google": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.0",
+    "ai": "^6.0.0",
+    "ai-gateway-provider": "https://pkg.pr.new/cloudflare/ai/ai-gateway-provider@338",
     "downshift": "^9.0.13",
     "nanoid": "^5.1.6",
     "react": "^19.2.3",
@@ -23,7 +24,7 @@
     "react-hotkeys-hook": "^5.2.1",
     "react-textarea-autosize": "^8.5.9",
     "streamdown": "^1.6.10",
-    "workers-ai-provider": "^2.0.0",
+    "workers-ai-provider": "https://pkg.pr.new/cloudflare/ai/workers-ai-provider@338",
     "zod": "^4.1.8"
   },
   "keywords": []

@@ -153,7 +153,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
     const result = streamText({
       system: prompt,
 
-      messages: convertToModelMessages(this.state.messages),
+      messages: await convertToModelMessages(this.state.messages),
       model,
       // tools: allTools,
       tools: wrappedTools,

@@ -34,7 +34,7 @@ export class HumanInTheLoop extends AIChatAgent {
 
       // Now continue with streamText so the LLM can respond to the tool result
       const result = streamText({
-        messages: convertToModelMessages(this.messages),
+        messages: await convertToModelMessages(this.messages),
         model: openai("gpt-4o"),
         onFinish,
         tools,
@@ -62,7 +62,7 @@ export class HumanInTheLoop extends AIChatAgent {
 
     // Use streamText directly and return with metadata
     const result = streamText({
-      messages: convertToModelMessages(this.messages),
+      messages: await convertToModelMessages(this.messages),
       model: openai("gpt-4o"),
       onFinish,
       tools,

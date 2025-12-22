@@ -29,6 +29,10 @@ export type JSONSchemaType = JSONSchema7;
  * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema` (FlexibleSchema)
  * because client tools must be serializable for the wire format. Zod schemas cannot be
  * serialized, so we require raw JSON Schema here.
+ *
+ * @deprecated Use AI SDK's native tool pattern instead. Define tools on the server with
+ * `tool()` from "ai", and handle client-side execution via the `onToolCall` callback
+ * in `useAgentChat`. For tools requiring user approval, use `needsApproval` on the server.
  */
 export type AITool<Input = unknown, Output = unknown> = {
   /** Human-readable description of what the tool does */
@@ -50,6 +54,8 @@ export type AITool<Input = unknown, Output = unknown> = {
  * Schema for a client tool sent to the server.
  * This is the wire format - what gets sent in the request body.
  * Must match the server-side ClientToolSchema type in ai-chat-agent.ts.
+ *
+ * @deprecated Use AI SDK's native tool pattern instead. Define tools on the server.
  */
 export type ClientToolSchema = {
   /** Unique name for the tool */
@@ -65,6 +71,9 @@ export type ClientToolSchema = {
  * These schemas are automatically sent to the server with each request.
  * @param tools - Record of tool name to tool definition
  * @returns Array of tool schemas to send to server, or undefined if none
+ *
+ * @deprecated Use AI SDK's native tool pattern instead. Define tools on the server
+ * and use `onToolCall` callback for client-side execution.
  */
 export function extractClientToolSchemas(
   tools?: Record<string, AITool<unknown, unknown>>
@@ -154,6 +163,21 @@ type InternalPrepareResult = {
 };
 
 /**
+ * Callback for handling client-side tool execution.
+ * Called when a tool without server-side execute is invoked.
+ */
+export type OnToolCallCallback = (options: {
+  /** The tool call that needs to be handled */
+  toolCall: {
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+  };
+  /** Function to provide the tool output */
+  addToolOutput: (options: { toolCallId: string; output: unknown }) => void;
+}) => void | Promise<void>;
+
+/**
  * Options for the useAgentChat hook
  */
 type UseAgentChatOptions<
@@ -171,16 +195,43 @@ type UseAgentChatOptions<
   /** Request headers */
   headers?: HeadersInit;
   /**
+   * Callback for handling client-side tool execution.
+   * Called when a tool without server-side `execute` is invoked by the LLM.
+   *
+   * Use this for:
+   * - Tools that need browser APIs (geolocation, camera, etc.)
+   * - Tools that need user interaction before providing a result
+   * - Tools requiring approval before execution
+   *
+   * @example
+   * ```typescript
+   * onToolCall: async ({ toolCall, addToolOutput }) => {
+   *   if (toolCall.toolName === 'getLocation') {
+   *     const position = await navigator.geolocation.getCurrentPosition();
+   *     addToolOutput({
+   *       toolCallId: toolCall.toolCallId,
+   *       output: { lat: position.coords.latitude, lng: position.coords.longitude }
+   *     });
+   *   }
+   * }
+   * ```
+   */
+  onToolCall?: OnToolCallCallback;
+  /**
+   * @deprecated Use `onToolCall` callback instead for automatic tool execution.
    * @description Whether to automatically resolve tool calls that do not require human interaction.
    * @experimental
    */
   experimental_automaticToolResolution?: boolean;
   /**
+   * @deprecated Use `onToolCall` callback instead. Define tools on the server
+   * and handle client-side execution via `onToolCall`.
+   *
    * Tools that can be executed on the client.
-
    */
   tools?: Record<string, AITool<unknown, unknown>>;
   /**
+   * @deprecated Use `needsApproval` on server-side tools instead.
    * @description Manual override for tools requiring confirmation.
    * If not provided, will auto-detect from tools object (tools without execute require confirmation).
    */
@@ -198,6 +249,8 @@ type UseAgentChatOptions<
    */
   autoContinueAfterToolResult?: boolean;
   /**
+   * @deprecated Use `sendAutomaticallyWhen` from AI SDK instead.
+   *
    * When true (default), automatically sends the next message only after
    * all pending confirmation-required tool calls have been resolved.
    * When false, sends immediately after each tool result.
@@ -238,6 +291,8 @@ const requestCache = new Map<string, Promise<Message[]>>();
  * Tools require confirmation if they have no execute function AND are not server-executed.
  * @param tools - Record of tool name to tool definition
  * @returns Array of tool names that require confirmation
+ *
+ * @deprecated Use `needsApproval` on server-side tools instead.
  */
 export function detectToolsRequiringConfirmation(
   tools?: Record<string, AITool<unknown, unknown>>
@@ -249,18 +304,36 @@ export function detectToolsRequiringConfirmation(
     .map(([name]) => name);
 }
 
+/**
+ * Return type for addToolOutput function
+ */
+type AddToolOutputOptions = {
+  /** The ID of the tool call to provide output for */
+  toolCallId: string;
+  /** The name of the tool (optional, for type safety) */
+  toolName?: string;
+  /** The output to provide */
+  output: unknown;
+};
+
 export function useAgentChat<
   State = unknown,
   ChatMessage extends UIMessage = UIMessage
 >(
   options: UseAgentChatOptions<State, ChatMessage>
-): ReturnType<typeof useChat<ChatMessage>> & {
+): Omit<ReturnType<typeof useChat<ChatMessage>>, "addToolOutput"> & {
   clearHistory: () => void;
+  /**
+   * Provide output for a tool call. Use this for tools that require user interaction
+   * or client-side execution.
+   */
+  addToolOutput: (opts: AddToolOutputOptions) => void;
 } {
   const {
     agent,
     getInitialMessages,
     messages: optionsInitialMessages,
+    onToolCall,
     experimental_automaticToolResolution,
     tools,
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
@@ -272,8 +345,13 @@ export function useAgentChat<
   } = options;
 
   // Auto-detect tools requiring confirmation, or use manual override
+  // @deprecated - this will be removed when toolsRequiringConfirmation is removed
   const toolsRequiringConfirmation =
     manualToolsRequiringConfirmation ?? detectToolsRequiringConfirmation(tools);
+
+  // Keep a ref to always point to the latest onToolCall callback
+  const onToolCallRef = useRef(onToolCall);
+  onToolCallRef.current = onToolCall;
 
   const agentUrl = new URL(
     `${// @ts-expect-error we're using a protected _url property that includes query params
@@ -739,6 +817,87 @@ export function useAgentChat<
     autoContinueAfterToolResult
   ]);
 
+  // Helper function to send tool output to server
+  const sendToolOutputToServer = useCallback(
+    (toolCallId: string, toolName: string, output: unknown) => {
+      agentRef.current.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId,
+          toolName,
+          output,
+          autoContinue: autoContinueAfterToolResult
+        })
+      );
+
+      setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+    },
+    [autoContinueAfterToolResult]
+  );
+
+  // Effect for new onToolCall callback pattern (v6 style)
+  // This fires when there are tool calls that need client-side handling
+  useEffect(() => {
+    const currentOnToolCall = onToolCallRef.current;
+    if (!currentOnToolCall) {
+      return;
+    }
+
+    const lastMessage =
+      useChatHelpers.messages[useChatHelpers.messages.length - 1];
+    if (!lastMessage || lastMessage.role !== "assistant") {
+      return;
+    }
+
+    // Find tool calls in input-available state that haven't been processed
+    const pendingToolCalls = lastMessage.parts.filter(
+      (part) =>
+        isToolUIPart(part) &&
+        part.state === "input-available" &&
+        !processedToolCalls.current.has(part.toolCallId)
+    );
+
+    for (const part of pendingToolCalls) {
+      if (isToolUIPart(part)) {
+        const toolCallId = part.toolCallId;
+        const toolName = getToolName(part);
+
+        // Mark as processed to prevent re-triggering
+        processedToolCalls.current.add(toolCallId);
+
+        // Create addToolOutput function for this specific tool call
+        const addToolOutput = (opts: {
+          toolCallId: string;
+          output: unknown;
+        }) => {
+          sendToolOutputToServer(opts.toolCallId, toolName, opts.output);
+
+          // Update local state via AI SDK
+          useChatHelpers.addToolResult({
+            tool: toolName,
+            toolCallId: opts.toolCallId,
+            output: opts.output
+          });
+        };
+
+        // Call the onToolCall callback
+        // The callback is responsible for calling addToolOutput when ready
+        currentOnToolCall({
+          toolCall: {
+            toolCallId,
+            toolName,
+            input: part.input
+          },
+          addToolOutput
+        });
+      }
+    }
+  }, [
+    useChatHelpers.messages,
+    sendToolOutputToServer,
+    useChatHelpers.addToolResult
+  ]);
+
   /**
    * Contains the request ID, accumulated message parts, and a unique message ID.
    * Used for both resumed streams and real-time broadcasts from other tabs.
@@ -1195,9 +1354,33 @@ export function useAgentChat<
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [useChatHelpers.messages]);
 
+  // Create addToolOutput function for external use
+  const addToolOutput = useCallback(
+    (opts: { toolCallId: string; toolName?: string; output: unknown }) => {
+      const toolName = opts.toolName ?? "";
+      sendToolOutputToServer(opts.toolCallId, toolName, opts.output);
+
+      // Update local state via AI SDK
+      useChatHelpers.addToolResult({
+        tool: toolName,
+        toolCallId: opts.toolCallId,
+        output: opts.output
+      });
+    },
+    [sendToolOutputToServer, useChatHelpers.addToolResult]
+  );
+
   return {
     ...useChatHelpers,
     messages: messagesWithToolResults,
+    /**
+     * Provide output for a tool call. Use this for tools that require user interaction
+     * or client-side execution.
+     */
+    addToolOutput,
+    /**
+     * @deprecated Use `addToolOutput` instead.
+     */
     addToolResult: addToolResultAndSendMessage,
     clearHistory: () => {
       useChatHelpers.setMessages([]);

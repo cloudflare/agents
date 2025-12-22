@@ -205,7 +205,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
 
         const result = streamText({
           system: this.state.system,
-          messages: convertToModelMessages(cleanedMessages),
+          messages: await convertToModelMessages(cleanedMessages),
           model: modelProvider,
           tools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
