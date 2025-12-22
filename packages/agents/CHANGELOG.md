@@ -1,5 +1,17 @@
 # @cloudflare/agents
 
+## 0.2.35
+
+### Patch Changes
+
+- [#742](https://github.com/cloudflare/agents/pull/742) [`29938d4`](https://github.com/cloudflare/agents/commit/29938d42f177b9c5600370c03231ed398d03ed07) Thanks [@threepointone](https://github.com/threepointone)! - mark AgentNamespace as deprecated
+
+  It only makes things harder, especially for autogenned types.
+
+- [#747](https://github.com/cloudflare/agents/pull/747) [`17a0346`](https://github.com/cloudflare/agents/commit/17a034676b871ed30172f46f9a4160723c537ee0) Thanks [@threepointone](https://github.com/threepointone)! - fix: scheduling should work
+
+  since we updated to zod v4, the schedule schema was broken. ai sdk's .jsonSchema function doesn't correctly work on tools created with zod v4. The fix, is to use the v3 version of zod for the schedule schema.
+
 ## 0.2.34
 
 ### Patch Changes
