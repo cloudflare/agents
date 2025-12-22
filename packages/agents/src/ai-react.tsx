@@ -166,17 +166,16 @@ type InternalPrepareResult = {
  * Callback for handling client-side tool execution.
  * Called when a tool without server-side execute is invoked.
  */
-export type OnToolCallCallback =
-  (options: {
-    /** The tool call that needs to be handled */
-    toolCall: {
-      toolCallId: string;
-      toolName: string;
-      input: unknown;
-    };
-    /** Function to provide the tool output */
-    addToolOutput: (options: { toolCallId: string; output: unknown }) => void;
-  }) => void | Promise<void>;
+export type OnToolCallCallback = (options: {
+  /** The tool call that needs to be handled */
+  toolCall: {
+    toolCallId: string;
+    toolName: string;
+    input: unknown;
+  };
+  /** Function to provide the tool output */
+  addToolOutput: (options: { toolCallId: string; output: unknown }) => void;
+}) => void | Promise<void>;
 
 /**
  * Options for the useAgentChat hook
@@ -217,7 +216,7 @@ type UseAgentChatOptions<
    * }
    * ```
    */
-  onToolCall?: OnToolCallCallback<ChatMessage>;
+  onToolCall?: OnToolCallCallback;
   /**
    * @deprecated Use `onToolCall` callback instead for automatic tool execution.
    * @description Whether to automatically resolve tool calls that do not require human interaction.

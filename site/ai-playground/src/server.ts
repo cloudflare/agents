@@ -9,7 +9,8 @@ import {
   type StreamTextOnFinishCallback,
   stepCountIs,
   streamText,
-  type ToolSet
+  type ToolSet,
+  type LanguageModel
 } from "ai";
 import { cleanupMessages } from "./utils";
 import { nanoid } from "nanoid";
@@ -205,7 +206,8 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
         const result = streamText({
           system: this.state.system,
           messages: await convertToModelMessages(cleanedMessages),
-          model: modelProvider,
+          // TODO: we need to fix workers-ai-provider for ai sdk v6
+          model: modelProvider as unknown as LanguageModel,
           tools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof tools
