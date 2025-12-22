@@ -1,4 +1,4 @@
-# Migration Guide: Upgrading Agents SDK to AI SDK v6 (Beta)
+# Migration Guide: Upgrading Agents SDK to AI SDK v6
 
 This guide helps you migrate your existing code from **AI SDK v5.x** to **AI SDK v6.x** when using the Agents SDK.
 
@@ -8,7 +8,7 @@ AI SDK v6 introduces new capabilities like tool approval, but **migrating from v
 
 ## Installation
 
-Update your dependencies to use the beta versions:
+Update your dependencies to use the latest versions:
 
 ```bash
 npm install ai@latest @ai-sdk/react@latest @ai-sdk/openai@latest
@@ -357,6 +357,6 @@ model: workersai("model-name") as unknown as Parameters<
 ## Need Help?
 
 - Check the [official AI SDK v6 migration guide](https://ai-sdk.dev/docs/migration-guides/migration-guide-6-0)
-- Check the [AI SDK v6 announcement](https://ai-sdk.dev/docs/announcing-ai-sdk-6-beta)
+- Check the [AI SDK v6 announcement](https://vercel.com/blog/ai-sdk-6)
 - Check the [AI SDK documentation](https://sdk.vercel.ai/docs)
 - Report issues on the [Agents SDK GitHub repository](https://github.com/cloudflare/agents/issues)
