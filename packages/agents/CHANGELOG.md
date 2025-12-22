@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.3.0
+
+### Minor Changes
+
+- [`accdd78`](https://github.com/cloudflare/agents/commit/accdd78688a71287153687907f682b0feeacd155) Thanks [@threepointone](https://github.com/threepointone)! - update to ai sdk v6
+
+  via @whoiskatrin in https://github.com/cloudflare/agents/pull/733
+
 ## 0.2.35
 
 ### Patch Changes
