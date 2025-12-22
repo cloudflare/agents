@@ -1,8 +1,6 @@
 # Migration Guide: Upgrading Agents SDK to AI SDK v6 (Beta)
 
-This guide helps you migrate your existing code from **AI SDK v5.x** to **AI SDK v6.x** (beta) when using the Agents SDK.
-
-> **Note**: AI SDK v6 is currently in beta. APIs may still change. For production projects, consider waiting for the stable release.
+This guide helps you migrate your existing code from **AI SDK v5.x** to **AI SDK v6.x** when using the Agents SDK.
 
 ## Overview
 
@@ -13,19 +11,7 @@ AI SDK v6 introduces new capabilities like tool approval, but **migrating from v
 Update your dependencies to use the beta versions:
 
 ```bash
-npm install ai@beta @ai-sdk/react@beta @ai-sdk/openai@beta
-```
-
-For the Agents SDK, update `package.json`:
-
-```json
-{
-  "dependencies": {
-    "ai": "^6.0.0-beta",
-    "@ai-sdk/openai": "^3.0.0-beta",
-    "@ai-sdk/react": "^3.0.0-beta"
-  }
-}
+npm install ai@latest @ai-sdk/react@latest @ai-sdk/openai@latest
 ```
 
 ## Breaking Changes
@@ -348,30 +334,25 @@ model: workersai("model-name") as unknown as Parameters<
 
 ### Package Updates
 
-- [ ] Update `ai` package to `^6.0.0-beta`
-- [ ] Update `@ai-sdk/react` to `^3.0.0-beta`
-- [ ] Update `@ai-sdk/openai` (and other providers) to `^3.0.0-beta`
+- Update `ai` package to `^6.0.0`
+- Update `@ai-sdk/react` to `^3.0.0`
+- Update `@ai-sdk/openai` (and other providers) to `^3.0.0`
 
 ### AI SDK Changes
 
-- [ ] Add `await` to all `convertToModelMessages()` calls
-- [ ] Replace `CoreMessage` with `ModelMessage`
-- [ ] Replace `convertToCoreMessages()` with `convertToModelMessages()`
-- [ ] Remove `mode` option from `generateObject` calls
+- Add `await` to all `convertToModelMessages()` calls
+- Replace `CoreMessage` with `ModelMessage`
+- Replace `convertToCoreMessages()` with `convertToModelMessages()`
+- Remove `mode` option from `generateObject` calls
 
 ### Agents SDK Tool Pattern Migration
 
-- [ ] Move client tool definitions to server using `tool()` from "ai"
-- [ ] Replace `tools` option with `onToolCall` callback in `useAgentChat`
-- [ ] Replace `toolsRequiringConfirmation` with `needsApproval` on server tools
-- [ ] Replace `experimental_automaticToolResolution` with `onToolCall`
-- [ ] Replace `addToolResult()` calls with `addToolOutput()`
-- [ ] Remove `createToolsFromClientSchemas()` usage
-
-### Verification
-
-- [ ] Run type check: `npm run typecheck`
-- [ ] Run tests: `npm test`
+- Move client tool definitions to server using `tool()` from "ai"
+- Replace `tools` option with `onToolCall` callback in `useAgentChat`
+- Replace `toolsRequiringConfirmation` with `needsApproval` on server tools
+- Replace `experimental_automaticToolResolution` with `onToolCall`
+- Replace `addToolResult()` calls with `addToolOutput()`
+- Remove `createToolsFromClientSchemas()` usage
 
 ## Need Help?
 
