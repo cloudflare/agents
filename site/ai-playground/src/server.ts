@@ -206,8 +206,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
         const result = streamText({
           system: this.state.system,
           messages: await convertToModelMessages(cleanedMessages),
-          // TODO: we need to fix workers-ai-provider for ai sdk v6
-          model: modelProvider as unknown as LanguageModel,
+          model: modelProvider,
           tools,
           onFinish: onFinish as unknown as StreamTextOnFinishCallback<
             typeof tools
