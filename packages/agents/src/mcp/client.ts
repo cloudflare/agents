@@ -913,7 +913,9 @@ export class MCPClientManager {
    */
   getAITools(): ToolSet {
     if (!this.jsonSchema) {
-      throw new Error("jsonSchema not initialized.");
+      throw new Error(
+        "jsonSchema not initialized, please call `await this.mcp.ensureJsonSchema()` before calling getAITools(). This will be fixed in the next major version."
+      );
     }
 
     // Warn if tools are being read from non-ready connections

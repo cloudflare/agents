@@ -1781,7 +1781,7 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       expect(() => newManager.getAITools()).toThrow(
-        "jsonSchema not initialized."
+        "jsonSchema not initialized, please call `await this.mcp.ensureJsonSchema()` before calling getAITools(). This will be fixed in the next major version."
       );
     });
   });
