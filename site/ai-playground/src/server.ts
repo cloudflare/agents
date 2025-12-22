@@ -9,7 +9,8 @@ import {
   type StreamTextOnFinishCallback,
   stepCountIs,
   streamText,
-  type ToolSet
+  type ToolSet,
+  type LanguageModel
 } from "ai";
 import { cleanupMessages } from "./utils";
 import { nanoid } from "nanoid";
@@ -107,7 +108,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
         const cleanedMessages = cleanupMessages(this.messages);
 
         // Determine which model provider to use
-        let modelProvider;
+        let modelProvider: LanguageModel;
 
         if (
           this.state.useExternalProvider &&
@@ -133,7 +134,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
               apiKey: this.state.gatewayApiKey
             });
 
-            let baseModel;
+            let baseModel: LanguageModel;
             if (this.state.externalProvider === "openai") {
               const openai = createOpenAIGateway(); // No API key for unified billing
               baseModel = openai.chat(modelName);

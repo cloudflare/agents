@@ -121,7 +121,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         setShowLocalhostWarning(true);
         return;
       }
-    } catch (err) {
+    } catch (_err) {
       // Invalid URL, let the server handle it
     }
 
@@ -259,22 +259,6 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
         {label}
       </span>
     );
-  };
-
-  // Get overall status for the header
-  const getOverallStatus = () => {
-    if (mcpState.servers.length === 0) return "not-connected";
-    if (mcpState.servers.some((s) => s.state === "ready")) return "ready";
-    if (mcpState.servers.some((s) => s.state === "authenticating"))
-      return "authenticating";
-    if (
-      mcpState.servers.some(
-        (s) => s.state === "connecting" || s.state === "discovering"
-      )
-    )
-      return "connecting";
-    if (mcpState.servers.some((s) => s.state === "failed")) return "failed";
-    return "not-connected";
   };
 
   return (
@@ -448,7 +432,10 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
           {showAuth && (
             <div className="absolute z-10 mt-2 w-full bg-white border border-gray-200 rounded-md shadow-lg p-3 space-y-3">
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
+                <label
+                  htmlFor="header-name"
+                  className="block text-xs font-medium text-gray-700 mb-1"
+                >
                   Header Name
                 </label>
                 <input
@@ -464,7 +451,10 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                 />
               </div>
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">
+                <label
+                  htmlFor="bearer-value"
+                  className="block text-xs font-medium text-gray-700 mb-1"
+                >
                   Bearer Value
                 </label>
                 <div className="relative">
@@ -538,7 +528,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                 </div>
                 <button
                   type="button"
-                  className="ml-2 px-2 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded-md transition-colors flex-shrink-0"
+                  className="ml-2 px-2 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded-md transition-colors shrink-0"
                   onClick={() => handleDisconnect(server.id)}
                   disabled={disconnectingServerId === server.id}
                 >
@@ -670,7 +660,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                         </div>
                         {tool.description && (
                           <svg
-                            className={`w-3 h-3 text-gray-500 flex-shrink-0 ml-2 transform transition-transform ${
+                            className={`w-3 h-3 text-gray-500 shrink-0 ml-2 transform transition-transform ${
                               isExpanded ? "rotate-180" : ""
                             }`}
                             fill="none"

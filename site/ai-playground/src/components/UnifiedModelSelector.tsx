@@ -370,7 +370,11 @@ const UnifiedModelSelector = ({
         <div className="relative">
           <div className="mb-1">
             <div className="flex justify-between items-center mb-1">
-              <label {...getLabelProps()} className="font-semibold text-sm">
+              <label
+                htmlFor="model"
+                {...getLabelProps()}
+                className="font-semibold text-sm"
+              >
                 Model
               </label>
               <div className="flex space-x-1 min-h-[26px]">
@@ -481,7 +485,12 @@ const UnifiedModelSelector = ({
         /* External Provider Models Selector */
         <div className="space-y-3">
           <div>
-            <label className="text-xs text-gray-600 block mb-1">Provider</label>
+            <label
+              htmlFor="provider"
+              className="text-xs text-gray-600 block mb-1"
+            >
+              Provider
+            </label>
             <select
               value={externalProvider}
               onChange={(e) =>
@@ -497,7 +506,9 @@ const UnifiedModelSelector = ({
           </div>
 
           <div>
-            <label className="text-xs text-gray-600 block mb-1">Model</label>
+            <label htmlFor="model" className="text-xs text-gray-600 block mb-1">
+              Model
+            </label>
             <div className="bg-white border border-gray-200 rounded-md p-2 max-h-40 overflow-y-auto">
               {externalModels.map((model) => (
                 <button
@@ -527,7 +538,10 @@ const UnifiedModelSelector = ({
 
           {/* Authentication Method */}
           <div>
-            <label className="text-xs text-gray-600 block mb-2">
+            <label
+              htmlFor="authentication"
+              className="text-xs text-gray-600 block mb-2"
+            >
               Authentication
             </label>
             <div className="flex gap-2 mb-3">
@@ -557,7 +571,10 @@ const UnifiedModelSelector = ({
 
             {authMethod === "provider-key" ? (
               <div>
-                <label className="text-xs text-gray-600 block mb-1">
+                <label
+                  htmlFor="provider-api-key"
+                  className="text-xs text-gray-600 block mb-1"
+                >
                   {externalProvider === "openai"
                     ? "OpenAI"
                     : externalProvider === "anthropic"
@@ -592,7 +609,10 @@ const UnifiedModelSelector = ({
             ) : (
               <div className="space-y-3">
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">
+                  <label
+                    htmlFor="account-id"
+                    className="text-xs text-gray-600 block mb-1"
+                  >
                     Account ID <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -609,7 +629,10 @@ const UnifiedModelSelector = ({
                 </div>
 
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">
+                  <label
+                    htmlFor="gateway-id"
+                    className="text-xs text-gray-600 block mb-1"
+                  >
                     Gateway ID <span className="text-red-500">*</span>
                   </label>
                   <input
@@ -626,7 +649,10 @@ const UnifiedModelSelector = ({
                 </div>
 
                 <div>
-                  <label className="text-xs text-gray-600 block mb-1">
+                  <label
+                    htmlFor="cloudflare-api-key"
+                    className="text-xs text-gray-600 block mb-1"
+                  >
                     Cloudflare API Key <span className="text-red-500">*</span>
                   </label>
                   <div className="relative">

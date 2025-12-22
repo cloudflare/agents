@@ -210,7 +210,7 @@ const App = () => {
 
   // Scroll to bottom when messages change
   useEffect(() => {
-    if (messageElement.current) {
+    if (messageElement.current && messages.length > 0) {
       messageElement.current.scrollTop = messageElement.current.scrollHeight;
     }
   }, [messages]);

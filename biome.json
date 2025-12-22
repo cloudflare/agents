@@ -16,6 +16,7 @@
       "openai-sdk/**",
       "packages/**",
       "guides/**",
+      "site/ai-playground/**",
       "!node_modules",
       "!**/node_modules",
       "!dist",
@@ -70,5 +71,10 @@
     "clientKind": "git",
     "enabled": false,
     "useIgnoreFile": false
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
   }
 }
