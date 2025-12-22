@@ -166,7 +166,7 @@ type InternalPrepareResult = {
  * Callback for handling client-side tool execution.
  * Called when a tool without server-side execute is invoked.
  */
-export type OnToolCallCallback<ChatMessage extends UIMessage = UIMessage> =
+export type OnToolCallCallback =
   (options: {
     /** The tool call that needs to be handled */
     toolCall: {
