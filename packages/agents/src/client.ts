@@ -28,11 +28,14 @@ export type AgentClientOptions<State = unknown> = Omit<
 /**
  * Options for streaming RPC calls
  */
-export type StreamOptions = {
+export type StreamOptions<
+  OnChunkT extends unknown | SerializableValue = unknown,
+  OnDoneT extends unknown | SerializableValue = unknown
+> = {
   /** Called when a chunk of data is received */
-  onChunk?: (chunk: unknown) => void;
+  onChunk?: (chunk: OnChunkT) => void;
   /** Called when the stream ends */
-  onDone?: (finalChunk: unknown) => void;
+  onDone?: (finalChunk: OnDoneT) => void;
   /** Called when an error occurs */
   onError?: (error: string) => void;
 };

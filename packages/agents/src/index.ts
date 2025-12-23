@@ -28,6 +28,7 @@ import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
+import type { SerializableValue } from "./serializable";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -1962,7 +1963,10 @@ export async function getAgentByName<
 /**
  * A wrapper for streaming responses in callable methods
  */
-export class StreamingResponse {
+export class StreamingResponse<
+  OnChunkT extends SerializableValue | unknown = unknown,
+  OnDoneT extends SerializableValue | unknown = unknown
+> {
   private _connection: Connection;
   private _id: string;
   private _closed = false;
@@ -1976,7 +1980,7 @@ export class StreamingResponse {
    * Send a chunk of data to the client
    * @param chunk The data to send
    */
-  send(chunk: unknown) {
+  send(chunk: OnChunkT) {
     if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
@@ -1994,7 +1998,7 @@ export class StreamingResponse {
    * End the stream and send the final chunk (if any)
    * @param finalChunk Optional final chunk of data to send
    */
-  end(finalChunk?: unknown) {
+  end(finalChunk?: OnDoneT) {
     if (this._closed) {
       throw new Error("StreamingResponse is already closed");
     }
