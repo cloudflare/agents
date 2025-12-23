@@ -1341,10 +1341,14 @@ export class AIChatAgent<
           part.state = options.state;
           anyPart.toolName = options.toolName;
           anyPart.input = anyOptions.input;
-          anyPart.output = anyOptions.output;
-          anyPart.errorText = anyOptions.errorText;
-          anyPart.rawInput = anyOptions.rawInput ?? anyPart.rawInput;
-          anyPart.preliminary = anyOptions.preliminary;
+          // Only update optional fields if explicitly provided to avoid
+          // overwriting values set by _applyToolResult with undefined
+          if ("output" in anyOptions) anyPart.output = anyOptions.output;
+          if ("errorText" in anyOptions)
+            anyPart.errorText = anyOptions.errorText;
+          if ("rawInput" in anyOptions) anyPart.rawInput = anyOptions.rawInput;
+          if ("preliminary" in anyOptions)
+            anyPart.preliminary = anyOptions.preliminary;
 
           if (
             anyOptions.providerMetadata != null &&
@@ -1354,19 +1358,21 @@ export class AIChatAgent<
               anyOptions.providerMetadata as ProviderMetadata;
           }
         } else {
-          message.parts.push({
+          const newPart: Record<string, unknown> = {
             type: "dynamic-tool",
             toolName: options.toolName,
             toolCallId: options.toolCallId,
             state: options.state,
-            input: anyOptions.input,
-            output: anyOptions.output,
-            errorText: anyOptions.errorText,
-            preliminary: anyOptions.preliminary,
-            ...(anyOptions.providerMetadata != null
-              ? { callProviderMetadata: anyOptions.providerMetadata }
-              : {})
-          } as DynamicToolUIPart);
+            input: anyOptions.input
+          };
+          if ("output" in anyOptions) newPart.output = anyOptions.output;
+          if ("errorText" in anyOptions)
+            newPart.errorText = anyOptions.errorText;
+          if ("preliminary" in anyOptions)
+            newPart.preliminary = anyOptions.preliminary;
+          if (anyOptions.providerMetadata != null)
+            newPart.callProviderMetadata = anyOptions.providerMetadata;
+          message.parts.push(newPart as DynamicToolUIPart);
         }
       }
 
@@ -1416,10 +1422,14 @@ export class AIChatAgent<
         if (part != null) {
           part.state = options.state;
           anyPart.input = anyOptions.input;
-          anyPart.output = anyOptions.output;
-          anyPart.errorText = anyOptions.errorText;
-          anyPart.rawInput = anyOptions.rawInput;
-          anyPart.preliminary = anyOptions.preliminary;
+          // Only update output if explicitly provided in options to avoid
+          // overwriting a value set by _applyToolResult with undefined
+          if ("output" in anyOptions) anyPart.output = anyOptions.output;
+          if ("errorText" in anyOptions)
+            anyPart.errorText = anyOptions.errorText;
+          if ("rawInput" in anyOptions) anyPart.rawInput = anyOptions.rawInput;
+          if ("preliminary" in anyOptions)
+            anyPart.preliminary = anyOptions.preliminary;
 
           // once providerExecuted is set, it stays for streaming
           anyPart.providerExecuted =
@@ -1433,20 +1443,23 @@ export class AIChatAgent<
               anyOptions.providerMetadata as ProviderMetadata;
           }
         } else {
-          message.parts.push({
+          const newPart: Record<string, unknown> = {
             type: `tool-${options.toolName}`,
             toolCallId: options.toolCallId,
             state: options.state,
-            input: anyOptions.input,
-            output: anyOptions.output,
-            rawInput: anyOptions.rawInput,
-            errorText: anyOptions.errorText,
-            providerExecuted: anyOptions.providerExecuted,
-            preliminary: anyOptions.preliminary,
-            ...(anyOptions.providerMetadata != null
-              ? { callProviderMetadata: anyOptions.providerMetadata }
-              : {})
-          } as ToolUIPart);
+            input: anyOptions.input
+          };
+          if ("output" in anyOptions) newPart.output = anyOptions.output;
+          if ("rawInput" in anyOptions) newPart.rawInput = anyOptions.rawInput;
+          if ("errorText" in anyOptions)
+            newPart.errorText = anyOptions.errorText;
+          if ("providerExecuted" in anyOptions)
+            newPart.providerExecuted = anyOptions.providerExecuted;
+          if ("preliminary" in anyOptions)
+            newPart.preliminary = anyOptions.preliminary;
+          if (anyOptions.providerMetadata != null)
+            newPart.callProviderMetadata = anyOptions.providerMetadata;
+          message.parts.push(newPart as ToolUIPart);
         }
       }
 
