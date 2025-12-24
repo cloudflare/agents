@@ -4,7 +4,7 @@ import type {
   JSONRPCMessage,
   ListToolsResult,
   JSONRPCNotification,
-  JSONRPCResponse
+  JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import worker, { type Env } from "../../worker";
@@ -254,7 +254,7 @@ describe("Streamable HTTP Transport", () => {
       expect(response.status).toBe(200);
 
       const sseText = await readSSEEvent(response);
-      const parsed = parseSSEData(sseText) as JSONRPCResponse;
+      const parsed = parseSSEData(sseText) as JSONRPCResultResponse;
       expect(parsed.id).toBe("unicode-1");
 
       const result = parsed.result as CallToolResult;
@@ -461,7 +461,7 @@ describe("Streamable HTTP Transport", () => {
 
       // Read the POST SSE response for the tool return value
       const postFrame = await readSSEEvent(postRes);
-      const postJson = parseSSEData(postFrame) as JSONRPCResponse;
+      const postJson = parseSSEData(postFrame) as JSONRPCResultResponse;
       expect(postJson.id).toBe("emit-log-1");
       const result = postJson.result as CallToolResult;
       expect(
@@ -509,7 +509,7 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(installRes.status).toBe(200);
       const installFrame = await readSSEEvent(installRes);
-      const installJson = parseSSEData(installFrame) as JSONRPCResponse;
+      const installJson = parseSSEData(installFrame) as JSONRPCResultResponse;
       expect(installJson.id).toBe("install-1");
       let result = installJson.result as CallToolResult;
       expect(
@@ -532,7 +532,7 @@ describe("Streamable HTTP Transport", () => {
       let listRes = await sendPostRequest(ctx, baseUrl, listReq, sessionId);
       expect(listRes.status).toBe(200);
       let listFrame = await readSSEEvent(listRes);
-      let listJson = parseSSEData(listFrame) as JSONRPCResponse;
+      let listJson = parseSSEData(listFrame) as JSONRPCResultResponse;
       let tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
       expect(tools.some((t) => t.name === "temp-echo")).toBe(true);
 
@@ -551,7 +551,7 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(installRes.status).toBe(200);
       const runTempFrame = await readSSEEvent(runTempRes);
-      const runTempJson = parseSSEData(runTempFrame) as JSONRPCResponse;
+      const runTempJson = parseSSEData(runTempFrame) as JSONRPCResultResponse;
       expect(runTempJson.id).toBe("run-temp-1");
       result = runTempJson.result as CallToolResult;
       expect(
@@ -574,7 +574,9 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(uninstallRes.status).toBe(200);
       const uninstallFrame = await readSSEEvent(uninstallRes);
-      const uninstallJson = parseSSEData(uninstallFrame) as JSONRPCResponse;
+      const uninstallJson = parseSSEData(
+        uninstallFrame
+      ) as JSONRPCResultResponse;
       expect(uninstallJson.id).toBe("uninstall-1");
 
       listChanged = await readOneFrame(standaloneReader);
@@ -591,7 +593,7 @@ describe("Streamable HTTP Transport", () => {
       listRes = await sendPostRequest(ctx, baseUrl, listReq, sessionId);
       expect(listRes.status).toBe(200);
       listFrame = await readSSEEvent(listRes);
-      listJson = parseSSEData(listFrame) as JSONRPCResponse;
+      listJson = parseSSEData(listFrame) as JSONRPCResultResponse;
       tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
       expect(tools.some((t) => t.name === "temp-echo")).toBe(false);
     });
@@ -631,7 +633,7 @@ describe("Streamable HTTP Transport", () => {
 
       // Parse the SSE response
       const sseText = await readSSEEvent(response);
-      const parsed = parseSSEData(sseText) as JSONRPCResponse;
+      const parsed = parseSSEData(sseText) as JSONRPCResultResponse;
       expect(parsed.id).toBe("echo-headers-1");
 
       // Extract the echoed request info

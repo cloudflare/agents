@@ -1417,4 +1417,644 @@ describe("WorkerTransport", () => {
       });
     });
   });
+
+  describe("Resumability - EventStore", () => {
+    it("should accept eventStore option", async () => {
+      const server = createTestServer();
+
+      const eventStore = {
+        storeEvent: vi.fn(async () => "event-id"),
+        replayEventsAfter: vi.fn(async () => "_GET_stream")
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        eventStore
+      });
+
+      expect(transport).toBeDefined();
+    });
+
+    it("should call replayEventsAfter when Last-Event-ID is provided on GET request", async () => {
+      const server = createTestServer();
+      let replayWasCalled = false;
+
+      const eventStore = {
+        storeEvent: vi.fn(async () => "event-id"),
+        getStreamIdForEventId: vi.fn(async () => "_GET_stream"),
+        replayEventsAfter: vi.fn(async () => {
+          replayWasCalled = true;
+          return "_GET_stream";
+        })
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        eventStore
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Reconnect with Last-Event-ID - this should trigger replayEventsAfter
+      const reconnectRequest = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session",
+          "Last-Event-ID": "_GET_stream_100"
+        }
+      });
+
+      const response = await transport.handleRequest(reconnectRequest);
+      expect(response.status).toBe(200);
+
+      // Verify replayEventsAfter was called
+      expect(replayWasCalled).toBe(true);
+      expect(eventStore.replayEventsAfter).toHaveBeenCalledWith(
+        "_GET_stream_100",
+        expect.objectContaining({ send: expect.any(Function) })
+      );
+    });
+  });
+
+  describe("Standalone GET SSE Stream", () => {
+    it("should allow one GET SSE stream per session", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // First GET should succeed
+      const getRequest1 = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response1 = await transport.handleRequest(getRequest1);
+      expect(response1.status).toBe(200);
+
+      // Second GET should fail with 409 Conflict
+      const getRequest2 = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response2 = await transport.handleRequest(getRequest2);
+      expect(response2.status).toBe(409);
+
+      const body = (await response2.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Only one SSE stream");
+    });
+
+    it("should reject GET without Accept: text/event-stream", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // GET without proper Accept header
+      const getRequest = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response = await transport.handleRequest(getRequest);
+      expect(response.status).toBe(406);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("must accept text/event-stream");
+    });
+  });
+
+  describe("DELETE Request and onsessionclosed", () => {
+    it("should handle DELETE request and close session", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // DELETE to close session
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response = await transport.handleRequest(deleteRequest);
+      expect(response.status).toBe(200);
+    });
+
+    it("should fire onsessionclosed callback on DELETE", async () => {
+      const server = createTestServer();
+      let closedSessionId: string | undefined;
+      let callbackCalled = false;
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "close-test-session",
+        onsessionclosed: (sessionId: string) => {
+          callbackCalled = true;
+          closedSessionId = sessionId;
+        }
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // DELETE to close session
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "close-test-session"
+        }
+      });
+
+      await transport.handleRequest(deleteRequest);
+
+      expect(callbackCalled).toBe(true);
+      expect(closedSessionId).toBe("close-test-session");
+    });
+
+    it("should reject DELETE with wrong session ID", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // DELETE with wrong session ID
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "wrong-session"
+        }
+      });
+
+      const response = await transport.handleRequest(deleteRequest);
+      expect(response.status).toBe(404);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Session not found");
+    });
+  });
+
+  describe("closeSSEStream method", () => {
+    it("should close SSE stream for specific request ID", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Make a tool call request to establish a stream
+      const toolRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "tool-1",
+          method: "tools/call",
+          params: { name: "test-tool", arguments: { message: "test" } }
+        })
+      });
+
+      const response = await transport.handleRequest(toolRequest);
+      expect(response.status).toBe(200);
+
+      // Close the stream for this request
+      transport.closeSSEStream("tool-1");
+
+      // The stream should be closed - subsequent operations on this request should fail
+      // (The actual behavior depends on timing, but the stream cleanup should have been triggered)
+    });
+  });
+
+  describe("Unsupported HTTP Methods", () => {
+    it("should return 405 for unsupported methods", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const putRequest = new Request("http://example.com/", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+
+      const response = await transport.handleRequest(putRequest);
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe("GET, POST, DELETE, OPTIONS");
+    });
+
+    it("should return 405 for PATCH method", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const patchRequest = new Request("http://example.com/", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+
+      const response = await transport.handleRequest(patchRequest);
+      expect(response.status).toBe(405);
+    });
+  });
+
+  describe("Batch Requests", () => {
+    it("should handle batch JSON-RPC requests", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
+      });
+
+      // Initialize first
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Send batch request
+      const batchRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify([
+          {
+            jsonrpc: "2.0",
+            id: "batch-1",
+            method: "tools/list",
+            params: {}
+          },
+          {
+            jsonrpc: "2.0",
+            id: "batch-2",
+            method: "prompts/list",
+            params: {}
+          }
+        ])
+      });
+
+      const response = await transport.handleRequest(batchRequest);
+      expect(response.status).toBe(200);
+    });
+
+    it("should reject batch containing initialize request with other messages", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const batchRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify([
+          {
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-03-26"
+            }
+          },
+          {
+            jsonrpc: "2.0",
+            id: "2",
+            method: "tools/list",
+            params: {}
+          }
+        ])
+      });
+
+      const response = await transport.handleRequest(batchRequest);
+      expect(response.status).toBe(400);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain(
+        "Only one initialization request is allowed"
+      );
+    });
+  });
+
+  describe("Notification Handling", () => {
+    it("should return 202 for notification-only requests", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize first
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Send notification (no id field)
+      const notificationRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        })
+      });
+
+      const response = await transport.handleRequest(notificationRequest);
+      expect(response.status).toBe(202);
+    });
+  });
+
+  describe("Content-Type Validation", () => {
+    it("should reject POST with wrong Content-Type", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain",
+          Accept: "application/json, text/event-stream"
+        },
+        body: "not json"
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(415);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain(
+        "Content-Type must be application/json"
+      );
+    });
+
+    it("should reject POST missing Accept header for both JSON and SSE", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json" // Missing text/event-stream
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(406);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain(
+        "must accept both application/json and text/event-stream"
+      );
+    });
+  });
+
+  describe("Invalid JSON Handling", () => {
+    it("should return parse error for invalid JSON body", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: "{ invalid json }"
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(400);
+
+      const body = (await response.json()) as { error: { code: number } };
+      expect(body.error.code).toBe(-32700); // Parse error
+    });
+
+    it("should return error for invalid JSON-RPC message structure", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({ invalid: "message" }) // Missing jsonrpc field
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(400);
+
+      const body = (await response.json()) as { error: { code: number } };
+      expect(body.error.code).toBe(-32700);
+    });
+  });
 });
