@@ -29,22 +29,6 @@ import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./ai-types";
-import {
-  TaskTracker,
-  TasksAccessor,
-  createTaskContext,
-  taskMethodOriginals,
-  getTaskMethodKey,
-  type Task,
-  type TaskContext,
-  type TaskHandle,
-  type TaskOptions,
-  type TaskFilter,
-  type TaskEvent,
-  type TaskStatus,
-  type TaskExecutionPayload,
-  type TaskObservabilityEvent
-} from "./task";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -120,20 +104,51 @@ function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
   );
 }
 
-// Import callable decorator and metadata from shared module
-import {
-  callable as callableDecorator,
-  unstable_callable as unstableCallableDecorator,
-  callableMetadata,
-  type CallableMetadata
-} from "./callable";
+/**
+ * Metadata for a callable method
+ */
+export type CallableMetadata = {
+  /** Optional description of what the method does */
+  description?: string;
+  /** Whether the method supports streaming responses */
+  streaming?: boolean;
+};
 
-// Re-export for public API
-export {
-  callableDecorator as callable,
-  unstableCallableDecorator as unstable_callable,
-  callableMetadata,
-  type CallableMetadata
+const callableMetadata = new Map<Function, CallableMetadata>();
+
+/**
+ * Decorator that marks a method as callable by clients
+ * @param metadata Optional metadata about the callable method
+ */
+export function callable(metadata: CallableMetadata = {}) {
+  return function callableDecorator<This, Args extends unknown[], Return>(
+    target: (this: This, ...args: Args) => Return,
+    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
+    context: ClassMethodDecoratorContext
+  ) {
+    if (!callableMetadata.has(target)) {
+      callableMetadata.set(target, metadata);
+    }
+
+    return target;
+  };
+}
+
+let didWarnAboutUnstableCallable = false;
+
+/**
+ * Decorator that marks a method as callable by clients
+ * @deprecated this has been renamed to callable, and unstable_callable will be removed in the next major version
+ * @param metadata Optional metadata about the callable method
+ */
+export const unstable_callable = (metadata: CallableMetadata = {}) => {
+  if (!didWarnAboutUnstableCallable) {
+    didWarnAboutUnstableCallable = true;
+    console.warn(
+      "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
+    );
+  }
+  callable(metadata);
 };
 
 export type QueueItem<T = string> = {
@@ -291,29 +306,6 @@ export class Agent<
   readonly mcp: MCPClientManager;
 
   /**
-   * Task tracker for tracking async work lifecycle
-   * @internal
-   */
-  private _taskTracker!: TaskTracker;
-
-  /**
-   * Tasks accessor for managing tracked tasks
-   *
-   * @example
-   * ```typescript
-   * // Get a task
-   * const task = this.tasks.get(taskId);
-   *
-   * // List running tasks
-   * const running = this.tasks.list({ status: 'running' });
-   *
-   * // Cancel a task
-   * this.tasks.cancel(taskId);
-   * ```
-   */
-  readonly tasks!: TasksAccessor;
-
-  /**
    * Initial state for the Agent
    * Override to provide default state values
    */
@@ -456,48 +448,6 @@ export class Agent<
       storage: this.ctx.storage
     });
 
-    // Initialize TaskTracker for tracking async work lifecycle
-    // - Execution is handled by the queue system
-    // - Real-time sync is handled by the state system
-    this._taskTracker = new TaskTracker(
-      this.sql.bind(this),
-      // Sync task updates to state for automatic broadcast to clients
-      (taskId: string, task: Task | null) => {
-        this._syncTaskToState(taskId, task);
-      }
-    );
-    (this as { tasks: TasksAccessor }).tasks = new TasksAccessor(
-      this._taskTracker
-    );
-
-    // Set workflow cancel callback for TasksAccessor
-    this.tasks.setWorkflowCancelCallback((taskId) =>
-      this._cancelWorkflow(taskId)
-    );
-
-    // Set observability callback for task lifecycle events
-    this._taskTracker.setObservabilityCallback(
-      (event: TaskObservabilityEvent) => {
-        this.observability?.emit(
-          {
-            displayMessage: this._formatTaskObservabilityMessage(event),
-            id: nanoid(),
-            payload: {
-              taskId: event.taskId,
-              method: event.method,
-              ...event.data
-            },
-            timestamp: event.timestamp,
-            type: event.type
-          },
-          this.ctx
-        );
-      }
-    );
-
-    // Clear any stale queue items from previous runs to prevent task spirals
-    this.sql`DELETE FROM cf_agents_queues WHERE callback = '_executeTask'`;
-
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
     this._disposables.add(
       this.mcp.onServerStateChanged(async () => {
@@ -520,83 +470,6 @@ export class Agent<
           // TODO: make zod/ai sdk more performant and remove this
           // Late initialization of jsonSchemaFn (needed for getAITools)
           await this.mcp.ensureJsonSchema();
-
-          // Handle workflow update callbacks
-          const url = new URL(request.url);
-          if (
-            url.pathname === "/_workflow-update" &&
-            request.method === "POST"
-          ) {
-            try {
-              const json = await request.json();
-
-              // Comprehensive validation of workflow update payload
-              const validationError = this._validateWorkflowUpdate(json);
-              if (validationError) {
-                console.error(
-                  "[Agent] Invalid workflow update:",
-                  validationError
-                );
-                return new Response(validationError, { status: 400 });
-              }
-
-              const update = json as {
-                taskId: string;
-                event?: { type: string; data?: unknown };
-                progress?: number;
-                status?: "completed" | "failed";
-                result?: unknown;
-                error?: string;
-              };
-
-              this._handleWorkflowUpdate(update);
-              return new Response("ok", { status: 200 });
-            } catch (error) {
-              console.error("[Agent] Failed to handle workflow update:", error);
-              return new Response("error", { status: 500 });
-            }
-          }
-
-          // Handle durable task execution from DurableTaskWorkflow
-          if (
-            url.pathname === "/_execute-durable-task" &&
-            request.method === "POST"
-          ) {
-            try {
-              const json = (await request.json()) as {
-                taskId: string;
-                methodName: string;
-                input: unknown;
-              };
-
-              const { taskId, methodName, input } = json;
-
-              if (!taskId || !methodName) {
-                return new Response("Missing taskId or methodName", {
-                  status: 400
-                });
-              }
-
-              const result = await this._executeDurableTaskMethod(
-                taskId,
-                methodName,
-                input
-              );
-
-              return new Response(JSON.stringify(result), {
-                status: 200,
-                headers: { "Content-Type": "application/json" }
-              });
-            } catch (error) {
-              console.error("[Agent] Failed to execute durable task:", error);
-              return new Response(
-                JSON.stringify({
-                  error: error instanceof Error ? error.message : String(error)
-                }),
-                { status: 500, headers: { "Content-Type": "application/json" } }
-              );
-            }
-          }
 
           // Handle MCP OAuth callback if this is one
           const oauthResponse = await this.handleMcpOAuthCallback(request);
@@ -819,662 +692,6 @@ export class Agent<
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
-  }
-
-  // ============================================================================
-  // Task System
-  // ============================================================================
-
-  /**
-   * Run a method as a tracked task with lifecycle management.
-   *
-   * Tasks provide:
-   * - Automatic status tracking (pending → running → completed/failed/aborted)
-   * - Progress events via ctx.emit()
-   * - Abort handling via ctx.signal
-   * - Timeout support
-   * - Retry support
-   * - Persistence across agent restarts
-   *
-   * @param methodName Name of the method to run as a task
-   * @param input Input payload to pass to the method
-   * @param options Task options (timeout, retries, custom ID)
-   * @returns TaskHandle with the task ID and status
-   *
-   * @example
-   * ```typescript
-   * class MyAgent extends Agent<Env> {
-   *   async createTask(input: string) {
-   *     // Start a task - returns immediately with task handle
-   *     const task = await this.task("processData", { input }, {
-   *       timeout: "5m",
-   *       retries: 2
-   *     });
-   *     return { taskId: task.id };
-   *   }
-   *
-   *   // The task method receives input and context
-   *   async processData(input: { input: string }, ctx: TaskContext) {
-   *     ctx.emit("starting", { step: 1 });
-   *
-   *     // Check for abort
-   *     if (ctx.signal.aborted) throw new Error("Aborted");
-   *
-   *     ctx.setProgress(50);
-   *     const result = await this.doWork(input.input);
-   *
-   *     return { result };
-   *   }
-   * }
-   * ```
-   */
-  async task<TInput, TResult = unknown>(
-    methodName: keyof this & string,
-    input: TInput,
-    options: TaskOptions = {}
-  ): Promise<TaskHandle<TResult>> {
-    // Route to durable or simple task based on options
-    if (options.durable) {
-      return this._runDurableTask<TInput, TResult>(methodName, input, options);
-    }
-    return this._runTask<TInput, TResult>(methodName, input, options);
-  }
-
-  /**
-   * Run a simple (non-durable) task in the Durable Object.
-   * Called by the @task() decorator for non-durable tasks.
-   * @internal
-   */
-  async _runTask<TInput, TResult = unknown>(
-    methodName: string,
-    input: TInput,
-    options: TaskOptions = {}
-  ): Promise<TaskHandle<TResult>> {
-    // Validate method exists
-    const method = this[methodName as keyof this];
-    if (typeof method !== "function") {
-      throw new Error(`Method ${methodName} does not exist on this agent`);
-    }
-
-    // 1. Create task record for tracking
-    const task = this._taskTracker.create(methodName, input, options);
-
-    // 2. Queue execution using the existing queue system
-    const payload: TaskExecutionPayload = {
-      taskId: task.id,
-      methodName,
-      input,
-      timeoutMs: task.timeoutMs,
-      retries: options.retries
-    };
-
-    const queueId = await this.queue("_executeTask" as keyof this, payload);
-
-    // Link task to queue item
-    this._taskTracker.linkToQueue(task.id, queueId);
-
-    // 3. Return handle immediately (task runs in background)
-    return this._taskTracker.getHandle<TResult>(task.id)!;
-  }
-
-  /**
-   * Run a durable task backed by Cloudflare Workflows.
-   * Called by the @task({ durable: true }) decorator.
-   *
-   * This dispatches to a generated workflow that will call back into the agent
-   * to execute the actual task method with durable step/sleep/waitForEvent support.
-   * @internal
-   */
-  async _runDurableTask<TInput, TResult = unknown>(
-    methodName: string,
-    input: TInput,
-    options: TaskOptions = {}
-  ): Promise<TaskHandle<TResult>> {
-    // 1. Create task record with durable flag
-    const task = this._taskTracker.create(methodName, input, {
-      ...options,
-      durable: true
-    });
-
-    // 2. Get the workflow binding for durable tasks
-    // Convention: DURABLE_TASKS_WORKFLOW binding should be configured
-    const workflowBinding = "DURABLE_TASKS_WORKFLOW";
-    const workflowNS = (this.env as Record<string, unknown>)[workflowBinding];
-
-    if (
-      !workflowNS ||
-      typeof (workflowNS as { create?: unknown }).create !== "function"
-    ) {
-      this._taskTracker.fail(task.id, "Durable workflow not configured");
-      throw new Error(
-        `Durable tasks require ${workflowBinding} binding. ` +
-          "Add it to your wrangler.jsonc or use @task() without durable: true."
-      );
-    }
-
-    // 3. Dispatch workflow with task tracking info
-    const agentBinding = camelCaseToKebabCase(this._ParentClass.name);
-    const instance = await (
-      workflowNS as {
-        create: (opts: { params: unknown }) => Promise<{ id: string }>;
-      }
-    ).create({
-      params: {
-        _taskId: task.id,
-        _agentBinding: agentBinding,
-        _agentName: (this as unknown as { name: string }).name || "default",
-        _methodName: methodName,
-        _input: input,
-        _timeout: options.timeout,
-        _retry: options.retry
-      }
-    });
-
-    // 4. Link task to workflow instance
-    this._taskTracker.linkToWorkflow(task.id, instance.id, workflowBinding);
-    this._taskTracker.addEvent(task.id, "workflow-started", {
-      instanceId: instance.id,
-      methodName,
-      durable: true
-    });
-
-    // 5. Return handle immediately
-    return this._taskTracker.getHandle<TResult>(task.id)!;
-  }
-
-  /**
-   * Start a Cloudflare Workflow and track it as a task.
-   *
-   * The workflow will receive a WorkflowTaskContext with emit() and setProgress()
-   * methods that sync updates back to this Agent for real-time client notifications.
-   *
-   * @param workflowBinding - The workflow binding name (e.g., "ANALYSIS_WORKFLOW")
-   * @param input - Input parameters for the workflow
-   * @returns TaskHandle for tracking the workflow
-   *
-   * @example
-   * ```typescript
-   * class MyAgent extends Agent<Env> {
-   *   @callable()
-   *   async startLongAnalysis(input: { repoUrl: string }) {
-   *     return this.workflow("ANALYSIS_WORKFLOW", input);
-   *   }
-   * }
-   * ```
-   */
-  async workflow<TInput extends Record<string, unknown>, TResult = unknown>(
-    workflowBinding: string,
-    input: TInput
-  ): Promise<TaskHandle<TResult>> {
-    // 1. Create task record
-    const task = this._taskTracker.create("_workflow", input, {});
-
-    // 2. Get workflow binding
-    const workflowNS = (this.env as Record<string, unknown>)[workflowBinding];
-    if (
-      !workflowNS ||
-      typeof (workflowNS as { create?: unknown }).create !== "function"
-    ) {
-      this._taskTracker.fail(
-        task.id,
-        `Workflow binding ${workflowBinding} not found`
-      );
-      throw new Error(`Workflow binding ${workflowBinding} not found`);
-    }
-
-    // 3. Dispatch workflow with task tracking info
-    // Use kebab-case for binding name to match wrangler.jsonc convention
-    const agentBinding = camelCaseToKebabCase(this._ParentClass.name);
-    const instance = await (
-      workflowNS as {
-        create: (opts: { params: unknown }) => Promise<{ id: string }>;
-      }
-    ).create({
-      params: {
-        ...input,
-        _taskId: task.id,
-        _agentBinding: agentBinding,
-        _agentName: (this as unknown as { name: string }).name || "default"
-      }
-    });
-
-    // 4. Store workflow instance ID for cancellation support
-    this._taskTracker.linkToWorkflow(task.id, instance.id, workflowBinding);
-    this._taskTracker.addEvent(task.id, "workflow-started", {
-      instanceId: instance.id,
-      binding: workflowBinding
-    });
-
-    // 5. Return handle
-    return this._taskTracker.getHandle<TResult>(task.id)!;
-  }
-
-  /**
-   * Cancel a workflow task by terminating its workflow instance.
-   * Returns { success, reason } to indicate outcome.
-   * @internal
-   */
-  async _cancelWorkflow(
-    taskId: string
-  ): Promise<{ success: boolean; reason?: string }> {
-    const workflowInfo = this._taskTracker.getWorkflowInfo(taskId);
-    if (!workflowInfo) {
-      return { success: false, reason: "not_a_workflow" };
-    }
-
-    const workflowNS = (this.env as Record<string, unknown>)[
-      workflowInfo.binding
-    ] as {
-      get: (id: string) => Promise<{
-        terminate: () => Promise<void>;
-        status: () => Promise<{ status: string }>;
-      }>;
-    } | null;
-
-    if (!workflowNS?.get) {
-      console.error(
-        `[Agent] Workflow binding ${workflowInfo.binding} not found`
-      );
-      return { success: false, reason: "binding_not_found" };
-    }
-
-    try {
-      const instance = await workflowNS.get(workflowInfo.instanceId);
-
-      // Check status first to provide better feedback
-      try {
-        const { status } = await instance.status();
-        if (["complete", "errored", "terminated"].includes(status)) {
-          return { success: false, reason: `already_${status}` };
-        }
-      } catch {
-        // Status check failed, try to terminate anyway
-      }
-
-      await instance.terminate();
-      return { success: true };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(
-        `[Agent] Failed to terminate workflow ${workflowInfo.instanceId}:`,
-        message
-      );
-      return { success: false, reason: message };
-    }
-  }
-
-  /**
-   * Format task observability message for display
-   * @internal
-   */
-  private _formatTaskObservabilityMessage(
-    event: TaskObservabilityEvent
-  ): string {
-    const method = event.method ? ` (${event.method})` : "";
-    switch (event.type) {
-      case "task:created":
-        return `Task ${event.taskId}${method} created`;
-      case "task:started":
-        return `Task ${event.taskId}${method} started`;
-      case "task:progress":
-        return `Task ${event.taskId} progress: ${event.data?.progress}%`;
-      case "task:completed":
-        return `Task ${event.taskId}${method} completed`;
-      case "task:failed":
-        return `Task ${event.taskId}${method} failed: ${event.data?.error}`;
-      case "task:aborted":
-        return `Task ${event.taskId}${method} aborted: ${event.data?.reason}`;
-      case "task:event":
-        return `Task ${event.taskId} event: ${event.data?.eventType}`;
-      default:
-        return `Task ${event.taskId} ${event.type}`;
-    }
-  }
-
-  /**
-   * Validate workflow update payload
-   * @internal
-   * @returns Error message if validation fails, null if valid
-   */
-  private _validateWorkflowUpdate(json: unknown): string | null {
-    if (!json || typeof json !== "object") {
-      return "payload must be an object";
-    }
-
-    const payload = json as Record<string, unknown>;
-
-    // Required field: taskId
-    if (typeof payload.taskId !== "string" || !payload.taskId) {
-      return "missing or invalid taskId";
-    }
-
-    // Optional field: event (must be object with type string if present)
-    if (payload.event !== undefined) {
-      if (typeof payload.event !== "object" || payload.event === null) {
-        return "event must be an object";
-      }
-      const event = payload.event as Record<string, unknown>;
-      if (typeof event.type !== "string") {
-        return "event.type must be a string";
-      }
-    }
-
-    // Optional field: progress (must be number 0-100 if present)
-    if (payload.progress !== undefined) {
-      if (
-        typeof payload.progress !== "number" ||
-        payload.progress < 0 ||
-        payload.progress > 100
-      ) {
-        return "progress must be a number between 0 and 100";
-      }
-    }
-
-    // Optional field: status (must be "completed" or "failed" if present)
-    if (payload.status !== undefined) {
-      if (payload.status !== "completed" && payload.status !== "failed") {
-        return 'status must be "completed" or "failed"';
-      }
-    }
-
-    // Optional field: error (must be string if present)
-    if (payload.error !== undefined && typeof payload.error !== "string") {
-      return "error must be a string";
-    }
-
-    return null;
-  }
-
-  /**
-   * Handle workflow update callbacks
-   * @internal
-   */
-  private _handleWorkflowUpdate(update: {
-    taskId: string;
-    event?: { type: string; data?: unknown };
-    progress?: number;
-    status?: "completed" | "failed";
-    result?: unknown;
-    error?: string;
-  }): void {
-    const { taskId, event, progress, status, result, error } = update;
-
-    if (event) {
-      this._taskTracker.addEvent(taskId, event.type, event.data);
-    }
-    if (progress !== undefined) {
-      this._taskTracker.setProgress(taskId, progress);
-    }
-    if (status === "completed") {
-      this._taskTracker.complete(taskId, result);
-    }
-    if (status === "failed") {
-      this._taskTracker.fail(taskId, error || "Workflow failed");
-    }
-  }
-
-  /**
-   * Execute a durable task method (called by DurableTaskWorkflow via HTTP)
-   * @internal
-   */
-  private async _executeDurableTaskMethod(
-    taskId: string,
-    methodName: string,
-    input: unknown
-  ): Promise<unknown> {
-    // Validate method exists
-    const methodOrWrapper = this[methodName as keyof this];
-    if (typeof methodOrWrapper !== "function") {
-      throw new Error(`Method ${methodName} does not exist on this agent`);
-    }
-
-    // Get the original method implementation (before @task() wrapper)
-    const className = this.constructor.name;
-    const taskKey = getTaskMethodKey(className, methodName);
-    const originalMethod = taskMethodOriginals.get(taskKey);
-    const method = originalMethod || methodOrWrapper;
-
-    // Mark task as running if not already
-    const existingTask = this._taskTracker.get(taskId);
-    if (existingTask && existingTask.status === "pending") {
-      this._taskTracker.markRunning(taskId);
-    }
-
-    // Note: When called from DurableTaskWorkflow, the entire execution is
-    // wrapped in a workflow step.do(), providing retry semantics. Individual
-    // ctx.step() calls execute inline within this outer step. For fine-grained
-    // checkpointing, use AgentWorkflow directly.
-    const ctx = createTaskContext(taskId, this._taskTracker);
-    return (method as Function).call(this, input, ctx);
-  }
-
-  /**
-   * Internal method called by queue to execute a task
-   * @internal
-   */
-  async _executeTask(
-    payload: TaskExecutionPayload,
-    _queueItem: QueueItem<string>
-  ): Promise<void> {
-    const { taskId, methodName, input, retries = 0 } = payload;
-
-    // Check if task was already aborted before execution
-    const existingTask = this._taskTracker.get(taskId);
-    if (!existingTask || existingTask.status === "aborted") {
-      return;
-    }
-
-    // Mark task as running and get abort controller
-    const controller = this._taskTracker.markRunning(taskId);
-
-    try {
-      // Create task context
-      const ctx = createTaskContext(taskId, this._taskTracker);
-
-      // Get the method to execute
-      // If method was decorated with @task(), get the original implementation
-      const methodOrWrapper = this[methodName as keyof this];
-      if (typeof methodOrWrapper !== "function") {
-        this._taskTracker.fail(taskId, `Method ${methodName} not found`);
-        return;
-      }
-
-      // Check if this is a @task() decorated method - use original implementation
-      const className = this.constructor.name;
-      const taskKey = getTaskMethodKey(className, methodName);
-      const originalMethod = taskMethodOriginals.get(taskKey);
-      const method = originalMethod || methodOrWrapper;
-
-      // Safety check: if original is same as wrapper, we'd loop forever
-      if (originalMethod && originalMethod === methodOrWrapper) {
-        this._taskTracker.fail(taskId, "Internal error: task method loop");
-        return;
-      }
-
-      // Execute with retries
-      let lastError: Error | undefined;
-
-      for (let attempt = 0; attempt <= retries; attempt++) {
-        // Check for abort or timeout (deadline-based, no setTimeout accumulation)
-        if (
-          controller.signal.aborted ||
-          this._taskTracker.checkTimeout(taskId)
-        ) {
-          return;
-        }
-
-        try {
-          const result = await (method as Function).call(this, input, ctx);
-          // Final timeout check before completing
-          if (!this._taskTracker.checkTimeout(taskId)) {
-            this._taskTracker.complete(taskId, result);
-          }
-          return;
-        } catch (error) {
-          lastError = error instanceof Error ? error : new Error(String(error));
-
-          if (attempt < retries && !controller.signal.aborted) {
-            // Check timeout before retry
-            if (this._taskTracker.checkTimeout(taskId)) {
-              return;
-            }
-            // Add retry event
-            this._taskTracker.addEvent(taskId, "retry", {
-              attempt: attempt + 1,
-              maxRetries: retries,
-              error: lastError.message
-            });
-
-            // Exponential backoff with deadline checking
-            // Note: For durable retries, use this.workflow() with Cloudflare Workflows
-            // which has built-in retry support via step.do({ retries: {...} })
-            const backoffMs = Math.min(1000 * 2 ** attempt, 30000);
-            const checkInterval = 1000; // Check deadline every second during backoff
-            let waited = 0;
-            while (waited < backoffMs) {
-              if (
-                controller.signal.aborted ||
-                this._taskTracker.checkTimeout(taskId)
-              ) {
-                return;
-              }
-              const waitTime = Math.min(checkInterval, backoffMs - waited);
-              await new Promise((r) => setTimeout(r, waitTime));
-              waited += waitTime;
-            }
-          }
-        }
-      }
-
-      // All retries exhausted - verify task is still in running state before failing
-      // This prevents race condition where timeout could mark task as aborted
-      // between the checkTimeout() call and the fail() call
-      if (!controller.signal.aborted) {
-        const task = this._taskTracker.get(taskId);
-        if (task?.status === "running") {
-          this._taskTracker.fail(taskId, lastError?.message || "Unknown error");
-        }
-      }
-    } finally {
-      // Always clean up the abort controller to prevent memory leaks
-      // This is safe even if complete/fail/abort already cleaned it up
-      this._taskTracker.cleanupController(taskId);
-    }
-  }
-
-  /**
-   * Track last broadcast per task to rate-limit progress updates
-   * @internal
-   */
-  private _lastTaskBroadcast = new Map<
-    string,
-    { time: number; status: string; broadcastCount: number }
-  >();
-
-  /**
-   * Pending final state broadcasts to guarantee delivery
-   * Maps taskId -> task state for deferred final broadcast
-   * @internal
-   */
-  private _pendingFinalBroadcasts = new Map<string, Task>();
-
-  /**
-   * Clean up stale broadcast cache entries.
-   * Removes entries for tasks that no longer exist or are in final states.
-   * Called automatically when cache grows large, or can be called manually.
-   * @internal
-   */
-  private _cleanupBroadcastCaches(): void {
-    const now = Date.now();
-    const staleThresholdMs = 60000; // 1 minute
-
-    for (const [taskId, entry] of this._lastTaskBroadcast) {
-      // Remove if entry is stale (no updates for 1 minute)
-      if (now - entry.time > staleThresholdMs) {
-        this._lastTaskBroadcast.delete(taskId);
-        this._pendingFinalBroadcasts.delete(taskId);
-        continue;
-      }
-
-      // Remove if task no longer exists or is in final state
-      const task = this._taskTracker?.get(taskId);
-      if (!task || ["completed", "failed", "aborted"].includes(task.status)) {
-        this._lastTaskBroadcast.delete(taskId);
-        this._pendingFinalBroadcasts.delete(taskId);
-      }
-    }
-  }
-
-  /**
-   * Broadcast task update to all connected clients.
-   *
-   * Rate limiting strategy (single-threaded DO, no race conditions):
-   * - Status changes: ALWAYS broadcast immediately
-   * - Final states (completed/failed/aborted): ALWAYS broadcast + schedule deferred guarantee
-   * - Progress updates: Rate-limited to every 500ms to prevent flooding
-   *
-   * Final state guarantee: If a final state is reached, we broadcast immediately
-   * and also schedule a deferred broadcast to ensure clients receive the final
-   * state even if the immediate broadcast was missed (e.g., due to WebSocket issues).
-   */
-  private _syncTaskToState(taskId: string, task: Task | null): void {
-    // Periodic cleanup when cache grows large (prevents unbounded growth)
-    if (this._lastTaskBroadcast.size > 100) {
-      this._cleanupBroadcastCaches();
-    }
-    // Task deleted - always broadcast
-    if (!task) {
-      this._lastTaskBroadcast.delete(taskId);
-      this._pendingFinalBroadcasts.delete(taskId);
-      this.broadcast(
-        JSON.stringify({ type: "CF_AGENT_TASK_UPDATE", taskId, task: null })
-      );
-      return;
-    }
-
-    const now = Date.now();
-    const last = this._lastTaskBroadcast.get(taskId);
-    const statusChanged = !last || last.status !== task.status;
-    const isFinalState = ["completed", "failed", "aborted"].includes(
-      task.status
-    );
-    const timeSinceLast = last ? now - last.time : Number.POSITIVE_INFINITY;
-
-    // Always broadcast: status changes, final states, or 500ms since last
-    if (statusChanged || isFinalState || timeSinceLast >= 500) {
-      const broadcastCount = (last?.broadcastCount || 0) + 1;
-      this._lastTaskBroadcast.set(taskId, {
-        time: now,
-        status: task.status,
-        broadcastCount
-      });
-
-      this.broadcast(
-        JSON.stringify({ type: "CF_AGENT_TASK_UPDATE", taskId, task })
-      );
-
-      // For final states, schedule a deferred rebroadcast to guarantee delivery
-      // This ensures the final state is sent even if rapid updates caused issues
-      if (isFinalState) {
-        this._pendingFinalBroadcasts.set(taskId, task);
-        // Use queueMicrotask for deferred execution after current sync cycle
-        queueMicrotask(() => {
-          const pendingTask = this._pendingFinalBroadcasts.get(taskId);
-          if (pendingTask) {
-            // Broadcast the final state one more time to guarantee delivery
-            this.broadcast(
-              JSON.stringify({
-                type: "CF_AGENT_TASK_UPDATE",
-                taskId,
-                task: pendingTask
-              })
-            );
-            this._pendingFinalBroadcasts.delete(taskId);
-            this._lastTaskBroadcast.delete(taskId);
-          }
-        });
-      }
-    }
   }
 
   /**
@@ -1773,57 +990,15 @@ export class Agent<
 
   /**
    * Get all queues by key and value
-   * Uses SQL JSON extraction for efficient filtering when possible
-   * @param key Key to filter by (supports nested paths like "data.userId")
+   * @param key Key to filter by
    * @param value Value to filter by
    * @returns Array of matching QueueItem objects
    */
   async getQueues(key: string, value: string): Promise<QueueItem<string>[]> {
-    // Use SQL JSON extraction for single-level keys (more efficient)
-    // SQLite's json_extract uses $ path syntax
-    if (!key.includes(".")) {
-      try {
-        const result = this.ctx.storage.sql
-          .exec(
-            "SELECT * FROM cf_agents_queues WHERE json_extract(payload, ?) = ?",
-            `$.${key}`,
-            value
-          )
-          .toArray() as QueueItem<string>[];
-
-        return result.map((row) => ({
-          ...row,
-          payload: JSON.parse(row.payload)
-        }));
-      } catch {
-        // Fall back to JS filtering if SQL approach fails
-      }
-    }
-
-    // Fallback: fetch all and filter in JS (for nested keys or if SQL fails)
     const result = this.sql<QueueItem<string>>`
       SELECT * FROM cf_agents_queues
     `;
-    return result
-      .filter((row) => {
-        try {
-          const payload = JSON.parse(row.payload);
-          // Support nested keys with dot notation
-          const keys = key.split(".");
-          let val = payload;
-          for (const k of keys) {
-            if (val === null || val === undefined) return false;
-            val = val[k];
-          }
-          return val === value;
-        } catch {
-          return false;
-        }
-      })
-      .map((row) => ({
-        ...row,
-        payload: JSON.parse(row.payload)
-      }));
+    return result.filter((row) => JSON.parse(row.payload)[key] === value);
   }
 
   /**
@@ -2473,41 +1648,16 @@ export type AgentOptions<Env> = PartyServerOptions<Env> & {
 };
 
 /**
- * ExecutionContext with optional exports (ctx.exports API)
- * @see https://developers.cloudflare.com/changelog/2025-09-26-ctx-exports/
- */
-export type ExecutionContextWithExports = ExecutionContext & {
-  exports?: Record<string, unknown>;
-};
-
-/**
  * Route a request to the appropriate Agent
  * @param request Request to route
  * @param env Environment containing Agent bindings
- * @param options Routing options (can include ctx for ctx.exports support)
+ * @param options Routing options
  * @returns Response from the Agent or undefined if no route matched
- *
- * @example
- * ```typescript
- * // With ctx.exports (recommended - auto bindings)
- * export default {
- *   async fetch(request, env, ctx) {
- *     return routeAgentRequest(request, env, { ctx });
- *   }
- * }
- *
- * // Without ctx.exports (manual bindings)
- * export default {
- *   async fetch(request, env) {
- *     return routeAgentRequest(request, env);
- *   }
- * }
- * ```
  */
 export async function routeAgentRequest<Env>(
   request: Request,
   env: Env,
-  options?: AgentOptions<Env> & { ctx?: ExecutionContextWithExports }
+  options?: AgentOptions<Env>
 ) {
   const corsHeaders =
     options?.cors === true
@@ -2530,15 +1680,9 @@ export async function routeAgentRequest<Env>(
     );
   }
 
-  // Merge ctx.exports with env if available (ctx.exports takes precedence)
-  // This allows automatic bindings via enable_ctx_exports compatibility flag
-  const mergedEnv = options?.ctx?.exports
-    ? { ...env, ...options.ctx.exports }
-    : env;
-
   let response = await routePartykitRequest(
     request,
-    mergedEnv as Record<string, unknown>,
+    env as Record<string, unknown>,
     {
       prefix: "agents",
       ...(options as PartyServerOptions<Record<string, unknown>>)
@@ -2860,29 +2004,3 @@ export class StreamingResponse {
     this._connection.send(JSON.stringify(response));
   }
 }
-
-// Re-export task decorator and types for convenience
-export { task } from "./task";
-export type { TaskObservabilityEvent, TaskObservabilityCallback } from "./task";
-export type {
-  Task,
-  TaskContext,
-  TaskHandle,
-  TaskOptions,
-  TaskFilter,
-  TaskEvent,
-  TaskStatus
-};
-
-// Re-export workflow types for durable task execution
-export {
-  AgentWorkflow,
-  CloudflareWorkflowAdapter,
-  DurableTaskWorkflow
-} from "./workflow";
-export type {
-  WorkflowTaskContext,
-  WorkflowUpdate,
-  WorkflowAdapter,
-  DurableTaskWorkflowPayload
-} from "./workflow";

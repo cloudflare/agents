@@ -5,48 +5,6 @@ import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
 import { MessageType } from "./ai-types";
-import type { Task, TaskEvent, TaskStatus } from "./task";
-
-// ============================================================================
-// Task Types
-// ============================================================================
-
-/**
- * Reactive task reference returned by agent.task()
- * All properties are getters that read from the latest state
- */
-export interface TaskRef<TResult = unknown> {
-  /** Task ID */
-  readonly id: string;
-  /** Current status - updates reactively */
-  readonly status: TaskStatus;
-  /** Result when completed */
-  readonly result: TResult | undefined;
-  /** Error message when failed */
-  readonly error: string | undefined;
-  /** Progress 0-100 */
-  readonly progress: number | undefined;
-  /** Events emitted during execution */
-  readonly events: TaskEvent[];
-  /** When created */
-  readonly createdAt: number | undefined;
-  /** When started */
-  readonly startedAt: number | undefined;
-  /** When completed */
-  readonly completedAt: number | undefined;
-
-  // Computed status helpers
-  readonly isLoading: boolean;
-  readonly isSuccess: boolean;
-  readonly isError: boolean;
-  readonly isPending: boolean;
-  readonly isRunning: boolean;
-  readonly isCompleted: boolean;
-  readonly isAborted: boolean;
-
-  /** Abort the running task */
-  abort(): Promise<void>;
-}
 
 /**
  * Convert a camelCase string to a kebab-case string
@@ -219,44 +177,17 @@ type AgentStub<T> = {
 type UntypedAgentStub = Record<string, Method>;
 
 /**
- * Base agent type with task support (without typed call/stub)
- */
-type AgentBase<State = unknown> = PartySocket & {
-  agent: string;
-  name: string;
-  setState: (state: State) => void;
-  /**
-   * Start a task and get a reactive TaskRef back.
-   * The returned object updates automatically as the task progresses.
-   *
-   * @example
-   * ```tsx
-   * const task = await agent.task("analyzeRepo", { repoUrl });
-   * // task.status, task.progress, etc. update automatically
-   * ```
-   */
-  task: <TResult = unknown>(
-    method: string,
-    input: unknown
-  ) => Promise<TaskRef<TResult>>;
-  /** All active tasks - reactive state */
-  tasks: Record<string, Task>;
-};
-
-/**
- * Extended agent type with task support (untyped version)
- */
-export type AgentWithTasks<State = unknown> = AgentBase<State> & {
-  call: UntypedAgentMethodCall;
-  stub: UntypedAgentStub;
-};
-
-/**
  * React hook for connecting to an Agent
  */
 export function useAgent<State = unknown>(
   options: UseAgentOptions<State>
-): AgentWithTasks<State>;
+): PartySocket & {
+  agent: string;
+  name: string;
+  setState: (state: State) => void;
+  call: UntypedAgentMethodCall;
+  stub: UntypedAgentStub;
+};
 export function useAgent<
   AgentT extends {
     get state(): State;
@@ -264,18 +195,21 @@ export function useAgent<
   State
 >(
   options: UseAgentOptions<State>
-): AgentBase<State> & {
+): PartySocket & {
+  agent: string;
+  name: string;
+  setState: (state: State) => void;
   call: AgentMethodCall<AgentT>;
   stub: AgentStub<AgentT>;
 };
-export function useAgent<
-  AgentT extends { get state(): State } | unknown,
-  State = unknown
->(
+export function useAgent<State>(
   options: UseAgentOptions<unknown>
-): AgentBase<State> & {
-  call: AgentMethodCall<AgentT> | UntypedAgentMethodCall;
-  stub: AgentStub<AgentT> | UntypedAgentStub;
+): PartySocket & {
+  agent: string;
+  name: string;
+  setState: (state: State) => void;
+  call: UntypedAgentMethodCall | AgentMethodCall<unknown>;
+  stub: UntypedAgentStub;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
   const { query, queryDeps, cacheTtl, ...restOptions } = options;
@@ -291,13 +225,6 @@ export function useAgent<
       }
     >()
   );
-
-  // Task tracking state - reactive, updates when server sends _tasks
-  const [tasks, setTasks] = useState<Record<string, Task>>({});
-  const tasksRef = useRef(tasks);
-  tasksRef.current = tasks;
-  const setTasksRef = useRef(setTasks);
-  setTasksRef.current = setTasks;
 
   const cacheKey = useMemo(
     () => createCacheKey(agentNamespace, options.name, queryDeps || []),
@@ -410,21 +337,6 @@ export function useAgent<
           options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
-        // Handle task updates (separate from main state)
-        if (parsedMessage.type === "CF_AGENT_TASK_UPDATE") {
-          const { taskId, task } = parsedMessage as {
-            taskId: string;
-            task: Task | null;
-          };
-          setTasksRef.current((prev) => {
-            if (task === null) {
-              const { [taskId]: _, ...rest } = prev;
-              return rest;
-            }
-            return { ...prev, [taskId]: task };
-          });
-          return;
-        }
         if (parsedMessage.type === MessageType.CF_AGENT_MCP_SERVERS) {
           options.onMcpUpdate?.(parsedMessage.mcp as MCPServersState);
           return;
@@ -522,331 +434,5 @@ export function useAgent<
     );
   }
 
-  // Create task method - starts a task and returns a reactive TaskRef
-  const taskMethod = useCallback(
-    async <TResult = unknown,>(
-      method: string,
-      input: unknown
-    ): Promise<TaskRef<TResult>> => {
-      // Call the task method - returns { id, status }
-      const handle = (await call(method, [input])) as {
-        id: string;
-        status: TaskStatus;
-      };
-      const taskId = handle.id;
-
-      // Helper to get current status
-      const getStatus = (): TaskStatus =>
-        (tasksRef.current[taskId]?.status || handle.status) as TaskStatus;
-
-      // Return a TaskRef with getters that read from the latest state
-      // When tasks state updates, the component re-renders, and getters return new values
-      const ref: TaskRef<TResult> = {
-        get id() {
-          return taskId;
-        },
-        get status() {
-          return getStatus();
-        },
-        get result() {
-          return tasksRef.current[taskId]?.result as TResult | undefined;
-        },
-        get error() {
-          return tasksRef.current[taskId]?.error;
-        },
-        get progress() {
-          return tasksRef.current[taskId]?.progress;
-        },
-        get events() {
-          return tasksRef.current[taskId]?.events || [];
-        },
-        get createdAt() {
-          return tasksRef.current[taskId]?.createdAt;
-        },
-        get startedAt() {
-          return tasksRef.current[taskId]?.startedAt;
-        },
-        get completedAt() {
-          return tasksRef.current[taskId]?.completedAt;
-        },
-        get isLoading() {
-          const s = getStatus();
-          return s === "pending" || s === "running";
-        },
-        get isSuccess() {
-          return getStatus() === "completed";
-        },
-        get isError() {
-          const s = getStatus();
-          return s === "failed" || s === "aborted";
-        },
-        get isPending() {
-          return getStatus() === "pending";
-        },
-        get isRunning() {
-          return getStatus() === "running";
-        },
-        get isCompleted() {
-          return getStatus() === "completed";
-        },
-        get isAborted() {
-          return getStatus() === "aborted";
-        },
-        abort: async () => {
-          const status = getStatus();
-          // Only abort if task is in a non-terminal state
-          if (
-            status === "pending" ||
-            status === "running" ||
-            status === "waiting"
-          ) {
-            await call("abortTask", [taskId]);
-          }
-        }
-      };
-      return ref;
-    },
-    [call]
-  );
-
-  // Add task support to agent
-  (agent as AgentWithTasks<State>).task = taskMethod;
-  (agent as AgentWithTasks<State>).tasks = tasks;
-
-  return agent as AgentWithTasks<State>;
-}
-
-// ============================================================================
-// Task Hook
-// ============================================================================
-
-/**
- * Reactive task state returned by useTask
- */
-export interface UseTaskState<TResult = unknown> {
-  /** Task ID */
-  id: string;
-  /** Current task status */
-  status: TaskStatus;
-  /** Task result (when completed) */
-  result?: TResult;
-  /** Error message (when failed) */
-  error?: string;
-  /** Progress percentage (0-100) */
-  progress?: number;
-  /** Events emitted during task execution */
-  events: TaskEvent[];
-  /** When the task was created */
-  createdAt?: number;
-  /** When execution started */
-  startedAt?: number;
-  /** When execution completed */
-  completedAt?: number;
-
-  // Computed properties
-  /** Whether the task is currently loading (pending or running) */
-  isLoading: boolean;
-  /** Whether the task completed successfully */
-  isSuccess: boolean;
-  /** Whether the task failed or was aborted */
-  isError: boolean;
-  /** Whether the task is pending */
-  isPending: boolean;
-  /** Whether the task is running */
-  isRunning: boolean;
-  /** Whether the task is completed */
-  isCompleted: boolean;
-  /** Whether the task is aborted */
-  isAborted: boolean;
-
-  // Actions
-  /** Abort the task */
-  abort: () => Promise<void>;
-  /** Refresh the task state */
-  refresh: () => Promise<void>;
-}
-
-/**
- * Options for useTask hook
- */
-export interface UseTaskOptions {
-  /** Callback when task status changes */
-  onStatusChange?: (status: TaskStatus) => void;
-  /** Callback when task completes */
-  onComplete?: (result: unknown) => void;
-  /** Callback when task fails */
-  onError?: (error: string) => void;
-  /** Callback when a task event is emitted */
-  onEvent?: (event: TaskEvent) => void;
-}
-
-/**
- * React hook for tracking a task's state in real-time.
- *
- * Uses the existing state sync mechanism - tasks are stored in `state._tasks`
- * and automatically broadcast to clients via CF_AGENT_STATE messages.
- *
- * @param agent - The agent connection from useAgent()
- * @param taskId - The task ID to track
- * @param options - Optional callbacks
- * @returns Reactive task state with actions
- *
- * @example
- * ```tsx
- * function TaskView({ taskId }: { taskId: string }) {
- *   const agent = useAgent({ agent: "task-runner" });
- *   const task = useTask(agent, taskId);
- *
- *   if (task.isPending) return <Spinner />;
- *   if (task.isError) return <Error message={task.error} />;
- *
- *   return (
- *     <div>
- *       <ProgressBar value={task.progress} />
- *       {task.events.map(e => <div key={e.id}>{e.type}</div>)}
- *       {task.isRunning && <button onClick={task.abort}>Abort</button>}
- *       {task.isSuccess && <Result data={task.result} />}
- *     </div>
- *   );
- * }
- * ```
- */
-export function useTask<TResult = unknown>(
-  agent: PartySocket & {
-    call: (method: string, args?: unknown[]) => Promise<unknown>;
-  },
-  taskId: string,
-  options: UseTaskOptions = {}
-): UseTaskState<TResult> {
-  const [task, setTask] = useState<Task<TResult> | null>(null);
-  const prevStatusRef = useRef<TaskStatus | null>(null);
-  const prevEventsLengthRef = useRef(0);
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
-
-  // Fetch initial task state via RPC
-  const fetchTask = useCallback(async () => {
-    try {
-      const result = (await agent.call("getTask", [
-        taskId
-      ])) as Task<TResult> | null;
-      if (result) {
-        setTask(result);
-      }
-    } catch (err) {
-      console.error("[useTask] Failed to fetch task:", err);
-    }
-  }, [agent, taskId]);
-
-  // Fetch on mount
-  useEffect(() => {
-    fetchTask();
-  }, [fetchTask]);
-
-  // Listen for state updates - tasks are synced via existing state mechanism
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      if (typeof event.data !== "string") return;
-
-      try {
-        const message = JSON.parse(event.data);
-
-        // Reuse existing state sync - tasks are in state._tasks
-        if (message.type === MessageType.CF_AGENT_STATE) {
-          const tasks = message.state?._tasks as
-            | Record<string, Task<TResult>>
-            | undefined;
-          const updatedTask = tasks?.[taskId];
-          if (updatedTask) {
-            setTask(updatedTask);
-          }
-        }
-      } catch {
-        // Ignore non-JSON messages
-      }
-    };
-
-    agent.addEventListener("message", handleMessage);
-    return () => agent.removeEventListener("message", handleMessage);
-  }, [agent, taskId]);
-
-  // Call callbacks when status changes
-  useEffect(() => {
-    if (!task) return;
-
-    // Status change callback
-    if (task.status !== prevStatusRef.current) {
-      const prevStatus = prevStatusRef.current;
-      prevStatusRef.current = task.status;
-
-      if (prevStatus !== null) {
-        optionsRef.current.onStatusChange?.(task.status);
-
-        if (task.status === "completed") {
-          optionsRef.current.onComplete?.(task.result);
-        }
-
-        if (task.status === "failed" || task.status === "aborted") {
-          optionsRef.current.onError?.(task.error || "Task failed");
-        }
-      }
-    }
-
-    // Event callback for new events
-    if (task.events.length > prevEventsLengthRef.current) {
-      const newEvents = task.events.slice(prevEventsLengthRef.current);
-      for (const event of newEvents) {
-        optionsRef.current.onEvent?.(event);
-      }
-      prevEventsLengthRef.current = task.events.length;
-    }
-  }, [task]);
-
-  // Abort action - only abort if task is in a non-terminal state
-  const abort = useCallback(async () => {
-    const currentStatus = task?.status;
-    if (
-      currentStatus === "completed" ||
-      currentStatus === "failed" ||
-      currentStatus === "aborted"
-    ) {
-      // Task is already in terminal state, no need to abort
-      return;
-    }
-    try {
-      await agent.call("abortTask", [taskId]);
-    } catch (err) {
-      console.error("[useTask] Failed to abort task:", err);
-    }
-  }, [agent, taskId, task?.status]);
-
-  // Refresh action
-  const refresh = useCallback(async () => {
-    await fetchTask();
-  }, [fetchTask]);
-
-  // Default values for when task is not yet loaded
-  const status = task?.status ?? "pending";
-  const events = task?.events ?? [];
-
-  return {
-    id: taskId,
-    status,
-    result: task?.result,
-    error: task?.error,
-    progress: task?.progress,
-    events,
-    createdAt: task?.createdAt,
-    startedAt: task?.startedAt,
-    completedAt: task?.completedAt,
-    isLoading: status === "pending" || status === "running",
-    isSuccess: status === "completed",
-    isError: status === "failed" || status === "aborted",
-    isPending: status === "pending",
-    isRunning: status === "running",
-    isCompleted: status === "completed",
-    isAborted: status === "aborted",
-    abort,
-    refresh
-  };
+  return agent;
 }

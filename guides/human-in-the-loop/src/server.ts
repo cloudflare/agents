@@ -3,6 +3,8 @@ import { routeAgentRequest } from "agents";
 import { AIChatAgent } from "agents/ai-chat-agent";
 import {
   convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse,
   type StreamTextOnFinishCallback,
   streamText,
   stepCountIs
