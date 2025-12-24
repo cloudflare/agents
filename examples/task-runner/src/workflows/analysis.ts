@@ -2,7 +2,7 @@
  * Analysis Workflow
  *
  * A durable workflow that analyzes GitHub repositories using AI.
- * Extends WorkflowEntrypoint
+ * Demonstrates Cloudflare Workflows with step-based checkpointing.
  */
 
 import {
@@ -15,7 +15,6 @@ import OpenAI from "openai";
 interface AnalysisParams {
   repoUrl: string;
   branch?: string;
-  _taskId?: string;
   _agentBinding?: string;
   _agentName?: string;
 }
@@ -50,11 +49,17 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, AnalysisParams> {
     const {
       repoUrl,
       branch = "main",
-      _taskId,
       _agentBinding,
       _agentName
     } = event.payload;
 
+    // Get the task ID from the workflow instance ID
+    const taskId = event.instanceId;
+
+    /**
+     * Notify agent of task updates via DO fetch.
+     * This is fire-and-forget - we don't wait for response.
+     */
     const notifyAgent = async (update: {
       event?: { type: string; data?: unknown };
       progress?: number;
@@ -62,7 +67,7 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, AnalysisParams> {
       result?: unknown;
       error?: string;
     }) => {
-      if (!_taskId || !_agentBinding || !_agentName) return;
+      if (!_agentBinding || !_agentName) return;
 
       try {
         const agentNS = this.env[
@@ -71,17 +76,20 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, AnalysisParams> {
         if (!agentNS) return;
 
         const agentId = agentNS.idFromName(_agentName);
-        const agent = agentNS.get(agentId);
+        const agent = agentId ? agentNS.get(agentId) : null;
+        if (!agent) return;
 
+        // Call the handleWorkflowUpdate method via RPC-style fetch
         await agent.fetch(
-          new Request("http://internal/_workflow-update", {
+          new Request("http://internal/rpc", {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-partykit-namespace": _agentBinding,
-              "x-partykit-room": _agentName
-            },
-            body: JSON.stringify({ taskId: _taskId, ...update })
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "rpc",
+              id: crypto.randomUUID(),
+              method: "handleWorkflowUpdate",
+              args: [{ taskId, ...update }]
+            })
           })
         );
       } catch (error) {
@@ -98,6 +106,7 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, AnalysisParams> {
     const [, owner, repo] = match;
     const repoName = repo.replace(/\.git$/, "");
 
+    // Step 1: Fetch repository tree
     const files = await step.do("fetch-repo-tree", async () => {
       await notifyAgent({
         event: {
@@ -143,6 +152,7 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, AnalysisParams> {
       progress: 30
     });
 
+    // Step 2: Fetch key files
     const keyFiles = await step.do("fetch-key-files", async () => {
       await notifyAgent({
         event: {
@@ -195,6 +205,7 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, AnalysisParams> {
       progress: 50
     });
 
+    // Step 3: AI Analysis (with retries)
     const analysis = await step.do(
       "ai-analysis",
       {
@@ -289,6 +300,7 @@ ${keyFilesContent}`
       analyzedAt: new Date().toISOString()
     };
 
+    // Step 4: Notify completion
     await step.do("notify-complete", async () => {
       await notifyAgent({
         event: {

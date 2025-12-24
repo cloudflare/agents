@@ -1,7 +1,7 @@
 /**
- * Task Runner Example - React Client
+ * Workflow Example - React Client
  *
- * Demonstrates tasks with real-time broadcast updates
+ * Demonstrates workflows with real-time state updates
  */
 
 import { useState, useRef, useCallback } from "react";
@@ -18,7 +18,7 @@ type TaskResult = {
   analyzedAt: string;
 };
 
-type TaskStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+type TaskStatus = "pending" | "running" | "completed" | "failed";
 
 interface TaskData {
   id: string;
@@ -26,16 +26,19 @@ interface TaskData {
   progress?: number;
   result?: TaskResult;
   error?: string;
-  events?: Array<{
-    id: string;
+  workflowInstanceId?: string;
+  events: Array<{
     type: string;
     data?: unknown;
     timestamp: number;
   }>;
 }
 
+type AgentState = {
+  tasks: Record<string, TaskData>;
+};
+
 function App() {
-  const [tasks, setTasks] = useState<Map<string, TaskData>>(new Map());
   const [repoUrl, setRepoUrl] = useState(
     "https://github.com/cloudflare/agents"
   );
@@ -43,111 +46,54 @@ function App() {
   const [isStarting, setIsStarting] = useState(false);
   const startingRef = useRef(false);
 
+  // Track state from agent
+  const [agentState, setAgentState] = useState<AgentState>({ tasks: {} });
+
+  // Use agent with state callback
   const agent = useAgent({
     agent: "task-runner",
     name: "default",
-    onMessage: (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "CF_AGENT_TASK_UPDATE") {
-          const { taskId, task } = data;
-          setTasks((prev) => {
-            const next = new Map(prev);
-            if (task === null) {
-              next.delete(taskId);
-            } else {
-              next.set(taskId, task);
-            }
-            return next;
-          });
-        }
-      } catch {
-        // Ignore non-JSON messages
-      }
+    onStateUpdate: (state) => {
+      setAgentState(state as AgentState);
     }
   });
 
-  // Poll for task updates (fallback when broadcasts are missed)
-  const pollTaskStatus = useCallback(
-    async (taskId: string) => {
-      const maxPolls = 120;
-      for (let i = 0; i < maxPolls; i++) {
-        const delay = i < 10 ? 200 : 500;
-        await new Promise((r) => setTimeout(r, delay));
-        try {
-          const task = (await agent.call("getTask", [
-            taskId
-          ])) as TaskData | null;
-          if (task) {
-            setTasks((prev) => {
-              const next = new Map(prev);
-              next.set(taskId, task);
-              return next;
-            });
-            if (["completed", "failed", "aborted"].includes(task.status)) {
-              return;
-            }
-          }
-        } catch {
-          // Ignore polling errors
-        }
-      }
-    },
-    [agent]
+  const tasks = agentState?.tasks || {};
+  const taskList = Object.values(tasks).sort(
+    (a, b) => (b.events?.[0]?.timestamp || 0) - (a.events?.[0]?.timestamp || 0)
   );
 
-  // Start quick analysis - protected against double-calls
+  // Start quick analysis (runs in Agent)
   const startQuickAnalysis = useCallback(async () => {
     if (startingRef.current) return;
     startingRef.current = true;
     setIsStarting(true);
 
     try {
-      const handle = await agent.call("quickAnalysis", [{ repoUrl, branch }]);
-      const taskId = (handle as { id: string }).id;
-
-      // Add task to local state immediately
-      setTasks((prev) => {
-        const next = new Map(prev);
-        next.set(taskId, { id: taskId, status: "pending" });
-        return next;
-      });
-
-      // Start polling as fallback for missed broadcasts (immediate first poll)
-      setTimeout(() => pollTaskStatus(taskId), 100);
-    } catch {
-      // Failed to start
+      await agent.call("quickAnalysis", [{ repoUrl, branch }]);
+    } catch (e) {
+      console.error("Failed to start quick analysis:", e);
     } finally {
       startingRef.current = false;
       setIsStarting(false);
     }
-  }, [agent, repoUrl, branch, pollTaskStatus]);
+  }, [agent, repoUrl, branch]);
 
-  // Start deep analysis using Cloudflare Workflow
+  // Start deep analysis (runs in Workflow)
   const startDeepAnalysis = useCallback(async () => {
     if (startingRef.current) return;
     startingRef.current = true;
     setIsStarting(true);
 
     try {
-      const handle = await agent.call("deepAnalysis", [{ repoUrl, branch }]);
-      const taskId = (handle as { id: string }).id;
-
-      setTasks((prev) => {
-        const next = new Map(prev);
-        next.set(taskId, { id: taskId, status: "pending" });
-        return next;
-      });
-
-      // Start polling as fallback (immediate first poll)
-      setTimeout(() => pollTaskStatus(taskId), 100);
-    } catch {
-      // Failed to start
+      await agent.call("startAnalysis", [{ repoUrl, branch }]);
+    } catch (e) {
+      console.error("Failed to start deep analysis:", e);
     } finally {
       startingRef.current = false;
       setIsStarting(false);
     }
-  }, [agent, repoUrl, branch, pollTaskStatus]);
+  }, [agent, repoUrl, branch]);
 
   const abortTask = useCallback(
     async (taskId: string) => {
@@ -160,14 +106,10 @@ function App() {
     [agent]
   );
 
-  const taskList = Array.from(tasks.values()).sort(
-    (a, b) => (b.events?.[0]?.timestamp || 0) - (a.events?.[0]?.timestamp || 0)
-  );
-
   return (
     <div className="app">
       <header>
-        <h1>🔍 Repo Analyzer</h1>
+        <h1>Repo Analyzer</h1>
         <p>AI-powered repository analysis with real-time updates</p>
       </header>
 
@@ -200,7 +142,7 @@ function App() {
             className="primary"
             disabled={isStarting}
           >
-            {isStarting ? "Starting..." : "⚡ Quick Analysis"}
+            {isStarting ? "Starting..." : "Quick Analysis"}
           </button>
           <button
             type="button"
@@ -208,7 +150,7 @@ function App() {
             className="secondary"
             disabled={isStarting}
           >
-            {isStarting ? "Starting..." : "🔬 Deep Analysis (Workflow)"}
+            {isStarting ? "Starting..." : "Deep Analysis (Workflow)"}
           </button>
         </div>
       </section>
@@ -365,8 +307,6 @@ function TaskCard({
         return "#00aa44";
       case "failed":
         return "#ff4444";
-      case "aborted":
-        return "#ff8800";
       default:
         return "#888";
     }
@@ -375,17 +315,15 @@ function TaskCard({
   const getStatusEmoji = () => {
     switch (task.status) {
       case "pending":
-        return "⏳";
+        return "[pending]";
       case "running":
-        return "🔄";
+        return "[running]";
       case "completed":
-        return "✅";
+        return "[done]";
       case "failed":
-        return "❌";
-      case "aborted":
-        return "🛑";
+        return "[failed]";
       default:
-        return "❓";
+        return "[?]";
     }
   };
 
@@ -412,8 +350,11 @@ function TaskCard({
 
       {task.events && task.events.length > 0 && (
         <div className="task-events">
-          {task.events.slice(-3).map((event) => (
-            <div key={event.id} className="event">
+          {task.events.slice(-3).map((event, i) => (
+            <div
+              key={`${event.type}-${event.timestamp}-${i}`}
+              className="event"
+            >
               <span className="event-type">{event.type}</span>
               {event.data !== undefined && (
                 <span className="event-data">

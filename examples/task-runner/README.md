@@ -1,25 +1,13 @@
-# Task Runner Example
+# Workflow Example
 
-Demonstrates the Agents SDK task system with two execution modes:
+Demonstrates Cloudflare Workflows integration with Agents SDK.
 
-1. **Quick Analysis** (`@task()`) - Runs in the Agent (Durable Object), good for < 30s operations
-2. **Deep Analysis** (`workflow()`) - Runs in Cloudflare Workflows, durable for hours/days
+## Overview
 
-## Key Feature: Same Client API
+This example shows two approaches for running background work:
 
-Both modes use the identical client-side API:
-
-```tsx
-// Client code - works for both @task() and workflow()
-const task = await agent.task<ResultType>("methodName", input);
-
-// Task is reactive - updates automatically
-task.status; // "pending" | "running" | "completed" | "failed"
-task.progress; // 0-100
-task.events; // Real-time events from the task
-task.result; // Available when completed
-task.abort(); // Cancel the task
-```
+1. **Quick Analysis** - Runs directly in the Agent using `ctx.waitUntil()`, good for < 30s operations
+2. **Deep Analysis** - Uses Cloudflare Workflows for durable, long-running operations
 
 ## Architecture
 
@@ -27,29 +15,27 @@ task.abort(); // Cancel the task
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Client (React)                          │
 │                                                                 │
-│  const task = await agent.task("quickAnalysis", { repoUrl })   │
-│  const task = await agent.task("deepAnalysis", { repoUrl })    │
+│  await agent.call("quickAnalysis", [{ repoUrl }])              │
+│  await agent.call("startAnalysis", [{ repoUrl }])              │
 │                           │                                     │
-│                    Same API! ↓                                  │
-└─────────────────────────────────────────────────────────────────┘
+└───────────────────────────┼─────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Agent (Durable Object)                       │
 │                                                                 │
-│  @task()           │  @callable()                               │
-│  quickAnalysis()   │  deepAnalysis() {                          │
-│  - Runs in DO      │    return this.workflow("ANALYSIS_WORKFLOW")│
-│  - Fast            │  }                                         │
-│  - < 30s tasks     │                                            │
-│         │          │           │                                │
-└─────────┼──────────┴───────────┼────────────────────────────────┘
-          │                      │
-          ▼                      ▼
-     [Executes               [Dispatches to
-      in Agent]               Workflow]
-                                 │
-                                 ▼
+│  quickAnalysis()         │  startAnalysis()                     │
+│  - Uses waitUntil()      │  - Creates workflow instance         │
+│  - Fast, simple          │  - env.ANALYSIS_WORKFLOW.create()    │
+│  - < 30s tasks           │  - Returns task ID                   │
+│         │                │           │                          │
+└─────────┼────────────────┴───────────┼──────────────────────────┘
+          │                            │
+          ▼                            ▼
+     [Executes                    [Dispatches to
+      in Agent]                    Workflow]
+                                       │
+                                       ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Cloudflare Workflow                            │
 │                                                                 │
@@ -61,21 +47,21 @@ task.abort(); // Cancel the task
 │    }                                                            │
 │  }                                                              │
 │                                                                 │
-│  // Sends updates back to Agent via HTTP callback              │
-│  notifyAgent({ progress: 50, event: { type: "phase" } })       │
+│  // Sends updates back to Agent via RPC                        │
+│  agent.handleWorkflowUpdate({ taskId, progress, event })       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ## When to Use Each
 
-| Feature    | @task()             | workflow()               |
+| Feature    | waitUntil()         | Cloudflare Workflow      |
 | ---------- | ------------------- | ------------------------ |
 | Duration   | Seconds to minutes  | Minutes to days          |
 | Execution  | In Durable Object   | Separate Workflow engine |
 | Durability | Lost on DO eviction | Survives restarts        |
 | Retries    | Manual              | Automatic per-step       |
 | Sleep      | Not durable         | Durable (can wait hours) |
-| Cost       | DO compute time     | Workflow compute time    |
+| Complexity | Simple              | More setup required      |
 
 ## Setup
 
@@ -103,20 +89,34 @@ npm run dev
 
 ```typescript
 // Quick task - runs in Agent
-@task({ timeout: "5m" })
-async quickAnalysis(input: Input, ctx: TaskContext) {
-  ctx.emit("phase", { name: "fetching" });
-  ctx.setProgress(10);
+@callable()
+async quickAnalysis(input: { repoUrl: string }): Promise<{ id: string }> {
+  const taskId = `task_${crypto.randomUUID().slice(0, 12)}`;
 
-  // Your logic here...
+  // Track in state for UI updates
+  this.updateTask(taskId, { status: "running" });
 
-  return result;
+  // Run in background
+  this.ctx.waitUntil(this.runAnalysis(taskId, input.repoUrl));
+
+  return { id: taskId };
 }
 
-// Durable task - runs in Workflow
+// Durable task - dispatches to Workflow
 @callable()
-async deepAnalysis(input: Input) {
-  return this.workflow("ANALYSIS_WORKFLOW", input);
+async startAnalysis(input: { repoUrl: string }) {
+  const taskId = `task_${crypto.randomUUID().slice(0, 12)}`;
+
+  // Create workflow instance
+  const instance = await this.env.ANALYSIS_WORKFLOW.create({
+    id: taskId,
+    params: { repoUrl: input.repoUrl, _agentBinding: "task-runner", _agentName: this.name }
+  });
+
+  // Track in state
+  this.updateTask(taskId, { status: "pending", workflowInstanceId: instance.id });
+
+  return { id: taskId, workflowInstanceId: instance.id };
 }
 ```
 
@@ -158,7 +158,7 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, Params> {
 ```jsonc
 {
   "durable_objects": {
-    "bindings": [{ "name": "TaskRunner", "class_name": "TaskRunner" }]
+    "bindings": [{ "name": "task-runner", "class_name": "TaskRunner" }]
   },
   "workflows": [
     {
@@ -172,7 +172,7 @@ export class AnalysisWorkflow extends WorkflowEntrypoint<Env, Params> {
 
 ## Files
 
-- `src/server.ts` - Agent with both @task() and workflow() methods
+- `src/server.ts` - Agent with quick and workflow-based analysis
 - `src/workflows/analysis.ts` - Durable workflow implementation
 - `src/App.tsx` - React UI demonstrating both modes
 - `wrangler.jsonc` - Cloudflare configuration
