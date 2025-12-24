@@ -7,8 +7,8 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   JSONRPCMessageSchema,
-  isJSONRPCError,
-  isJSONRPCResponse,
+  isJSONRPCErrorResponse,
+  isJSONRPCResultResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, ConnectionContext } from "../";
@@ -312,7 +312,7 @@ export abstract class McpAgent<
     message: JSONRPCMessage
   ): Promise<boolean> {
     // Check if this is a response to an elicitation request
-    if (isJSONRPCResponse(message) && message.result) {
+    if (isJSONRPCResultResponse(message) && message.result) {
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
@@ -331,7 +331,7 @@ export abstract class McpAgent<
     }
 
     // Check if this is an error response to an elicitation request
-    if (isJSONRPCError(message)) {
+    if (isJSONRPCErrorResponse(message)) {
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
