@@ -1,0 +1,26 @@
+{
+  "compatibility_date": "2025-04-17",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // adding these flags since the vitest runner needs them
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TestChatAgent",
+        "name": "TestChatAgent"
+      }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["TestChatAgent"],
+      "tag": "v1"
+    }
+  ]
+}

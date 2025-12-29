@@ -9,7 +9,7 @@ import {
 import type { McpAgent } from ".";
 import { getAgentByName } from "..";
 import type { CORSOptions } from "./types";
-import { MessageType } from "../ai-types";
+import { MessageType } from "../types";
 
 /**
  * Since we use WebSockets to bridge the client to the

@@ -3,7 +3,7 @@ import { getToolName, isToolUIPart } from "ai";
 import { clientTools } from "./tools";
 import { APPROVAL, toolsRequiringConfirmation } from "./utils";
 import "./styles.css";
-import { useAgentChat, type AITool } from "agents/ai-react";
+import { useAgentChat, type AITool } from "@cloudflare/ai-chat/react";
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 

@@ -13,13 +13,13 @@
   "author": "Sunil Pai <spai@cloudflare.com>",
   "private": true,
   "scripts": {
-    "build": "npm run build -w agents -w hono-agents",
+    "build": "npm run build -w agents -w hono-agents -w @cloudflare/ai-chat -w @cloudflare/codemode",
     "format": "prettier --write .",
     "typecheck": "npx tsx scripts/typecheck.ts",
     "check:exports": "npx tsx scripts/check-exports.ts",
     "check:updates": "npx tsx scripts/check-updates.ts",
     "check": "sherif && npm run check:exports && prettier --check . && biome lint && npm run typecheck",
-    "test": "npm run test -w agents",
+    "test": "npm run test -w agents -w @cloudflare/ai-chat",
     "test:react": "npm run test:react -w agents",
     "postinstall": "patch-package && playwright install --with-deps chromium",
     "prepare": "husky"

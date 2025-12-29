@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/workers-types/experimental",
+      "@cloudflare/vitest-pool-workers"
+    ]
+  },
+  "extends": "../../../../tsconfig.base.json",
+  "include": ["./**/*.ts"]
+}

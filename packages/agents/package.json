@@ -33,8 +33,7 @@
     "nanoid": "^5.1.6",
     "partyserver": "^0.1.0",
     "partysocket": "1.1.10",
-    "yargs": "^18.0.0",
-    "zod-to-ts": "^2.0.0"
+    "yargs": "^18.0.0"
   },
   "devDependencies": {
     "@ai-sdk/openai": "^3.0.0",
@@ -51,6 +50,8 @@
   "peerDependencies": {
     "@ai-sdk/openai": "^3.0.0",
     "@ai-sdk/react": "^3.0.0",
+    "@cloudflare/ai-chat": "^0.0.1",
+    "@cloudflare/codemode": "^0.0.1",
     "ai": "^6.0.0",
     "react": "^19.0.0",
     "viem": ">=2.0.0",
@@ -78,25 +79,10 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js"
     },
-    "./ai-chat-agent": {
-      "types": "./dist/ai-chat-agent.d.ts",
-      "import": "./dist/ai-chat-agent.js",
-      "require": "./dist/ai-chat-agent.js"
-    },
-    "./ai-chat-v5-migration": {
-      "types": "./dist/ai-chat-v5-migration.d.ts",
-      "import": "./dist/ai-chat-v5-migration.js",
-      "require": "./dist/ai-chat-v5-migration.js"
-    },
-    "./ai-react": {
-      "types": "./dist/ai-react.d.ts",
-      "import": "./dist/ai-react.js",
-      "require": "./dist/ai-react.js"
-    },
-    "./ai-types": {
-      "types": "./dist/ai-types.d.ts",
-      "import": "./dist/ai-types.js",
-      "require": "./dist/ai-types.js"
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "require": "./dist/types.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
@@ -138,10 +124,35 @@
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./internal_context": {
+      "types": "./dist/internal_context.d.ts",
+      "import": "./dist/internal_context.js",
+      "require": "./dist/internal_context.js"
+    },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",
       "require": "./dist/mcp/x402.js"
+    },
+    "./ai-chat-agent": {
+      "types": "./dist/ai-chat-agent.d.ts",
+      "import": "./dist/ai-chat-agent.js",
+      "require": "./dist/ai-chat-agent.js"
+    },
+    "./ai-chat-v5-migration": {
+      "types": "./dist/ai-chat-v5-migration.d.ts",
+      "import": "./dist/ai-chat-v5-migration.js",
+      "require": "./dist/ai-chat-v5-migration.js"
+    },
+    "./ai-react": {
+      "types": "./dist/ai-react.d.ts",
+      "import": "./dist/ai-react.js",
+      "require": "./dist/ai-react.js"
+    },
+    "./ai-types": {
+      "types": "./dist/ai-types.d.ts",
+      "import": "./dist/ai-types.js",
+      "require": "./dist/ai-types.js"
     }
   },
   "publishConfig": {

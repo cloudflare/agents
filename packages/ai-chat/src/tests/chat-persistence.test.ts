@@ -1,7 +1,7 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker, { type Env } from "./worker";
-import { MessageType } from "../ai-types";
+import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 
 interface ToolCallPart {

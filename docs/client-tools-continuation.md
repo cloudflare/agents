@@ -12,7 +12,7 @@ The `autoContinueAfterToolResult` option lets client tools behave like server to
 ## How It Works
 
 ```typescript
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 
 const { messages, addToolResult } = useAgentChat({
   agent,

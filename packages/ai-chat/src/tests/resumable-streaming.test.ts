@@ -1,7 +1,7 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import worker, { type Env } from "./worker";
-import { MessageType, type OutgoingMessage } from "../ai-types";
+import { MessageType, type OutgoingMessage } from "../types";
 
 function isStreamResumingMessage(
   m: unknown

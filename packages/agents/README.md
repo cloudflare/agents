@@ -315,7 +315,7 @@ export class TimeAwareAgent extends Agent {
 Create meaningful conversations with intelligence:
 
 ```ts
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import { openai } from "@ai-sdk/openai";
 import { streamText, generateText, createDataStreamResponse } from "ai";
 
@@ -366,7 +366,7 @@ The AI SDK provides native support for message metadata through the `messageMeta
 In the context of `AIChatAgent`, you can use metadata like this:
 
 ```typescript
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import { streamText } from "ai";
 import { openai } from "@ai-sdk/openai";
 
@@ -585,10 +585,7 @@ function EmbeddableChat() {
 On the server, use `createToolsFromClientSchemas` to convert client tool schemas to AI SDK format:
 
 ```typescript
-import {
-  AIChatAgent,
-  createToolsFromClientSchemas
-} from "agents/ai-chat-agent";
+import { AIChatAgent, createToolsFromClientSchemas } from "@cloudflare/ai-chat";
 import { openai } from "@ai-sdk/openai";
 import { streamText, convertToModelMessages } from "ai";
 

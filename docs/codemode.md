@@ -85,7 +85,7 @@ const result = streamText({
 ### After (With Codemode)
 
 ```typescript
-import { experimental_codemode as codemode } from "agents/codemode/ai";
+import { experimental_codemode as codemode } from "@cloudflare/codemode/ai";
 
 // Define your tools as usual
 const tools = {

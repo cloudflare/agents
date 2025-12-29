@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import TextareaAutosize from "react-textarea-autosize";
 import Footer from "./components/Footer";
 import Header from "./components/Header";

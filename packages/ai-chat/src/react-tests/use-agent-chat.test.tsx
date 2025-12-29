@@ -7,8 +7,8 @@ import {
   type PrepareSendMessagesRequestOptions,
   type PrepareSendMessagesRequestResult,
   type AITool
-} from "../ai-react";
-import type { useAgent } from "../react";
+} from "../react";
+import type { useAgent } from "agents/react";
 
 function createAgent({ name, url }: { name: string; url: string }) {
   const target = new EventTarget();

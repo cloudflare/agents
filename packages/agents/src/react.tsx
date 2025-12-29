@@ -4,7 +4,7 @@ import { useCallback, useRef, use, useMemo, useState, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
 import type { Method, RPCMethod } from "./serializable";
-import { MessageType } from "./ai-types";
+import { MessageType } from "./types";
 
 /**
  * Convert a camelCase string to a kebab-case string

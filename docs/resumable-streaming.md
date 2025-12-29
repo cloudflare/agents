@@ -17,7 +17,7 @@ It just works!
 ### Server
 
 ```typescript
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import { streamText } from "ai";
 import { openai } from "@ai-sdk/openai";
 
@@ -38,7 +38,7 @@ export class ChatAgent extends AIChatAgent<Env> {
 
 ```tsx
 import { useAgent } from "agents/react";
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 
 function Chat() {
   const agent = useAgent({
