@@ -1,6 +1,6 @@
 import { openai } from "@ai-sdk/openai";
 import { routeAgentRequest } from "agents";
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
   type StreamTextOnFinishCallback,

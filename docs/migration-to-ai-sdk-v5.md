@@ -67,6 +67,8 @@ If you're extending `AIChatAgent`, the message handling has been updated:
 #### Before:
 
 ```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+
 class MyAgent extends AIChatAgent<Env> {
   async onChatMessage(
     onFinish: StreamTextOnFinishCallback<ToolSet>,
@@ -80,6 +82,8 @@ class MyAgent extends AIChatAgent<Env> {
 #### After:
 
 ```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+
 class MyAgent extends AIChatAgent<Env> {
   async onChatMessage(
     onFinish: StreamTextOnFinishCallback<ToolSet>,
@@ -181,7 +185,10 @@ for await (const chunk of result.fullStream) {
 **Optional manual utilities:**
 
 ```typescript
-import { autoTransformMessages, analyzeCorruption } from "agents";
+import {
+  autoTransformMessages,
+  analyzeCorruption
+} from "@cloudflare/ai-chat/ai-chat-v5-migration";
 
 // Manual transformation (usually not needed)
 const cleanMessages = autoTransformMessages(anyFormatMessages);
@@ -205,7 +212,7 @@ The `useAgentChat` hook can now automatically detect which tools require human-i
 To enable this, pass your `tools` object to the `useAgentChat` hook:
 
 ```typescript
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { tools } from "./tools";
 
 // ...
@@ -319,15 +326,14 @@ You can optionally use the migration utilities to convert stored messages:
 
 ```typescript
 import {
-  needsMigration,
   migrateMessagesToUIFormat,
   analyzeCorruption
-} from "agents";
+} from "@cloudflare/ai-chat/ai-chat-v5-migration";
 
 // In your agent class
-if (needsMigration(this.messages)) {
-  // Optional: analyze what types of corruption exist
-  const stats = analyzeCorruption(this.messages);
+// Check if messages need migration (autoTransformMessages handles this automatically)
+const stats = analyzeCorruption(this.messages);
+if (stats.legacyString || stats.corruptArray) {
   console.log(
     `Migrating ${stats.legacyString} legacy and ${stats.corruptArray} corrupt messages`
   );
@@ -341,17 +347,19 @@ if (needsMigration(this.messages)) {
 ## Migration Utilities Reference
 
 ```typescript
-// Type guards
-isUIMessage(message); // Check if already in v5 format
-needsMigration(messages); // Check if any messages need migration
+import {
+  migrateMessagesToUIFormat,
+  analyzeCorruption
+} from "@cloudflare/ai-chat/ai-chat-v5-migration";
 
 // Migration functions
-migrateToUIMessage(message); // Migrate single message
 migrateMessagesToUIFormat(messages); // Migrate array of messages
 
 // Analysis tools
 analyzeCorruption(messages); // Get stats about message format issues
 ```
+
+**Note:** The `autoTransformMessages` function is used internally by `AIChatAgent` and automatically handles migration. You typically don't need to call migration utilities manually.
 
 Migration handles:
 

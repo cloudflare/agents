@@ -1,5 +1,5 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { agentContext, type AgentEmail } from "./context";
+import { agentContext, type AgentEmail } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import type {
@@ -27,7 +27,7 @@ import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
-import { MessageType } from "./ai-types";
+import { MessageType } from "./types";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -1920,7 +1920,7 @@ export async function routeAgentEmail<
 }
 
 // AgentEmail is re-exported from ./context
-export type { AgentEmail } from "./context";
+export type { AgentEmail } from "./internal_context";
 
 export type EmailSendOptions = {
   to: string;

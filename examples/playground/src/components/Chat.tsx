@@ -1,5 +1,5 @@
 import "./Chat.css";
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 

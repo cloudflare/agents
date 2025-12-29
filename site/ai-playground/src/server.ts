@@ -1,6 +1,6 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import type { MCPClientOAuthResult } from "agents/mcp";
 import {
   convertToModelMessages,

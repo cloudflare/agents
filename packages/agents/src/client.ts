@@ -8,7 +8,7 @@ import type {
   SerializableReturnValue,
   SerializableValue
 } from "./serializable";
-import { MessageType } from "./ai-types";
+import { MessageType } from "./types";
 
 /**
  * Options for creating an AgentClient

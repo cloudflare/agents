@@ -12,7 +12,7 @@ import {
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { getCurrentAgent, type Connection } from "..";
 import type { McpAgent } from ".";
-import { MessageType } from "../ai-types";
+import { MessageType } from "../types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
 
 export class McpSSETransport implements Transport {
