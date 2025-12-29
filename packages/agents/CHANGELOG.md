@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.3.1
+
+### Patch Changes
+
+- [#754](https://github.com/cloudflare/agents/pull/754) [`e21051d`](https://github.com/cloudflare/agents/commit/e21051d798a5de5f2af33b9fb0e12ea6d648d2e9) Thanks [@threepointone](https://github.com/threepointone)! - fix: don't mark ai as optional under peerDependenciesMeta
+
 ## 0.3.0
 
 ### Minor Changes
