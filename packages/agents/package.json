@@ -64,9 +64,6 @@
     "@ai-sdk/react": {
       "optional": true
     },
-    "ai": {
-      "optional": true
-    },
     "viem": {
       "optional": true
     },
