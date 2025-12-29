@@ -2,7 +2,7 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type {
   CallToolResult,
-  JSONRPCResponse
+  JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
 import worker, { type Env } from "../../worker";
 import { establishSSEConnection } from "../../shared/test-utils";
@@ -160,7 +160,7 @@ describe("SSE Transport", () => {
       const dataLine = lines.find((line) => line.startsWith("data:"));
       const parsed = JSON.parse(
         dataLine!.replace("data: ", "")
-      ) as JSONRPCResponse;
+      ) as JSONRPCResultResponse;
       expect(parsed.id).toBe("echo-headers-1");
 
       // Extract the echoed request info
