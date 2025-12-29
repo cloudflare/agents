@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/codemode",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Code Mode: use LLMs to generate executable code that performs tool calls",
   "repository": {
     "directory": "packages/codemode",
@@ -18,7 +18,7 @@
     "zod": "^4.1.8"
   },
   "peerDependencies": {
-    "agents": "^0.3.2",
+    "agents": "^0.3.3",
     "ai": "^6.0.0",
     "zod": "^3.25.0 || ^4.0.0"
   },

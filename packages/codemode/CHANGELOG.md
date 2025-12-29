@@ -1,5 +1,14 @@
 # @cloudflare/codemode
 
+## 0.0.3
+
+### Patch Changes
+
+- [`a5d0137`](https://github.com/cloudflare/agents/commit/a5d01379b9ad2d88bc028c50f1858b4e69f106c5) Thanks [@threepointone](https://github.com/threepointone)! - trigger a new release
+
+- Updated dependencies [[`a5d0137`](https://github.com/cloudflare/agents/commit/a5d01379b9ad2d88bc028c50f1858b4e69f106c5)]:
+  - agents@0.3.3
+
 ## 0.0.2
 
 ### Patch Changes
