@@ -1,6 +1,5 @@
-import type { env } from "cloudflare:workers";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { agentContext, type AgentEmail } from "./context";
+import { agentContext, type AgentEmail } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import type {
@@ -28,7 +27,7 @@ import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
 import { DisposableStore } from "./core/events";
-import { MessageType } from "./ai-types";
+import { MessageType } from "./types";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -154,7 +153,7 @@ export const unstable_callable = (metadata: CallableMetadata = {}) => {
 export type QueueItem<T = string> = {
   id: string;
   payload: T;
-  callback: keyof Agent<unknown>;
+  callback: keyof Agent<Cloudflare.Env>;
   created_at: number;
 };
 
@@ -235,7 +234,7 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 const DEFAULT_STATE = {} as unknown;
 
 export function getCurrentAgent<
-  T extends Agent<unknown, unknown> = Agent<unknown, unknown>
+  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
 >(): {
   agent: T | undefined;
   connection: Connection | undefined;
@@ -271,7 +270,10 @@ export function getCurrentAgent<
 // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
 function withAgentContext<T extends (...args: any[]) => any>(
   method: T
-): (this: Agent<unknown, unknown>, ...args: Parameters<T>) => ReturnType<T> {
+): (
+  this: Agent<Cloudflare.Env, unknown>,
+  ...args: Parameters<T>
+) => ReturnType<T> {
   return function (...args: Parameters<T>): ReturnType<T> {
     const { connection, request, email, agent } = getCurrentAgent();
 
@@ -292,7 +294,7 @@ function withAgentContext<T extends (...args: any[]) => any>(
  * @template State State type to store within the Agent
  */
 export class Agent<
-  Env = typeof env,
+  Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Server<Env, Props> {
@@ -1628,8 +1630,9 @@ const wrappedClasses = new Set<typeof Agent.prototype.constructor>();
 /**
  * Namespace for creating Agent instances
  * @template Agentic Type of the Agent class
+ * @deprecated Use DurableObjectNamespace instead
  */
-export type AgentNamespace<Agentic extends Agent<unknown>> =
+export type AgentNamespace<Agentic extends Agent<Cloudflare.Env>> =
   DurableObjectNamespace<Agentic>;
 
 /**
@@ -1821,7 +1824,9 @@ const agentMapCache = new WeakMap<
  * @param options The options for routing the email
  * @returns A promise that resolves when the email has been routed
  */
-export async function routeAgentEmail<Env>(
+export async function routeAgentEmail<
+  Env extends Cloudflare.Env = Cloudflare.Env
+>(
   email: ForwardableEmailMessage,
   env: Env,
   options: EmailRoutingOptions<Env>
@@ -1865,7 +1870,7 @@ export async function routeAgentEmail<Env>(
   }
 
   const agent = await getAgentByName(
-    namespace as unknown as AgentNamespace<Agent<Env>>,
+    namespace as unknown as DurableObjectNamespace<Agent<Env>>,
     routingInfo.agentId
   );
 
@@ -1915,7 +1920,7 @@ export async function routeAgentEmail<Env>(
 }
 
 // AgentEmail is re-exported from ./context
-export type { AgentEmail } from "./context";
+export type { AgentEmail } from "./internal_context";
 
 export type EmailSendOptions = {
   to: string;
@@ -1939,11 +1944,11 @@ export type EmailSendOptions = {
  * @returns Promise resolving to an Agent instance stub
  */
 export async function getAgentByName<
-  Env,
-  T extends Agent<Env>,
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  T extends Agent<Env> = Agent<Env>,
   Props extends Record<string, unknown> = Record<string, unknown>
 >(
-  namespace: AgentNamespace<T>,
+  namespace: DurableObjectNamespace<T>,
   name: string,
   options?: {
     jurisdiction?: DurableObjectJurisdiction;

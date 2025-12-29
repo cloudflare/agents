@@ -12,7 +12,7 @@ jobs:
           fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
-          node-version: 20.x
+          node-version: 24
           cache: "npm"
 
       - name: Get Playwright version

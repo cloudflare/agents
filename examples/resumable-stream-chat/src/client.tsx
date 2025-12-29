@@ -1,7 +1,7 @@
 import type React from "react";
 import { Suspense, useState, useRef, useEffect } from "react";
 import { useAgent } from "agents/react";
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import type { UIMessage } from "ai";
 
 /**

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { useAgentChat } from "agents/ai-react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import TextareaAutosize from "react-textarea-autosize";
 import Footer from "./components/Footer";
 import Header from "./components/Header";
 import { SparkleIcon } from "./components/Icons";
 import { McpServers } from "./components/McpServers";
-import ModelSelector from "./components/ModelSelector";
+import UnifiedModelSelector from "./components/UnifiedModelSelector";
 import ViewCodeModal from "./components/ViewCodeModal";
 import { ToolCallCard } from "./components/ToolCallCard";
 import { ReasoningCard } from "./components/ReasoningCard";
@@ -62,7 +62,12 @@ const App = () => {
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
-  const [params, setParams] = useState<PlaygroundState>(DEFAULT_PARAMS);
+  const [params, setParams] = useState<PlaygroundState>({
+    ...DEFAULT_PARAMS,
+    useExternalProvider: false,
+    externalProvider: "openai",
+    authMethod: "provider-key"
+  });
 
   const [mcp, setMcp] = useState<McpServersComponentState>(DEFAULT_MCP_STATUS);
 
@@ -86,7 +91,15 @@ const App = () => {
         model: state.model,
         temperature: state.temperature,
         stream: state.stream,
-        system: state.system
+        system: state.system,
+        useExternalProvider: state.useExternalProvider,
+        externalProvider: state.externalProvider,
+        externalModel: state.externalModel,
+        authMethod: state.authMethod,
+        providerApiKey: state.providerApiKey,
+        gatewayAccountId: state.gatewayAccountId,
+        gatewayId: state.gatewayId,
+        gatewayApiKey: state.gatewayApiKey
       }));
     },
     onMcpUpdate(mcpState: MCPServersState) {
@@ -197,13 +210,18 @@ const App = () => {
 
   // Scroll to bottom when messages change
   useEffect(() => {
-    if (messageElement.current) {
+    if (messageElement.current && messages.length > 0) {
       messageElement.current.scrollTop = messageElement.current.scrollHeight;
     }
   }, [messages]);
 
-  const activeModelName = params.model ?? DEFAULT_PARAMS.model;
-  const activeModel = models.find((model) => model.name === activeModelName);
+  // Determine active model based on mode
+  const activeModelName = params.useExternalProvider
+    ? params.externalModel || params.model
+    : (params.model ?? DEFAULT_PARAMS.model);
+  const activeModel = params.useExternalProvider
+    ? undefined
+    : models.find((model) => model.name === activeModelName);
 
   return (
     <main className="w-full h-full bg-gray-50 md:px-6">
@@ -327,21 +345,181 @@ const App = () => {
               </p>
 
               <div className="md:mb-4">
-                {
-                  <ModelSelector
-                    models={models}
-                    model={activeModel}
-                    isLoading={isLoadingModels}
-                    onModelSelection={async (model) => {
-                      agent.setState({
-                        model: model ? model.name : DEFAULT_PARAMS.model,
-                        temperature: params.temperature,
-                        stream: params.stream,
-                        system: params.system
-                      });
-                    }}
-                  />
-                }
+                <UnifiedModelSelector
+                  workersAiModels={models}
+                  activeWorkersAiModel={activeModel}
+                  isLoadingWorkersAi={isLoadingModels}
+                  useExternalProvider={params.useExternalProvider || false}
+                  externalProvider={params.externalProvider || "openai"}
+                  externalModel={params.externalModel}
+                  authMethod={params.authMethod || "provider-key"}
+                  providerApiKey={params.providerApiKey}
+                  gatewayAccountId={params.gatewayAccountId}
+                  gatewayId={params.gatewayId}
+                  gatewayApiKey={params.gatewayApiKey}
+                  onModeChange={(useExternal) => {
+                    const defaultModels: Record<string, string> = {
+                      openai: "openai/gpt-5.2",
+                      anthropic: "anthropic/claude-sonnet-4-5-20250929",
+                      google: "google-ai-studio/gemini-3-pro-preview",
+                      xai: "xai/grok-4-1-fast-reasoning"
+                    };
+                    const selectedModel = useExternal
+                      ? defaultModels[params.externalProvider || "openai"] ||
+                        params.model
+                      : params.model || DEFAULT_PARAMS.model;
+                    agent.setState({
+                      model: selectedModel,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: useExternal,
+                      externalProvider: params.externalProvider || "openai",
+                      externalModel: useExternal ? selectedModel : undefined,
+                      authMethod: params.authMethod || "provider-key",
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onWorkersAiModelSelect={(model) => {
+                    agent.setState({
+                      model: model ? model.name : DEFAULT_PARAMS.model,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: false,
+                      externalProvider: params.externalProvider,
+                      externalModel: undefined,
+                      authMethod: params.authMethod,
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onExternalProviderChange={(provider) => {
+                    const defaultModels: Record<string, string> = {
+                      openai: "openai/gpt-5.2",
+                      anthropic: "anthropic/claude-sonnet-4-5-20250929",
+                      google: "google-ai-studio/gemini-3-pro-preview",
+                      xai: "xai/grok-4-1-fast-reasoning"
+                    };
+                    const selectedModel =
+                      defaultModels[provider] || params.model;
+                    agent.setState({
+                      model: selectedModel,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: true,
+                      externalProvider: provider,
+                      externalModel: selectedModel,
+                      authMethod: params.authMethod || "provider-key",
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onExternalModelSelect={(modelId) => {
+                    agent.setState({
+                      model: modelId,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: true,
+                      externalProvider: params.externalProvider || "openai",
+                      externalModel: modelId,
+                      authMethod: params.authMethod || "provider-key",
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onAuthMethodChange={(method) => {
+                    agent.setState({
+                      model: params.externalModel || params.model,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: true,
+                      externalProvider: params.externalProvider || "openai",
+                      externalModel: params.externalModel,
+                      authMethod: method,
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onProviderApiKeyChange={(key) => {
+                    agent.setState({
+                      model: params.externalModel || params.model,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: true,
+                      externalProvider: params.externalProvider || "openai",
+                      externalModel: params.externalModel,
+                      authMethod: "provider-key",
+                      providerApiKey: key,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onGatewayAccountIdChange={(accountId) => {
+                    agent.setState({
+                      model: params.externalModel || params.model,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: true,
+                      externalProvider: params.externalProvider || "openai",
+                      externalModel: params.externalModel,
+                      authMethod: "gateway",
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: accountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onGatewayIdChange={(gatewayId) => {
+                    agent.setState({
+                      model: params.externalModel || params.model,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: true,
+                      externalProvider: params.externalProvider || "openai",
+                      externalModel: params.externalModel,
+                      authMethod: "gateway",
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
+                    });
+                  }}
+                  onGatewayApiKeyChange={(apiKey) => {
+                    agent.setState({
+                      model: params.externalModel || params.model,
+                      temperature: params.temperature,
+                      stream: params.stream,
+                      system: params.system,
+                      useExternalProvider: true,
+                      externalProvider: params.externalProvider || "openai",
+                      externalModel: params.externalModel,
+                      authMethod: "gateway",
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: apiKey
+                    });
+                  }}
+                />
               </div>
 
               <div
@@ -358,10 +536,20 @@ const App = () => {
                   onChange={(e) => {
                     const newSystem = e.target.value;
                     agent.setState({
-                      model: params.model,
+                      model: params.useExternalProvider
+                        ? params.externalModel || params.model
+                        : params.model,
                       temperature: params.temperature,
                       stream: params.stream,
-                      system: newSystem
+                      system: newSystem,
+                      useExternalProvider: params.useExternalProvider,
+                      externalProvider: params.externalProvider,
+                      externalModel: params.externalModel,
+                      authMethod: params.authMethod,
+                      providerApiKey: params.providerApiKey,
+                      gatewayAccountId: params.gatewayAccountId,
+                      gatewayId: params.gatewayId,
+                      gatewayApiKey: params.gatewayApiKey
                     });
                   }}
                 />
@@ -385,10 +573,20 @@ const App = () => {
                     onChange={async (e) => {
                       const temperature = Number.parseFloat(e.target.value);
                       agent.setState({
-                        model: params.model,
+                        model: params.useExternalProvider
+                          ? params.externalModel || params.model
+                          : params.model,
                         temperature,
                         stream: params.stream,
-                        system: params.system
+                        system: params.system,
+                        useExternalProvider: params.useExternalProvider,
+                        externalProvider: params.externalProvider,
+                        externalModel: params.externalModel,
+                        authMethod: params.authMethod,
+                        providerApiKey: params.providerApiKey,
+                        gatewayAccountId: params.gatewayAccountId,
+                        gatewayId: params.gatewayId,
+                        gatewayApiKey: params.gatewayApiKey
                       });
                     }}
                   />
@@ -409,10 +607,20 @@ const App = () => {
                     checked={params.stream}
                     onChange={(e) => {
                       agent.setState({
-                        model: params.model,
+                        model: params.useExternalProvider
+                          ? params.externalModel || params.model
+                          : params.model,
                         temperature: params.temperature,
                         stream: e.target.checked,
-                        system: params.system
+                        system: params.system,
+                        useExternalProvider: params.useExternalProvider,
+                        externalProvider: params.externalProvider,
+                        externalModel: params.externalModel,
+                        authMethod: params.authMethod,
+                        providerApiKey: params.providerApiKey,
+                        gatewayAccountId: params.gatewayAccountId,
+                        gatewayId: params.gatewayId,
+                        gatewayApiKey: params.gatewayApiKey
                       });
                     }}
                   />
@@ -420,15 +628,8 @@ const App = () => {
               </div>
             </section>
 
-            {activeModel?.properties.find(
-              (p: { property_id: string; value: string }) =>
-                p.property_id === "function_calling" && p.value === "true"
-            ) ? (
-              <>
-                <div className="bg-ai h-px mx-2 mt-2 opacity-25" />
-                <McpServers agent={agent} mcpState={mcp} mcpLogs={mcpLogs} />
-              </>
-            ) : null}
+            <div className="bg-ai h-px mx-2 mt-2 opacity-25" />
+            <McpServers agent={agent} mcpState={mcp} mcpLogs={mcpLogs} />
           </div>
 
           <div

@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { Agent, getAgentByName } from "agents";
 import { wrapFetchWithPayment } from "x402-fetch";
 import { paymentMiddleware } from "x402-hono";
+import { env } from "cloudflare:workers";
 
 // This allows us to create a wallet from just a private key
 // We'll use it for both the payer and receiver accounts
@@ -34,7 +35,7 @@ export class PayAgent extends Agent<Env> {
   }
 }
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono();
 
 // Configure the middleware.
 // Only gate the `protected-route` endpoint, everything else we keep free.
@@ -63,11 +64,7 @@ app.get("/protected-route", (c) => {
 
 // The agent will fetch our own protected route and automatically pay.
 app.get("/agent", async (c) => {
-  const agent = await getAgentByName(
-    // @ts-expect-error Hono complains with `wrangler types --include-runtime false`
-    c.env.PAY_AGENT,
-    "1234"
-  );
+  const agent = await getAgentByName(env.PAY_AGENT, "1234");
   return agent.fetch(c.req.raw);
 });
 

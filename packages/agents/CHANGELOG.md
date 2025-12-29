@@ -1,5 +1,50 @@
 # @cloudflare/agents
 
+## 0.3.1
+
+### Patch Changes
+
+- [#754](https://github.com/cloudflare/agents/pull/754) [`e21051d`](https://github.com/cloudflare/agents/commit/e21051d798a5de5f2af33b9fb0e12ea6d648d2e9) Thanks [@threepointone](https://github.com/threepointone)! - fix: don't mark ai as optional under peerDependenciesMeta
+
+## 0.3.0
+
+### Minor Changes
+
+- [`accdd78`](https://github.com/cloudflare/agents/commit/accdd78688a71287153687907f682b0feeacd155) Thanks [@threepointone](https://github.com/threepointone)! - update to ai sdk v6
+
+  via @whoiskatrin in https://github.com/cloudflare/agents/pull/733
+
+## 0.2.35
+
+### Patch Changes
+
+- [#742](https://github.com/cloudflare/agents/pull/742) [`29938d4`](https://github.com/cloudflare/agents/commit/29938d42f177b9c5600370c03231ed398d03ed07) Thanks [@threepointone](https://github.com/threepointone)! - mark AgentNamespace as deprecated
+
+  It only makes things harder, especially for autogenned types.
+
+- [#747](https://github.com/cloudflare/agents/pull/747) [`17a0346`](https://github.com/cloudflare/agents/commit/17a034676b871ed30172f46f9a4160723c537ee0) Thanks [@threepointone](https://github.com/threepointone)! - fix: scheduling should work
+
+  since we updated to zod v4, the schedule schema was broken. ai sdk's .jsonSchema function doesn't correctly work on tools created with zod v4. The fix, is to use the v3 version of zod for the schedule schema.
+
+## 0.2.34
+
+### Patch Changes
+
+- [#739](https://github.com/cloudflare/agents/pull/739) [`e9b6bb7`](https://github.com/cloudflare/agents/commit/e9b6bb7ea2727e4692d9191108c5609c6a44d9d9) Thanks [@threepointone](https://github.com/threepointone)! - update all dependencies
+  - remove the changesets cli patch, as well as updating node version, so we don't need to explicitly install newest npm
+  - lock mcp sdk version till we figure out how to do breaking changes correctly
+  - removes stray permissions block from release.yml
+
+- [#740](https://github.com/cloudflare/agents/pull/740) [`087264c`](https://github.com/cloudflare/agents/commit/087264cd3b3bebff3eb6e59d850e091d086ff591) Thanks [@threepointone](https://github.com/threepointone)! - update zod
+
+- [#737](https://github.com/cloudflare/agents/pull/737) [`b8c0595`](https://github.com/cloudflare/agents/commit/b8c0595b22ef6421370d3d14e74ddc9ed708d719) Thanks [@threepointone](https://github.com/threepointone)! - update partyserver (and some other cf packages)
+
+  specifically updating partyserver so it gets a better default type for Env, defaulting to Cloudflare.Env
+
+- [#732](https://github.com/cloudflare/agents/pull/732) [`9fbb1b6`](https://github.com/cloudflare/agents/commit/9fbb1b6587176a70296b30592eaba5f821c68208) Thanks [@Scalahansolo](https://github.com/Scalahansolo)! - Setup proper peer deps for zod v4
+
+- [#722](https://github.com/cloudflare/agents/pull/722) [`57b7f2e`](https://github.com/cloudflare/agents/commit/57b7f2e26e4d5e6eb370b2b8a690a542c3c269c9) Thanks [@agcty](https://github.com/agcty)! - fix: move AI SDK packages to peer dependencies
+
 ## 0.2.32
 
 ### Patch Changes

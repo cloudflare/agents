@@ -1,0 +1,62 @@
+{
+  "name": "@cloudflare/ai-chat",
+  "version": "0.0.1",
+  "description": "Cloudflare Agents (x) AI SDK Chat",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "ai",
+    "sdk",
+    "chat"
+  ],
+  "type": "module",
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "ai": "^6.0.0",
+    "react": "^19.2.3",
+    "vitest-browser-react": "^1.0.1",
+    "zod": "^4.1.8"
+  },
+  "peerDependencies": {
+    "agents": "^0.3.0",
+    "ai": "^6.0.0",
+    "react": "^19.0.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js",
+      "require": "./dist/react.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "require": "./dist/types.js"
+    },
+    "./ai-chat-v5-migration": {
+      "types": "./dist/ai-chat-v5-migration.d.ts",
+      "import": "./dist/ai-chat-v5-migration.js",
+      "require": "./dist/ai-chat-v5-migration.js"
+    }
+  },
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "check:test": "npm run check:test:workers && npm run check:test:react",
+    "check:test:react": "vitest -r src/react-tests --watch false",
+    "check:test:workers": "vitest -r src/tests --watch false",
+    "test": "npm run test:workers && npm run test:react",
+    "test:react": "vitest -r src/react-tests",
+    "test:workers": "vitest -r src/tests"
+  },
+  "dependencies": {
+    "ai": "^6.0.0"
+  }
+}

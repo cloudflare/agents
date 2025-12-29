@@ -10,7 +10,7 @@
     "test-email": "tsx test-mail.ts"
   },
   "dependencies": {
-    "postal-mime": "^2.6.1"
+    "postal-mime": "^2.7.0"
   },
   "keywords": [],
   "license": "ISC",

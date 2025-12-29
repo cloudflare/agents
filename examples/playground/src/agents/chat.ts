@@ -1,4 +1,4 @@
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
   streamText,
@@ -13,7 +13,7 @@ export class Chat extends AIChatAgent<Env> {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const result = streamText({
-          messages: convertToModelMessages(this.messages),
+          messages: await convertToModelMessages(this.messages),
           model,
           onFinish
         });

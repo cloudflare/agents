@@ -1,10 +1,8 @@
 import { openai } from "@ai-sdk/openai";
 import { routeAgentRequest } from "agents";
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
-  createUIMessageStream,
-  createUIMessageStreamResponse,
   type StreamTextOnFinishCallback,
   streamText,
   stepCountIs
@@ -16,11 +14,7 @@ import {
   getWeatherInformation
 } from "./utils";
 
-type Env = {
-  OPENAI_API_KEY: string;
-};
-
-export class HumanInTheLoop extends AIChatAgent<Env> {
+export class HumanInTheLoop extends AIChatAgent {
   async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
     const startTime = Date.now();
 
@@ -40,7 +34,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 
       // Now continue with streamText so the LLM can respond to the tool result
       const result = streamText({
-        messages: convertToModelMessages(this.messages),
+        messages: await convertToModelMessages(this.messages),
         model: openai("gpt-4o"),
         onFinish,
         tools,
@@ -68,7 +62,7 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
 
     // Use streamText directly and return with metadata
     const result = streamText({
-      messages: convertToModelMessages(this.messages),
+      messages: await convertToModelMessages(this.messages),
       model: openai("gpt-4o"),
       onFinish,
       tools,

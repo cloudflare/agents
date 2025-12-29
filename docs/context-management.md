@@ -7,7 +7,8 @@
 ## How It Works
 
 ```typescript
-import { AIChatAgent, getCurrentAgent } from "agents";
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { getCurrentAgent } from "agents";
 
 export class MyAgent extends AIChatAgent {
   async customMethod() {
@@ -33,7 +34,8 @@ export class MyAgent extends AIChatAgent {
 ## Real-World Example
 
 ```typescript
-import { AIChatAgent, getCurrentAgent } from "agents";
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { getCurrentAgent } from "agents";
 import { generateText } from "ai";
 import { openai } from "@ai-sdk/openai";
 
@@ -82,6 +84,10 @@ agent.customMethod()
 ### Working with AI SDK Tools
 
 ```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { generateText } from "ai";
+import { openai } from "@ai-sdk/openai";
+
 export class MyAgent extends AIChatAgent {
   async generateResponse(prompt: string) {
     // AI SDK tools automatically work
@@ -101,6 +107,9 @@ export class MyAgent extends AIChatAgent {
 ### Calling External Libraries
 
 ```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { getCurrentAgent } from "agents";
+
 async function saveToDatabase(data: any) {
   const { agent } = getCurrentAgent<MyAgent>();
   // Can access agent info for logging, context, etc.
@@ -136,6 +145,7 @@ Gets the current agent from any context where it's available.
 **Usage:**
 
 ```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import { getCurrentAgent } from "agents";
 
 export class MyAgent extends AIChatAgent {

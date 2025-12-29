@@ -1,0 +1,37 @@
+{
+  "name": "@cloudflare/codemode",
+  "version": "0.0.1",
+  "description": "Code Mode: use LLMs to generate executable code that performs tool calls",
+  "dependencies": {
+    "zod-to-ts": "^2.0.0"
+  },
+  "devDependencies": {
+    "ai": "^6.0.0",
+    "zod": "^4.1.8"
+  },
+  "peerDependencies": {
+    "agents": "^0.3.0",
+    "ai": "^6.0.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "exports": {
+    "./ai": {
+      "types": "./dist/ai.d.ts",
+      "import": "./dist/ai.js",
+      "require": "./dist/ai.js"
+    }
+  },
+  "scripts": {
+    "build": "tsx ./scripts/build.ts"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "ai",
+    "llm",
+    "codemode"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module"
+}

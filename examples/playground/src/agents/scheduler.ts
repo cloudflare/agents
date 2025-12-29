@@ -36,7 +36,6 @@ export class Scheduler extends Agent<Env> {
     if (event.type === "schedule") {
       const result = await generateObject({
         maxRetries: 5,
-        mode: "json",
         model,
         prompt: `${getSchedulePrompt({
           date: new Date()

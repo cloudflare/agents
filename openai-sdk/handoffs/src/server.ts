@@ -1,11 +1,7 @@
 import { Agent, run } from "@openai/agents";
 import { Agent as CFAgent, routeAgentRequest } from "agents";
 
-type Env = {
-  MyAgent: DurableObjectNamespace<MyAgent>;
-};
-
-export class MyAgent extends CFAgent<Env> {
+export class MyAgent extends CFAgent {
   async onRequest() {
     const historyTutorAgent = new Agent({
       instructions:

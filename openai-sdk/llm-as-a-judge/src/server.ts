@@ -2,10 +2,6 @@ import { Agent, type AgentInputItem, run, withTrace } from "@openai/agents";
 import { Agent as CFAgent, callable, routeAgentRequest } from "agents";
 import { z } from "zod";
 
-type Env = {
-  MyAgent: DurableObjectNamespace<MyAgent>;
-};
-
 const EvaluationFeedback = z.object({
   feedback: z.string(),
   score: z.enum(["pass", "needs_improvement", "fail"])

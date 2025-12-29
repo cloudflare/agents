@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.3.7/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.3.10/schema.json",
   "assist": {
     "actions": {
       "source": {
@@ -16,6 +16,7 @@
       "openai-sdk/**",
       "packages/**",
       "guides/**",
+      "site/ai-playground/**",
       "!node_modules",
       "!**/node_modules",
       "!dist",
@@ -70,5 +71,10 @@
     "clientKind": "git",
     "enabled": false,
     "useIgnoreFile": false
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
   }
 }
