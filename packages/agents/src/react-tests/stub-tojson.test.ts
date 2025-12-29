@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { _testUtils } from "../react";
 
-/**q
+/**
  * The stub proxy should not make RPC calls for internal JS methods like toJSON,
  * which are accessed by console.log and JSON.stringify.
  */
