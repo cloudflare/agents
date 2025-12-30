@@ -912,10 +912,12 @@ export class MCPClientManager {
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
-    if (!this.jsonSchema) {
-      throw new Error("jsonSchema not initialized.");
+    if (Object.keys(this.mcpConnections).length > 0) {
+      // delay checking for .jsonSchema until we actually need it
+      if (!this.jsonSchema) {
+        throw new Error("invariant: mcp.jsonSchema not initialized.");
+      }
     }
-
     // Warn if tools are being read from non-ready connections
     for (const [id, conn] of Object.entries(this.mcpConnections)) {
       if (
