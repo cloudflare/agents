@@ -1458,11 +1458,46 @@ export class AIChatAgent<
         }
       }
 
+      // Determine response format based on content-type
+      const contentType = response.headers.get("content-type") || "";
+      const isSSE = contentType.includes("text/event-stream"); // AI SDK v5 SSE format
+
+      // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
+      if (!isSSE) {
+        const body = JSON.stringify({
+          type: "text-start",
+          id
+        });
+        this._storeStreamChunk(streamId, body);
+        this._broadcastChatMessage({
+          body: body,
+          done: false,
+          id,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          ...(continuation && { continuation: true })
+        });
+      }
+
       let streamCompleted = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) {
+            if (!isSSE) {
+              const body = JSON.stringify({
+                type: "text-end",
+                id
+              });
+              this._storeStreamChunk(streamId, body);
+              this._broadcastChatMessage({
+                body: body,
+                done: false,
+                id,
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                ...(continuation && { continuation: true })
+              });
+            }
+
             // Mark the stream as completed
             this._completeStream(streamId);
             streamCompleted = true;
@@ -1478,10 +1513,6 @@ export class AIChatAgent<
           }
 
           const chunk = decoder.decode(value);
-
-          // Determine response format based on content-type
-          const contentType = response.headers.get("content-type") || "";
-          const isSSE = contentType.includes("text/event-stream");
 
           // After streaming is complete, persist the complete assistant's response
           if (isSSE) {
@@ -1895,6 +1926,7 @@ export class AIChatAgent<
               // Synthesize a text-delta event so clients can stream-render
               const chunkBody = JSON.stringify({
                 type: "text-delta",
+                id,
                 delta: chunk
               });
               // Store chunk for replay on reconnection
