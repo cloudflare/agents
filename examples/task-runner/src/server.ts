@@ -34,6 +34,8 @@ interface WorkflowInstance {
     error?: string;
     output?: unknown;
   }>;
+  // Send events to workflows waiting with step.waitForEvent()
+  sendEvent: (event: { type: string; payload: unknown }) => Promise<void>;
 }
 
 interface Workflow {
@@ -56,6 +58,13 @@ interface RepoFile {
   size?: number;
 }
 
+interface SecurityIssue {
+  severity: "low" | "medium" | "high" | "critical";
+  file: string;
+  description: string;
+  recommendation: string;
+}
+
 interface AnalysisResult {
   repoUrl: string;
   branch: string;
@@ -63,15 +72,27 @@ interface AnalysisResult {
   architecture: string;
   techStack: string[];
   suggestions: string[];
+  // Deep analysis includes these additional fields
+  securityIssues?: SecurityIssue[];
+  codePatterns?: string[];
+  dependencies?: { name: string; version: string; type: string }[];
   fileCount: number;
+  analyzedFiles?: number;
   analyzedAt: string;
+  // Workflow-specific fields (only present in deep analysis)
+  approvalStatus?: "pending" | "approved" | "rejected" | "auto-approved";
+  approvedBy?: string;
+  approvedAt?: string;
+  followUpScheduled?: boolean;
+  workflowDuration?: string;
 }
 
 // Simple in-memory task tracking for this example
 // In production, you might use SQL storage or external state
 interface TaskState {
   id: string;
-  status: "pending" | "running" | "completed" | "failed";
+  type: "quick" | "deep";
+  status: "pending" | "running" | "awaiting-approval" | "completed" | "failed";
   progress?: number;
   result?: AnalysisResult;
   error?: string;
@@ -107,21 +128,34 @@ export class TaskRunner extends Agent<
 
   /**
    * Start a deep analysis using Cloudflare Workflow.
+   *
+   * Unlike quickAnalysis, this demonstrates workflow-specific capabilities:
    * - Runs in the Workflow engine (separate from DO)
-   * - Can run for hours/days
-   * - Survives restarts, automatic retries
-   * - Each step is checkpointed
+   * - Can run for hours/days with step.sleep()
+   * - Survives restarts, automatic retries with exponential backoff
+   * - Each step is checkpointed (no duplicate work on restart)
+   * - Can pause for human approval with step.waitForEvent()
+   * - Can schedule follow-up tasks days in the future
    */
   @callable()
-  async startAnalysis(input: { repoUrl: string; branch?: string }) {
+  async startAnalysis(input: {
+    repoUrl: string;
+    branch?: string;
+    /** If true, workflow pauses for human approval on critical security issues */
+    requireApproval?: boolean;
+    /** If true, schedules a follow-up reminder (demonstrates step.sleep for days) */
+    scheduleFollowUp?: boolean;
+  }) {
     const taskId = `task_${crypto.randomUUID().slice(0, 12)}`;
 
-    // Create workflow instance
+    // Create workflow instance with workflow-specific options
     const instance = await this.env.ANALYSIS_WORKFLOW.create({
       id: taskId,
       params: {
         repoUrl: input.repoUrl,
         branch: input.branch || "main",
+        requireApproval: input.requireApproval ?? true,
+        scheduleFollowUp: input.scheduleFollowUp ?? false,
         // Pass agent info for callbacks
         _agentBinding: "task-runner",
         _agentName: this.name || "default"
@@ -131,6 +165,7 @@ export class TaskRunner extends Agent<
     // Track the task in state
     const task: TaskState = {
       id: taskId,
+      type: "deep",
       status: "pending",
       workflowInstanceId: instance.id,
       events: [{ type: "workflow-started", timestamp: Date.now() }]
@@ -141,7 +176,15 @@ export class TaskRunner extends Agent<
       tasks: { ...this.state.tasks, [taskId]: task }
     });
 
-    return { id: taskId, workflowInstanceId: instance.id };
+    return {
+      id: taskId,
+      workflowInstanceId: instance.id,
+      message:
+        "Deep analysis started. " +
+        (input.requireApproval
+          ? "Will pause for approval if critical issues found."
+          : "Auto-approving all findings.")
+    };
   }
 
   /**
@@ -159,6 +202,7 @@ export class TaskRunner extends Agent<
     // Track the task
     const task: TaskState = {
       id: taskId,
+      type: "quick",
       status: "running",
       progress: 0,
       events: [{ type: "started", timestamp: Date.now() }]
@@ -168,15 +212,20 @@ export class TaskRunner extends Agent<
       tasks: { ...this.state.tasks, [taskId]: task }
     });
 
-    // Run analysis in background (non-blocking)
-    // In a Durable Object, we just start the async work without awaiting
-    this.runQuickAnalysis(taskId, repoUrl, branch).catch((error) => {
+    // Run analysis in background using ctx.waitUntil to prevent early termination
+    // This ensures the task completes even if no WebSocket connections are active
+    const analysisPromise = this.runQuickAnalysis(
+      taskId,
+      repoUrl,
+      branch
+    ).catch((error) => {
       console.error("[TaskRunner] Quick analysis failed:", error);
       this.updateTask(taskId, {
         status: "failed",
         error: error instanceof Error ? error.message : String(error)
       });
     });
+    this.ctx.waitUntil(analysisPromise);
 
     return { id: taskId };
   }
@@ -298,6 +347,102 @@ export class TaskRunner extends Agent<
     );
   }
 
+  /**
+   * Approve or reject a task waiting for human approval.
+   *
+   * This demonstrates step.waitForEvent() - the workflow is paused/hibernating
+   * with zero compute cost until this event is sent. Can wait up to 7 days!
+   */
+  @callable()
+  async approveTask(input: {
+    taskId: string;
+    approved: boolean;
+    approver: string;
+    comment?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    const task = this.state.tasks[input.taskId];
+    if (!task) {
+      return { success: false, message: "Task not found" };
+    }
+
+    if (!task.workflowInstanceId) {
+      return {
+        success: false,
+        message:
+          "This is not a workflow task (quick analysis doesn't need approval)"
+      };
+    }
+
+    if (task.status !== "awaiting-approval") {
+      return {
+        success: false,
+        message: `Task is not awaiting approval (current status: ${task.status})`
+      };
+    }
+
+    try {
+      const instance = await this.env.ANALYSIS_WORKFLOW.get(
+        task.workflowInstanceId
+      );
+
+      // Send the approval event to the waiting workflow
+      // This wakes up the hibernating workflow!
+      await instance.sendEvent({
+        type: "security-approval",
+        payload: {
+          approved: input.approved,
+          approver: input.approver,
+          comment: input.comment
+        }
+      });
+
+      this.updateTask(input.taskId, {
+        status: "running",
+        events: [
+          {
+            type: input.approved ? "approved" : "rejected",
+            data: { approver: input.approver, comment: input.comment },
+            timestamp: Date.now()
+          }
+        ]
+      });
+
+      return {
+        success: true,
+        message: input.approved
+          ? `Task approved by ${input.approver}. Workflow resuming...`
+          : `Task rejected by ${input.approver}. Workflow will complete with rejection flag.`
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Failed to send approval: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+  }
+
+  /**
+   * Get the workflow status directly from the Workflow engine.
+   * Useful for debugging or checking if workflow is waiting for an event.
+   */
+  @callable()
+  async getWorkflowStatus(
+    taskId: string
+  ): Promise<{ status: string; error?: string } | null> {
+    const task = this.state.tasks[taskId];
+    if (!task?.workflowInstanceId) return null;
+
+    try {
+      const instance = await this.env.ANALYSIS_WORKFLOW.get(
+        task.workflowInstanceId
+      );
+      const status = await instance.status();
+      return { status: status.status, error: status.error };
+    } catch {
+      return null;
+    }
+  }
+
   // =========================================================================
   // Workflow Update Handler (called by workflow via RPC)
   // =========================================================================
@@ -334,6 +479,14 @@ export class TaskRunner extends Agent<
       updates.error = update.error;
     } else if (task.status === "pending") {
       updates.status = "running";
+    }
+
+    // Check if workflow is now waiting for approval
+    if (
+      update.event?.type === "phase" &&
+      (update.event.data as { name?: string })?.name === "awaiting-approval"
+    ) {
+      updates.status = "awaiting-approval";
     }
 
     if (update.event) {
