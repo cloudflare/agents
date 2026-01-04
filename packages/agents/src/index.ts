@@ -303,7 +303,7 @@ export class Agent<
    * expose RPC methods
    * @internal
    */
-  declare readonly [Rpc.__DURABLE_OBJECT_BRAND]: never;
+  declare readonly ["__DURABLE_OBJECT_BRAND"]: never;
 
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
