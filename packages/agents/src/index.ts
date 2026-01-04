@@ -298,6 +298,13 @@ export class Agent<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Server<Env, Props> {
+  /**
+   * This to make sure that DurableObjectNamespace<Agent> and DurableObjectStub<Agent> properly
+   * expose RPC methods
+   * @internal
+   */
+  declare readonly [Rpc.__DURABLE_OBJECT_BRAND]: never;
+
   private _state = DEFAULT_STATE as State;
   private _disposables = new DisposableStore();
   private _destroyed = false;
