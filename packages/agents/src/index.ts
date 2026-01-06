@@ -116,6 +116,24 @@ export type CallableMetadata = {
 const callableMetadata = new Map<Function, CallableMetadata>();
 
 /**
+ * Error class for SQL execution failures, containing the query that failed
+ */
+export class SqlError extends Error {
+  /** The SQL query that failed */
+  readonly query: string;
+  /** The original error that caused the failure */
+  readonly cause: unknown;
+
+  constructor(query: string, cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(`SQL query failed: ${message}`);
+    this.name = "SqlError";
+    this.query = query;
+    this.cause = cause;
+  }
+}
+
+/**
  * Decorator that marks a method as callable by clients
  * @param metadata Optional metadata about the callable method
  */
@@ -391,8 +409,7 @@ export class Agent<
       // Execute the SQL query with the provided values
       return [...this.ctx.storage.sql.exec(query, ...values)] as T[];
     } catch (e) {
-      this.onSqlError(query, e);
-      throw this.onError(e);
+      throw this.onError(new SqlError(query, e));
     }
   }
   constructor(ctx: AgentContext, env: Env) {
@@ -869,15 +886,6 @@ export class Agent<
       console.error("Override onError(error) to handle server errors");
     }
     throw theError;
-  }
-
-  /**
-   * Handle SQL execution errors. Override this method to customize logging behavior.
-   * @param query The SQL query that failed
-   * @param error The error that occurred
-   */
-  onSqlError(_query: string, _error: unknown): void {
-    console.error(`failed to execute sql query: ${_query}`, _error);
   }
 
   /**
