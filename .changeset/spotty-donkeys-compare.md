@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-add onSqlError hook for customizable SQL error logging
+pipe SQL errors into the existing onError method using a new SqlError class
