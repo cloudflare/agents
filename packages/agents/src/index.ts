@@ -391,7 +391,7 @@ export class Agent<
       // Execute the SQL query with the provided values
       return [...this.ctx.storage.sql.exec(query, ...values)] as T[];
     } catch (e) {
-      console.error(`failed to execute sql query: ${query}`, e);
+      this.onSqlError(query, e);
       throw this.onError(e);
     }
   }
@@ -869,6 +869,15 @@ export class Agent<
       console.error("Override onError(error) to handle server errors");
     }
     throw theError;
+  }
+
+  /**
+   * Handle SQL execution errors. Override this method to customize logging behavior.
+   * @param query The SQL query that failed
+   * @param error The error that occurred
+   */
+  onSqlError(_query: string, _error: unknown): void {
+    console.error(`failed to execute sql query: ${_query}`, _error);
   }
 
   /**
