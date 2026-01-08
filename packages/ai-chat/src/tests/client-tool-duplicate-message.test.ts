@@ -1,11 +1,7 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker, { type Env } from "./worker";
+import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("Client-side tool duplicate message prevention", () => {
   it("merges tool output into existing message by toolCallId", async () => {

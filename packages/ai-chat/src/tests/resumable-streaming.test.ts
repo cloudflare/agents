@@ -1,6 +1,5 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker, { type Env } from "./worker";
 import { MessageType, type OutgoingMessage } from "../types";
 
 function isStreamResumingMessage(
@@ -31,22 +30,7 @@ function isUseChatResponseMessage(
   );
 }
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
-
-async function connectChatWS(path: string) {
-  const ctx = createExecutionContext();
-  const req = new Request(`http://example.com${path}`, {
-    headers: { Upgrade: "websocket" }
-  });
-  const res = await worker.fetch(req, env, ctx);
-  expect(res.status).toBe(101);
-  const ws = res.webSocket as WebSocket;
-  expect(ws).toBeDefined();
-  ws.accept();
-  return { ws, ctx };
-}
+import { connectChatWS } from "./test-utils";
 
 function collectMessages(ws: WebSocket): unknown[] {
   const messages: unknown[] = [];
