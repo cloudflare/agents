@@ -1,5 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { expect } from "vitest";
+import { MessageType, type OutgoingMessage } from "../types";
 import worker from "./worker";
 
 /**
@@ -18,4 +19,21 @@ export async function connectChatWS(
   expect(ws).toBeDefined();
   ws.accept();
   return { ws, ctx };
+}
+
+/**
+ * Type guard for CF_AGENT_USE_CHAT_RESPONSE messages
+ */
+export function isUseChatResponseMessage(
+  m: unknown
+): m is Extract<
+  OutgoingMessage,
+  { type: MessageType.CF_AGENT_USE_CHAT_RESPONSE }
+> {
+  return (
+    typeof m === "object" &&
+    m !== null &&
+    "type" in m &&
+    m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
+  );
 }

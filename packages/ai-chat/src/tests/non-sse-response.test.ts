@@ -1,23 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import { connectChatWS } from "./test-utils";
-
-interface UseChatResponseMessage {
-  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE;
-  id: string;
-  body: string;
-  done: boolean;
-}
-
-function isUseChatResponseMessage(m: unknown): m is UseChatResponseMessage {
-  return (
-    typeof m === "object" &&
-    m !== null &&
-    "type" in m &&
-    m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
-  );
-}
+import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 
 describe("Non-SSE Response Handling - PR #761", () => {
   it("should send text-start, text-delta, and text-end events for plain text responses", async () => {

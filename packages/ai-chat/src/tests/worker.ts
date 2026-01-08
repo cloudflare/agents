@@ -2,13 +2,11 @@ import { AIChatAgent } from "../";
 import type { UIMessage as ChatMessage } from "ai";
 import { callable, getCurrentAgent, routeAgentRequest } from "agents";
 
-interface ToolCallPart {
-  type: string;
-  toolCallId: string;
-  state: "input-available" | "output-available";
-  input: Record<string, unknown>;
-  output?: unknown;
-}
+// Type helper for tool call parts - extracts from ChatMessage parts
+type TestToolCallPart = Extract<
+  ChatMessage["parts"][number],
+  { type: `tool-${string}` }
+>;
 
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
@@ -99,7 +97,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   @callable()
   async testPersistToolCall(messageId: string, toolName: string) {
-    const toolCallPart: ToolCallPart = {
+    const toolCallPart: TestToolCallPart = {
       type: `tool-${toolName}`,
       toolCallId: `call_${messageId}`,
       state: "input-available",
@@ -121,7 +119,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     toolName: string,
     output: string
   ) {
-    const toolResultPart: ToolCallPart = {
+    const toolResultPart: TestToolCallPart = {
       type: `tool-${toolName}`,
       toolCallId: `call_${messageId}`,
       state: "output-available",

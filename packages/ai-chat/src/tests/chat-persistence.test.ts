@@ -5,13 +5,11 @@ import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 
-interface ToolCallPart {
-  type: string;
-  toolCallId: string;
-  state: "input-available" | "output-available";
-  input: Record<string, unknown>;
-  output?: unknown;
-}
+// Type helper for tool call parts - extracts ToolUIPart from ChatMessage parts
+type TestToolCallPart = Extract<
+  ChatMessage["parts"][number],
+  { type: `tool-${string}` }
+>;
 
 describe("Chat Agent Persistence", () => {
   it("persists new messages incrementally without deleting existing ones", async () => {
@@ -266,7 +264,7 @@ describe("Chat Agent Persistence", () => {
       parts: [{ type: "text", text: "What time is it in London?" }]
     };
 
-    const toolCallPart: ToolCallPart = {
+    const toolCallPart: TestToolCallPart = {
       type: "tool-getLocalTime",
       toolCallId: "call_456",
       state: "input-available",
@@ -289,7 +287,7 @@ describe("Chat Agent Persistence", () => {
       messagesAfterToolCall.find((m) => m.id === "assistant-1")
     ).toBeDefined();
 
-    const toolResultPart: ToolCallPart = {
+    const toolResultPart: TestToolCallPart = {
       type: "tool-getLocalTime",
       toolCallId: "call_456",
       state: "output-available",
@@ -372,7 +370,7 @@ describe("Chat Agent Persistence", () => {
       parts: [{ type: "text", text: "What time is it?" }]
     };
 
-    const toolCallPart: ToolCallPart = {
+    const toolCallPart: TestToolCallPart = {
       type: "tool-getLocalTime",
       toolCallId: "call_123",
       state: "input-available",
@@ -397,7 +395,7 @@ describe("Chat Agent Persistence", () => {
       assistantResponse
     ]);
 
-    const toolResultPart: ToolCallPart = {
+    const toolResultPart: TestToolCallPart = {
       type: "tool-getLocalTime",
       toolCallId: "call_123",
       state: "output-available",

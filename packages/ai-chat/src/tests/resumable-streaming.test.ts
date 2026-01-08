@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import { MessageType, type OutgoingMessage } from "../types";
+import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 
 function isStreamResumingMessage(
   m: unknown
@@ -15,22 +16,6 @@ function isStreamResumingMessage(
     m.type === MessageType.CF_AGENT_STREAM_RESUMING
   );
 }
-
-function isUseChatResponseMessage(
-  m: unknown
-): m is Extract<
-  OutgoingMessage,
-  { type: MessageType.CF_AGENT_USE_CHAT_RESPONSE }
-> {
-  return (
-    typeof m === "object" &&
-    m !== null &&
-    "type" in m &&
-    m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
-  );
-}
-
-import { connectChatWS } from "./test-utils";
 
 function collectMessages(ws: WebSocket): unknown[] {
   const messages: unknown[] = [];
