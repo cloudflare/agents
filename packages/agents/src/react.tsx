@@ -73,13 +73,53 @@ function deleteCacheEntry(key: string): void {
   queryCache.delete(key);
 }
 
+/**
+ * Creates a proxy that wraps RPC method calls.
+ * Internal JS methods (toJSON, then, etc.) return undefined to avoid
+ * triggering RPC calls during serialization (e.g., console.log)
+ */
+function createStubProxy<T = Record<string, Method>>(
+  call: (method: string, args: unknown[]) => unknown
+): T {
+  // biome-ignore lint/suspicious/noExplicitAny: proxy needs any for dynamic method access
+  return new Proxy<any>(
+    {},
+    {
+      get: (_target, method) => {
+        // Skip internal JavaScript methods that shouldn't trigger RPC calls.
+        // These are commonly accessed by console.log, JSON.stringify, and other
+        // serialization utilities.
+        if (
+          typeof method === "symbol" ||
+          method === "toJSON" ||
+          method === "then" ||
+          method === "catch" ||
+          method === "finally" ||
+          method === "valueOf" ||
+          method === "toString" ||
+          method === "constructor" ||
+          method === "prototype" ||
+          method === "$$typeof" ||
+          method === "@@toStringTag" ||
+          method === "asymmetricMatch" ||
+          method === "nodeType"
+        ) {
+          return undefined;
+        }
+        return (...args: unknown[]) => call(method as string, args);
+      }
+    }
+  );
+}
+
 // Export for testing purposes
 export const _testUtils = {
   queryCache,
   setCacheEntry,
   getCacheEntry,
   deleteCacheEntry,
-  clearCache: () => queryCache.clear()
+  clearCache: () => queryCache.clear(),
+  createStubProxy
 };
 
 /**
@@ -415,17 +455,7 @@ export function useAgent<State>(
   agent.call = call;
   agent.agent = agentNamespace;
   agent.name = options.name || "default";
-  // biome-ignore lint: suppressions/parse
-  agent.stub = new Proxy<any>(
-    {},
-    {
-      get: (_target, method) => {
-        return (...args: unknown[]) => {
-          return call(method as string, args);
-        };
-      }
-    }
-  );
+  agent.stub = createStubProxy(call);
 
   // warn if agent isn't in lowercase
   if (agent.agent !== agent.agent.toLowerCase()) {

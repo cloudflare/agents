@@ -759,6 +759,33 @@ export class AIChatAgent<
     this.broadcast(JSON.stringify(message), exclude);
   }
 
+  /**
+   * Broadcasts a text event for non-SSE responses.
+   * This ensures plain text responses follow the AI SDK v5 stream protocol.
+   *
+   * @param streamId - The stream identifier for chunk storage
+   * @param event - The text event payload (text-start, text-delta with delta, or text-end)
+   * @param continuation - Whether this is a continuation of a previous stream
+   */
+  private _broadcastTextEvent(
+    streamId: string,
+    event:
+      | { type: "text-start"; id: string }
+      | { type: "text-delta"; id: string; delta: string }
+      | { type: "text-end"; id: string },
+    continuation: boolean
+  ) {
+    const body = JSON.stringify(event);
+    this._storeStreamChunk(streamId, body);
+    this._broadcastChatMessage({
+      body,
+      done: false,
+      id: event.id,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      ...(continuation && { continuation: true })
+    });
+  }
+
   private _loadMessagesFromDb(): ChatMessage[] {
     const rows =
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
@@ -1458,11 +1485,32 @@ export class AIChatAgent<
         }
       }
 
+      // Determine response format based on content-type
+      const contentType = response.headers.get("content-type") || "";
+      const isSSE = contentType.includes("text/event-stream"); // AI SDK v5 SSE format
+
+      // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
+      if (!isSSE) {
+        this._broadcastTextEvent(
+          streamId,
+          { type: "text-start", id },
+          continuation
+        );
+      }
+
       let streamCompleted = false;
       try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) {
+            if (!isSSE) {
+              this._broadcastTextEvent(
+                streamId,
+                { type: "text-end", id },
+                continuation
+              );
+            }
+
             // Mark the stream as completed
             this._completeStream(streamId);
             streamCompleted = true;
@@ -1478,10 +1526,6 @@ export class AIChatAgent<
           }
 
           const chunk = decoder.decode(value);
-
-          // Determine response format based on content-type
-          const contentType = response.headers.get("content-type") || "";
-          const isSSE = contentType.includes("text/event-stream");
 
           // After streaming is complete, persist the complete assistant's response
           if (isSSE) {
@@ -1892,20 +1936,11 @@ export class AIChatAgent<
             // Treat the entire chunk as a text delta to preserve exact formatting
             if (chunk.length > 0) {
               message.parts.push({ type: "text", text: chunk });
-              // Synthesize a text-delta event so clients can stream-render
-              const chunkBody = JSON.stringify({
-                type: "text-delta",
-                delta: chunk
-              });
-              // Store chunk for replay on reconnection
-              this._storeStreamChunk(streamId, chunkBody);
-              this._broadcastChatMessage({
-                body: chunkBody,
-                done: false,
-                id,
-                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-                ...(continuation && { continuation: true })
-              });
+              this._broadcastTextEvent(
+                streamId,
+                { type: "text-delta", id, delta: chunk },
+                continuation
+              );
             }
           }
         }

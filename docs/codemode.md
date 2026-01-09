@@ -105,7 +105,7 @@ export const globalOutbound = {
   }
 };
 
-export { CodeModeProxy } from "agents/codemode/ai";
+export { CodeModeProxy } from "@cloudflare/codemode/ai";
 
 // Use codemode wrapper
 const { prompt, tools: wrappedTools } = await codemode({
@@ -166,7 +166,7 @@ export const globalOutbound = {
 };
 
 // Export the proxy for tool execution
-export { CodeModeProxy } from "agents/codemode/ai";
+export { CodeModeProxy } from "@cloudflare/codemode/ai";
 ```
 
 ## Benefits for MCP Server Integration

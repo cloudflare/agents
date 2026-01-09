@@ -19,13 +19,13 @@
     "@use-it/interval": "^1.0.0",
     "astro": "^5.16.6",
     "clsx": "^2.1.1",
-    "effect": "^3.19.13",
-    "framer-motion": "^12.23.26",
+    "effect": "^3.19.14",
+    "framer-motion": "^12.24.8",
     "gsap": "^3.14.2",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-wrap-balancer": "^1.1.1",
-    "shiki": "^3.20.0",
+    "shiki": "^3.21.0",
     "tailwindcss": "^4.1.18"
   },
   "devDependencies": {

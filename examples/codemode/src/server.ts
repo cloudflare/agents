@@ -2,7 +2,7 @@ import { routeAgentRequest, Agent, callable, type Connection } from "agents";
 
 import { getSchedulePrompt } from "agents/schedule";
 
-import { experimental_codemode as codemode } from "agents/codemode/ai";
+import { experimental_codemode as codemode } from "@cloudflare/codemode/ai";
 import {
   streamText,
   type UIMessage,
@@ -18,7 +18,7 @@ import { env } from "cloudflare:workers";
 
 // export this WorkerEntryPoint that lets you
 // reroute function calls back to a caller
-export { CodeModeProxy } from "agents/codemode/ai";
+export { CodeModeProxy } from "@cloudflare/codemode/ai";
 
 // inline this until enable_ctx_exports is supported by default
 declare global {
