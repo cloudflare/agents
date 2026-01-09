@@ -10,10 +10,17 @@ import {
   type RequestId
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type {
+  EventStore,
+  StreamId,
+  EventId
+} from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { getCurrentAgent, type Connection } from "..";
 import type { McpAgent } from ".";
 import { MessageType } from "../types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
+
+export type { EventStore, StreamId, EventId };
 
 export class McpSSETransport implements Transport {
   sessionId: string;
@@ -61,32 +68,6 @@ export class McpSSETransport implements Transport {
     // Similar to start, the only thing to do is to pass the event on to the server
     this.onclose?.();
   }
-}
-
-export type StreamId = string;
-export type EventId = string;
-
-// TODO: Implement this and make it opt-in?
-/**
- * Interface for resumability support via event storage
- */
-export interface EventStore {
-  /**
-   * Stores an event for later retrieval
-   * @param streamId ID of the stream the event belongs to
-   * @param message The JSON-RPC message to store
-   * @returns The generated event ID for the stored event
-   */
-  storeEvent(streamId: StreamId, message: JSONRPCMessage): Promise<EventId>;
-
-  replayEventsAfter(
-    lastEventId: EventId,
-    {
-      send
-    }: {
-      send: (eventId: EventId, message: JSONRPCMessage) => Promise<void>;
-    }
-  ): Promise<StreamId>;
 }
 
 /**
