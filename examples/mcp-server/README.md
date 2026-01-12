@@ -19,4 +19,4 @@ You can test the MCP server using the MCP Inspector or any MCP client that suppo
 
 ## Adding State
 
-To create a stateful MCP server, you can use an `Agent` to keep the state of the session/transport. See the [`mcp-elicitations`](../mcp-elicitation) example for more information.
+To create a stateful MCP server, you can use an `Agent` to keep the state of the session/transport. See the [`mcp-elicitation`](../mcp-elicitation) example for more information.
