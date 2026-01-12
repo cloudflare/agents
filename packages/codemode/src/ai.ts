@@ -46,7 +46,8 @@ export async function experimental_codemode(options: {
   tools: ToolSet;
 }> {
   const generatedTypes = await generateTypes(options.tools);
-  const prompt = `You are a helpful assistant. You have access to the "codemode" tool that can do different things: 
+  const prompt = `${options.prompt}
+  You are a helpful assistant. You have access to the "codemode" tool that can do different things: 
   
   ${getToolDescriptions(options.tools)} 
   
