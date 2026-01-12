@@ -12,6 +12,7 @@ export default defineConfig({
       ],
       provider: "playwright"
     },
-    clearMocks: true
+    clearMocks: true,
+    setupFiles: ["./setup.ts"]
   }
 });

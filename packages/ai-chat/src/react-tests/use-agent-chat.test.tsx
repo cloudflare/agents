@@ -10,6 +10,10 @@ import {
 } from "../react";
 import type { useAgent } from "agents/react";
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function createAgent({ name, url }: { name: string; url: string }) {
   const target = new EventTarget();
   const baseAgent = {
@@ -63,15 +67,17 @@ describe("useAgentChat", () => {
       return "Suspended";
     };
 
-    const screen = await act(() =>
-      render(<TestComponent />, {
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
         wrapper: ({ children }) => (
           <StrictMode>
             <Suspense fallback={<SuspenseObserver />}>{children}</Suspense>
           </StrictMode>
         )
-      })
-    );
+      });
+      await sleep(10);
+      return screen;
+    });
 
     await expect
       .element(screen.getByTestId("messages"))
@@ -123,15 +129,18 @@ describe("useAgentChat", () => {
       return "Suspended";
     };
 
-    const screen = await act(() =>
-      render(<TestComponent agent={agentA} />, {
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentA} />, {
         wrapper: ({ children }) => (
           <StrictMode>
             <Suspense fallback={<SuspenseObserver />}>{children}</Suspense>
           </StrictMode>
         )
-      })
-    );
+      });
+
+      await sleep(10);
+      return screen;
+    });
 
     await expect
       .element(screen.getByTestId("messages"))
@@ -145,7 +154,10 @@ describe("useAgentChat", () => {
 
     suspenseRendered.mockClear();
 
-    await act(() => screen.rerender(<TestComponent agent={agentB} />));
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentB} />);
+      await sleep(10);
+    });
 
     await expect
       .element(screen.getByTestId("messages"))
@@ -219,7 +231,7 @@ describe("useAgentChat", () => {
         _options: PrepareSendMessagesRequestOptions<UIMessage>
       ): Promise<PrepareSendMessagesRequestResult> => {
         // Simulate async operation like fetching tool definitions
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await sleep(10);
         return {
           body: {
             clientTools: [
@@ -475,25 +487,23 @@ describe("useAgentChat client-side tool execution (issue #728)", () => {
       );
     };
 
-    const screen = await act(() =>
-      render(<TestComponent />, {
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
         wrapper: ({ children }) => (
           <StrictMode>
             <Suspense fallback="Loading...">{children}</Suspense>
           </StrictMode>
         )
-      })
-    );
+      });
+      // The tool should have been automatically executed
+      await sleep(10);
+      return screen;
+    });
 
     // Wait for initial messages to load
     await expect
       .element(screen.getByTestId("messages-count"))
       .toHaveTextContent("2");
-
-    // The tool should have been automatically executed
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    });
 
     // Verify the tool execute was called
     expect(mockExecute).toHaveBeenCalled();
@@ -574,15 +584,17 @@ describe("useAgentChat client-side tool execution (issue #728)", () => {
       );
     };
 
-    const screen = await act(() =>
-      render(<TestComponent />, {
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
         wrapper: ({ children }) => (
           <StrictMode>
             <Suspense fallback="Loading...">{children}</Suspense>
           </StrictMode>
         )
-      })
-    );
+      });
+      await sleep(10);
+      return screen;
+    });
 
     await expect
       .element(screen.getByTestId("messages-count"))
