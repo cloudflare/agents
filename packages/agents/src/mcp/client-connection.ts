@@ -663,9 +663,21 @@ export class MCPClientConnection {
   }
 
   private _capabilityErrorHandler<T>(empty: T, method: string) {
-    return (e: { code: number }) => {
+    return (e: unknown) => {
       // server is badly behaved and returning invalid capabilities. This commonly occurs for resource templates
-      if (e.code === -32601) {
+      // Check both the error code property and the error message for -32601 (Method not found)
+      const errorCode =
+        e &&
+        typeof e === "object" &&
+        "code" in e &&
+        typeof (e as { code: unknown }).code === "number"
+          ? (e as { code: number }).code
+          : undefined;
+      const errorMessage = toErrorMessage(e);
+      const isMethodNotFound =
+        errorCode === -32601 || errorMessage.includes('"code":-32601');
+
+      if (isMethodNotFound) {
         const url = this.url.toString();
         this._onObservabilityEvent.fire({
           type: "mcp:client:discover",
@@ -673,7 +685,7 @@ export class MCPClientConnection {
           payload: {
             url,
             capability: method.split("/")[0],
-            error: toErrorMessage(e)
+            error: errorMessage
           },
           timestamp: Date.now(),
           id: nanoid()
