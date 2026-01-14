@@ -1304,12 +1304,24 @@ export class Agent<
         if (row.type === "cron") {
           if (this._destroyed) return;
           // Update next execution time for cron schedules
-          const nextExecutionTime = getNextCronTime(row.cron);
-          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
+          try {
+            const nextExecutionTime = getNextCronTime(row.cron);
+            const nextTimestamp = Math.floor(
+              nextExecutionTime.getTime() / 1000
+            );
 
-          this.sql`
-          UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-        `;
+            this.sql`
+              UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
+            `;
+          } catch (e) {
+            console.error(
+              `invalid cron expression "${row.cron}" for schedule ${row.id}`,
+              e
+            );
+            this.sql`
+              DELETE FROM cf_agents_schedules WHERE id = ${row.id}
+            `;
+          }
         } else {
           if (this._destroyed) return;
           // Delete one-time schedules after execution
