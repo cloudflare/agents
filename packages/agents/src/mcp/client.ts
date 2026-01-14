@@ -941,8 +941,12 @@ export class MCPClientManager {
                 serverId: tool.serverId
               });
               if (result.isError) {
-                // @ts-expect-error TODO we should fix this
-                throw new Error(result.content[0].text);
+                const textContent = result.content[0];
+                const message =
+                  textContent?.type === "text"
+                    ? textContent.text
+                    : "Tool call failed";
+                throw new Error(message);
               }
               return result;
             },
