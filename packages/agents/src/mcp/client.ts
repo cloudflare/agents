@@ -941,9 +941,12 @@ export class MCPClientManager {
                 serverId: tool.serverId
               });
               if (result.isError) {
-                const textContent = result.content[0];
+                const content = result.content as
+                  | Array<{ type: string; text?: string }>
+                  | undefined;
+                const textContent = content?.[0];
                 const message =
-                  textContent?.type === "text"
+                  textContent?.type === "text" && textContent.text
                     ? textContent.text
                     : "Tool call failed";
                 throw new Error(message);
