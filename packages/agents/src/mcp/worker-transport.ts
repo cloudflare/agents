@@ -10,7 +10,8 @@ import type {
   JSONRPCMessage,
   RequestId,
   RequestInfo,
-  MessageExtraInfo
+  MessageExtraInfo,
+  ClientCapabilities
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   isInitializeRequest,
@@ -27,6 +28,7 @@ import type {
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
+const RESTORE_REQUEST_ID = "__restore__";
 
 interface StreamMapping {
   writer?: WritableStreamDefaultWriter<Uint8Array>;
@@ -43,6 +45,11 @@ export interface MCPStorageApi {
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
+  initializeParams?: {
+    capabilities: ClientCapabilities;
+    clientInfo: { name: string; version: string };
+    protocolVersion: string;
+  };
 }
 
 export interface WorkerTransportOptions {
@@ -99,6 +106,7 @@ export class WorkerTransport implements Transport {
   private stateRestored = false;
   private eventStore?: EventStore;
   private retryInterval?: number;
+  private initializeParams?: TransportState["initializeParams"];
 
   sessionId?: string;
   onclose?: () => void;
@@ -130,6 +138,16 @@ export class WorkerTransport implements Transport {
     if (state) {
       this.sessionId = state.sessionId;
       this.initialized = state.initialized;
+
+      // Restore _clientCapabilities on the Server instance by replaying the original initialize request
+      if (state.initializeParams && this.onmessage) {
+        this.onmessage({
+          jsonrpc: "2.0",
+          id: RESTORE_REQUEST_ID,
+          method: "initialize",
+          params: state.initializeParams
+        });
+      }
     }
 
     this.stateRestored = true;
@@ -145,7 +163,8 @@ export class WorkerTransport implements Transport {
 
     const state: TransportState = {
       sessionId: this.sessionId,
-      initialized: this.initialized
+      initialized: this.initialized,
+      initializeParams: this.initializeParams
     };
 
     await Promise.resolve(this.storage.set(state));
@@ -538,6 +557,23 @@ export class WorkerTransport implements Transport {
 
       this.sessionId = this.sessionIdGenerator?.();
       this.initialized = true;
+
+      const initMessage = messages.find(isInitializeRequest);
+      if (initMessage && "params" in initMessage) {
+        const params = initMessage.params as {
+          capabilities?: ClientCapabilities;
+          clientInfo?: { name: string; version: string };
+          protocolVersion?: string;
+        };
+        if (params.capabilities && params.clientInfo && params.protocolVersion) {
+          this.initializeParams = {
+            capabilities: params.capabilities,
+            clientInfo: params.clientInfo,
+            protocolVersion: params.protocolVersion
+          };
+        }
+      }
+
       await this.saveState();
 
       if (this.sessionId && this.onsessioninitialized) {
@@ -800,6 +836,10 @@ export class WorkerTransport implements Transport {
     // Then override with message.id for responses/errors
     if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       requestId = message.id;
+    }
+
+    if (requestId === RESTORE_REQUEST_ID) {
+      return;
     }
 
     if (requestId === undefined) {
