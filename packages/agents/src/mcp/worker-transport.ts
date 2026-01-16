@@ -11,7 +11,7 @@ import type {
   RequestId,
   RequestInfo,
   MessageExtraInfo,
-  ClientCapabilities
+  InitializeRequestParams
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   isInitializeRequest,
@@ -45,11 +45,7 @@ export interface MCPStorageApi {
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
-  initializeParams?: {
-    capabilities: ClientCapabilities;
-    clientInfo: { name: string; version: string };
-    protocolVersion: string;
-  };
+  initializeParams?: InitializeRequestParams;
 }
 
 export interface WorkerTransportOptions {
@@ -559,19 +555,12 @@ export class WorkerTransport implements Transport {
       this.initialized = true;
 
       const initMessage = messages.find(isInitializeRequest);
-      if (initMessage && "params" in initMessage) {
-        const params = initMessage.params as {
-          capabilities?: ClientCapabilities;
-          clientInfo?: { name: string; version: string };
-          protocolVersion?: string;
+      if (initMessage && isInitializeRequest(initMessage)) {
+        this.initializeParams = {
+          capabilities: initMessage.params.capabilities,
+          clientInfo: initMessage.params.clientInfo,
+          protocolVersion: initMessage.params.protocolVersion
         };
-        if (params.capabilities && params.clientInfo && params.protocolVersion) {
-          this.initializeParams = {
-            capabilities: params.capabilities,
-            clientInfo: params.clientInfo,
-            protocolVersion: params.protocolVersion
-          };
-        }
       }
 
       await this.saveState();
