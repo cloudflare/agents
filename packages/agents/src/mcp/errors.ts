@@ -2,7 +2,7 @@ export function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function getErrorCode(error: unknown): number | undefined {
+export function getErrorCode(error: unknown): number | undefined {
   if (
     error &&
     typeof error === "object" &&
