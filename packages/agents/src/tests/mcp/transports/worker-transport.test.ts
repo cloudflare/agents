@@ -902,7 +902,9 @@ describe("WorkerTransport", () => {
       expect(response.status).toBe(200);
       expect(storedState).toBeDefined();
       expect(storedState?.initializeParams).toBeDefined();
-      expect(storedState?.initializeParams?.capabilities?.elicitation?.form).toBeDefined();
+      expect(
+        storedState?.initializeParams?.capabilities?.elicitation?.form
+      ).toBeDefined();
       expect(storedState?.initializeParams?.clientInfo).toEqual({
         name: "test-client",
         version: "1.0"
@@ -950,7 +952,9 @@ describe("WorkerTransport", () => {
       await transport1.handleRequest(initRequest);
 
       // Verify server1 has capabilities
-      expect(server1.server.getClientCapabilities()?.elicitation?.form).toBeDefined();
+      expect(
+        server1.server.getClientCapabilities()?.elicitation?.form
+      ).toBeDefined();
 
       // Phase 2: Simulate serverless restart with NEW instances
       const server2 = createTestServer();
@@ -981,7 +985,9 @@ describe("WorkerTransport", () => {
       // Verify capabilities were restored on server2
       expect(transport2.sessionId).toBe("test-session");
       expect(server2.server.getClientCapabilities()).toBeDefined();
-      expect(server2.server.getClientCapabilities()?.elicitation?.form).toBeDefined();
+      expect(
+        server2.server.getClientCapabilities()?.elicitation?.form
+      ).toBeDefined();
     });
 
     it("should restore clientInfo on Server instance after restart", async () => {
