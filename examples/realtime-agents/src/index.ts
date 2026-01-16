@@ -14,10 +14,7 @@ import { env } from "cloudflare:workers";
 
 const GATEWAY_ID = "aig-worker-testing";
 
-export class RealtimeVoiceAgent
-  extends RealtimeAgent
-  implements RealtimePipelineComponent
-{
+export class RealtimeVoiceAgent extends RealtimeAgent {
   constructor(ctx: AgentContext, env: Env) {
     const rtk = new RealtimeKitTransport({
       meetingId: "bbb9e53e-c839-4c84-b0cd-b8ef18ed8da2"
@@ -57,14 +54,6 @@ export class RealtimeVoiceAgent
 
   async startPipeline() {
     await this.startRealtimePipeline();
-  }
-
-  input_kind(): DataKind {
-    return DataKind.Text;
-  }
-
-  output_kind(): DataKind {
-    return DataKind.Text;
   }
 }
 
