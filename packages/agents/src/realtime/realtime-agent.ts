@@ -16,6 +16,7 @@ import {
 } from "./utils";
 import { RealtimeAPI } from "./api";
 import {
+  DataKind,
   RealtimeKitTransport,
   type RealtimePipelineComponent
 } from "./components";
@@ -39,10 +40,10 @@ export type RealtimeSnapshot = {
   flowId?: string;
 };
 
-export class RealtimeAgent<Env = unknown, State = unknown> extends Agent<
-  Env,
-  State
-> {
+export class RealtimeAgent<Env = unknown, State = unknown>
+  extends Agent<Env, State>
+  implements RealtimePipelineComponent
+{
   public pipelineState: RealtimeState = "idle";
   private api: RealtimeAPI;
   private pipeline: RealtimePipelineComponent[] = [];
@@ -629,7 +630,7 @@ export class RealtimeAgent<Env = unknown, State = unknown> extends Agent<
   override getConnectionTags(
     connection: Connection,
     ctx: ConnectionContext
-  ): string[] {
+  ): string[] | Promise<string[]> {
     if (ctx.request.url.endsWith("/realtime/ws")) {
       return [REALTIME_WS_TAG];
     }
@@ -669,5 +670,19 @@ export class RealtimeAgent<Env = unknown, State = unknown> extends Agent<
     }
     if (connCount === 0)
       throw new Error("no connections to realtime agent found");
+  }
+
+  input_kind(): DataKind {
+    return DataKind.Text;
+  }
+
+  output_kind(): DataKind {
+    return DataKind.Text;
+  }
+  schema() {
+    return {
+      name: "agent",
+      type: "websocket"
+    };
   }
 }
