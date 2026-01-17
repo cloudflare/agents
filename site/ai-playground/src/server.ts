@@ -75,8 +75,9 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
             status: 200
           });
         }
+        const safeError = JSON.stringify(result.authError || "Unknown error");
         return new Response(
-          `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
+          `<script>alert('Authentication failed: ' + ${safeError}); window.close();</script>`,
           {
             headers: { "content-type": "text/html" },
             status: 200
