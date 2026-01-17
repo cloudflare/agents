@@ -1,5 +1,16 @@
 # @cloudflare/agents
 
+## 0.3.6
+
+### Patch Changes
+
+- [#786](https://github.com/cloudflare/agents/pull/786) [`395f461`](https://github.com/cloudflare/agents/commit/395f46105d3affb5a2e2ffd28c516a0eefe45bb4) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - fix: allow callable methods to return this.state
+
+- [#783](https://github.com/cloudflare/agents/pull/783) [`f27e62c`](https://github.com/cloudflare/agents/commit/f27e62c24f586abb285843db183198230ddd47ca) Thanks [@Muhammad-Bin-Ali](https://github.com/Muhammad-Bin-Ali)! - fix saving initialize params for stateless MCP server (effects eliciations and other optional features)
+
+- Updated dependencies [[`93c613e`](https://github.com/cloudflare/agents/commit/93c613e077e7aa16e78cf9b0b53e285577e92ce5)]:
+  - @cloudflare/codemode@0.0.5
+
 ## 0.3.5
 
 ### Patch Changes

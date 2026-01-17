@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -51,7 +51,7 @@
     "@ai-sdk/openai": "^3.0.0",
     "@ai-sdk/react": "^3.0.0",
     "@cloudflare/ai-chat": "^0.0.4",
-    "@cloudflare/codemode": "^0.0.4",
+    "@cloudflare/codemode": "^0.0.5",
     "ai": "^6.0.0",
     "react": "^19.0.0",
     "viem": ">=2.0.0",
