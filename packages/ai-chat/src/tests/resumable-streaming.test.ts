@@ -237,6 +237,84 @@ describe("Resumable Streaming", () => {
       ws2.close();
     });
 
+    it("does not deliver live chunks before ACK to resuming connections", async () => {
+      const room = crypto.randomUUID();
+
+      // First connection - start a stream
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages1 = collectMessages(ws1);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = env.TestChatAgent.get(
+        env.TestChatAgent.idFromName(room)
+      );
+      const streamId = await agentStub.testStartStream("req-live");
+
+      // Second connection - will be notified to resume
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Broadcast a live chunk while ws2 is pending resume (no ACK yet)
+      await agentStub.testBroadcastLiveChunk(
+        "req-live",
+        streamId,
+        '{"type":"text-delta","id":"0","delta":"A"}'
+      );
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      // ws2 should NOT receive live chunks before ACK
+      const preAckChunks = messages2.filter(isUseChatResponseMessage);
+      expect(preAckChunks.length).toBe(0);
+
+      // ws1 should receive the live chunk
+      const ws1Chunks = messages1.filter(isUseChatResponseMessage);
+      expect(ws1Chunks.length).toBe(1);
+      expect(ws1Chunks[0].body).toBe(
+        '{"type":"text-delta","id":"0","delta":"A"}'
+      );
+
+      // Send ACK to resume
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: "req-live"
+        })
+      );
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      // After ACK, ws2 should receive the replayed chunk
+      const postAckChunks = messages2.filter(isUseChatResponseMessage);
+      expect(postAckChunks.length).toBeGreaterThanOrEqual(1);
+      expect(postAckChunks[0].body).toBe(
+        '{"type":"text-delta","id":"0","delta":"A"}'
+      );
+
+      // Live chunks after ACK should be delivered
+      await agentStub.testBroadcastLiveChunk(
+        "req-live",
+        streamId,
+        '{"type":"text-delta","id":"0","delta":"B"}'
+      );
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      const finalChunks = messages2.filter(isUseChatResponseMessage);
+      expect(finalChunks.some((m) => m.body?.includes('"delta":"B"'))).toBe(
+        true
+      );
+
+      ws1.close();
+      ws2.close();
+    });
+
     it("ignores ACK with wrong request ID", async () => {
       const room = crypto.randomUUID();
 

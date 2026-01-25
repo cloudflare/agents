@@ -235,6 +235,14 @@ export class AIChatAgent<
    */
   private _lastCleanupTime = 0;
 
+  /**
+   * Set of connection IDs that are pending stream resume.
+   * These connections have received CF_AGENT_STREAM_RESUMING but haven't sent ACK yet.
+   * They should be excluded from live stream broadcasts until they ACK.
+   * @internal
+   */
+  private _pendingResumeConnections: Set<string> = new Set();
+
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
 
@@ -284,6 +292,20 @@ export class AIChatAgent<
       }
       // Call consumer's onConnect
       return _onConnect(connection, ctx);
+    };
+
+    // Wrap onClose to clean up pending resume connections
+    const _onClose = this.onClose.bind(this);
+    this.onClose = async (
+      connection: Connection,
+      code: number,
+      reason: string,
+      wasClean: boolean
+    ) => {
+      // Clean up pending resume state for this connection
+      this._pendingResumeConnections.delete(connection.id);
+      // Call consumer's onClose
+      return _onClose(connection, code, reason, wasClean);
     };
 
     // Wrap onMessage
@@ -395,6 +417,7 @@ export class AIChatAgent<
           this._activeStreamId = null;
           this._activeRequestId = null;
           this._streamChunkIndex = 0;
+          this._pendingResumeConnections.clear();
           this.messages = [];
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
@@ -418,6 +441,8 @@ export class AIChatAgent<
 
         // Handle stream resume acknowledgment
         if (data.type === MessageType.CF_AGENT_STREAM_RESUME_ACK) {
+          this._pendingResumeConnections.delete(connection.id);
+
           if (
             this._activeStreamId &&
             this._activeRequestId &&
@@ -574,6 +599,10 @@ export class AIChatAgent<
       return;
     }
 
+    // Add connection to pending set - they'll be excluded from live broadcasts
+    // until they send ACK to receive the full stream replay
+    this._pendingResumeConnections.add(connection.id);
+
     // Notify client - they will send ACK when ready
     connection.send(
       JSON.stringify({
@@ -726,6 +755,9 @@ export class AIChatAgent<
     this._activeRequestId = null;
     this._streamChunkIndex = 0;
 
+    // Clear pending resume connections - no active stream to resume
+    this._pendingResumeConnections.clear();
+
     // Periodically clean up old streams (not on every completion)
     this._maybeCleanupOldStreams();
   }
@@ -756,7 +788,14 @@ export class AIChatAgent<
   }
 
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
-    this.broadcast(JSON.stringify(message), exclude);
+    // Combine explicit exclusions with connections pending stream resume.
+    // Pending connections should not receive live stream chunks until they ACK,
+    // at which point they'll receive the full replay via _sendStreamChunks.
+    const allExclusions = [
+      ...(exclude || []),
+      ...this._pendingResumeConnections
+    ];
+    this.broadcast(JSON.stringify(message), allExclusions);
   }
 
   /**
