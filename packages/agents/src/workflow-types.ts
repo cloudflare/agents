@@ -13,6 +13,8 @@ export type AgentWorkflowInternalParams = {
   __agentName: string;
   /** Environment binding name for the Agent's namespace */
   __agentBinding: string;
+  /** Workflow binding name (for callbacks) */
+  __workflowName: string;
 };
 
 /**
@@ -29,6 +31,8 @@ export type WorkflowCallbackType = "progress" | "complete" | "error" | "event";
  * Base callback structure sent from Workflow to Agent
  */
 export type WorkflowCallbackBase = {
+  /** Workflow binding name */
+  workflowName: string;
   /** ID of the workflow instance */
   workflowId: string;
   /** Type of callback */
@@ -110,10 +114,8 @@ export type WorkflowTrackingRow = {
   workflow_name: string;
   /** Current workflow status */
   status: WorkflowStatus;
-  /** JSON-serialized params passed to workflow */
-  params: string | null;
-  /** JSON-serialized output from workflow */
-  output: string | null;
+  /** JSON-serialized metadata for querying */
+  metadata: string | null;
   /** Error name if workflow failed */
   error_name: string | null;
   /** Error message if workflow failed */
@@ -132,6 +134,8 @@ export type WorkflowTrackingRow = {
 export type RunWorkflowOptions = {
   /** Custom workflow instance ID (auto-generated if not provided) */
   id?: string;
+  /** Optional metadata for querying (stored as JSON) */
+  metadata?: Record<string, unknown>;
 };
 
 /**
@@ -147,7 +151,7 @@ export type WorkflowEventPayload = {
 /**
  * Parsed workflow tracking info returned by getWorkflow()
  */
-export type WorkflowInfo<Params = unknown> = {
+export type WorkflowInfo = {
   /** Internal row ID */
   id: string;
   /** Cloudflare Workflow instance ID */
@@ -156,10 +160,8 @@ export type WorkflowInfo<Params = unknown> = {
   workflowName: string;
   /** Current workflow status */
   status: WorkflowStatus;
-  /** Params passed to workflow (parsed) */
-  params: Params | null;
-  /** Output from workflow (parsed) */
-  output: unknown | null;
+  /** Metadata (parsed from JSON) */
+  metadata: Record<string, unknown> | null;
   /** Error info if workflow failed */
   error: { name: string; message: string } | null;
   /** When workflow was created */
@@ -176,8 +178,10 @@ export type WorkflowInfo<Params = unknown> = {
 export type WorkflowQueryCriteria = {
   /** Filter by status */
   status?: WorkflowStatus | WorkflowStatus[];
-  /** Filter by workflow name */
+  /** Filter by workflow binding name */
   workflowName?: string;
+  /** Filter by metadata key-value pairs (exact match) */
+  metadata?: Record<string, string | number | boolean>;
   /** Limit number of results */
   limit?: number;
   /** Order by created_at */

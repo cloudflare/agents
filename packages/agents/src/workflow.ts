@@ -61,6 +61,11 @@ export class AgentWorkflow<
    */
   private _workflowId!: string;
 
+  /**
+   * Workflow binding name (for callbacks)
+   */
+  private _workflowName!: string;
+
   constructor(ctx: ExecutionContext, env: Env) {
     super(ctx, env);
 
@@ -87,16 +92,17 @@ export class AgentWorkflow<
   private async _initAgent(
     event: WorkflowEvent<AgentWorkflowParams<Params>>
   ): Promise<void> {
-    const { __agentName, __agentBinding } = event.payload;
+    const { __agentName, __agentBinding, __workflowName } = event.payload;
 
-    if (!__agentName || !__agentBinding) {
+    if (!__agentName || !__agentBinding || !__workflowName) {
       throw new Error(
-        "AgentWorkflow requires __agentName and __agentBinding in params. " +
+        "AgentWorkflow requires __agentName, __agentBinding, and __workflowName in params. " +
           "Use agent.runWorkflow() to start workflows with proper agent context."
       );
     }
 
     this._workflowId = event.instanceId;
+    this._workflowName = __workflowName;
 
     // Get the Agent namespace from env
     const namespace = (this.env as Record<string, unknown>)[
@@ -141,6 +147,13 @@ export class AgentWorkflow<
    */
   get workflowId(): string {
     return this._workflowId;
+  }
+
+  /**
+   * Get the workflow binding name
+   */
+  get workflowName(): string {
+    return this._workflowName;
   }
 
   /**
@@ -191,6 +204,7 @@ export class AgentWorkflow<
     message?: string
   ): Promise<void> {
     await this.notifyAgent({
+      workflowName: this._workflowName,
       workflowId: this._workflowId,
       type: "progress",
       progress,
@@ -202,11 +216,16 @@ export class AgentWorkflow<
   /**
    * Report successful completion to the Agent.
    * Triggers onWorkflowComplete() on the Agent.
+   * Automatically reports progress as 1.0 before completing.
    *
    * @param result - Optional result data
    */
   protected async reportComplete<T = unknown>(result?: T): Promise<void> {
+    // Auto-set progress to 1.0 on completion
+    await this.reportProgress(1.0, "Complete");
+
     await this.notifyAgent({
+      workflowName: this._workflowName,
       workflowId: this._workflowId,
       type: "complete",
       result,
@@ -223,6 +242,7 @@ export class AgentWorkflow<
   protected async reportError(error: Error | string): Promise<void> {
     const errorMessage = error instanceof Error ? error.message : error;
     await this.notifyAgent({
+      workflowName: this._workflowName,
       workflowId: this._workflowId,
       type: "error",
       error: errorMessage,
@@ -238,6 +258,7 @@ export class AgentWorkflow<
    */
   protected async sendEvent<T = unknown>(event: T): Promise<void> {
     await this.notifyAgent({
+      workflowName: this._workflowName,
       workflowId: this._workflowId,
       type: "event",
       event,
@@ -274,7 +295,8 @@ export class AgentWorkflow<
   protected getUserParams(
     event: WorkflowEvent<AgentWorkflowParams<Params>>
   ): Params {
-    const { __agentName, __agentBinding, ...userParams } = event.payload;
+    const { __agentName, __agentBinding, __workflowName, ...userParams } =
+      event.payload;
     return userParams as unknown as Params;
   }
 }

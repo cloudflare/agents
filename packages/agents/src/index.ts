@@ -479,8 +479,7 @@ export class Agent<
           'terminated', 'complete', 'waiting',
           'waitingForPause', 'unknown'
         )),
-        params TEXT,
-        output TEXT,
+        metadata TEXT,
         error_name TEXT,
         error_message TEXT,
         created_at INTEGER NOT NULL DEFAULT (unixepoch()),
@@ -1443,8 +1442,8 @@ export class Agent<
     options?: RunWorkflowOptions
   ): Promise<string> {
     // Find the binding name for this workflow
-    const bindingName = this._findWorkflowBindingName(workflow);
-    if (!bindingName) {
+    const workflowName = this._findWorkflowBindingName(workflow);
+    if (!workflowName) {
       throw new Error("Could not find workflow binding name in environment");
     }
 
@@ -1457,11 +1456,12 @@ export class Agent<
     // Generate workflow ID if not provided
     const workflowId = options?.id ?? nanoid();
 
-    // Inject agent identity into params
+    // Inject agent identity and workflow name into params
     const augmentedParams = {
       ...params,
       __agentName: this.name,
-      __agentBinding: agentBindingName
+      __agentBinding: agentBindingName,
+      __workflowName: workflowName
     };
 
     // Create the workflow instance
@@ -1472,9 +1472,12 @@ export class Agent<
 
     // Track the workflow in our database
     const id = nanoid();
+    const metadataJson = options?.metadata
+      ? JSON.stringify(options.metadata)
+      : null;
     this.sql`
-      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, params)
-      VALUES (${id}, ${instance.id}, ${bindingName}, 'queued', ${JSON.stringify(params)})
+      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
+      VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
     `;
 
     this.observability?.emit(
@@ -1483,7 +1486,7 @@ export class Agent<
         id: nanoid(),
         payload: {
           workflowId: instance.id,
-          workflowName: bindingName
+          workflowName: workflowName
         },
         timestamp: Date.now(),
         type: "workflow:start"
@@ -1557,11 +1560,10 @@ export class Agent<
   /**
    * Get a tracked workflow by ID.
    *
-   * @template P - Type of params
    * @param workflowId - Workflow instance ID
    * @returns Workflow info or undefined if not found
    */
-  getWorkflow<P = unknown>(workflowId: string): WorkflowInfo<P> | undefined {
+  getWorkflow(workflowId: string): WorkflowInfo | undefined {
     const rows = this.sql<WorkflowTrackingRow>`
       SELECT * FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
     `;
@@ -1570,21 +1572,18 @@ export class Agent<
       return undefined;
     }
 
-    return this._rowToWorkflowInfo<P>(rows[0]);
+    return this._rowToWorkflowInfo(rows[0]);
   }
 
   /**
    * Query tracked workflows.
    *
-   * @template P - Type of params
    * @param criteria - Query criteria
    * @returns Array of workflow info
    */
-  getWorkflows<P = unknown>(
-    criteria: WorkflowQueryCriteria = {}
-  ): WorkflowInfo<P>[] {
+  getWorkflows(criteria: WorkflowQueryCriteria = {}): WorkflowInfo[] {
     let query = "SELECT * FROM cf_agents_workflows WHERE 1=1";
-    const params: (string | number)[] = [];
+    const params: (string | number | boolean)[] = [];
 
     if (criteria.status) {
       const statuses = Array.isArray(criteria.status)
@@ -1600,6 +1599,14 @@ export class Agent<
       params.push(criteria.workflowName);
     }
 
+    // Filter by metadata key-value pairs using json_extract
+    if (criteria.metadata) {
+      for (const [key, value] of Object.entries(criteria.metadata)) {
+        query += ` AND json_extract(metadata, '$.${key}') = ?`;
+        params.push(value);
+      }
+    }
+
     query += ` ORDER BY created_at ${criteria.orderBy === "asc" ? "ASC" : "DESC"}`;
 
     if (criteria.limit) {
@@ -1611,7 +1618,7 @@ export class Agent<
       .exec(query, ...params)
       .toArray() as WorkflowTrackingRow[];
 
-    return rows.map((row) => this._rowToWorkflowInfo<P>(row));
+    return rows.map((row) => this._rowToWorkflowInfo(row));
   }
 
   /**
@@ -1636,14 +1643,9 @@ export class Agent<
     const errorName = status.error?.name ?? null;
     const errorMessage = status.error?.message ?? null;
 
-    // Extract output if present
-    const output =
-      status.output !== undefined ? JSON.stringify(status.output) : null;
-
     this.sql`
       UPDATE cf_agents_workflows
       SET status = ${statusName},
-          output = ${output},
           error_name = ${errorName},
           error_message = ${errorMessage},
           updated_at = ${now},
@@ -1655,14 +1657,13 @@ export class Agent<
   /**
    * Convert a database row to WorkflowInfo
    */
-  private _rowToWorkflowInfo<P>(row: WorkflowTrackingRow): WorkflowInfo<P> {
+  private _rowToWorkflowInfo(row: WorkflowTrackingRow): WorkflowInfo {
     return {
       id: row.id,
       workflowId: row.workflow_id,
       workflowName: row.workflow_name,
       status: row.status,
-      params: row.params ? JSON.parse(row.params) : null,
-      output: row.output ? JSON.parse(row.output) : null,
+      metadata: row.metadata ? JSON.parse(row.metadata) : null,
       error: row.error_name
         ? { name: row.error_name, message: row.error_message ?? "" }
         : null,
@@ -1742,19 +1743,32 @@ export class Agent<
     switch (callback.type) {
       case "progress":
         await this.onWorkflowProgress(
+          callback.workflowName,
           callback.workflowId,
           callback.progress,
           callback.message
         );
         break;
       case "complete":
-        await this.onWorkflowComplete(callback.workflowId, callback.result);
+        await this.onWorkflowComplete(
+          callback.workflowName,
+          callback.workflowId,
+          callback.result
+        );
         break;
       case "error":
-        await this.onWorkflowError(callback.workflowId, callback.error);
+        await this.onWorkflowError(
+          callback.workflowName,
+          callback.workflowId,
+          callback.error
+        );
         break;
       case "event":
-        await this.onWorkflowEvent(callback.workflowId, callback.event);
+        await this.onWorkflowEvent(
+          callback.workflowName,
+          callback.workflowId,
+          callback.event
+        );
         break;
     }
   }
@@ -1763,11 +1777,13 @@ export class Agent<
    * Called when a workflow reports progress.
    * Override to handle progress updates.
    *
+   * @param workflowName - Workflow binding name
    * @param workflowId - ID of the workflow
    * @param progress - Progress value (0-1)
    * @param message - Optional progress message
    */
   async onWorkflowProgress(
+    _workflowName: string,
     _workflowId: string,
     _progress: number,
     _message?: string
@@ -1779,10 +1795,12 @@ export class Agent<
    * Called when a workflow completes successfully.
    * Override to handle completion.
    *
+   * @param workflowName - Workflow binding name
    * @param workflowId - ID of the workflow
    * @param result - Optional result data
    */
   async onWorkflowComplete(
+    _workflowName: string,
     _workflowId: string,
     _result?: unknown
   ): Promise<void> {
@@ -1793,10 +1811,15 @@ export class Agent<
    * Called when a workflow encounters an error.
    * Override to handle errors.
    *
+   * @param workflowName - Workflow binding name
    * @param workflowId - ID of the workflow
    * @param error - Error message
    */
-  async onWorkflowError(_workflowId: string, _error: string): Promise<void> {
+  async onWorkflowError(
+    _workflowName: string,
+    _workflowId: string,
+    _error: string
+  ): Promise<void> {
     // Override to handle errors
   }
 
@@ -1804,10 +1827,15 @@ export class Agent<
    * Called when a workflow sends a custom event.
    * Override to handle custom events.
    *
+   * @param workflowName - Workflow binding name
    * @param workflowId - ID of the workflow
    * @param event - Custom event payload
    */
-  async onWorkflowEvent(_workflowId: string, _event: unknown): Promise<void> {
+  async onWorkflowEvent(
+    _workflowName: string,
+    _workflowId: string,
+    _event: unknown
+  ): Promise<void> {
     // Override to handle custom events
   }
 

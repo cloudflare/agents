@@ -14,9 +14,14 @@ import {
   routeAgentRequest,
   type AgentEmail,
   type Connection,
-  type WSMessage
+  type WSMessage,
+  type WorkflowStatus,
+  type WorkflowInfo
 } from "../index.ts";
 import type { MCPClientConnection } from "../mcp/client-connection";
+
+// Re-export test workflows for wrangler
+export { TestProcessingWorkflow, SimpleTestWorkflow } from "./test-workflow";
 
 export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
@@ -28,6 +33,9 @@ export type Env = {
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
+  // Workflow bindings for integration testing
+  TEST_WORKFLOW: Workflow;
+  SIMPLE_WORKFLOW: Workflow;
 };
 
 type State = unknown;
@@ -334,95 +342,110 @@ export class TestWorkflowAgent extends Agent<Env> {
   // Track callbacks received for testing
   private _callbacksReceived: Array<{
     type: string;
+    workflowName: string;
     workflowId: string;
     data: unknown;
   }> = [];
 
-  @callable()
-  getCallbacksReceived() {
+  getCallbacksReceived(): Array<{
+    type: string;
+    workflowName: string;
+    workflowId: string;
+    data: unknown;
+  }> {
     return this._callbacksReceived;
   }
 
-  @callable()
-  clearCallbacks() {
+  clearCallbacks(): void {
     this._callbacksReceived = [];
   }
 
   // Override lifecycle callbacks to track them
   async onWorkflowProgress(
+    workflowName: string,
     workflowId: string,
     progress: number,
     message?: string
   ): Promise<void> {
     this._callbacksReceived.push({
       type: "progress",
+      workflowName,
       workflowId,
       data: { progress, message }
     });
   }
 
   async onWorkflowComplete(
+    workflowName: string,
     workflowId: string,
     result?: unknown
   ): Promise<void> {
     this._callbacksReceived.push({
       type: "complete",
+      workflowName,
       workflowId,
       data: { result }
     });
   }
 
-  async onWorkflowError(workflowId: string, error: string): Promise<void> {
+  async onWorkflowError(
+    workflowName: string,
+    workflowId: string,
+    error: string
+  ): Promise<void> {
     this._callbacksReceived.push({
       type: "error",
+      workflowName,
       workflowId,
       data: { error }
     });
   }
 
-  async onWorkflowEvent(workflowId: string, event: unknown): Promise<void> {
+  async onWorkflowEvent(
+    workflowName: string,
+    workflowId: string,
+    event: unknown
+  ): Promise<void> {
     this._callbacksReceived.push({
       type: "event",
+      workflowName,
       workflowId,
       data: { event }
     });
   }
 
   // Test helper to insert a workflow tracking record directly
-  @callable()
   async insertTestWorkflow(
     workflowId: string,
     workflowName: string,
     status: string,
-    params?: unknown
+    metadata?: Record<string, unknown>
   ): Promise<string> {
     const id = crypto.randomUUID();
     this.sql`
-      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, params)
-      VALUES (${id}, ${workflowId}, ${workflowName}, ${status}, ${params ? JSON.stringify(params) : null})
+      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
+      VALUES (${id}, ${workflowId}, ${workflowName}, ${status}, ${metadata ? JSON.stringify(metadata) : null})
     `;
     return id;
   }
 
   // Expose getWorkflow for testing
-  @callable()
-  async getWorkflowById(workflowId: string) {
-    return this.getWorkflow(workflowId);
+  async getWorkflowById(workflowId: string): Promise<WorkflowInfo | null> {
+    return this.getWorkflow(workflowId) ?? null;
   }
 
   // Expose getWorkflows for testing
-  @callable()
   async queryWorkflows(criteria?: {
-    status?: string | string[];
+    status?: WorkflowStatus | WorkflowStatus[];
     workflowName?: string;
+    metadata?: Record<string, string | number | boolean>;
     limit?: number;
     orderBy?: "asc" | "desc";
-  }) {
+  }): Promise<WorkflowInfo[]> {
     return this.getWorkflows(criteria);
   }
 
   // Test helper to update workflow status directly
-  @callable()
   async updateWorkflowStatus(
     workflowId: string,
     status: string
@@ -433,6 +456,57 @@ export class TestWorkflowAgent extends Agent<Env> {
       SET status = ${status}, updated_at = ${now}
       WHERE workflow_id = ${workflowId}
     `;
+  }
+
+  // Track workflow results for testing RPC calls from workflows
+  private _workflowResults: Array<{ taskId: string; result: unknown }> = [];
+
+  getWorkflowResults(): Array<{ taskId: string; result: unknown }> {
+    return this._workflowResults;
+  }
+
+  clearWorkflowResults(): void {
+    this._workflowResults = [];
+  }
+
+  // Called by workflows via RPC to record results
+  async recordWorkflowResult(taskId: string, result: unknown): Promise<void> {
+    this._workflowResults.push({ taskId, result });
+  }
+
+  // Start a workflow using the Agent's runWorkflow method
+  async runWorkflowTest(
+    workflowId: string,
+    params: { taskId: string; shouldFail?: boolean; waitForApproval?: boolean }
+  ): Promise<string> {
+    return this.runWorkflow(this.env.TEST_WORKFLOW, params, { id: workflowId });
+  }
+
+  // Start a simple workflow
+  async runSimpleWorkflowTest(
+    workflowId: string,
+    params: { value: string }
+  ): Promise<string> {
+    return this.runWorkflow(this.env.SIMPLE_WORKFLOW, params, {
+      id: workflowId
+    });
+  }
+
+  // Send an event to a workflow
+  async sendApprovalEvent(
+    workflowId: string,
+    approved: boolean,
+    reason?: string
+  ): Promise<void> {
+    await this.sendWorkflowEvent(this.env.TEST_WORKFLOW, workflowId, {
+      type: "approval",
+      payload: { approved, reason }
+    });
+  }
+
+  // Get workflow status from Cloudflare
+  async getCloudflareWorkflowStatus(workflowId: string) {
+    return this.getWorkflowStatus(this.env.TEST_WORKFLOW, workflowId);
   }
 }
 

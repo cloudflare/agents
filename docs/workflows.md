@@ -99,7 +99,7 @@ Use `runWorkflow()` to start a workflow with automatic tracking:
 // src/agent.ts
 import { Agent } from "agents";
 
-export class MyAgent extends Agent<Env> {
+export class MyAgent extends Agent {
   async startTask(taskId: string, data: string) {
     // Start workflow - automatically tracked in Agent's database
     const workflowId = await this.runWorkflow(this.env.PROCESSING_WORKFLOW, {
@@ -112,16 +112,20 @@ export class MyAgent extends Agent<Env> {
 
   // Called when workflow reports progress
   async onWorkflowProgress(
+    workflowName: string,
     workflowId: string,
     progress: number,
     message?: string
   ) {
-    console.log(`Workflow ${workflowId}: ${progress * 100}% - ${message}`);
+    console.log(
+      `Workflow ${workflowName}/${workflowId}: ${progress * 100}% - ${message}`
+    );
 
     // Broadcast to connected clients
     this.broadcast(
       JSON.stringify({
         type: "workflow-progress",
+        workflowName,
         workflowId,
         progress,
         message
@@ -130,8 +134,12 @@ export class MyAgent extends Agent<Env> {
   }
 
   // Called when workflow completes
-  async onWorkflowComplete(workflowId: string, result?: unknown) {
-    console.log(`Workflow ${workflowId} completed:`, result);
+  async onWorkflowComplete(
+    workflowName: string,
+    workflowId: string,
+    result?: unknown
+  ) {
+    console.log(`Workflow ${workflowName}/${workflowId} completed:`, result);
   }
 
   // Method called by workflow via RPC
@@ -180,19 +188,20 @@ Base class for Workflows that integrate with Agents.
 
 - `agent` - Typed stub for calling Agent methods via RPC
 - `workflowId` - The workflow instance ID
+- `workflowName` - The workflow binding name
 - `env` - Environment bindings
 
 **Methods:**
 
-| Method                               | Description                                   |
-| ------------------------------------ | --------------------------------------------- |
-| `reportProgress(progress, message?)` | Report progress (0-1) to the Agent            |
-| `reportComplete(result?)`            | Report successful completion                  |
-| `reportError(error)`                 | Report an error                               |
-| `sendEvent(event)`                   | Send a custom event to the Agent              |
-| `broadcastToClients(message)`        | Broadcast message to all WebSocket clients    |
-| `fetchAgent(path, init?)`            | Make HTTP request to the Agent                |
-| `getUserParams(event)`               | Extract user params (without internal params) |
+| Method                               | Description                                            |
+| ------------------------------------ | ------------------------------------------------------ |
+| `reportProgress(progress, message?)` | Report progress (0-1) to the Agent                     |
+| `reportComplete(result?)`            | Report successful completion (auto-sets progress to 1) |
+| `reportError(error)`                 | Report an error                                        |
+| `sendEvent(event)`                   | Send a custom event to the Agent                       |
+| `broadcastToClients(message)`        | Broadcast message to all WebSocket clients             |
+| `fetchAgent(path, init?)`            | Make HTTP request to the Agent                         |
+| `getUserParams(event)`               | Extract user params (without internal params)          |
 
 ### Agent Workflow Methods
 
@@ -206,7 +215,10 @@ Start a workflow and track it in the Agent's database.
 const workflowId = await this.runWorkflow(
   this.env.MY_WORKFLOW,
   { taskId: "123", data: "process this" },
-  { id: "custom-id" } // optional
+  {
+    id: "custom-id", // optional - auto-generated if not provided
+    metadata: { userId: "user-456", priority: "high" } // optional - for querying
+  }
 );
 ```
 
@@ -215,6 +227,7 @@ const workflowId = await this.runWorkflow(
 - `workflow` - Workflow binding from `env`
 - `params` - Params to pass to the workflow
 - `options.id` - Custom workflow ID (auto-generated if not provided)
+- `options.metadata` - Optional metadata stored for querying (not passed to workflow)
 
 **Returns:** Workflow instance ID
 
@@ -243,8 +256,8 @@ const status = await this.getWorkflowStatus(this.env.MY_WORKFLOW, workflowId);
 Get a tracked workflow by ID.
 
 ```typescript
-const workflow = this.getWorkflow<TaskParams>(workflowId);
-// { workflowId, status, params, output, error, createdAt, ... }
+const workflow = this.getWorkflow(workflowId);
+// { workflowId, workflowName, status, metadata, error, createdAt, ... }
 ```
 
 #### `getWorkflows(criteria?)`
@@ -254,6 +267,14 @@ Query tracked workflows.
 ```typescript
 // Get all running workflows
 const running = this.getWorkflows({ status: "running" });
+
+// Get workflows by binding name
+const processing = this.getWorkflows({ workflowName: "PROCESSING_WORKFLOW" });
+
+// Filter by metadata
+const userWorkflows = this.getWorkflows({
+  metadata: { userId: "user-456" }
+});
 
 // Get recent completed workflows
 const recent = this.getWorkflows({
@@ -268,26 +289,39 @@ const recent = this.getWorkflows({
 Override these methods in your Agent to handle workflow events:
 
 ```typescript
-class MyAgent extends Agent<Env> {
+class MyAgent extends Agent {
   // Called when workflow reports progress
   async onWorkflowProgress(
+    workflowName: string,
     workflowId: string,
     progress: number,
     message?: string
   ) {}
 
   // Called when workflow completes successfully
-  async onWorkflowComplete(workflowId: string, result?: unknown) {}
+  async onWorkflowComplete(
+    workflowName: string,
+    workflowId: string,
+    result?: unknown
+  ) {}
 
   // Called when workflow encounters an error
-  async onWorkflowError(workflowId: string, error: string) {}
+  async onWorkflowError(
+    workflowName: string,
+    workflowId: string,
+    error: string
+  ) {}
 
   // Called when workflow sends a custom event
-  async onWorkflowEvent(workflowId: string, event: unknown) {}
+  async onWorkflowEvent(
+    workflowName: string,
+    workflowId: string,
+    event: unknown
+  ) {}
 
   // Handle all callbacks in one place (alternative)
   async onWorkflowCallback(callback: WorkflowCallback) {
-    // Called for all callback types
+    // Called for all callback types - callback includes workflowName
   }
 }
 ```
@@ -304,13 +338,14 @@ Workflows started with `runWorkflow()` are automatically tracked in the Agent's 
 | `workflow_id`   | TEXT    | Cloudflare workflow instance ID |
 | `workflow_name` | TEXT    | Workflow binding name           |
 | `status`        | TEXT    | Current status                  |
-| `params`        | TEXT    | JSON params passed to workflow  |
-| `output`        | TEXT    | JSON output (when complete)     |
+| `metadata`      | TEXT    | JSON metadata (for querying)    |
 | `error_name`    | TEXT    | Error name (if failed)          |
 | `error_message` | TEXT    | Error message (if failed)       |
 | `created_at`    | INTEGER | Unix timestamp                  |
 | `updated_at`    | INTEGER | Unix timestamp                  |
 | `completed_at`  | INTEGER | Unix timestamp (when done)      |
+
+Note: Workflow params and output are not stored by default. Use `metadata` to store queryable information, and store large payloads in your own tables if needed.
 
 ### Workflow Status Values
 
@@ -356,8 +391,9 @@ export class DataProcessingWorkflow extends AgentWorkflow<
 }
 
 // Agent
-class MyAgent extends Agent<Env> {
+class MyAgent extends Agent {
   async onWorkflowProgress(
+    workflowName: string,
     workflowId: string,
     progress: number,
     message?: string
@@ -366,6 +402,7 @@ class MyAgent extends Agent<Env> {
     this.broadcast(
       JSON.stringify({
         type: "processing-progress",
+        workflowName,
         workflowId,
         progress,
         message
@@ -398,7 +435,7 @@ export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
     const approval = await step.waitForEvent<{
       approved: boolean;
       reason?: string;
-    }>("approval", { timeout: "7 days" });
+    }>("wait-for-approval", { type: "approval", timeout: "7 days" });
 
     if (!approval.payload.approved) {
       await this.reportError(`Rejected: ${approval.payload.reason}`);
@@ -416,7 +453,7 @@ export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
 }
 
 // Agent
-class MyAgent extends Agent<Env> {
+class MyAgent extends Agent {
   // Called by admin to approve/reject
   async handleApproval(workflowId: string, approved: boolean, reason?: string) {
     await this.sendWorkflowEvent(this.env.APPROVAL_WORKFLOW, workflowId, {
