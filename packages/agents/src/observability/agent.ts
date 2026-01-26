@@ -28,4 +28,12 @@ export type AgentObservabilityEvent =
       {
         connectionId: string;
       }
+    >
+  | BaseEvent<
+      "workflow:start" | "workflow:event",
+      {
+        workflowId: string;
+        workflowName?: string;
+        eventType?: string;
+      }
     >;

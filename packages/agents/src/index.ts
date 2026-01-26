@@ -22,6 +22,15 @@ import {
 } from "partyserver";
 import { camelCaseToKebabCase } from "./client";
 import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import type {
+  WorkflowCallback,
+  WorkflowTrackingRow,
+  WorkflowStatus,
+  RunWorkflowOptions,
+  WorkflowEventPayload,
+  WorkflowInfo,
+  WorkflowQueryCriteria
+} from "./workflow-types";
 import { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
@@ -459,6 +468,35 @@ export class Agent<
       )
     `;
 
+    // Workflow tracking table for Agent-Workflow integration
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_workflows (
+        id TEXT PRIMARY KEY NOT NULL,
+        workflow_id TEXT NOT NULL UNIQUE,
+        workflow_name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN (
+          'queued', 'running', 'paused', 'errored',
+          'terminated', 'complete', 'waiting',
+          'waitingForPause', 'unknown'
+        )),
+        params TEXT,
+        output TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        completed_at INTEGER
+      )
+    `;
+
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)
+    `;
+
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
+    `;
+
     // Initialize MCPClientManager AFTER tables are created
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
       storage: this.ctx.storage
@@ -491,6 +529,12 @@ export class Agent<
           const oauthResponse = await this.handleMcpOAuthCallback(request);
           if (oauthResponse) {
             return oauthResponse;
+          }
+
+          // Handle workflow-related requests
+          const workflowResponse = await this._handleWorkflowRequest(request);
+          if (workflowResponse) {
+            return workflowResponse;
           }
 
           return this._tryCatch(() => _onRequest(request));
@@ -1334,6 +1378,7 @@ export class Agent<
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
@@ -1368,6 +1413,449 @@ export class Agent<
    */
   private _isCallable(method: string): boolean {
     return callableMetadata.has(this[method as keyof this] as Function);
+  }
+
+  // ==========================================
+  // Workflow Integration Methods
+  // ==========================================
+
+  /**
+   * Start a workflow and track it in this Agent's database.
+   * Automatically injects agent identity into the workflow params.
+   *
+   * @template P - Type of params to pass to the workflow
+   * @param workflow - Workflow binding from env
+   * @param params - Params to pass to the workflow
+   * @param options - Optional workflow options
+   * @returns The workflow instance ID
+   *
+   * @example
+   * ```typescript
+   * const workflowId = await this.runWorkflow(
+   *   this.env.MY_WORKFLOW,
+   *   { taskId: '123', data: 'process this' }
+   * );
+   * ```
+   */
+  async runWorkflow<P = unknown>(
+    workflow: Workflow,
+    params: P,
+    options?: RunWorkflowOptions
+  ): Promise<string> {
+    // Find the binding name for this workflow
+    const bindingName = this._findWorkflowBindingName(workflow);
+    if (!bindingName) {
+      throw new Error("Could not find workflow binding name in environment");
+    }
+
+    // Find the binding name for this Agent's namespace
+    const agentBindingName = this._findAgentBindingName();
+    if (!agentBindingName) {
+      throw new Error("Could not find Agent binding name in environment");
+    }
+
+    // Generate workflow ID if not provided
+    const workflowId = options?.id ?? nanoid();
+
+    // Inject agent identity into params
+    const augmentedParams = {
+      ...params,
+      __agentName: this.name,
+      __agentBinding: agentBindingName
+    };
+
+    // Create the workflow instance
+    const instance = await workflow.create({
+      id: workflowId,
+      params: augmentedParams
+    });
+
+    // Track the workflow in our database
+    const id = nanoid();
+    this.sql`
+      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, params)
+      VALUES (${id}, ${instance.id}, ${bindingName}, 'queued', ${JSON.stringify(params)})
+    `;
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${instance.id} started`,
+        id: nanoid(),
+        payload: {
+          workflowId: instance.id,
+          workflowName: bindingName
+        },
+        timestamp: Date.now(),
+        type: "workflow:start"
+      },
+      this.ctx
+    );
+
+    return instance.id;
+  }
+
+  /**
+   * Send an event to a running workflow.
+   * The workflow can wait for this event using step.waitForEvent().
+   *
+   * @param workflow - Workflow binding from env
+   * @param workflowId - ID of the workflow instance
+   * @param event - Event to send
+   *
+   * @example
+   * ```typescript
+   * await this.sendWorkflowEvent(
+   *   this.env.MY_WORKFLOW,
+   *   workflowId,
+   *   { type: 'approval', payload: { approved: true } }
+   * );
+   * ```
+   */
+  async sendWorkflowEvent(
+    workflow: Workflow,
+    workflowId: string,
+    event: WorkflowEventPayload
+  ): Promise<void> {
+    const instance = await workflow.get(workflowId);
+    await instance.sendEvent(event);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Event sent to workflow ${workflowId}`,
+        id: nanoid(),
+        payload: {
+          workflowId,
+          eventType: event.type
+        },
+        timestamp: Date.now(),
+        type: "workflow:event"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Get the status of a workflow and update the tracking record.
+   *
+   * @param workflow - Workflow binding from env
+   * @param workflowId - ID of the workflow instance
+   * @returns The workflow status
+   */
+  async getWorkflowStatus(
+    workflow: Workflow,
+    workflowId: string
+  ): Promise<InstanceStatus> {
+    const instance = await workflow.get(workflowId);
+    const status = await instance.status();
+
+    // Update the tracking record
+    this._updateWorkflowTracking(workflowId, status);
+
+    return status;
+  }
+
+  /**
+   * Get a tracked workflow by ID.
+   *
+   * @template P - Type of params
+   * @param workflowId - Workflow instance ID
+   * @returns Workflow info or undefined if not found
+   */
+  getWorkflow<P = unknown>(workflowId: string): WorkflowInfo<P> | undefined {
+    const rows = this.sql<WorkflowTrackingRow>`
+      SELECT * FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
+    `;
+
+    if (!rows || rows.length === 0) {
+      return undefined;
+    }
+
+    return this._rowToWorkflowInfo<P>(rows[0]);
+  }
+
+  /**
+   * Query tracked workflows.
+   *
+   * @template P - Type of params
+   * @param criteria - Query criteria
+   * @returns Array of workflow info
+   */
+  getWorkflows<P = unknown>(
+    criteria: WorkflowQueryCriteria = {}
+  ): WorkflowInfo<P>[] {
+    let query = "SELECT * FROM cf_agents_workflows WHERE 1=1";
+    const params: (string | number)[] = [];
+
+    if (criteria.status) {
+      const statuses = Array.isArray(criteria.status)
+        ? criteria.status
+        : [criteria.status];
+      const placeholders = statuses.map(() => "?").join(", ");
+      query += ` AND status IN (${placeholders})`;
+      params.push(...statuses);
+    }
+
+    if (criteria.workflowName) {
+      query += " AND workflow_name = ?";
+      params.push(criteria.workflowName);
+    }
+
+    query += ` ORDER BY created_at ${criteria.orderBy === "asc" ? "ASC" : "DESC"}`;
+
+    if (criteria.limit) {
+      query += " LIMIT ?";
+      params.push(criteria.limit);
+    }
+
+    const rows = this.ctx.storage.sql
+      .exec(query, ...params)
+      .toArray() as WorkflowTrackingRow[];
+
+    return rows.map((row) => this._rowToWorkflowInfo<P>(row));
+  }
+
+  /**
+   * Update workflow tracking record from InstanceStatus
+   */
+  private _updateWorkflowTracking(
+    workflowId: string,
+    status: InstanceStatus
+  ): void {
+    const statusName = status.status as WorkflowStatus;
+    const now = Math.floor(Date.now() / 1000);
+
+    // Determine if workflow is complete
+    const completedStatuses: WorkflowStatus[] = [
+      "complete",
+      "errored",
+      "terminated"
+    ];
+    const completedAt = completedStatuses.includes(statusName) ? now : null;
+
+    // Extract error info if present
+    const errorName = status.error?.name ?? null;
+    const errorMessage = status.error?.message ?? null;
+
+    // Extract output if present
+    const output =
+      status.output !== undefined ? JSON.stringify(status.output) : null;
+
+    this.sql`
+      UPDATE cf_agents_workflows
+      SET status = ${statusName},
+          output = ${output},
+          error_name = ${errorName},
+          error_message = ${errorMessage},
+          updated_at = ${now},
+          completed_at = ${completedAt}
+      WHERE workflow_id = ${workflowId}
+    `;
+  }
+
+  /**
+   * Convert a database row to WorkflowInfo
+   */
+  private _rowToWorkflowInfo<P>(row: WorkflowTrackingRow): WorkflowInfo<P> {
+    return {
+      id: row.id,
+      workflowId: row.workflow_id,
+      workflowName: row.workflow_name,
+      status: row.status,
+      params: row.params ? JSON.parse(row.params) : null,
+      output: row.output ? JSON.parse(row.output) : null,
+      error: row.error_name
+        ? { name: row.error_name, message: row.error_message ?? "" }
+        : null,
+      createdAt: new Date(row.created_at * 1000),
+      updatedAt: new Date(row.updated_at * 1000),
+      completedAt: row.completed_at ? new Date(row.completed_at * 1000) : null
+    };
+  }
+
+  /**
+   * Find the binding name for a workflow in the environment
+   */
+  private _findWorkflowBindingName(workflow: Workflow): string | undefined {
+    for (const [key, value] of Object.entries(
+      this.env as Record<string, unknown>
+    )) {
+      if (value === workflow) {
+        return key;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Find the binding name for this Agent's namespace
+   */
+  private _findAgentBindingName(): string | undefined {
+    for (const [key, value] of Object.entries(
+      this.env as Record<string, unknown>
+    )) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "idFromName" in value &&
+        typeof value.idFromName === "function"
+      ) {
+        // Check if this namespace's class name matches our class name
+        const className = this._ParentClass.name;
+        if (
+          key === className ||
+          camelCaseToKebabCase(key) === camelCaseToKebabCase(className)
+        ) {
+          return key;
+        }
+      }
+    }
+
+    // Fallback: find any DO namespace that could be us
+    for (const [key, value] of Object.entries(
+      this.env as Record<string, unknown>
+    )) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "idFromName" in value &&
+        typeof value.idFromName === "function"
+      ) {
+        return key;
+      }
+    }
+
+    return undefined;
+  }
+
+  // ==========================================
+  // Workflow Lifecycle Callbacks
+  // ==========================================
+
+  /**
+   * Handle a callback from a workflow.
+   * Called when the Agent receives a callback at /_workflow/callback.
+   * Override this to handle all callback types in one place.
+   *
+   * @param callback - The callback payload
+   */
+  async onWorkflowCallback(callback: WorkflowCallback): Promise<void> {
+    switch (callback.type) {
+      case "progress":
+        await this.onWorkflowProgress(
+          callback.workflowId,
+          callback.progress,
+          callback.message
+        );
+        break;
+      case "complete":
+        await this.onWorkflowComplete(callback.workflowId, callback.result);
+        break;
+      case "error":
+        await this.onWorkflowError(callback.workflowId, callback.error);
+        break;
+      case "event":
+        await this.onWorkflowEvent(callback.workflowId, callback.event);
+        break;
+    }
+  }
+
+  /**
+   * Called when a workflow reports progress.
+   * Override to handle progress updates.
+   *
+   * @param workflowId - ID of the workflow
+   * @param progress - Progress value (0-1)
+   * @param message - Optional progress message
+   */
+  async onWorkflowProgress(
+    _workflowId: string,
+    _progress: number,
+    _message?: string
+  ): Promise<void> {
+    // Override to handle progress updates
+  }
+
+  /**
+   * Called when a workflow completes successfully.
+   * Override to handle completion.
+   *
+   * @param workflowId - ID of the workflow
+   * @param result - Optional result data
+   */
+  async onWorkflowComplete(
+    _workflowId: string,
+    _result?: unknown
+  ): Promise<void> {
+    // Override to handle completion
+  }
+
+  /**
+   * Called when a workflow encounters an error.
+   * Override to handle errors.
+   *
+   * @param workflowId - ID of the workflow
+   * @param error - Error message
+   */
+  async onWorkflowError(_workflowId: string, _error: string): Promise<void> {
+    // Override to handle errors
+  }
+
+  /**
+   * Called when a workflow sends a custom event.
+   * Override to handle custom events.
+   *
+   * @param workflowId - ID of the workflow
+   * @param event - Custom event payload
+   */
+  async onWorkflowEvent(_workflowId: string, _event: unknown): Promise<void> {
+    // Override to handle custom events
+  }
+
+  /**
+   * Handle workflow-related HTTP requests.
+   * Called from onRequest for /_workflow/* paths.
+   */
+  private async _handleWorkflowRequest(
+    request: Request
+  ): Promise<Response | null> {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Handle /_workflow/callback
+    if (path === "/_workflow/callback" && request.method === "POST") {
+      try {
+        const callback = (await request.json()) as WorkflowCallback;
+        await this.onWorkflowCallback(callback);
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        console.error("Error handling workflow callback:", e);
+        return new Response(JSON.stringify({ error: String(e) }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    // Handle /_workflow/broadcast
+    if (path === "/_workflow/broadcast" && request.method === "POST") {
+      try {
+        const message = await request.json();
+        this.broadcast(JSON.stringify(message));
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        console.error("Error handling workflow broadcast:", e);
+        return new Response(JSON.stringify({ error: String(e) }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -2023,3 +2511,28 @@ export class StreamingResponse {
     this._connection.send(JSON.stringify(response));
   }
 }
+
+// ==========================================
+// Workflow Integration Exports
+// ==========================================
+
+export { AgentWorkflow } from "./workflow";
+export type {
+  AgentWorkflowParams,
+  AgentWorkflowInternalParams,
+  WorkflowCallback,
+  WorkflowCallbackType,
+  WorkflowProgressCallback,
+  WorkflowCompleteCallback,
+  WorkflowErrorCallback,
+  WorkflowEventCallback
+} from "./workflow";
+
+export type {
+  WorkflowStatus,
+  WorkflowTrackingRow,
+  RunWorkflowOptions,
+  WorkflowEventPayload,
+  WorkflowInfo,
+  WorkflowQueryCriteria
+} from "./workflow-types";

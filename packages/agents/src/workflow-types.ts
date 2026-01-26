@@ -1,0 +1,185 @@
+/**
+ * Workflow integration types for Agents
+ *
+ * These types provide seamless integration between Cloudflare Agents
+ * and Cloudflare Workflows for durable, multi-step background processing.
+ */
+
+/**
+ * Internal parameters injected by runWorkflow() to identify the originating Agent
+ */
+export type AgentWorkflowInternalParams = {
+  /** Name/ID of the Agent that started this workflow */
+  __agentName: string;
+  /** Environment binding name for the Agent's namespace */
+  __agentBinding: string;
+};
+
+/**
+ * Combined workflow params: user params + internal agent params
+ */
+export type AgentWorkflowParams<T = unknown> = T & AgentWorkflowInternalParams;
+
+/**
+ * Workflow callback types for Agent-Workflow communication
+ */
+export type WorkflowCallbackType = "progress" | "complete" | "error" | "event";
+
+/**
+ * Base callback structure sent from Workflow to Agent
+ */
+export type WorkflowCallbackBase = {
+  /** ID of the workflow instance */
+  workflowId: string;
+  /** Type of callback */
+  type: WorkflowCallbackType;
+  /** Timestamp when callback was sent */
+  timestamp: number;
+};
+
+/**
+ * Progress callback - reports workflow progress
+ */
+export type WorkflowProgressCallback = WorkflowCallbackBase & {
+  type: "progress";
+  /** Progress percentage (0-1) */
+  progress: number;
+  /** Optional progress message */
+  message?: string;
+};
+
+/**
+ * Complete callback - workflow finished successfully
+ */
+export type WorkflowCompleteCallback = WorkflowCallbackBase & {
+  type: "complete";
+  /** Result of the workflow */
+  result?: unknown;
+};
+
+/**
+ * Error callback - workflow encountered an error
+ */
+export type WorkflowErrorCallback = WorkflowCallbackBase & {
+  type: "error";
+  /** Error message */
+  error: string;
+};
+
+/**
+ * Event callback - custom event from workflow
+ */
+export type WorkflowEventCallback = WorkflowCallbackBase & {
+  type: "event";
+  /** Custom event payload */
+  event: unknown;
+};
+
+/**
+ * Union of all callback types
+ */
+export type WorkflowCallback =
+  | WorkflowProgressCallback
+  | WorkflowCompleteCallback
+  | WorkflowErrorCallback
+  | WorkflowEventCallback;
+
+/**
+ * Workflow status values matching Cloudflare Workflows API
+ */
+export type WorkflowStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "errored"
+  | "terminated"
+  | "complete"
+  | "waiting"
+  | "waitingForPause"
+  | "unknown";
+
+/**
+ * Row structure for cf_agents_workflows tracking table
+ */
+export type WorkflowTrackingRow = {
+  /** Internal row ID (UUID) */
+  id: string;
+  /** Cloudflare Workflow instance ID */
+  workflow_id: string;
+  /** Workflow binding name */
+  workflow_name: string;
+  /** Current workflow status */
+  status: WorkflowStatus;
+  /** JSON-serialized params passed to workflow */
+  params: string | null;
+  /** JSON-serialized output from workflow */
+  output: string | null;
+  /** Error name if workflow failed */
+  error_name: string | null;
+  /** Error message if workflow failed */
+  error_message: string | null;
+  /** Unix timestamp when workflow was created */
+  created_at: number;
+  /** Unix timestamp when workflow was last updated */
+  updated_at: number;
+  /** Unix timestamp when workflow completed (null if not complete) */
+  completed_at: number | null;
+};
+
+/**
+ * Options for runWorkflow()
+ */
+export type RunWorkflowOptions = {
+  /** Custom workflow instance ID (auto-generated if not provided) */
+  id?: string;
+};
+
+/**
+ * Event payload for sendWorkflowEvent()
+ */
+export type WorkflowEventPayload = {
+  /** Event type name */
+  type: string;
+  /** Event payload data */
+  payload: unknown;
+};
+
+/**
+ * Parsed workflow tracking info returned by getWorkflow()
+ */
+export type WorkflowInfo<Params = unknown> = {
+  /** Internal row ID */
+  id: string;
+  /** Cloudflare Workflow instance ID */
+  workflowId: string;
+  /** Workflow binding name */
+  workflowName: string;
+  /** Current workflow status */
+  status: WorkflowStatus;
+  /** Params passed to workflow (parsed) */
+  params: Params | null;
+  /** Output from workflow (parsed) */
+  output: unknown | null;
+  /** Error info if workflow failed */
+  error: { name: string; message: string } | null;
+  /** When workflow was created */
+  createdAt: Date;
+  /** When workflow was last updated */
+  updatedAt: Date;
+  /** When workflow completed (null if not complete) */
+  completedAt: Date | null;
+};
+
+/**
+ * Criteria for querying tracked workflows
+ */
+export type WorkflowQueryCriteria = {
+  /** Filter by status */
+  status?: WorkflowStatus | WorkflowStatus[];
+  /** Filter by workflow name */
+  workflowName?: string;
+  /** Limit number of results */
+  limit?: number;
+  /** Order by created_at */
+  orderBy?: "asc" | "desc";
+};
