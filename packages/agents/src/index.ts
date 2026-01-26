@@ -1538,6 +1538,130 @@ export class Agent<
   }
 
   /**
+   * Approve a waiting workflow.
+   * Sends an approval event to the workflow that can be received by waitForApproval().
+   *
+   * @param workflowId - ID of the workflow to approve
+   * @param data - Optional approval data (reason, metadata)
+   *
+   * @example
+   * ```typescript
+   * await this.approveWorkflow(workflowId, {
+   *   reason: 'Approved by admin',
+   *   metadata: { approvedBy: userId }
+   * });
+   * ```
+   */
+  async approveWorkflow(
+    workflowId: string,
+    data?: { reason?: string; metadata?: Record<string, unknown> }
+  ): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflowBinding = this._findWorkflowBindingByName(
+      workflowInfo.workflowName
+    );
+    if (!workflowBinding) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    await this.sendWorkflowEvent(workflowBinding, workflowId, {
+      type: "approval",
+      payload: {
+        approved: true,
+        reason: data?.reason,
+        metadata: data?.metadata
+      }
+    });
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} approved`,
+        id: nanoid(),
+        payload: { workflowId, reason: data?.reason },
+        timestamp: Date.now(),
+        type: "workflow:approved"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Reject a waiting workflow.
+   * Sends a rejection event to the workflow that will cause waitForApproval() to throw.
+   *
+   * @param workflowId - ID of the workflow to reject
+   * @param data - Optional rejection data (reason)
+   *
+   * @example
+   * ```typescript
+   * await this.rejectWorkflow(workflowId, {
+   *   reason: 'Request denied by admin'
+   * });
+   * ```
+   */
+  async rejectWorkflow(
+    workflowId: string,
+    data?: { reason?: string }
+  ): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflowBinding = this._findWorkflowBindingByName(
+      workflowInfo.workflowName
+    );
+    if (!workflowBinding) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    await this.sendWorkflowEvent(workflowBinding, workflowId, {
+      type: "approval",
+      payload: {
+        approved: false,
+        reason: data?.reason
+      }
+    });
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} rejected`,
+        id: nanoid(),
+        payload: { workflowId, reason: data?.reason },
+        timestamp: Date.now(),
+        type: "workflow:rejected"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Find a workflow binding by its name.
+   */
+  private _findWorkflowBindingByName(
+    workflowName: string
+  ): Workflow | undefined {
+    const binding = (this.env as Record<string, unknown>)[workflowName];
+    if (
+      binding &&
+      typeof binding === "object" &&
+      "create" in binding &&
+      "get" in binding
+    ) {
+      return binding as Workflow;
+    }
+    return undefined;
+  }
+
+  /**
    * Get the status of a workflow and update the tracking record.
    *
    * @param workflow - Workflow binding from env
@@ -1745,8 +1869,7 @@ export class Agent<
         await this.onWorkflowProgress(
           callback.workflowName,
           callback.workflowId,
-          callback.progress,
-          callback.message
+          callback.progress
         );
         break;
       case "complete":
@@ -1779,14 +1902,12 @@ export class Agent<
    *
    * @param workflowName - Workflow binding name
    * @param workflowId - ID of the workflow
-   * @param progress - Progress value (0-1)
-   * @param message - Optional progress message
+   * @param progress - Typed progress data (default: DefaultProgress)
    */
   async onWorkflowProgress(
     _workflowName: string,
     _workflowId: string,
-    _progress: number,
-    _message?: string
+    _progress: unknown
   ): Promise<void> {
     // Override to handle progress updates
   }
@@ -1876,6 +1997,44 @@ export class Agent<
         });
       } catch (e) {
         console.error("Error handling workflow broadcast:", e);
+        return new Response(JSON.stringify({ error: String(e) }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    // Handle /_workflow/state - allows workflows to update Agent state
+    if (path === "/_workflow/state" && request.method === "POST") {
+      try {
+        const { action, state } = (await request.json()) as {
+          action: "set" | "merge";
+          state: unknown;
+        };
+
+        if (action === "set") {
+          this.setState(state as State);
+        } else if (action === "merge") {
+          const currentState = this.state ?? ({} as State);
+          this.setState({
+            ...currentState,
+            ...(state as Record<string, unknown>)
+          } as State);
+        } else {
+          return new Response(
+            JSON.stringify({ error: `Unknown action: ${action}` }),
+            {
+              status: 400,
+              headers: { "Content-Type": "application/json" }
+            }
+          );
+        }
+
+        return new Response(JSON.stringify({ success: true }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        console.error("Error handling workflow state update:", e);
         return new Response(JSON.stringify({ error: String(e) }), {
           status: 500,
           headers: { "Content-Type": "application/json" }

@@ -28,11 +28,18 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
     // Call Agent methods via RPC
     await this.agent.updateStatus(params.taskId, "processing");
 
-    // Report progress back to Agent
-    await this.reportProgress(0.5, "Halfway done");
+    // Report typed progress back to Agent
+    await this.reportProgress({
+      step: "process",
+      percent: 0.5,
+      message: "Halfway done"
+    });
 
     // Broadcast to WebSocket clients
     await this.broadcastToClients({ type: "update", taskId: params.taskId });
+
+    // Sync state to Agent (broadcasts to clients)
+    await this.mergeAgentState({ taskProgress: 0.5 });
 
     await this.reportComplete(result);
     return result;
@@ -46,13 +53,24 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
 - `sendWorkflowEvent(workflow, workflowId, event)` - Send events to waiting workflows
 - `getWorkflow(workflowId)` - Get tracked workflow by ID
 - `getWorkflows(criteria?)` - Query by status, workflowName, or metadata
+- `approveWorkflow(workflowId, data?)` - Approve a waiting workflow
+- `rejectWorkflow(workflowId, data?)` - Reject a waiting workflow
+
+### AgentWorkflow Methods
+
+- `reportProgress(progress)` - Report typed progress object to Agent
+- `reportComplete(result?)` - Report successful completion
+- `reportError(error)` - Report an error
+- `waitForApproval(step, opts?)` - Wait for approval (throws on rejection)
+- `updateAgentState(state)` - Replace Agent state (broadcasts to clients)
+- `mergeAgentState(partial)` - Merge into Agent state (broadcasts to clients)
 
 ### Lifecycle Callbacks
 
 Override these methods to handle workflow events (workflowName is first for easy differentiation):
 
 ```typescript
-async onWorkflowProgress(workflowName, workflowId, progress, message?) {}
+async onWorkflowProgress(workflowName, workflowId, progress) {} // progress is typed object
 async onWorkflowComplete(workflowName, workflowId, result?) {}
 async onWorkflowError(workflowName, workflowId, error) {}
 async onWorkflowEvent(workflowName, workflowId, event) {}

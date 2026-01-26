@@ -364,14 +364,13 @@ export class TestWorkflowAgent extends Agent<Env> {
   async onWorkflowProgress(
     workflowName: string,
     workflowId: string,
-    progress: number,
-    message?: string
+    progress: unknown
   ): Promise<void> {
     this._callbacksReceived.push({
       type: "progress",
       workflowName,
       workflowId,
-      data: { progress, message }
+      data: { progress }
     });
   }
 

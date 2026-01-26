@@ -35,11 +35,21 @@ export class TestProcessingWorkflow extends AgentWorkflow<
     const params = this.getUserParams(event);
 
     // Step 1: Report start
-    await this.reportProgress(0.1, "Starting processing");
+    await this.reportProgress({
+      step: "start",
+      status: "running",
+      percent: 0.1,
+      message: "Starting processing"
+    });
 
     // Step 2: If waiting for approval, pause and wait for event
     if (params.waitForApproval) {
-      await this.reportProgress(0.3, "Waiting for approval");
+      await this.reportProgress({
+        step: "approval",
+        status: "pending",
+        percent: 0.3,
+        message: "Waiting for approval"
+      });
 
       const approval = await step.waitForEvent<{
         approved: boolean;
@@ -55,7 +65,12 @@ export class TestProcessingWorkflow extends AgentWorkflow<
     }
 
     // Step 3: Process the task
-    await this.reportProgress(0.5, "Processing task");
+    await this.reportProgress({
+      step: "process",
+      status: "running",
+      percent: 0.5,
+      message: "Processing task"
+    });
 
     const result = await step.do("process", async () => {
       if (params.shouldFail) {
@@ -87,7 +102,12 @@ export class TestProcessingWorkflow extends AgentWorkflow<
     });
 
     // Step 6: Report completion
-    await this.reportProgress(0.9, "Almost done");
+    await this.reportProgress({
+      step: "complete",
+      status: "running",
+      percent: 0.9,
+      message: "Almost done"
+    });
     await this.reportComplete(result);
 
     return result;

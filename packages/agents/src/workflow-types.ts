@@ -42,15 +42,31 @@ export type WorkflowCallbackBase = {
 };
 
 /**
- * Progress callback - reports workflow progress
+ * Default progress type - covers common use cases.
+ * Developers can define their own progress type for domain-specific needs.
  */
-export type WorkflowProgressCallback = WorkflowCallbackBase & {
-  type: "progress";
-  /** Progress percentage (0-1) */
-  progress: number;
-  /** Optional progress message */
+export type DefaultProgress = {
+  /** Current step name */
+  step?: string;
+  /** Step/overall status */
+  status?: "pending" | "running" | "complete" | "error";
+  /** Human-readable message */
   message?: string;
+  /** Progress percentage (0-1) */
+  percent?: number;
+  /** Allow additional custom fields */
+  [key: string]: unknown;
 };
+
+/**
+ * Progress callback - reports workflow progress with typed payload
+ */
+export type WorkflowProgressCallback<P = DefaultProgress> =
+  WorkflowCallbackBase & {
+    type: "progress";
+    /** Typed progress data */
+    progress: P;
+  };
 
 /**
  * Complete callback - workflow finished successfully
@@ -82,8 +98,8 @@ export type WorkflowEventCallback = WorkflowCallbackBase & {
 /**
  * Union of all callback types
  */
-export type WorkflowCallback =
-  | WorkflowProgressCallback
+export type WorkflowCallback<P = DefaultProgress> =
+  | WorkflowProgressCallback<P>
   | WorkflowCompleteCallback
   | WorkflowErrorCallback
   | WorkflowEventCallback;
@@ -187,3 +203,59 @@ export type WorkflowQueryCriteria = {
   /** Order by created_at */
   orderBy?: "asc" | "desc";
 };
+
+/**
+ * Standard approval event payload used by approveWorkflow/rejectWorkflow
+ */
+export type ApprovalEventPayload = {
+  /** Whether the workflow was approved */
+  approved: boolean;
+  /** Optional reason for approval/rejection */
+  reason?: string;
+  /** Optional additional metadata */
+  metadata?: Record<string, unknown>;
+};
+
+/**
+ * Workflow sleep duration type (re-exported for convenience)
+ */
+export type WorkflowTimeout =
+  | `${number} second`
+  | `${number} seconds`
+  | `${number} minute`
+  | `${number} minutes`
+  | `${number} hour`
+  | `${number} hours`
+  | `${number} day`
+  | `${number} days`
+  | `${number} week`
+  | `${number} weeks`
+  | `${number} month`
+  | `${number} months`
+  | `${number} year`
+  | `${number} years`;
+
+/**
+ * Options for waitForApproval()
+ */
+export type WaitForApprovalOptions = {
+  /** Step name for waitForEvent (default: "wait-for-approval") */
+  stepName?: string;
+  /** Timeout duration (e.g., "7 days") */
+  timeout?: WorkflowTimeout;
+  /** Event type to wait for (default: "approval") */
+  eventType?: string;
+};
+
+/**
+ * Error thrown when a workflow is rejected via rejectWorkflow()
+ */
+export class WorkflowRejectedError extends Error {
+  constructor(
+    public readonly reason?: string,
+    public readonly workflowId?: string
+  ) {
+    super(reason ? `Workflow rejected: ${reason}` : "Workflow rejected");
+    this.name = "WorkflowRejectedError";
+  }
+}

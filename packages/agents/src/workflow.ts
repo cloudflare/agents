@@ -21,8 +21,8 @@
  *       return { processed: true };
  *     });
  *
- *     // Report progress to Agent
- *     await this.reportProgress(0.5, 'Halfway done');
+ *     // Report progress to Agent (typed)
+ *     await this.reportProgress({ step: 'process', status: 'complete', percent: 0.5 });
  *
  *     // Broadcast to connected clients
  *     await this.broadcastToClients({ type: 'progress', data: result });
@@ -34,20 +34,32 @@
  */
 
 import { WorkflowEntrypoint } from "cloudflare:workers";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+import type {
+  WorkflowEvent,
+  WorkflowStep,
+  WorkflowSleepDuration
+} from "cloudflare:workers";
 import { getAgentByName, type Agent } from "./index";
-import type { AgentWorkflowParams, WorkflowCallback } from "./workflow-types";
+import type {
+  AgentWorkflowParams,
+  WorkflowCallback,
+  DefaultProgress,
+  WaitForApprovalOptions
+} from "./workflow-types";
+import { WorkflowRejectedError } from "./workflow-types";
 
 /**
  * Base class for Workflows that need access to their originating Agent.
  *
  * @template AgentType - The Agent class type (for typed RPC access)
  * @template Params - User-defined params passed to the workflow (optional)
+ * @template ProgressType - Type for progress reporting (defaults to DefaultProgress)
  * @template Env - Environment type (defaults to Cloudflare.Env)
  */
 export class AgentWorkflow<
   AgentType extends Agent = Agent,
   Params = unknown,
+  ProgressType = DefaultProgress,
   Env extends Cloudflare.Env = Cloudflare.Env
 > extends WorkflowEntrypoint<Env, AgentWorkflowParams<Params>> {
   /**
@@ -193,22 +205,27 @@ export class AgentWorkflow<
   }
 
   /**
-   * Report progress to the Agent.
+   * Report progress to the Agent with typed progress data.
    * Triggers onWorkflowProgress() on the Agent.
    *
-   * @param progress - Progress value (0-1)
-   * @param message - Optional progress message
+   * @param progress - Typed progress data
+   *
+   * @example
+   * ```typescript
+   * // Using default progress type
+   * await this.reportProgress({ step: 'fetch', status: 'running' });
+   * await this.reportProgress({ step: 'fetch', status: 'complete', percent: 0.5 });
+   *
+   * // With custom progress type
+   * await this.reportProgress({ stage: 'extract', recordsProcessed: 100 });
+   * ```
    */
-  protected async reportProgress(
-    progress: number,
-    message?: string
-  ): Promise<void> {
+  protected async reportProgress(progress: ProgressType): Promise<void> {
     await this.notifyAgent({
       workflowName: this._workflowName,
       workflowId: this._workflowId,
       type: "progress",
-      progress,
-      message,
+      progress: progress as DefaultProgress,
       timestamp: Date.now()
     });
   }
@@ -216,14 +233,10 @@ export class AgentWorkflow<
   /**
    * Report successful completion to the Agent.
    * Triggers onWorkflowComplete() on the Agent.
-   * Automatically reports progress as 1.0 before completing.
    *
    * @param result - Optional result data
    */
   protected async reportComplete<T = unknown>(result?: T): Promise<void> {
-    // Auto-set progress to 1.0 on completion
-    await this.reportProgress(1.0, "Complete");
-
     await this.notifyAgent({
       workflowName: this._workflowName,
       workflowId: this._workflowId,
@@ -287,6 +300,112 @@ export class AgentWorkflow<
   }
 
   /**
+   * Wait for approval from the Agent.
+   * Automatically reports progress while waiting and handles rejection.
+   *
+   * @param step - Workflow step object
+   * @param options - Wait options (timeout, eventType, stepName)
+   * @returns Approval payload (throws WorkflowRejectedError if rejected)
+   *
+   * @example
+   * ```typescript
+   * const approval = await this.waitForApproval(step, { timeout: '7 days' });
+   * // approval contains the payload from approveWorkflow()
+   * ```
+   */
+  protected async waitForApproval<T = unknown>(
+    step: WorkflowStep,
+    options?: WaitForApprovalOptions
+  ): Promise<T> {
+    const stepName = options?.stepName ?? "wait-for-approval";
+    const eventType = options?.eventType ?? "approval";
+    const timeout = options?.timeout;
+
+    // Report that we're waiting
+    await this.reportProgress({
+      status: "pending",
+      message: "Waiting for approval"
+    } as ProgressType);
+
+    // Wait for the approval event
+    const event = await step.waitForEvent(stepName, {
+      type: eventType,
+      timeout: timeout as WorkflowSleepDuration | undefined
+    });
+
+    // Cast the payload to our expected type
+    const payload = event.payload as {
+      approved: boolean;
+      reason?: string;
+      metadata?: T;
+    };
+
+    // Check if rejected
+    if (!payload.approved) {
+      const reason = payload.reason;
+      await this.reportError(reason ?? "Workflow rejected");
+      throw new WorkflowRejectedError(reason, this._workflowId);
+    }
+
+    // Return the approval metadata as the result
+    return payload.metadata as T;
+  }
+
+  /**
+   * Update the Agent's state entirely.
+   * This will replace the Agent's state and broadcast to all connected clients.
+   *
+   * @param state - New state to set
+   *
+   * @example
+   * ```typescript
+   * await this.updateAgentState({ workflowStatus: 'processing', progress: 0.5 });
+   * ```
+   */
+  protected async updateAgentState(state: unknown): Promise<void> {
+    const response = await this.fetchAgent("/_workflow/state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "set", state })
+    });
+
+    if (!response.ok) {
+      console.error(
+        `Failed to update agent state: ${response.status} ${response.statusText}`
+      );
+    }
+  }
+
+  /**
+   * Merge partial state into the Agent's existing state.
+   * Performs a shallow merge and broadcasts to all connected clients.
+   *
+   * @param partialState - Partial state to merge
+   *
+   * @example
+   * ```typescript
+   * await this.mergeAgentState({
+   *   currentWorkflow: { id: this.workflowId, status: 'running' }
+   * });
+   * ```
+   */
+  protected async mergeAgentState(
+    partialState: Record<string, unknown>
+  ): Promise<void> {
+    const response = await this.fetchAgent("/_workflow/state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "merge", state: partialState })
+    });
+
+    if (!response.ok) {
+      console.error(
+        `Failed to merge agent state: ${response.status} ${response.statusText}`
+      );
+    }
+  }
+
+  /**
    * Get the user params (without internal agent params).
    *
    * @param event - Workflow event
@@ -310,5 +429,10 @@ export type {
   WorkflowProgressCallback,
   WorkflowCompleteCallback,
   WorkflowErrorCallback,
-  WorkflowEventCallback
+  WorkflowEventCallback,
+  DefaultProgress,
+  WaitForApprovalOptions,
+  ApprovalEventPayload
 } from "./workflow-types";
+
+export { WorkflowRejectedError } from "./workflow-types";

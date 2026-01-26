@@ -111,17 +111,18 @@ describe("AgentWorkflow integration", () => {
       expect(progressCallbacks.length).toBeGreaterThan(0);
       expect(completeCallbacks.length).toBe(1);
 
-      // Verify progress values
+      // Verify progress values - now progress is an object with percent field
+      type ProgressData = { progress: { percent?: number; step?: string } };
       expect(
         progressCallbacks.some(
           (c: CallbackRecord) =>
-            (c.data as { progress: number }).progress === 0.1
+            (c.data as ProgressData).progress?.percent === 0.1
         )
       ).toBe(true);
       expect(
         progressCallbacks.some(
           (c: CallbackRecord) =>
-            (c.data as { progress: number }).progress === 0.9
+            (c.data as ProgressData).progress?.percent === 0.9
         )
       ).toBe(true);
     });

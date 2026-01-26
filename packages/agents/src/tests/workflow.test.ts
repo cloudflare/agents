@@ -160,6 +160,14 @@ describe("workflow operations", () => {
       await agentStub.clearCallbacks();
 
       // Send a progress callback via the Agent's HTTP endpoint
+      // Progress is now an object with typed fields
+      const progressData = {
+        step: "processing",
+        status: "running",
+        percent: 0.5,
+        message: "Halfway done"
+      };
+
       const response = await agentStub.fetch(
         "https://agent.internal/_workflow/callback",
         {
@@ -169,8 +177,7 @@ describe("workflow operations", () => {
             workflowName: "TEST_WORKFLOW",
             workflowId: "test-wf-1",
             type: "progress",
-            progress: 0.5,
-            message: "Halfway done",
+            progress: progressData,
             timestamp: Date.now()
           })
         }
@@ -186,8 +193,7 @@ describe("workflow operations", () => {
       expect(callbacks[0].workflowName).toBe("TEST_WORKFLOW");
       expect(callbacks[0].workflowId).toBe("test-wf-1");
       expect(callbacks[0].data).toEqual({
-        progress: 0.5,
-        message: "Halfway done"
+        progress: progressData
       });
     });
 

@@ -68,8 +68,12 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
       return processData(params.data);
     });
 
-    // Report progress to Agent
-    await this.reportProgress(0.5, "Processing complete");
+    // Report progress to Agent (typed progress object)
+    await this.reportProgress({
+      step: "process",
+      status: "complete",
+      percent: 0.5
+    });
 
     // Step 2: Save results
     await step.do("save-results", async () => {
@@ -110,15 +114,16 @@ export class MyAgent extends Agent {
     return { workflowId };
   }
 
-  // Called when workflow reports progress
+  // Called when workflow reports progress (progress is typed object)
   async onWorkflowProgress(
     workflowName: string,
     workflowId: string,
-    progress: number,
-    message?: string
+    progress: unknown
   ) {
+    // Cast to your progress type
+    const p = progress as { step?: string; status?: string; percent?: number };
     console.log(
-      `Workflow ${workflowName}/${workflowId}: ${progress * 100}% - ${message}`
+      `Workflow ${workflowName}/${workflowId}: ${p.step} - ${p.status} (${(p.percent ?? 0) * 100}%)`
     );
 
     // Broadcast to connected clients
@@ -127,8 +132,7 @@ export class MyAgent extends Agent {
         type: "workflow-progress",
         workflowName,
         workflowId,
-        progress,
-        message
+        progress
       })
     );
   }
@@ -174,7 +178,7 @@ export class MyAgent extends Agent {
 
 ## API Reference
 
-### `AgentWorkflow<AgentType, Params, Env>`
+### `AgentWorkflow<AgentType, Params, ProgressType, Env>`
 
 Base class for Workflows that integrate with Agents.
 
@@ -182,6 +186,7 @@ Base class for Workflows that integrate with Agents.
 
 - `AgentType` - The Agent class type (for typed RPC)
 - `Params` - User params passed to the workflow (optional)
+- `ProgressType` - Type for progress reporting (defaults to `DefaultProgress`)
 - `Env` - Environment type (defaults to `Cloudflare.Env`)
 
 **Properties:**
@@ -193,15 +198,30 @@ Base class for Workflows that integrate with Agents.
 
 **Methods:**
 
-| Method                               | Description                                            |
-| ------------------------------------ | ------------------------------------------------------ |
-| `reportProgress(progress, message?)` | Report progress (0-1) to the Agent                     |
-| `reportComplete(result?)`            | Report successful completion (auto-sets progress to 1) |
-| `reportError(error)`                 | Report an error                                        |
-| `sendEvent(event)`                   | Send a custom event to the Agent                       |
-| `broadcastToClients(message)`        | Broadcast message to all WebSocket clients             |
-| `fetchAgent(path, init?)`            | Make HTTP request to the Agent                         |
-| `getUserParams(event)`               | Extract user params (without internal params)          |
+| Method                         | Description                                    |
+| ------------------------------ | ---------------------------------------------- |
+| `reportProgress(progress)`     | Report typed progress object to the Agent      |
+| `reportComplete(result?)`      | Report successful completion                   |
+| `reportError(error)`           | Report an error                                |
+| `sendEvent(event)`             | Send a custom event to the Agent               |
+| `broadcastToClients(message)`  | Broadcast message to all WebSocket clients     |
+| `fetchAgent(path, init?)`      | Make HTTP request to the Agent                 |
+| `getUserParams(event)`         | Extract user params (without internal params)  |
+| `waitForApproval(step, opts?)` | Wait for approval event (throws on rejection)  |
+| `updateAgentState(state)`      | Replace Agent state (broadcasts to clients)    |
+| `mergeAgentState(partial)`     | Merge into Agent state (broadcasts to clients) |
+
+**DefaultProgress Type:**
+
+```typescript
+type DefaultProgress = {
+  step?: string;
+  status?: "pending" | "running" | "complete" | "error";
+  message?: string;
+  percent?: number;
+  [key: string]: unknown; // extensible
+};
+```
 
 ### Agent Workflow Methods
 
@@ -290,13 +310,15 @@ Override these methods in your Agent to handle workflow events:
 
 ```typescript
 class MyAgent extends Agent {
-  // Called when workflow reports progress
+  // Called when workflow reports progress (progress is typed object)
   async onWorkflowProgress(
     workflowName: string,
     workflowId: string,
-    progress: number,
-    message?: string
-  ) {}
+    progress: unknown
+  ) {
+    // Cast to your progress type
+    const p = progress as { step?: string; percent?: number };
+  }
 
   // Called when workflow completes successfully
   async onWorkflowComplete(
@@ -322,6 +344,27 @@ class MyAgent extends Agent {
   // Handle all callbacks in one place (alternative)
   async onWorkflowCallback(callback: WorkflowCallback) {
     // Called for all callback types - callback includes workflowName
+  }
+}
+```
+
+### Approval Methods
+
+Convenience methods for human-in-the-loop approval flows:
+
+```typescript
+class MyAgent extends Agent {
+  // Approve a waiting workflow
+  async handleApproval(workflowId: string, userId: string) {
+    await this.approveWorkflow(workflowId, {
+      reason: "Approved by admin",
+      metadata: { approvedBy: userId }
+    });
+  }
+
+  // Reject a waiting workflow
+  async handleRejection(workflowId: string, reason: string) {
+    await this.rejectWorkflow(workflowId, { reason });
   }
 }
 ```
@@ -362,7 +405,7 @@ Note: Workflow params and output are not stored by default. Use `metadata` to st
 ### Background Processing with Progress
 
 ```typescript
-// Workflow
+// Workflow with default progress type
 export class DataProcessingWorkflow extends AgentWorkflow<
   MyAgent,
   ProcessParams
@@ -380,10 +423,12 @@ export class DataProcessingWorkflow extends AgentWorkflow<
       });
 
       // Report progress after each item
-      await this.reportProgress(
-        (i + 1) / items.length,
-        `Processed ${i + 1}/${items.length}`
-      );
+      await this.reportProgress({
+        step: `process-${i}`,
+        status: "complete",
+        percent: (i + 1) / items.length,
+        message: `Processed ${i + 1}/${items.length}`
+      });
     }
 
     await this.reportComplete({ processed: items.length });
@@ -395,8 +440,7 @@ class MyAgent extends Agent {
   async onWorkflowProgress(
     workflowName: string,
     workflowId: string,
-    progress: number,
-    message?: string
+    progress: unknown
   ) {
     // Broadcast progress to all connected clients
     this.broadcast(
@@ -404,8 +448,7 @@ class MyAgent extends Agent {
         type: "processing-progress",
         workflowName,
         workflowId,
-        progress,
-        message
+        progress
       })
     );
   }
@@ -415,7 +458,7 @@ class MyAgent extends Agent {
 ### Human-in-the-Loop Approval
 
 ```typescript
-// Workflow
+// Workflow using the built-in waitForApproval helper
 export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
   async run(
     event: WorkflowEvent<AgentWorkflowParams<RequestParams>>,
@@ -428,19 +471,14 @@ export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
       return { ...params, preparedAt: Date.now() };
     });
 
-    // Notify agent we're waiting for approval
-    await this.reportProgress(0.5, "Waiting for approval");
+    // Wait for approval (throws WorkflowRejectedError if rejected)
+    // This automatically reports progress as "waiting for approval"
+    const approvalData = await this.waitForApproval<{ approvedBy: string }>(
+      step,
+      { timeout: "7 days" }
+    );
 
-    // Wait for approval event (up to 7 days)
-    const approval = await step.waitForEvent<{
-      approved: boolean;
-      reason?: string;
-    }>("wait-for-approval", { type: "approval", timeout: "7 days" });
-
-    if (!approval.payload.approved) {
-      await this.reportError(`Rejected: ${approval.payload.reason}`);
-      throw new Error("Request rejected");
-    }
+    console.log("Approved by:", approvalData?.approvedBy);
 
     // Execute approved action
     const result = await step.do("execute", async () => {
@@ -452,14 +490,19 @@ export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
   }
 }
 
-// Agent
+// Agent using the built-in approval methods
 class MyAgent extends Agent {
-  // Called by admin to approve/reject
-  async handleApproval(workflowId: string, approved: boolean, reason?: string) {
-    await this.sendWorkflowEvent(this.env.APPROVAL_WORKFLOW, workflowId, {
-      type: "approval",
-      payload: { approved, reason }
+  // Approve a waiting workflow
+  async handleApproval(workflowId: string, userId: string) {
+    await this.approveWorkflow(workflowId, {
+      reason: "Approved by admin",
+      metadata: { approvedBy: userId }
     });
+  }
+
+  // Reject a waiting workflow
+  async handleRejection(workflowId: string, reason: string) {
+    await this.rejectWorkflow(workflowId, { reason });
   }
 }
 ```
@@ -505,6 +548,97 @@ export class ResilientTaskWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
 }
 ```
 
+### State Synchronization
+
+Workflows can update the Agent's state directly, which automatically broadcasts to all connected clients:
+
+```typescript
+// Workflow that syncs state to Agent
+export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
+  async run(
+    event: WorkflowEvent<AgentWorkflowParams<TaskParams>>,
+    step: WorkflowStep
+  ) {
+    const params = this.getUserParams(event);
+
+    // Update Agent state (replaces entire state, broadcasts to clients)
+    await this.updateAgentState({
+      currentTask: {
+        id: params.taskId,
+        status: "processing",
+        startedAt: Date.now()
+      }
+    });
+
+    const result = await step.do("process", async () => {
+      return processTask(params);
+    });
+
+    // Merge partial state (keeps existing fields, broadcasts to clients)
+    await this.mergeAgentState({
+      currentTask: {
+        status: "complete",
+        result,
+        completedAt: Date.now()
+      }
+    });
+
+    await this.reportComplete(result);
+    return result;
+  }
+}
+```
+
+### Custom Progress Types
+
+Define custom progress types for domain-specific reporting:
+
+```typescript
+// Custom progress type for data pipeline
+type PipelineProgress = {
+  stage: "extract" | "transform" | "load";
+  recordsProcessed: number;
+  totalRecords: number;
+  currentTable?: string;
+};
+
+// Workflow with custom progress type (3rd type parameter)
+export class ETLWorkflow extends AgentWorkflow<
+  MyAgent,
+  ETLParams,
+  PipelineProgress
+> {
+  async run(
+    event: WorkflowEvent<AgentWorkflowParams<ETLParams>>,
+    step: WorkflowStep
+  ) {
+    const params = this.getUserParams(event);
+
+    // Report typed progress
+    await this.reportProgress({
+      stage: "extract",
+      recordsProcessed: 0,
+      totalRecords: 1000,
+      currentTable: "users"
+    });
+
+    // ... processing
+  }
+}
+
+// Agent receives typed progress
+class MyAgent extends Agent {
+  async onWorkflowProgress(
+    workflowName: string,
+    workflowId: string,
+    progress: unknown
+  ) {
+    const p = progress as PipelineProgress;
+    console.log(`Stage: ${p.stage}, ${p.recordsProcessed}/${p.totalRecords}`);
+  }
+}
+```
+
 ## Bidirectional Communication
 
 ### Workflow → Agent
@@ -520,11 +654,19 @@ const response = await this.fetchAgent("/api/status", {
   body: JSON.stringify({ taskId })
 });
 
-// Callbacks
-await this.reportProgress(0.5, "Halfway done");
+// Callbacks (progress is now typed object)
+await this.reportProgress({
+  step: "process",
+  percent: 0.5,
+  message: "Halfway done"
+});
 await this.reportComplete(result);
 await this.reportError("Something went wrong");
 await this.sendEvent({ type: "custom", data: {} });
+
+// State synchronization (broadcasts to clients)
+await this.updateAgentState({ status: "processing" });
+await this.mergeAgentState({ progress: 0.5 });
 
 // Broadcast to WebSocket clients
 await this.broadcastToClients({ type: "update", data });
@@ -533,14 +675,24 @@ await this.broadcastToClients({ type: "update", data });
 ### Agent → Workflow
 
 ```typescript
-// Send event to waiting workflow
+// Send event to waiting workflow (generic)
 await this.sendWorkflowEvent(this.env.MY_WORKFLOW, workflowId, {
-  type: "approval",
-  payload: { approved: true }
+  type: "custom-event",
+  payload: { action: "proceed" }
 });
 
-// The workflow waits for this event with:
-const event = await step.waitForEvent("approval", { timeout: "7 days" });
+// Approve/reject workflows using convenience methods
+await this.approveWorkflow(workflowId, {
+  reason: "Approved by admin",
+  metadata: { approvedBy: userId }
+});
+
+await this.rejectWorkflow(workflowId, {
+  reason: "Request denied"
+});
+
+// The workflow waits for approval with:
+const approvalData = await this.waitForApproval(step, { timeout: "7 days" });
 ```
 
 ## Best Practices
