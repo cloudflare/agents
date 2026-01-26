@@ -27,6 +27,7 @@ export type Env = {
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
+  TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
 };
 
 type State = unknown;
@@ -323,6 +324,115 @@ export class TestScheduleAgent extends Agent<Env> {
   async createSchedule(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "testCallback");
     return schedule.id;
+  }
+}
+
+// Test Agent for Workflow integration
+export class TestWorkflowAgent extends Agent<Env> {
+  observability = undefined;
+
+  // Track callbacks received for testing
+  private _callbacksReceived: Array<{
+    type: string;
+    workflowId: string;
+    data: unknown;
+  }> = [];
+
+  @callable()
+  getCallbacksReceived() {
+    return this._callbacksReceived;
+  }
+
+  @callable()
+  clearCallbacks() {
+    this._callbacksReceived = [];
+  }
+
+  // Override lifecycle callbacks to track them
+  async onWorkflowProgress(
+    workflowId: string,
+    progress: number,
+    message?: string
+  ): Promise<void> {
+    this._callbacksReceived.push({
+      type: "progress",
+      workflowId,
+      data: { progress, message }
+    });
+  }
+
+  async onWorkflowComplete(
+    workflowId: string,
+    result?: unknown
+  ): Promise<void> {
+    this._callbacksReceived.push({
+      type: "complete",
+      workflowId,
+      data: { result }
+    });
+  }
+
+  async onWorkflowError(workflowId: string, error: string): Promise<void> {
+    this._callbacksReceived.push({
+      type: "error",
+      workflowId,
+      data: { error }
+    });
+  }
+
+  async onWorkflowEvent(workflowId: string, event: unknown): Promise<void> {
+    this._callbacksReceived.push({
+      type: "event",
+      workflowId,
+      data: { event }
+    });
+  }
+
+  // Test helper to insert a workflow tracking record directly
+  @callable()
+  async insertTestWorkflow(
+    workflowId: string,
+    workflowName: string,
+    status: string,
+    params?: unknown
+  ): Promise<string> {
+    const id = crypto.randomUUID();
+    this.sql`
+      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, params)
+      VALUES (${id}, ${workflowId}, ${workflowName}, ${status}, ${params ? JSON.stringify(params) : null})
+    `;
+    return id;
+  }
+
+  // Expose getWorkflow for testing
+  @callable()
+  async getWorkflowById(workflowId: string) {
+    return this.getWorkflow(workflowId);
+  }
+
+  // Expose getWorkflows for testing
+  @callable()
+  async queryWorkflows(criteria?: {
+    status?: string | string[];
+    workflowName?: string;
+    limit?: number;
+    orderBy?: "asc" | "desc";
+  }) {
+    return this.getWorkflows(criteria);
+  }
+
+  // Test helper to update workflow status directly
+  @callable()
+  async updateWorkflowStatus(
+    workflowId: string,
+    status: string
+  ): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    this.sql`
+      UPDATE cf_agents_workflows
+      SET status = ${status}, updated_at = ${now}
+      WHERE workflow_id = ${workflowId}
+    `;
   }
 }
 
