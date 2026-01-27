@@ -92,7 +92,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
       this.state.serialisedRunState!
     );
     const interruption = this.result?.interruptions?.find(
-      (i) => i.rawItem.callId === id
+      (i) => "callId" in i.rawItem && i.rawItem.callId === id
     );
     if (interruption) {
       if (approval) {

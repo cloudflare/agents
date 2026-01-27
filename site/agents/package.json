@@ -13,17 +13,17 @@
     "@astrojs/cloudflare": "^12.6.12",
     "@astrojs/react": "^4.4.2",
     "@cfworker/json-schema": "^4.1.1",
-    "@chonkiejs/core": "^0.0.5",
+    "@chonkiejs/core": "^0.0.7",
     "@gsap/react": "^2.1.2",
     "@orama/orama": "^3.1.18",
     "@use-it/interval": "^1.0.0",
-    "astro": "^5.16.6",
+    "astro": "^5.16.15",
     "clsx": "^2.1.1",
-    "effect": "^3.19.14",
-    "framer-motion": "^12.24.8",
+    "effect": "^3.19.15",
+    "framer-motion": "^12.29.2",
     "gsap": "^3.14.2",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "react-wrap-balancer": "^1.1.1",
     "shiki": "^3.21.0",
     "tailwindcss": "^4.1.18"
@@ -31,14 +31,14 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@tailwindcss/vite": "^4",
-    "@types/node": "^25.0.3",
-    "@types/react": "^19.2.7",
+    "@types/node": "^25.0.10",
+    "@types/react": "^19.2.9",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.56.0"
+    "wrangler": "^4.60.0"
   },
   "optionalDependencies": {
-    "lightningcss-darwin-arm64": "1.30.2",
-    "lightningcss-linux-x64-gnu": "1.30.2"
+    "lightningcss-darwin-arm64": "1.31.1",
+    "lightningcss-linux-x64-gnu": "1.31.1"
   }
 }

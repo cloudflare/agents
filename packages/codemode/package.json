@@ -14,8 +14,8 @@
     "zod-to-ts": "^2.0.0"
   },
   "devDependencies": {
-    "ai": "^6.0.15",
-    "zod": "^4.3.5"
+    "ai": "^6.0.50",
+    "zod": "^4.3.6"
   },
   "peerDependencies": {
     "agents": "^0.3.6",

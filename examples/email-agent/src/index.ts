@@ -167,9 +167,11 @@ export default {
           rawSize: body.length,
           reply: async (message: EmailMessage) => {
             console.log("📧 Reply to email:", message);
+            return { messageId: "mock-reply-id" };
           },
           forward: async (rcptTo: string, headers?: Headers) => {
             console.log("📧 Forwarding email to:", rcptTo, headers);
+            return { messageId: "mock-forward-id" };
           },
           setReject: (reason: string) => {
             console.log("📧 Rejecting email:", reason);
