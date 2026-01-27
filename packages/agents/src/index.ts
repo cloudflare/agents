@@ -2703,16 +2703,19 @@ export class StreamingResponse {
 // Workflow Integration Exports
 // ==========================================
 
-export { AgentWorkflow } from "./workflow";
+export { AgentWorkflow, WorkflowRejectedError } from "./workflow";
 export type {
   AgentWorkflowParams,
   AgentWorkflowInternalParams,
+  DefaultProgress,
   WorkflowCallback,
   WorkflowCallbackType,
   WorkflowProgressCallback,
   WorkflowCompleteCallback,
   WorkflowErrorCallback,
-  WorkflowEventCallback
+  WorkflowEventCallback,
+  WaitForApprovalOptions,
+  ApprovalEventPayload
 } from "./workflow";
 
 export type {
