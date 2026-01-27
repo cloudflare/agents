@@ -318,7 +318,7 @@ Delete workflow tracking records matching criteria. Useful for cleanup.
 // Delete all completed workflows older than 7 days
 const count = this.deleteWorkflows({
   status: "complete",
-  olderThan: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+  createdBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
 });
 
 // Delete all errored and terminated workflows
@@ -722,7 +722,7 @@ async onWorkflowComplete(workflowName, workflowId, result) {
 // Call this periodically via a scheduled task or cron
 this.deleteWorkflows({
   status: ["complete", "errored"],
-  olderThan: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // 7 days
+  createdBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // 7 days
 });
 
 // Option 3: Keep all history for compliance/auditing

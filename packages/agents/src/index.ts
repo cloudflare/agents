@@ -1779,10 +1779,10 @@ export class Agent<
    *
    * @example
    * ```typescript
-   * // Delete all completed workflows older than 7 days
+   * // Delete all completed workflows created more than 7 days ago
    * const deleted = this.deleteWorkflows({
    *   status: 'complete',
-   *   olderThan: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+   *   createdBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
    * });
    *
    * // Delete all errored and terminated workflows
@@ -1793,7 +1793,7 @@ export class Agent<
    */
   deleteWorkflows(
     criteria: Omit<WorkflowQueryCriteria, "limit" | "orderBy"> & {
-      olderThan?: Date;
+      createdBefore?: Date;
     } = {}
   ): number {
     // First count matching workflows
@@ -1826,9 +1826,9 @@ export class Agent<
       }
     }
 
-    if (criteria.olderThan) {
+    if (criteria.createdBefore) {
       query += " AND created_at < ?";
-      params.push(Math.floor(criteria.olderThan.getTime() / 1000));
+      params.push(Math.floor(criteria.createdBefore.getTime() / 1000));
     }
 
     this.ctx.storage.sql.exec(query, ...params).toArray();

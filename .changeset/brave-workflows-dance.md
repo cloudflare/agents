@@ -51,7 +51,7 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
 - `getWorkflow(workflowId)` - Get tracked workflow by ID
 - `getWorkflows(criteria?)` - Query by status, workflowName, or metadata
 - `deleteWorkflow(workflowId)` - Delete a workflow tracking record
-- `deleteWorkflows(criteria?)` - Delete workflows by criteria (status, workflowName, metadata, olderThan)
+- `deleteWorkflows(criteria?)` - Delete workflows by criteria (status, workflowName, metadata, createdBefore)
 - `approveWorkflow(workflowId, data?)` - Approve a waiting workflow
 - `rejectWorkflow(workflowId, data?)` - Reject a waiting workflow
 
