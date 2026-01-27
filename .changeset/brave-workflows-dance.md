@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 feat: Add Cloudflare Workflows integration for Agents
