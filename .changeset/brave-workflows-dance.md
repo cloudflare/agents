@@ -46,8 +46,8 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
 
 ### Agent Methods
 
-- `runWorkflow(workflow, params, options?)` - Start workflow with optional metadata for querying
-- `sendWorkflowEvent(workflow, workflowId, event)` - Send events to waiting workflows
+- `runWorkflow(workflowName, params, options?)` - Start workflow with optional metadata for querying
+- `sendWorkflowEvent(workflowName, workflowId, event)` - Send events to waiting workflows
 - `getWorkflow(workflowId)` - Get tracked workflow by ID
 - `getWorkflows(criteria?)` - Query by status, workflowName, or metadata
 - `deleteWorkflow(workflowId)` - Delete a workflow tracking record

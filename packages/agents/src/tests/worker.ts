@@ -514,7 +514,7 @@ export class TestWorkflowAgent extends Agent<Env> {
     workflowId: string,
     params: { taskId: string; shouldFail?: boolean; waitForApproval?: boolean }
   ): Promise<string> {
-    return this.runWorkflow(this.env.TEST_WORKFLOW, params, { id: workflowId });
+    return this.runWorkflow("TEST_WORKFLOW", params, { id: workflowId });
   }
 
   // Start a simple workflow
@@ -522,7 +522,7 @@ export class TestWorkflowAgent extends Agent<Env> {
     workflowId: string,
     params: { value: string }
   ): Promise<string> {
-    return this.runWorkflow(this.env.SIMPLE_WORKFLOW, params, {
+    return this.runWorkflow("SIMPLE_WORKFLOW", params, {
       id: workflowId
     });
   }
@@ -533,7 +533,7 @@ export class TestWorkflowAgent extends Agent<Env> {
     approved: boolean,
     reason?: string
   ): Promise<void> {
-    await this.sendWorkflowEvent(this.env.TEST_WORKFLOW, workflowId, {
+    await this.sendWorkflowEvent("TEST_WORKFLOW", workflowId, {
       type: "approval",
       payload: { approved, reason }
     });
@@ -541,7 +541,7 @@ export class TestWorkflowAgent extends Agent<Env> {
 
   // Get workflow status from Cloudflare
   async getCloudflareWorkflowStatus(workflowId: string) {
-    return this.getWorkflowStatus(this.env.TEST_WORKFLOW, workflowId);
+    return this.getWorkflowStatus("TEST_WORKFLOW", workflowId);
   }
 }
 

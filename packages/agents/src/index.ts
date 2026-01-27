@@ -313,6 +313,21 @@ function withAgentContext<T extends (...args: any[]) => any>(
 }
 
 /**
+ * Extract string keys from Env where the value is a Workflow binding.
+ */
+type WorkflowBinding<E> = {
+  [K in keyof E & string]: E[K] extends Workflow ? K : never;
+}[keyof E & string];
+
+/**
+ * Type for workflow name parameter.
+ * When Env has typed Workflow bindings, provides autocomplete for those keys.
+ * Also accepts any string for dynamic use cases and compatibility.
+ * The `string & {}` trick preserves autocomplete while allowing any string.
+ */
+type WorkflowName<E> = WorkflowBinding<E> | (string & {});
+
+/**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
@@ -1417,7 +1432,7 @@ export class Agent<
    * Automatically injects agent identity into the workflow params.
    *
    * @template P - Type of params to pass to the workflow
-   * @param workflow - Workflow binding from env
+   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
    * @param params - Params to pass to the workflow
    * @param options - Optional workflow options
    * @returns The workflow instance ID
@@ -1425,20 +1440,22 @@ export class Agent<
    * @example
    * ```typescript
    * const workflowId = await this.runWorkflow(
-   *   this.env.MY_WORKFLOW,
+   *   'MY_WORKFLOW',
    *   { taskId: '123', data: 'process this' }
    * );
    * ```
    */
   async runWorkflow<P = unknown>(
-    workflow: Workflow,
+    workflowName: WorkflowName<Env>,
     params: P,
     options?: RunWorkflowOptions
   ): Promise<string> {
-    // Find the binding name for this workflow
-    const workflowName = this._findWorkflowBindingName(workflow);
-    if (!workflowName) {
-      throw new Error("Could not find workflow binding name in environment");
+    // Look up the workflow binding by name
+    const workflow = this._findWorkflowBindingByName(workflowName);
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowName}' not found in environment`
+      );
     }
 
     // Find the binding name for this Agent's namespace
@@ -1507,24 +1524,31 @@ export class Agent<
    * Send an event to a running workflow.
    * The workflow can wait for this event using step.waitForEvent().
    *
-   * @param workflow - Workflow binding from env
+   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
    * @param workflowId - ID of the workflow instance
    * @param event - Event to send
    *
    * @example
    * ```typescript
    * await this.sendWorkflowEvent(
-   *   this.env.MY_WORKFLOW,
+   *   'MY_WORKFLOW',
    *   workflowId,
    *   { type: 'approval', payload: { approved: true } }
    * );
    * ```
    */
   async sendWorkflowEvent(
-    workflow: Workflow,
+    workflowName: WorkflowName<Env>,
     workflowId: string,
     event: WorkflowEventPayload
   ): Promise<void> {
+    const workflow = this._findWorkflowBindingByName(workflowName);
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowName}' not found in environment`
+      );
+    }
+
     const instance = await workflow.get(workflowId);
     await instance.sendEvent(event);
 
@@ -1567,23 +1591,18 @@ export class Agent<
       throw new Error(`Workflow ${workflowId} not found in tracking table`);
     }
 
-    const workflowBinding = this._findWorkflowBindingByName(
-      workflowInfo.workflowName
-    );
-    if (!workflowBinding) {
-      throw new Error(
-        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
-      );
-    }
-
-    await this.sendWorkflowEvent(workflowBinding, workflowId, {
-      type: "approval",
-      payload: {
-        approved: true,
-        reason: data?.reason,
-        metadata: data?.metadata
+    await this.sendWorkflowEvent(
+      workflowInfo.workflowName as WorkflowName<Env>,
+      workflowId,
+      {
+        type: "approval",
+        payload: {
+          approved: true,
+          reason: data?.reason,
+          metadata: data?.metadata
+        }
       }
-    });
+    );
 
     this.observability?.emit(
       {
@@ -1620,22 +1639,17 @@ export class Agent<
       throw new Error(`Workflow ${workflowId} not found in tracking table`);
     }
 
-    const workflowBinding = this._findWorkflowBindingByName(
-      workflowInfo.workflowName
-    );
-    if (!workflowBinding) {
-      throw new Error(
-        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
-      );
-    }
-
-    await this.sendWorkflowEvent(workflowBinding, workflowId, {
-      type: "approval",
-      payload: {
-        approved: false,
-        reason: data?.reason
+    await this.sendWorkflowEvent(
+      workflowInfo.workflowName as WorkflowName<Env>,
+      workflowId,
+      {
+        type: "approval",
+        payload: {
+          approved: false,
+          reason: data?.reason
+        }
       }
-    });
+    );
 
     this.observability?.emit(
       {
@@ -1670,14 +1684,21 @@ export class Agent<
   /**
    * Get the status of a workflow and update the tracking record.
    *
-   * @param workflow - Workflow binding from env
+   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
    * @param workflowId - ID of the workflow instance
    * @returns The workflow status
    */
   async getWorkflowStatus(
-    workflow: Workflow,
+    workflowName: WorkflowName<Env>,
     workflowId: string
   ): Promise<InstanceStatus> {
+    const workflow = this._findWorkflowBindingByName(workflowName);
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowName}' not found in environment`
+      );
+    }
+
     const instance = await workflow.get(workflowId);
     const status = await instance.status();
 
@@ -1885,20 +1906,6 @@ export class Agent<
       updatedAt: new Date(row.updated_at * 1000),
       completedAt: row.completed_at ? new Date(row.completed_at * 1000) : null
     };
-  }
-
-  /**
-   * Find the binding name for a workflow in the environment
-   */
-  private _findWorkflowBindingName(workflow: Workflow): string | undefined {
-    for (const [key, value] of Object.entries(
-      this.env as Record<string, unknown>
-    )) {
-      if (value === workflow) {
-        return key;
-      }
-    }
-    return undefined;
   }
 
   /**

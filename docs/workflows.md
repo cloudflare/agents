@@ -103,7 +103,7 @@ import { Agent } from "agents";
 export class MyAgent extends Agent {
   async startTask(taskId: string, data: string) {
     // Start workflow - automatically tracked in Agent's database
-    const workflowId = await this.runWorkflow(this.env.PROCESSING_WORKFLOW, {
+    const workflowId = await this.runWorkflow("PROCESSING_WORKFLOW", {
       taskId,
       data
     });
@@ -224,13 +224,13 @@ type DefaultProgress = {
 
 Methods added to the `Agent` class:
 
-#### `runWorkflow(workflow, params, options?)`
+#### `runWorkflow(workflowName, params, options?)`
 
 Start a workflow and track it in the Agent's database.
 
 ```typescript
 const workflowId = await this.runWorkflow(
-  this.env.MY_WORKFLOW,
+  "MY_WORKFLOW",
   { taskId: "123", data: "process this" },
   {
     id: "custom-id", // optional - auto-generated if not provided
@@ -248,12 +248,12 @@ const workflowId = await this.runWorkflow(
 
 **Returns:** Workflow instance ID
 
-#### `sendWorkflowEvent(workflow, workflowId, event)`
+#### `sendWorkflowEvent(workflowName, workflowId, event)`
 
 Send an event to a running workflow.
 
 ```typescript
-await this.sendWorkflowEvent(this.env.MY_WORKFLOW, workflowId, {
+await this.sendWorkflowEvent("MY_WORKFLOW", workflowId, {
   type: "approval",
   payload: { approved: true }
 });
@@ -264,7 +264,7 @@ await this.sendWorkflowEvent(this.env.MY_WORKFLOW, workflowId, {
 Get the status of a workflow and update tracking record.
 
 ```typescript
-const status = await this.getWorkflowStatus(this.env.MY_WORKFLOW, workflowId);
+const status = await this.getWorkflowStatus("MY_WORKFLOW", workflowId);
 // status: { status: 'running', output: null, error: null }
 ```
 
@@ -684,7 +684,7 @@ await this.broadcastToClients({ type: "update", data });
 
 ```typescript
 // Send event to waiting workflow (generic)
-await this.sendWorkflowEvent(this.env.MY_WORKFLOW, workflowId, {
+await this.sendWorkflowEvent("MY_WORKFLOW", workflowId, {
   type: "custom-event",
   payload: { action: "proceed" }
 });

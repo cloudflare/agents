@@ -53,7 +53,7 @@ export class TaskAgent extends Agent<Env, AgentState> {
 
     // Start the workflow
     const workflowId = await this.runWorkflow(
-      this.env.TASK_WORKFLOW,
+      "TASK_WORKFLOW",
       { taskId, taskName },
       { metadata: { taskName } }
     );
