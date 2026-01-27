@@ -1724,10 +1724,11 @@ export class Agent<
     }
 
     // Filter by metadata key-value pairs using json_extract
+    // Use parameterized path construction to prevent SQL injection
     if (criteria.metadata) {
       for (const [key, value] of Object.entries(criteria.metadata)) {
-        query += ` AND json_extract(metadata, '$.${key}') = ?`;
-        params.push(value);
+        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
+        params.push(key, value);
       }
     }
 

@@ -128,6 +128,42 @@ describe("workflow operations", () => {
       );
     });
 
+    it("should query workflows by metadata", async () => {
+      const agentStub = await getTestAgent("workflow-query-test-5");
+
+      // Insert workflows with different metadata
+      await agentStub.insertTestWorkflow("wf-1", "TEST_WORKFLOW", "running", {
+        userId: "user-123",
+        priority: "high"
+      });
+      await agentStub.insertTestWorkflow("wf-2", "TEST_WORKFLOW", "running", {
+        userId: "user-456",
+        priority: "low"
+      });
+      await agentStub.insertTestWorkflow("wf-3", "TEST_WORKFLOW", "complete", {
+        userId: "user-123",
+        priority: "low"
+      });
+
+      // Query by single metadata field
+      const user123Workflows = (await agentStub.queryWorkflows({
+        metadata: { userId: "user-123" }
+      })) as WorkflowInfo[];
+
+      expect(user123Workflows.length).toBe(2);
+      expect(
+        user123Workflows.every((w) => w.metadata?.userId === "user-123")
+      ).toBe(true);
+
+      // Query by multiple metadata fields
+      const highPriorityUser123 = (await agentStub.queryWorkflows({
+        metadata: { userId: "user-123", priority: "high" }
+      })) as WorkflowInfo[];
+
+      expect(highPriorityUser123.length).toBe(1);
+      expect(highPriorityUser123[0].workflowId).toBe("wf-1");
+    });
+
     it("should update workflow status", async () => {
       const agentStub = await getTestAgent("workflow-update-test-1");
 
