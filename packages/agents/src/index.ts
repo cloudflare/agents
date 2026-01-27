@@ -1763,7 +1763,7 @@ export class Agent<
    * Useful for cleaning up old completed/errored workflows.
    *
    * @param criteria - Criteria for which workflows to delete
-   * @returns Number of records deleted
+   * @returns Number of records matching criteria (expected deleted count)
    *
    * @example
    * ```typescript
