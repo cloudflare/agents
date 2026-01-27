@@ -530,12 +530,6 @@ export class Agent<
             return oauthResponse;
           }
 
-          // Handle workflow-related requests
-          const workflowResponse = await this._handleWorkflowRequest(request);
-          if (workflowResponse) {
-            return workflowResponse;
-          }
-
           return this._tryCatch(() => _onRequest(request));
         }
       );
@@ -2044,89 +2038,41 @@ export class Agent<
     // Override to handle custom events
   }
 
+  // ============================================================
+  // Internal RPC methods for AgentWorkflow communication
+  // These are called via DO RPC, not exposed via HTTP
+  // ============================================================
+
   /**
-   * Handle workflow-related HTTP requests.
-   * Called from onRequest for /_workflow/* paths.
+   * Handle a workflow callback via RPC.
+   * @internal - Called by AgentWorkflow, do not call directly
    */
-  private async _handleWorkflowRequest(
-    request: Request
-  ): Promise<Response | null> {
-    const url = new URL(request.url);
-    const path = url.pathname;
+  async _workflow_handleCallback(callback: WorkflowCallback): Promise<void> {
+    await this.onWorkflowCallback(callback);
+  }
 
-    // Handle /_workflow/callback
-    if (path === "/_workflow/callback" && request.method === "POST") {
-      try {
-        const callback = (await request.json()) as WorkflowCallback;
-        await this.onWorkflowCallback(callback);
-        return new Response(JSON.stringify({ success: true }), {
-          headers: { "Content-Type": "application/json" }
-        });
-      } catch (e) {
-        console.error("Error handling workflow callback:", e);
-        return new Response(JSON.stringify({ error: String(e) }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
+  /**
+   * Broadcast a message to all connected clients via RPC.
+   * @internal - Called by AgentWorkflow, do not call directly
+   */
+  _workflow_broadcast(message: unknown): void {
+    this.broadcast(JSON.stringify(message));
+  }
+
+  /**
+   * Update agent state via RPC.
+   * @internal - Called by AgentWorkflow, do not call directly
+   */
+  _workflow_updateState(action: "set" | "merge", state: unknown): void {
+    if (action === "set") {
+      this.setState(state as State);
+    } else {
+      const currentState = this.state ?? ({} as State);
+      this.setState({
+        ...currentState,
+        ...(state as Record<string, unknown>)
+      } as State);
     }
-
-    // Handle /_workflow/broadcast
-    if (path === "/_workflow/broadcast" && request.method === "POST") {
-      try {
-        const message = await request.json();
-        this.broadcast(JSON.stringify(message));
-        return new Response(JSON.stringify({ success: true }), {
-          headers: { "Content-Type": "application/json" }
-        });
-      } catch (e) {
-        console.error("Error handling workflow broadcast:", e);
-        return new Response(JSON.stringify({ error: String(e) }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
-    }
-
-    // Handle /_workflow/state - allows workflows to update Agent state
-    if (path === "/_workflow/state" && request.method === "POST") {
-      try {
-        const { action, state } = (await request.json()) as {
-          action: "set" | "merge";
-          state: unknown;
-        };
-
-        if (action === "set") {
-          this.setState(state as State);
-        } else if (action === "merge") {
-          const currentState = this.state ?? ({} as State);
-          this.setState({
-            ...currentState,
-            ...(state as Record<string, unknown>)
-          } as State);
-        } else {
-          return new Response(
-            JSON.stringify({ error: `Unknown action: ${action}` }),
-            {
-              status: 400,
-              headers: { "Content-Type": "application/json" }
-            }
-          );
-        }
-
-        return new Response(JSON.stringify({ success: true }), {
-          headers: { "Content-Type": "application/json" }
-        });
-      } catch (e) {
-        console.error("Error handling workflow state update:", e);
-        return new Response(JSON.stringify({ error: String(e) }), {
-          status: 500,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
-    }
-
-    return null;
   }
 
   /**

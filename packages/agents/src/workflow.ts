@@ -185,23 +185,12 @@ export class AgentWorkflow<
   }
 
   /**
-   * Send a notification to the Agent.
-   * Calls the Agent's /_workflow/callback endpoint.
+   * Send a notification to the Agent via RPC.
    *
    * @param callback - Callback payload to send
    */
   protected async notifyAgent(callback: WorkflowCallback): Promise<void> {
-    const response = await this.fetchAgent("/_workflow/callback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(callback)
-    });
-
-    if (!response.ok) {
-      console.error(
-        `Failed to notify agent: ${response.status} ${response.statusText}`
-      );
-    }
+    await this.agent._workflow_handleCallback(callback);
   }
 
   /**
@@ -281,22 +270,11 @@ export class AgentWorkflow<
 
   /**
    * Broadcast a message to all connected WebSocket clients via the Agent.
-   * Calls the Agent's broadcast() method.
    *
    * @param message - Message to broadcast (will be JSON-stringified)
    */
-  protected async broadcastToClients(message: unknown): Promise<void> {
-    const response = await this.fetchAgent("/_workflow/broadcast", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(message)
-    });
-
-    if (!response.ok) {
-      console.error(
-        `Failed to broadcast to clients: ${response.status} ${response.statusText}`
-      );
-    }
+  protected broadcastToClients(message: unknown): void {
+    this.agent._workflow_broadcast(message);
   }
 
   /**
@@ -359,21 +337,11 @@ export class AgentWorkflow<
    *
    * @example
    * ```typescript
-   * await this.updateAgentState({ workflowStatus: 'processing', progress: 0.5 });
+   * this.updateAgentState({ workflowStatus: 'processing', progress: 0.5 });
    * ```
    */
-  protected async updateAgentState(state: unknown): Promise<void> {
-    const response = await this.fetchAgent("/_workflow/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "set", state })
-    });
-
-    if (!response.ok) {
-      console.error(
-        `Failed to update agent state: ${response.status} ${response.statusText}`
-      );
-    }
+  protected updateAgentState(state: unknown): void {
+    this.agent._workflow_updateState("set", state);
   }
 
   /**
@@ -384,25 +352,13 @@ export class AgentWorkflow<
    *
    * @example
    * ```typescript
-   * await this.mergeAgentState({
+   * this.mergeAgentState({
    *   currentWorkflow: { id: this.workflowId, status: 'running' }
    * });
    * ```
    */
-  protected async mergeAgentState(
-    partialState: Record<string, unknown>
-  ): Promise<void> {
-    const response = await this.fetchAgent("/_workflow/state", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "merge", state: partialState })
-    });
-
-    if (!response.ok) {
-      console.error(
-        `Failed to merge agent state: ${response.status} ${response.statusText}`
-      );
-    }
+  protected mergeAgentState(partialState: Record<string, unknown>): void {
+    this.agent._workflow_updateState("merge", partialState);
   }
 
   /**
