@@ -56,10 +56,7 @@ type TaskParams = {
 };
 
 export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<TaskParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
 
     // Step 1: Process data
@@ -436,10 +433,7 @@ export class DataProcessingWorkflow extends AgentWorkflow<
   MyAgent,
   ProcessParams
 > {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<ProcessParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<ProcessParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
     const items = params.items;
 
@@ -486,10 +480,7 @@ class MyAgent extends Agent {
 ```typescript
 // Workflow using the built-in waitForApproval helper
 export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<RequestParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<RequestParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
 
     // Prepare request
@@ -538,10 +529,7 @@ class MyAgent extends Agent {
 ```typescript
 // Workflow with built-in retry logic
 export class ResilientTaskWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<TaskParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
 
     const result = await step.do(
@@ -581,10 +569,7 @@ Workflows can update the Agent's state directly, which automatically broadcasts 
 ```typescript
 // Workflow that syncs state to Agent
 export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<TaskParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
 
     // Update Agent state (replaces entire state, broadcasts to clients)
@@ -634,10 +619,7 @@ export class ETLWorkflow extends AgentWorkflow<
   ETLParams,
   PipelineProgress
 > {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<ETLParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<ETLParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
 
     // Report typed progress

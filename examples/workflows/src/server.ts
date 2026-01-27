@@ -9,8 +9,8 @@
  */
 
 import { Agent, AgentWorkflow, callable, routeAgentRequest } from "agents";
-import type { AgentWorkflowParams, DefaultProgress } from "agents";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+import type { AgentWorkflowEvent, DefaultProgress } from "agents";
+import type { WorkflowStep } from "cloudflare:workers";
 
 // Workflow parameters
 type TaskParams = {
@@ -191,10 +191,7 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
   TaskAgent,
   TaskParams
 > {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<TaskParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
     console.log(`Starting workflow for task: ${params.taskName}`);
 

@@ -19,10 +19,7 @@ Extend `AgentWorkflow` instead of `WorkflowEntrypoint` to get typed access to th
 
 ```typescript
 export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<TaskParams>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
     const params = this.getUserParams(event);
 
     // Call Agent methods via RPC

@@ -1,9 +1,9 @@
 /**
  * Test Workflow for integration testing AgentWorkflow functionality
  */
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+import type { WorkflowStep } from "cloudflare:workers";
 import { AgentWorkflow } from "../workflow";
-import type { AgentWorkflowParams } from "../workflow-types";
+import type { AgentWorkflowEvent } from "../workflow";
 import type { TestWorkflowAgent } from "./worker";
 
 /**
@@ -29,7 +29,7 @@ export class TestProcessingWorkflow extends AgentWorkflow<
   TestProcessingParams
 > {
   async run(
-    event: WorkflowEvent<AgentWorkflowParams<TestProcessingParams>>,
+    event: AgentWorkflowEvent<TestProcessingParams>,
     step: WorkflowStep
   ) {
     const params = this.getUserParams(event);
@@ -121,10 +121,7 @@ export class SimpleTestWorkflow extends AgentWorkflow<
   TestWorkflowAgent,
   { value: string }
 > {
-  async run(
-    event: WorkflowEvent<AgentWorkflowParams<{ value: string }>>,
-    step: WorkflowStep
-  ) {
+  async run(event: AgentWorkflowEvent<{ value: string }>, step: WorkflowStep) {
     const params = this.getUserParams(event);
 
     const result = await step.do("echo", async () => {

@@ -2747,6 +2747,7 @@ export class StreamingResponse {
 
 export { AgentWorkflow, WorkflowRejectedError } from "./workflow";
 export type {
+  AgentWorkflowEvent,
   AgentWorkflowParams,
   AgentWorkflowInternalParams,
   DefaultProgress,

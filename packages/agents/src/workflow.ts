@@ -12,7 +12,7 @@
  * type TaskParams = { taskId: string; data: string };
  *
  * export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
- *   async run(event: WorkflowEvent<AgentWorkflowParams<TaskParams>>, step: WorkflowStep) {
+ *   async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
  *     // Access the originating Agent via typed RPC
  *     await this.agent.updateTaskStatus(event.payload.taskId, 'processing');
  *
@@ -47,6 +47,22 @@ import type {
   WaitForApprovalOptions
 } from "./workflow-types";
 import { WorkflowRejectedError } from "./workflow-types";
+
+/**
+ * Convenience type alias for workflow event with agent params.
+ * Use this instead of WorkflowEvent<AgentWorkflowParams<T>> for cleaner code.
+ *
+ * @example
+ * ```typescript
+ * async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
+ *   const params = this.getUserParams(event);
+ *   // ...
+ * }
+ * ```
+ */
+export type AgentWorkflowEvent<Params = unknown> = WorkflowEvent<
+  AgentWorkflowParams<Params>
+>;
 
 /**
  * Base class for Workflows that need access to their originating Agent.
@@ -86,7 +102,7 @@ export class AgentWorkflow<
 
     // Override run to initialize agent before user code executes
     this.run = async (
-      event: WorkflowEvent<AgentWorkflowParams<Params>>,
+      event: AgentWorkflowEvent<Params>,
       step: WorkflowStep
     ) => {
       // Initialize agent connection
@@ -101,9 +117,7 @@ export class AgentWorkflow<
    * Initialize the Agent stub from workflow params.
    * Called automatically before run() executes.
    */
-  private async _initAgent(
-    event: WorkflowEvent<AgentWorkflowParams<Params>>
-  ): Promise<void> {
+  private async _initAgent(event: AgentWorkflowEvent<Params>): Promise<void> {
     const { __agentName, __agentBinding, __workflowName } = event.payload;
 
     if (!__agentName || !__agentBinding || !__workflowName) {
@@ -367,9 +381,7 @@ export class AgentWorkflow<
    * @param event - Workflow event
    * @returns User params only
    */
-  protected getUserParams(
-    event: WorkflowEvent<AgentWorkflowParams<Params>>
-  ): Params {
+  protected getUserParams(event: AgentWorkflowEvent<Params>): Params {
     const { __agentName, __agentBinding, __workflowName, ...userParams } =
       event.payload;
     return userParams as unknown as Params;
