@@ -1469,10 +1469,22 @@ export class Agent<
     const metadataJson = options?.metadata
       ? JSON.stringify(options.metadata)
       : null;
-    this.sql`
-      INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
-      VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
-    `;
+    try {
+      this.sql`
+        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
+        VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
+      `;
+    } catch (e) {
+      if (
+        e instanceof Error &&
+        e.message.includes("UNIQUE constraint failed")
+      ) {
+        throw new Error(
+          `Workflow with ID "${workflowId}" is already being tracked`
+        );
+      }
+      throw e;
+    }
 
     this.observability?.emit(
       {

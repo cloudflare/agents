@@ -360,6 +360,27 @@ export class TestWorkflowAgent extends Agent<Env> {
     this._callbacksReceived = [];
   }
 
+  // Helper to insert workflow tracking directly (for testing duplicate ID handling)
+  insertWorkflowTracking(workflowId: string, workflowName: string): void {
+    const id = `test-${Date.now()}`;
+    try {
+      this.sql`
+        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status)
+        VALUES (${id}, ${workflowId}, ${workflowName}, 'queued')
+      `;
+    } catch (e) {
+      if (
+        e instanceof Error &&
+        e.message.includes("UNIQUE constraint failed")
+      ) {
+        throw new Error(
+          `Workflow with ID "${workflowId}" is already being tracked`
+        );
+      }
+      throw e;
+    }
+  }
+
   // Override lifecycle callbacks to track them
   async onWorkflowProgress(
     workflowName: string,

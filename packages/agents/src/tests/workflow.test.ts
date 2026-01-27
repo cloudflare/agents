@@ -234,6 +234,20 @@ describe("workflow operations", () => {
       )) as WorkflowInfo | null;
       expect(workflow?.status).toBe("running");
     });
+
+    it("should throw clear error when tracking duplicate workflow ID", async () => {
+      const agentStub = await getTestAgent("workflow-duplicate-test");
+
+      // Insert a tracking record
+      await agentStub.insertWorkflowTracking("duplicate-id", "TEST_WORKFLOW");
+
+      // Try to insert again - should get friendly error
+      await expect(
+        agentStub.insertWorkflowTracking("duplicate-id", "TEST_WORKFLOW")
+      ).rejects.toThrow(
+        'Workflow with ID "duplicate-id" is already being tracked'
+      );
+    });
   });
 
   describe("workflow callbacks", () => {
