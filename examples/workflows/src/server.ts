@@ -12,12 +12,6 @@ import { Agent, AgentWorkflow, callable, routeAgentRequest } from "agents";
 import type { AgentWorkflowParams, DefaultProgress } from "agents";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
-// Environment bindings
-interface Env {
-  TaskAgent: DurableObjectNamespace;
-  TASK_WORKFLOW: Workflow;
-}
-
 // Workflow parameters
 type TaskParams = {
   taskId: string;
