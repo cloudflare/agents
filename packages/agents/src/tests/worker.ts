@@ -444,6 +444,21 @@ export class TestWorkflowAgent extends Agent<Env> {
     return this.getWorkflows(criteria);
   }
 
+  // Expose deleteWorkflow for testing
+  async deleteWorkflowById(workflowId: string): Promise<boolean> {
+    return this.deleteWorkflow(workflowId);
+  }
+
+  // Expose deleteWorkflows for testing
+  async deleteWorkflowsByCriteria(criteria?: {
+    status?: WorkflowStatus | WorkflowStatus[];
+    workflowName?: string;
+    metadata?: Record<string, string | number | boolean>;
+    olderThan?: Date;
+  }): Promise<number> {
+    return this.deleteWorkflows(criteria);
+  }
+
   // Test helper to update workflow status directly
   async updateWorkflowStatus(
     workflowId: string,

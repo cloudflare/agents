@@ -164,6 +164,54 @@ describe("workflow operations", () => {
       expect(highPriorityUser123[0].workflowId).toBe("wf-1");
     });
 
+    it("should delete a single workflow", async () => {
+      const agentStub = await getTestAgent("workflow-delete-test-1");
+
+      // Insert a workflow
+      await agentStub.insertTestWorkflow(
+        "wf-to-delete",
+        "TEST_WORKFLOW",
+        "complete"
+      );
+
+      // Verify it exists
+      const before = (await agentStub.queryWorkflows({})) as WorkflowInfo[];
+      expect(before.length).toBe(1);
+
+      // Delete it
+      const deleted = await agentStub.deleteWorkflowById("wf-to-delete");
+      expect(deleted).toBe(true);
+
+      // Verify it's gone
+      const after = (await agentStub.queryWorkflows({})) as WorkflowInfo[];
+      expect(after.length).toBe(0);
+
+      // Deleting again should return false
+      const deletedAgain = await agentStub.deleteWorkflowById("wf-to-delete");
+      expect(deletedAgain).toBe(false);
+    });
+
+    it("should delete workflows by criteria", async () => {
+      const agentStub = await getTestAgent("workflow-delete-test-2");
+
+      // Insert multiple workflows
+      await agentStub.insertTestWorkflow("wf-1", "TEST_WORKFLOW", "complete");
+      await agentStub.insertTestWorkflow("wf-2", "TEST_WORKFLOW", "errored");
+      await agentStub.insertTestWorkflow("wf-3", "TEST_WORKFLOW", "running");
+      await agentStub.insertTestWorkflow("wf-4", "TEST_WORKFLOW", "complete");
+
+      // Delete only completed workflows
+      const deletedCount = await agentStub.deleteWorkflowsByCriteria({
+        status: "complete"
+      });
+      expect(deletedCount).toBe(2);
+
+      // Verify only non-complete workflows remain
+      const remaining = (await agentStub.queryWorkflows({})) as WorkflowInfo[];
+      expect(remaining.length).toBe(2);
+      expect(remaining.every((w) => w.status !== "complete")).toBe(true);
+    });
+
     it("should update workflow status", async () => {
       const agentStub = await getTestAgent("workflow-update-test-1");
 

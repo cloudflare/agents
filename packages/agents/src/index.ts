@@ -1747,6 +1747,89 @@ export class Agent<
   }
 
   /**
+   * Delete a workflow tracking record.
+   *
+   * @param workflowId - ID of the workflow to delete
+   * @returns true if a record was deleted, false if not found
+   */
+  deleteWorkflow(workflowId: string): boolean {
+    // First check if workflow exists
+    const existing = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
+    `;
+    if (!existing[0] || existing[0].count === 0) {
+      return false;
+    }
+    this.sql`DELETE FROM cf_agents_workflows WHERE workflow_id = ${workflowId}`;
+    return true;
+  }
+
+  /**
+   * Delete workflow tracking records matching criteria.
+   * Useful for cleaning up old completed/errored workflows.
+   *
+   * @param criteria - Criteria for which workflows to delete
+   * @returns Number of records deleted
+   *
+   * @example
+   * ```typescript
+   * // Delete all completed workflows older than 7 days
+   * const deleted = this.deleteWorkflows({
+   *   status: 'complete',
+   *   olderThan: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+   * });
+   *
+   * // Delete all errored and terminated workflows
+   * const deleted = this.deleteWorkflows({
+   *   status: ['errored', 'terminated']
+   * });
+   * ```
+   */
+  deleteWorkflows(
+    criteria: Omit<WorkflowQueryCriteria, "limit" | "orderBy"> & {
+      olderThan?: Date;
+    } = {}
+  ): number {
+    // First count matching workflows
+    const matching = this.getWorkflows(criteria as WorkflowQueryCriteria);
+    if (matching.length === 0) {
+      return 0;
+    }
+
+    let query = "DELETE FROM cf_agents_workflows WHERE 1=1";
+    const params: (string | number | boolean)[] = [];
+
+    if (criteria.status) {
+      const statuses = Array.isArray(criteria.status)
+        ? criteria.status
+        : [criteria.status];
+      const placeholders = statuses.map(() => "?").join(", ");
+      query += ` AND status IN (${placeholders})`;
+      params.push(...statuses);
+    }
+
+    if (criteria.workflowName) {
+      query += " AND workflow_name = ?";
+      params.push(criteria.workflowName);
+    }
+
+    if (criteria.metadata) {
+      for (const [key, value] of Object.entries(criteria.metadata)) {
+        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
+        params.push(key, value);
+      }
+    }
+
+    if (criteria.olderThan) {
+      query += " AND created_at < ?";
+      params.push(Math.floor(criteria.olderThan.getTime() / 1000));
+    }
+
+    this.ctx.storage.sql.exec(query, ...params).toArray();
+    return matching.length;
+  }
+
+  /**
    * Update workflow tracking record from InstanceStatus
    */
   private _updateWorkflowTracking(

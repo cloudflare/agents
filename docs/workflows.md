@@ -304,6 +304,32 @@ const recent = this.getWorkflows({
 });
 ```
 
+#### `deleteWorkflow(workflowId)`
+
+Delete a single workflow tracking record.
+
+```typescript
+const deleted = this.deleteWorkflow(workflowId);
+// true if deleted, false if not found
+```
+
+#### `deleteWorkflows(criteria?)`
+
+Delete workflow tracking records matching criteria. Useful for cleanup.
+
+```typescript
+// Delete all completed workflows older than 7 days
+const count = this.deleteWorkflows({
+  status: "complete",
+  olderThan: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+});
+
+// Delete all errored and terminated workflows
+const count = this.deleteWorkflows({
+  status: ["errored", "terminated"]
+});
+```
+
 ### Lifecycle Callbacks
 
 Override these methods in your Agent to handle workflow events:
@@ -701,7 +727,25 @@ const approvalData = await this.waitForApproval(step, { timeout: "7 days" });
 2. **Use meaningful step names** - Helps with debugging and observability
 3. **Report progress regularly** - Keeps users informed
 4. **Handle errors gracefully** - Use `reportError()` before throwing
-5. **Clean up completed workflows** - Query and delete old records periodically
+5. **Clean up completed workflows** - The `cf_agents_workflows` table can grow unbounded, so implement a retention policy:
+
+```typescript
+// Option 1: Cleanup immediately on completion
+async onWorkflowComplete(workflowName, workflowId, result) {
+  // Process result first, then delete
+  this.deleteWorkflow(workflowId);
+}
+
+// Option 2: Scheduled cleanup (keep recent history)
+// Call this periodically via a scheduled task or cron
+this.deleteWorkflows({
+  status: ["complete", "errored"],
+  olderThan: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // 7 days
+});
+
+// Option 3: Keep all history for compliance/auditing
+// Don't call deleteWorkflows() - query historical data as needed
+```
 
 ## Limitations
 
