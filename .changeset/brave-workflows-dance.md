@@ -68,6 +68,7 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
 - `step.sendEvent(event)` - Send custom event to Agent
 - `step.updateAgentState(state)` - Replace Agent state (broadcasts to clients)
 - `step.mergeAgentState(partial)` - Merge into Agent state (broadcasts to clients)
+- `step.resetAgentState()` - Reset Agent state to initialState (broadcasts to clients)
 
 ### Lifecycle Callbacks
 

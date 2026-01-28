@@ -160,7 +160,6 @@ export class AgentWorkflow<
    * that Cloudflare's runtime may perform on the WorkflowStep class.
    */
   private _wrapStep(step: WorkflowStep): AgentWorkflowStep {
-    const workflow = this;
     let stepCounter = 0;
 
     // Cast step to our extended type and add methods directly
@@ -168,11 +167,11 @@ export class AgentWorkflow<
     const wrappedStep = step as AgentWorkflowStep;
 
     // Add durable Agent methods directly to the step object
-    wrappedStep.reportComplete = async function <T>(result?: T): Promise<void> {
+    wrappedStep.reportComplete = async <T>(result?: T): Promise<void> => {
       await step.do(`__agent_reportComplete_${stepCounter++}`, async () => {
-        await workflow.notifyAgent({
-          workflowName: workflow._workflowName,
-          workflowId: workflow._workflowId,
+        await this.notifyAgent({
+          workflowName: this._workflowName,
+          workflowId: this._workflowId,
           type: "complete",
           result,
           timestamp: Date.now()
@@ -180,14 +179,12 @@ export class AgentWorkflow<
       });
     };
 
-    wrappedStep.reportError = async function (
-      error: Error | string
-    ): Promise<void> {
+    wrappedStep.reportError = async (error: Error | string): Promise<void> => {
       const errorMessage = error instanceof Error ? error.message : error;
       await step.do(`__agent_reportError_${stepCounter++}`, async () => {
-        await workflow.notifyAgent({
-          workflowName: workflow._workflowName,
-          workflowId: workflow._workflowId,
+        await this.notifyAgent({
+          workflowName: this._workflowName,
+          workflowId: this._workflowId,
           type: "error",
           error: errorMessage,
           timestamp: Date.now()
@@ -195,11 +192,11 @@ export class AgentWorkflow<
       });
     };
 
-    wrappedStep.sendEvent = async function <T>(event: T): Promise<void> {
+    wrappedStep.sendEvent = async <T>(event: T): Promise<void> => {
       await step.do(`__agent_sendEvent_${stepCounter++}`, async () => {
-        await workflow.notifyAgent({
-          workflowName: workflow._workflowName,
-          workflowId: workflow._workflowId,
+        await this.notifyAgent({
+          workflowName: this._workflowName,
+          workflowId: this._workflowId,
           type: "event",
           event,
           timestamp: Date.now()
@@ -207,19 +204,23 @@ export class AgentWorkflow<
       });
     };
 
-    wrappedStep.updateAgentState = async function (
-      state: unknown
-    ): Promise<void> {
+    wrappedStep.updateAgentState = async (state: unknown): Promise<void> => {
       await step.do(`__agent_updateState_${stepCounter++}`, async () => {
-        workflow.agent._workflow_updateState("set", state);
+        this.agent._workflow_updateState("set", state);
       });
     };
 
-    wrappedStep.mergeAgentState = async function (
+    wrappedStep.mergeAgentState = async (
       partialState: Record<string, unknown>
-    ): Promise<void> {
+    ): Promise<void> => {
       await step.do(`__agent_mergeState_${stepCounter++}`, async () => {
-        workflow.agent._workflow_updateState("merge", partialState);
+        this.agent._workflow_updateState("merge", partialState);
+      });
+    };
+
+    wrappedStep.resetAgentState = async (): Promise<void> => {
+      await step.do(`__agent_resetState_${stepCounter++}`, async () => {
+        this.agent._workflow_updateState("reset");
       });
     };
 

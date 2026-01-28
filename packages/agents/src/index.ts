@@ -2184,15 +2184,20 @@ export class Agent<
    * Update agent state via RPC.
    * @internal - Called by AgentWorkflow, do not call directly
    */
-  _workflow_updateState(action: "set" | "merge", state: unknown): void {
+  _workflow_updateState(
+    action: "set" | "merge" | "reset",
+    state?: unknown
+  ): void {
     if (action === "set") {
       this.setState(state as State);
-    } else {
+    } else if (action === "merge") {
       const currentState = this.state ?? ({} as State);
       this.setState({
         ...currentState,
         ...(state as Record<string, unknown>)
       } as State);
+    } else if (action === "reset") {
+      this.setState(this.initialState);
     }
   }
 

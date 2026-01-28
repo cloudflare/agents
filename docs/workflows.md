@@ -209,6 +209,7 @@ Base class for Workflows that integrate with Agents.
 | `step.sendEvent(event)`         | Send a custom event to the Agent               |
 | `step.updateAgentState(state)`  | Replace Agent state (broadcasts to clients)    |
 | `step.mergeAgentState(partial)` | Merge into Agent state (broadcasts to clients) |
+| `step.resetAgentState()`        | Reset Agent state to initialState              |
 
 **DefaultProgress Type:**
 

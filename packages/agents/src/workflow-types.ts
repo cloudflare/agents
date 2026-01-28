@@ -57,6 +57,12 @@ export interface AgentWorkflowStep extends WorkflowStep {
    * @param partialState - Partial state to merge
    */
   mergeAgentState(partialState: Record<string, unknown>): Promise<void>;
+
+  /**
+   * Reset the Agent's state to its initialState (durable).
+   * Broadcasts the reset state to all connected clients.
+   */
+  resetAgentState(): Promise<void>;
 }
 
 /**
