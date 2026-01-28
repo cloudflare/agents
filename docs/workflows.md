@@ -234,17 +234,19 @@ const workflowId = await this.runWorkflow(
   { taskId: "123", data: "process this" },
   {
     id: "custom-id", // optional - auto-generated if not provided
-    metadata: { userId: "user-456", priority: "high" } // optional - for querying
+    metadata: { userId: "user-456", priority: "high" }, // optional - for querying
+    agentBinding: "MyAgent" // optional - auto-detected from class name if not provided
   }
 );
 ```
 
 **Parameters:**
 
-- `workflow` - Workflow binding from `env`
+- `workflowName` - Workflow binding name from `env`
 - `params` - Params to pass to the workflow
 - `options.id` - Custom workflow ID (auto-generated if not provided)
 - `options.metadata` - Optional metadata stored for querying (not passed to workflow)
+- `options.agentBinding` - Agent binding name (auto-detected from class name if not provided)
 
 **Returns:** Workflow instance ID
 

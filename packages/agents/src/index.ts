@@ -1493,9 +1493,13 @@ export class Agent<
     }
 
     // Find the binding name for this Agent's namespace
-    const agentBindingName = this._findAgentBindingName();
+    const agentBindingName =
+      options?.agentBinding ?? this._findAgentBindingName();
     if (!agentBindingName) {
-      throw new Error("Could not find Agent binding name in environment");
+      throw new Error(
+        "Could not detect Agent binding name from class name. " +
+          "Pass it explicitly via options.agentBinding"
+      );
     }
 
     // Generate workflow ID if not provided
@@ -2001,9 +2005,11 @@ export class Agent<
   }
 
   /**
-   * Find the binding name for this Agent's namespace
+   * Find the binding name for this Agent's namespace by matching class name.
+   * Returns undefined if no match found - use options.agentBinding as fallback.
    */
   private _findAgentBindingName(): string | undefined {
+    const className = this._ParentClass.name;
     for (const [key, value] of Object.entries(
       this.env as Record<string, unknown>
     )) {
@@ -2013,8 +2019,7 @@ export class Agent<
         "idFromName" in value &&
         typeof value.idFromName === "function"
       ) {
-        // Check if this namespace's class name matches our class name
-        const className = this._ParentClass.name;
+        // Check if this namespace's binding name matches our class name
         if (
           key === className ||
           camelCaseToKebabCase(key) === camelCaseToKebabCase(className)
@@ -2023,21 +2028,6 @@ export class Agent<
         }
       }
     }
-
-    // Fallback: find any DO namespace that could be us
-    for (const [key, value] of Object.entries(
-      this.env as Record<string, unknown>
-    )) {
-      if (
-        value &&
-        typeof value === "object" &&
-        "idFromName" in value &&
-        typeof value.idFromName === "function"
-      ) {
-        return key;
-      }
-    }
-
     return undefined;
   }
 

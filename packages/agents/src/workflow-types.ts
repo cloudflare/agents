@@ -152,6 +152,8 @@ export type RunWorkflowOptions = {
   id?: string;
   /** Optional metadata for querying (stored as JSON) */
   metadata?: Record<string, unknown>;
+  /** Agent binding name (auto-detected from class name if not provided) */
+  agentBinding?: string;
 };
 
 /**
