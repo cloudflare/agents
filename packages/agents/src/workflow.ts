@@ -313,13 +313,8 @@ export class AgentWorkflow<
     const eventType = options?.eventType ?? "approval";
     const timeout = options?.timeout;
 
-    // Report that we're waiting
-    await this.reportProgress({
-      status: "pending",
-      message: "Waiting for approval"
-    } as ProgressType);
-
     // Wait for the approval event
+    // Note: Call reportProgress() before this method if you want to update progress
     const event = await step.waitForEvent(stepName, {
       type: eventType,
       timeout: timeout as WorkflowSleepDuration | undefined

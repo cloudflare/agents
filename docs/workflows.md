@@ -489,7 +489,12 @@ export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
     });
 
     // Wait for approval (throws WorkflowRejectedError if rejected)
-    // This automatically reports progress as "waiting for approval"
+    await this.reportProgress({
+      step: "approval",
+      status: "pending",
+      percent: 0.5,
+      message: "Awaiting approval"
+    });
     const approvalData = await this.waitForApproval<{ approvedBy: string }>(
       step,
       { timeout: "7 days" }
