@@ -361,7 +361,7 @@ export abstract class McpAgent<
   /** Return a handler for the given path for this MCP.
    * Defaults to Streamable HTTP transport.
    */
-  static serve(
+  static serve<Env = unknown, Props = unknown>(
     path: string,
     {
       binding = "MCP_OBJECT",
@@ -371,11 +371,11 @@ export abstract class McpAgent<
     }: ServeOptions = {}
   ) {
     return {
-      async fetch<Env>(
+      async fetch(
         this: void,
         request: Request,
         env: Env,
-        ctx: ExecutionContext
+        ctx: ExecutionContext<Props>
       ): Promise<Response> {
         // Handle CORS preflight
         const corsResponse = handleCORS(request, corsOptions);
