@@ -753,4 +753,4 @@ async onStart() {
 - Maximum 10MB state per workflow
 - Events wait for at most 1 year
 - No direct WebSocket from workflows (use `broadcastToClients()`)
-- Workflow execution time: up to 15 minutes per step
+- Workflow execution time: up to 30 minutes per step
