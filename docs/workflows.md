@@ -739,7 +739,7 @@ this.deleteWorkflows({
 // Don't call deleteWorkflows() - query historical data as needed
 ```
 
-6. **Handle workflow binding renames carefully** - If you rename a workflow binding in `wrangler.toml`, existing tracked workflows will reference the old name. The agent will warn on startup if it detects this. Use `migrateWorkflowBinding()` to update them:
+6. **Handle workflow binding renames carefully** - If you rename a workflow binding in `wrangler.jsonc`, existing tracked workflows will reference the old name. The agent will warn on startup if it detects this. Use `migrateWorkflowBinding()` to update them:
 
 ```typescript
 // After renaming OLD_WORKFLOW to NEW_WORKFLOW in wrangler.toml
@@ -752,8 +752,8 @@ async onStart() {
 
 ## Limitations
 
-- Workflows can have at most 1,000 steps
+- Workflows can have at most 1,024 steps
 - Maximum 10MB state per workflow
 - Events wait for at most 1 year
 - No direct WebSocket from workflows (use `broadcastToClients()`)
-- Workflow execution time: up to 15 minutes per step
+- Workflow execution time: up to 30 minutes per step
