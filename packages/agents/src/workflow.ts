@@ -155,70 +155,75 @@ export class AgentWorkflow<
   /**
    * Wrap WorkflowStep with durable Agent communication methods.
    * Methods added to the wrapped step are idempotent and won't repeat on retry.
+   *
+   * Note: We add methods directly to the step object to preserve instanceof checks
+   * that Cloudflare's runtime may perform on the WorkflowStep class.
    */
   private _wrapStep(step: WorkflowStep): AgentWorkflowStep {
     const workflow = this;
     let stepCounter = 0;
 
-    return {
-      // Proxy original step methods
-      do: step.do.bind(step),
-      sleep: step.sleep.bind(step),
-      sleepUntil: step.sleepUntil.bind(step),
-      waitForEvent: step.waitForEvent.bind(step),
+    // Cast step to our extended type and add methods directly
+    // This preserves the original object identity and instanceof relationship
+    const wrappedStep = step as AgentWorkflowStep;
 
-      // Durable Agent methods - wrapped in step.do for idempotency
-      async reportComplete<T>(result?: T): Promise<void> {
-        await step.do(`__agent_reportComplete_${stepCounter++}`, async () => {
-          await workflow.notifyAgent({
-            workflowName: workflow._workflowName,
-            workflowId: workflow._workflowId,
-            type: "complete",
-            result,
-            timestamp: Date.now()
-          });
+    // Add durable Agent methods directly to the step object
+    wrappedStep.reportComplete = async function <T>(result?: T): Promise<void> {
+      await step.do(`__agent_reportComplete_${stepCounter++}`, async () => {
+        await workflow.notifyAgent({
+          workflowName: workflow._workflowName,
+          workflowId: workflow._workflowId,
+          type: "complete",
+          result,
+          timestamp: Date.now()
         });
-      },
-
-      async reportError(error: Error | string): Promise<void> {
-        const errorMessage = error instanceof Error ? error.message : error;
-        await step.do(`__agent_reportError_${stepCounter++}`, async () => {
-          await workflow.notifyAgent({
-            workflowName: workflow._workflowName,
-            workflowId: workflow._workflowId,
-            type: "error",
-            error: errorMessage,
-            timestamp: Date.now()
-          });
-        });
-      },
-
-      async sendEvent<T>(event: T): Promise<void> {
-        await step.do(`__agent_sendEvent_${stepCounter++}`, async () => {
-          await workflow.notifyAgent({
-            workflowName: workflow._workflowName,
-            workflowId: workflow._workflowId,
-            type: "event",
-            event,
-            timestamp: Date.now()
-          });
-        });
-      },
-
-      async updateAgentState(state: unknown): Promise<void> {
-        await step.do(`__agent_updateState_${stepCounter++}`, async () => {
-          workflow.agent._workflow_updateState("set", state);
-        });
-      },
-
-      async mergeAgentState(
-        partialState: Record<string, unknown>
-      ): Promise<void> {
-        await step.do(`__agent_mergeState_${stepCounter++}`, async () => {
-          workflow.agent._workflow_updateState("merge", partialState);
-        });
-      }
+      });
     };
+
+    wrappedStep.reportError = async function (
+      error: Error | string
+    ): Promise<void> {
+      const errorMessage = error instanceof Error ? error.message : error;
+      await step.do(`__agent_reportError_${stepCounter++}`, async () => {
+        await workflow.notifyAgent({
+          workflowName: workflow._workflowName,
+          workflowId: workflow._workflowId,
+          type: "error",
+          error: errorMessage,
+          timestamp: Date.now()
+        });
+      });
+    };
+
+    wrappedStep.sendEvent = async function <T>(event: T): Promise<void> {
+      await step.do(`__agent_sendEvent_${stepCounter++}`, async () => {
+        await workflow.notifyAgent({
+          workflowName: workflow._workflowName,
+          workflowId: workflow._workflowId,
+          type: "event",
+          event,
+          timestamp: Date.now()
+        });
+      });
+    };
+
+    wrappedStep.updateAgentState = async function (
+      state: unknown
+    ): Promise<void> {
+      await step.do(`__agent_updateState_${stepCounter++}`, async () => {
+        workflow.agent._workflow_updateState("set", state);
+      });
+    };
+
+    wrappedStep.mergeAgentState = async function (
+      partialState: Record<string, unknown>
+    ): Promise<void> {
+      await step.do(`__agent_mergeState_${stepCounter++}`, async () => {
+        workflow.agent._workflow_updateState("merge", partialState);
+      });
+    };
+
+    return wrappedStep;
   }
 
   /**
@@ -253,22 +258,6 @@ export class AgentWorkflow<
    */
   get workflowName(): string {
     return this._workflowName;
-  }
-
-  /**
-   * Make an HTTP request to the Agent.
-   * Useful for triggering HTTP endpoints on the Agent.
-   *
-   * @param path - Path to request (e.g., '/api/status')
-   * @param init - Optional fetch init options
-   * @returns Response from the Agent
-   */
-  protected async fetchAgent(
-    path: string,
-    init?: RequestInit
-  ): Promise<Response> {
-    const url = new URL(path, "https://agent.internal");
-    return this.agent.fetch(url.toString(), init);
   }
 
   /**

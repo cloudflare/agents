@@ -198,7 +198,6 @@ Base class for Workflows that integrate with Agents.
 | ------------------------------ | --------------------------------------------- |
 | `reportProgress(progress)`     | Report typed progress object to the Agent     |
 | `broadcastToClients(message)`  | Broadcast message to all WebSocket clients    |
-| `fetchAgent(path, init?)`      | Make HTTP request to the Agent                |
 | `waitForApproval(step, opts?)` | Wait for approval event (throws on rejection) |
 
 **Methods on `step` (durable, idempotent, won't repeat on retry):**
@@ -665,12 +664,6 @@ class MyAgent extends Agent {
 // Direct RPC call (typed)
 await this.agent.updateTaskStatus(taskId, "processing");
 const data = await this.agent.getData(taskId);
-
-// HTTP request
-const response = await this.fetchAgent("/api/status", {
-  method: "POST",
-  body: JSON.stringify({ taskId })
-});
 
 // Non-durable callbacks (may repeat on retry, use for frequent updates)
 await this.reportProgress({
