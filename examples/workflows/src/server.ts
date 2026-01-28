@@ -9,8 +9,11 @@
  */
 
 import { Agent, AgentWorkflow, callable, routeAgentRequest } from "agents";
-import type { AgentWorkflowEvent, DefaultProgress } from "agents";
-import type { WorkflowStep } from "cloudflare:workers";
+import type {
+  AgentWorkflowEvent,
+  AgentWorkflowStep,
+  DefaultProgress
+} from "agents";
 
 // Workflow parameters
 type TaskParams = {
@@ -191,8 +194,8 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
   TaskAgent,
   TaskParams
 > {
-  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
     console.log(`Starting workflow for task: ${params.taskName}`);
 
     // Step 1: Validate
@@ -242,7 +245,7 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
     });
 
     // Step 3: Wait for human approval
-    await this.mergeAgentState({ waitingForApproval: true });
+    await step.mergeAgentState({ waitingForApproval: true });
 
     await this.reportProgress({
       step: "approval",
@@ -259,7 +262,7 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
       }
     );
 
-    await this.mergeAgentState({ waitingForApproval: false });
+    await step.mergeAgentState({ waitingForApproval: false });
 
     await this.reportProgress({
       step: "approval",
@@ -294,7 +297,7 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
       message: "Task completed successfully!"
     });
 
-    await this.reportComplete(finalResult);
+    await step.reportComplete(finalResult);
 
     return finalResult;
   }

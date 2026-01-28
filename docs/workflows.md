@@ -46,8 +46,7 @@ Create a Workflow that extends `AgentWorkflow` to get typed access to the origin
 ```typescript
 // src/workflows/processing.ts
 import { AgentWorkflow } from "agents";
-import type { AgentWorkflowEvent } from "agents";
-import type { WorkflowStep } from "cloudflare:workers";
+import type { AgentWorkflowEvent, AgentWorkflowStep } from "agents";
 import type { MyAgent } from "../agent";
 
 type TaskParams = {
@@ -56,8 +55,8 @@ type TaskParams = {
 };
 
 export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
 
     // Step 1: Process data
     const result = await step.do("process-data", async () => {
@@ -65,7 +64,7 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
       return processData(params.data);
     });
 
-    // Report progress to Agent (typed progress object)
+    // Report progress to Agent (non-durable, lightweight)
     await this.reportProgress({
       step: "process",
       status: "complete",
@@ -78,14 +77,14 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
       await this.agent.saveResult(params.taskId, result);
     });
 
-    // Broadcast to connected clients
-    await this.broadcastToClients({
+    // Broadcast to connected clients (non-durable)
+    this.broadcastToClients({
       type: "task-complete",
       taskId: params.taskId
     });
 
-    // Report completion
-    await this.reportComplete(result);
+    // Report completion (durable via step)
+    await step.reportComplete(result);
 
     return result;
   }
@@ -193,20 +192,24 @@ Base class for Workflows that integrate with Agents.
 - `workflowName` - The workflow binding name
 - `env` - Environment bindings
 
-**Methods:**
+**Methods on `this` (non-durable, may repeat on retry):**
 
-| Method                         | Description                                    |
-| ------------------------------ | ---------------------------------------------- |
-| `reportProgress(progress)`     | Report typed progress object to the Agent      |
-| `reportComplete(result?)`      | Report successful completion                   |
-| `reportError(error)`           | Report an error                                |
-| `sendEvent(event)`             | Send a custom event to the Agent               |
-| `broadcastToClients(message)`  | Broadcast message to all WebSocket clients     |
-| `fetchAgent(path, init?)`      | Make HTTP request to the Agent                 |
-| `getUserParams(event)`         | Extract user params (without internal params)  |
-| `waitForApproval(step, opts?)` | Wait for approval event (throws on rejection)  |
-| `updateAgentState(state)`      | Replace Agent state (broadcasts to clients)    |
-| `mergeAgentState(partial)`     | Merge into Agent state (broadcasts to clients) |
+| Method                         | Description                                   |
+| ------------------------------ | --------------------------------------------- |
+| `reportProgress(progress)`     | Report typed progress object to the Agent     |
+| `broadcastToClients(message)`  | Broadcast message to all WebSocket clients    |
+| `fetchAgent(path, init?)`      | Make HTTP request to the Agent                |
+| `waitForApproval(step, opts?)` | Wait for approval event (throws on rejection) |
+
+**Methods on `step` (durable, idempotent, won't repeat on retry):**
+
+| Method                          | Description                                    |
+| ------------------------------- | ---------------------------------------------- |
+| `step.reportComplete(result?)`  | Report successful completion                   |
+| `step.reportError(error)`       | Report an error                                |
+| `step.sendEvent(event)`         | Send a custom event to the Agent               |
+| `step.updateAgentState(state)`  | Replace Agent state (broadcasts to clients)    |
+| `step.mergeAgentState(partial)` | Merge into Agent state (broadcasts to clients) |
 
 **DefaultProgress Type:**
 
@@ -435,8 +438,8 @@ export class DataProcessingWorkflow extends AgentWorkflow<
   MyAgent,
   ProcessParams
 > {
-  async run(event: AgentWorkflowEvent<ProcessParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<ProcessParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
     const items = params.items;
 
     for (let i = 0; i < items.length; i++) {
@@ -444,7 +447,7 @@ export class DataProcessingWorkflow extends AgentWorkflow<
         await processItem(items[i]);
       });
 
-      // Report progress after each item
+      // Report progress after each item (non-durable, lightweight)
       await this.reportProgress({
         step: `process-${i}`,
         status: "complete",
@@ -453,7 +456,7 @@ export class DataProcessingWorkflow extends AgentWorkflow<
       });
     }
 
-    await this.reportComplete({ processed: items.length });
+    await step.reportComplete({ processed: items.length });
   }
 }
 
@@ -482,8 +485,8 @@ class MyAgent extends Agent {
 ```typescript
 // Workflow using the built-in waitForApproval helper
 export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
-  async run(event: AgentWorkflowEvent<RequestParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<RequestParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
 
     // Prepare request
     const request = await step.do("prepare", async () => {
@@ -509,7 +512,7 @@ export class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
       return executeRequest(request);
     });
 
-    await this.reportComplete(result);
+    await step.reportComplete(result);
     return result;
   }
 }
@@ -536,8 +539,8 @@ class MyAgent extends Agent {
 ```typescript
 // Workflow with built-in retry logic
 export class ResilientTaskWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
 
     const result = await step.do(
       "call-external-api",
@@ -563,7 +566,7 @@ export class ResilientTaskWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
       }
     );
 
-    await this.reportComplete(result);
+    await step.reportComplete(result);
     return result;
   }
 }
@@ -571,16 +574,16 @@ export class ResilientTaskWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
 
 ### State Synchronization
 
-Workflows can update the Agent's state directly, which automatically broadcasts to all connected clients:
+Workflows can update the Agent's state directly (durably via step), which automatically broadcasts to all connected clients:
 
 ```typescript
 // Workflow that syncs state to Agent
 export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
 
-    // Update Agent state (replaces entire state, broadcasts to clients)
-    await this.updateAgentState({
+    // Update Agent state (durable, replaces entire state, broadcasts to clients)
+    await step.updateAgentState({
       currentTask: {
         id: params.taskId,
         status: "processing",
@@ -592,8 +595,8 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
       return processTask(params);
     });
 
-    // Merge partial state (keeps existing fields, broadcasts to clients)
-    await this.mergeAgentState({
+    // Merge partial state (durable, keeps existing fields, broadcasts to clients)
+    await step.mergeAgentState({
       currentTask: {
         status: "complete",
         result,
@@ -601,7 +604,7 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
       }
     });
 
-    await this.reportComplete(result);
+    await step.reportComplete(result);
     return result;
   }
 }
@@ -626,10 +629,10 @@ export class ETLWorkflow extends AgentWorkflow<
   ETLParams,
   PipelineProgress
 > {
-  async run(event: AgentWorkflowEvent<ETLParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<ETLParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
 
-    // Report typed progress
+    // Report typed progress (non-durable, lightweight for frequent updates)
     await this.reportProgress({
       stage: "extract",
       recordsProcessed: 0,
@@ -669,22 +672,22 @@ const response = await this.fetchAgent("/api/status", {
   body: JSON.stringify({ taskId })
 });
 
-// Callbacks (progress is now typed object)
+// Non-durable callbacks (may repeat on retry, use for frequent updates)
 await this.reportProgress({
   step: "process",
   percent: 0.5,
   message: "Halfway done"
 });
-await this.reportComplete(result);
-await this.reportError("Something went wrong");
-await this.sendEvent({ type: "custom", data: {} });
+this.broadcastToClients({ type: "update", data });
 
-// State synchronization (broadcasts to clients)
-await this.updateAgentState({ status: "processing" });
-await this.mergeAgentState({ progress: 0.5 });
+// Durable callbacks via step (idempotent, won't repeat on retry)
+await step.reportComplete(result);
+await step.reportError("Something went wrong");
+await step.sendEvent({ type: "custom", data: {} });
 
-// Broadcast to WebSocket clients
-await this.broadcastToClients({ type: "update", data });
+// Durable state synchronization via step (broadcasts to clients)
+await step.updateAgentState({ status: "processing" });
+await step.mergeAgentState({ progress: 0.5 });
 ```
 
 ### Agent → Workflow

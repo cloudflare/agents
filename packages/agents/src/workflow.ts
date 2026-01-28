@@ -38,27 +38,12 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { getAgentByName, type Agent } from "./index";
 import type {
   AgentWorkflowParams,
+  AgentWorkflowStep,
   WorkflowCallback,
   DefaultProgress,
   WaitForApprovalOptions
 } from "./workflow-types";
 import { WorkflowRejectedError } from "./workflow-types";
-
-/**
- * Convenience type alias for workflow event with agent params.
- * Use this instead of WorkflowEvent<AgentWorkflowParams<T>> for cleaner code.
- *
- * @example
- * ```typescript
- * async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
- *   const params = this.getUserParams(event);
- *   // ...
- * }
- * ```
- */
-export type AgentWorkflowEvent<Params = unknown> = WorkflowEvent<
-  AgentWorkflowParams<Params>
->;
 
 /**
  * Base class for Workflows that need access to their originating Agent.
@@ -93,19 +78,39 @@ export class AgentWorkflow<
   constructor(ctx: ExecutionContext, env: Env) {
     super(ctx, env);
 
-    // Store original run method
-    const originalRun = this.run.bind(this);
+    // Store original run method - cast to accept clean event type and wrapped step
+    // (user's implementation expects WorkflowEvent<Params> and AgentWorkflowStep)
+    const originalRun = this.run.bind(this) as (
+      event: WorkflowEvent<Params>,
+      step: AgentWorkflowStep
+    ) => Promise<unknown>;
 
     // Override run to initialize agent before user code executes
     this.run = async (
-      event: AgentWorkflowEvent<Params>,
+      event: WorkflowEvent<AgentWorkflowParams<Params>>,
       step: WorkflowStep
     ) => {
-      // Initialize agent connection
-      await this._initAgent(event);
+      // Extract internal params
+      const { __agentName, __agentBinding, __workflowName, ...userParams } =
+        event.payload;
 
-      // Call user's run implementation
-      return originalRun(event, step);
+      // Initialize agent connection
+      await this._initAgent(
+        __agentName,
+        __agentBinding,
+        __workflowName,
+        event.instanceId
+      );
+
+      // Pass cleaned event and wrapped step to user's implementation
+      const cleanedEvent = {
+        ...event,
+        payload: userParams as Params
+      } as WorkflowEvent<Params>;
+
+      const wrappedStep = this._wrapStep(step);
+
+      return originalRun(cleanedEvent, wrappedStep);
     };
   }
 
@@ -113,35 +118,107 @@ export class AgentWorkflow<
    * Initialize the Agent stub from workflow params.
    * Called automatically before run() executes.
    */
-  private async _initAgent(event: AgentWorkflowEvent<Params>): Promise<void> {
-    const { __agentName, __agentBinding, __workflowName } = event.payload;
-
-    if (!__agentName || !__agentBinding || !__workflowName) {
+  private async _initAgent(
+    agentName: string | undefined,
+    agentBinding: string | undefined,
+    workflowName: string | undefined,
+    instanceId: string
+  ): Promise<void> {
+    if (!agentName || !agentBinding || !workflowName) {
       throw new Error(
         "AgentWorkflow requires __agentName, __agentBinding, and __workflowName in params. " +
           "Use agent.runWorkflow() to start workflows with proper agent context."
       );
     }
 
-    this._workflowId = event.instanceId;
-    this._workflowName = __workflowName;
+    this._workflowId = instanceId;
+    this._workflowName = workflowName;
 
     // Get the Agent namespace from env
     const namespace = (this.env as Record<string, unknown>)[
-      __agentBinding
+      agentBinding
     ] as DurableObjectNamespace<AgentType>;
 
     if (!namespace) {
       throw new Error(
-        `Agent binding '${__agentBinding}' not found in environment`
+        `Agent binding '${agentBinding}' not found in environment`
       );
     }
 
     // Get the Agent stub by name
     this._agent = await getAgentByName<Cloudflare.Env, AgentType>(
       namespace,
-      __agentName
+      agentName
     );
+  }
+
+  /**
+   * Wrap WorkflowStep with durable Agent communication methods.
+   * Methods added to the wrapped step are idempotent and won't repeat on retry.
+   */
+  private _wrapStep(step: WorkflowStep): AgentWorkflowStep {
+    const workflow = this;
+    let stepCounter = 0;
+
+    return {
+      // Proxy original step methods
+      do: step.do.bind(step),
+      sleep: step.sleep.bind(step),
+      sleepUntil: step.sleepUntil.bind(step),
+      waitForEvent: step.waitForEvent.bind(step),
+
+      // Durable Agent methods - wrapped in step.do for idempotency
+      async reportComplete<T>(result?: T): Promise<void> {
+        await step.do(`__agent_reportComplete_${stepCounter++}`, async () => {
+          await workflow.notifyAgent({
+            workflowName: workflow._workflowName,
+            workflowId: workflow._workflowId,
+            type: "complete",
+            result,
+            timestamp: Date.now()
+          });
+        });
+      },
+
+      async reportError(error: Error | string): Promise<void> {
+        const errorMessage = error instanceof Error ? error.message : error;
+        await step.do(`__agent_reportError_${stepCounter++}`, async () => {
+          await workflow.notifyAgent({
+            workflowName: workflow._workflowName,
+            workflowId: workflow._workflowId,
+            type: "error",
+            error: errorMessage,
+            timestamp: Date.now()
+          });
+        });
+      },
+
+      async sendEvent<T>(event: T): Promise<void> {
+        await step.do(`__agent_sendEvent_${stepCounter++}`, async () => {
+          await workflow.notifyAgent({
+            workflowName: workflow._workflowName,
+            workflowId: workflow._workflowId,
+            type: "event",
+            event,
+            timestamp: Date.now()
+          });
+        });
+      },
+
+      async updateAgentState(state: unknown): Promise<void> {
+        await step.do(`__agent_updateState_${stepCounter++}`, async () => {
+          workflow.agent._workflow_updateState("set", state);
+        });
+      },
+
+      async mergeAgentState(
+        partialState: Record<string, unknown>
+      ): Promise<void> {
+        await step.do(`__agent_mergeState_${stepCounter++}`, async () => {
+          workflow.agent._workflow_updateState("merge", partialState);
+        });
+      }
+    };
   }
 
   /**
@@ -230,56 +307,8 @@ export class AgentWorkflow<
   }
 
   /**
-   * Report successful completion to the Agent.
-   * Triggers onWorkflowComplete() on the Agent.
-   *
-   * @param result - Optional result data
-   */
-  protected async reportComplete<T = unknown>(result?: T): Promise<void> {
-    await this.notifyAgent({
-      workflowName: this._workflowName,
-      workflowId: this._workflowId,
-      type: "complete",
-      result,
-      timestamp: Date.now()
-    });
-  }
-
-  /**
-   * Report an error to the Agent.
-   * Triggers onWorkflowError() on the Agent.
-   *
-   * @param error - Error or error message
-   */
-  protected async reportError(error: Error | string): Promise<void> {
-    const errorMessage = error instanceof Error ? error.message : error;
-    await this.notifyAgent({
-      workflowName: this._workflowName,
-      workflowId: this._workflowId,
-      type: "error",
-      error: errorMessage,
-      timestamp: Date.now()
-    });
-  }
-
-  /**
-   * Send a custom event to the Agent.
-   * Triggers onWorkflowEvent() on the Agent.
-   *
-   * @param event - Custom event payload
-   */
-  protected async sendEvent<T = unknown>(event: T): Promise<void> {
-    await this.notifyAgent({
-      workflowName: this._workflowName,
-      workflowId: this._workflowId,
-      type: "event",
-      event,
-      timestamp: Date.now()
-    });
-  }
-
-  /**
    * Broadcast a message to all connected WebSocket clients via the Agent.
+   * This is non-durable and may repeat on workflow retry.
    *
    * @param message - Message to broadcast (will be JSON-stringified)
    */
@@ -289,9 +318,9 @@ export class AgentWorkflow<
 
   /**
    * Wait for approval from the Agent.
-   * Automatically reports progress while waiting and handles rejection.
+   * Handles rejection by reporting error (durably) and throwing WorkflowRejectedError.
    *
-   * @param step - Workflow step object
+   * @param step - AgentWorkflowStep object
    * @param options - Wait options (timeout, eventType, stepName)
    * @returns Approval payload (throws WorkflowRejectedError if rejected)
    *
@@ -302,7 +331,7 @@ export class AgentWorkflow<
    * ```
    */
   protected async waitForApproval<T = unknown>(
-    step: WorkflowStep,
+    step: AgentWorkflowStep,
     options?: WaitForApprovalOptions
   ): Promise<T> {
     const stepName = options?.stepName ?? "wait-for-approval";
@@ -326,63 +355,19 @@ export class AgentWorkflow<
     // Check if rejected
     if (!payload.approved) {
       const reason = payload.reason;
-      await this.reportError(reason ?? "Workflow rejected");
+      await step.reportError(reason ?? "Workflow rejected");
       throw new WorkflowRejectedError(reason, this._workflowId);
     }
 
     // Return the approval metadata as the result
     return payload.metadata as T;
   }
-
-  /**
-   * Update the Agent's state entirely.
-   * This will replace the Agent's state and broadcast to all connected clients.
-   *
-   * @param state - New state to set
-   *
-   * @example
-   * ```typescript
-   * this.updateAgentState({ workflowStatus: 'processing', progress: 0.5 });
-   * ```
-   */
-  protected updateAgentState(state: unknown): void {
-    this.agent._workflow_updateState("set", state);
-  }
-
-  /**
-   * Merge partial state into the Agent's existing state.
-   * Performs a shallow merge and broadcasts to all connected clients.
-   *
-   * @param partialState - Partial state to merge
-   *
-   * @example
-   * ```typescript
-   * this.mergeAgentState({
-   *   currentWorkflow: { id: this.workflowId, status: 'running' }
-   * });
-   * ```
-   */
-  protected mergeAgentState(partialState: Record<string, unknown>): void {
-    this.agent._workflow_updateState("merge", partialState);
-  }
-
-  /**
-   * Get the user params (without internal agent params).
-   *
-   * @param event - Workflow event
-   * @returns User params only
-   */
-  protected getUserParams(event: AgentWorkflowEvent<Params>): Params {
-    const { __agentName, __agentBinding, __workflowName, ...userParams } =
-      event.payload;
-    return userParams as unknown as Params;
-  }
 }
 
 // Re-export types for convenience
 export type {
-  AgentWorkflowParams,
-  AgentWorkflowInternalParams,
+  AgentWorkflowEvent,
+  AgentWorkflowStep,
   WorkflowCallback,
   WorkflowCallbackType,
   WorkflowProgressCallback,

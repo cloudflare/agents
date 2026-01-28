@@ -1,9 +1,8 @@
 /**
  * Test Workflow for integration testing AgentWorkflow functionality
  */
-import type { WorkflowStep } from "cloudflare:workers";
 import { AgentWorkflow } from "../workflow";
-import type { AgentWorkflowEvent } from "../workflow";
+import type { AgentWorkflowEvent, AgentWorkflowStep } from "../workflow";
 import type { TestWorkflowAgent } from "./worker";
 
 /**
@@ -30,11 +29,11 @@ export class TestProcessingWorkflow extends AgentWorkflow<
 > {
   async run(
     event: AgentWorkflowEvent<TestProcessingParams>,
-    step: WorkflowStep
+    step: AgentWorkflowStep
   ) {
-    const params = this.getUserParams(event);
+    const params = event.payload;
 
-    // Step 1: Report start
+    // Step 1: Report start (non-durable)
     await this.reportProgress({
       step: "start",
       status: "running",
@@ -57,14 +56,14 @@ export class TestProcessingWorkflow extends AgentWorkflow<
       }>("wait-for-approval", { type: "approval", timeout: "1 minute" });
 
       if (!approval.payload.approved) {
-        await this.reportError(
+        await step.reportError(
           `Rejected: ${approval.payload.reason || "No reason given"}`
         );
         throw new Error("Workflow rejected");
       }
     }
 
-    // Step 3: Process the task
+    // Step 3: Process the task (non-durable progress report)
     await this.reportProgress({
       step: "process",
       status: "running",
@@ -94,21 +93,21 @@ export class TestProcessingWorkflow extends AgentWorkflow<
       }
     });
 
-    // Step 5: Broadcast to clients
-    await this.broadcastToClients({
+    // Step 5: Broadcast to clients (non-durable)
+    this.broadcastToClients({
       type: "workflow-progress",
       taskId: params.taskId,
       status: "completing"
     });
 
-    // Step 6: Report completion
+    // Step 6: Report completion (durable via step)
     await this.reportProgress({
       step: "complete",
       status: "running",
       percent: 0.9,
       message: "Almost done"
     });
-    await this.reportComplete(result);
+    await step.reportComplete(result);
 
     return result;
   }
@@ -121,14 +120,17 @@ export class SimpleTestWorkflow extends AgentWorkflow<
   TestWorkflowAgent,
   { value: string }
 > {
-  async run(event: AgentWorkflowEvent<{ value: string }>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(
+    event: AgentWorkflowEvent<{ value: string }>,
+    step: AgentWorkflowStep
+  ) {
+    const params = event.payload;
 
     const result = await step.do("echo", async () => {
       return { echoed: params.value };
     });
 
-    await this.reportComplete(result);
+    await step.reportComplete(result);
     return result;
   }
 }

@@ -5,7 +5,59 @@
  * and Cloudflare Workflows for durable, multi-step background processing.
  */
 
-import type { WorkflowSleepDuration } from "cloudflare:workers";
+import type {
+  WorkflowEvent,
+  WorkflowStep,
+  WorkflowSleepDuration
+} from "cloudflare:workers";
+
+/**
+ * Type alias for WorkflowEvent in AgentWorkflow context.
+ * Identical to WorkflowEvent - provided for naming consistency with AgentWorkflowStep.
+ */
+export type AgentWorkflowEvent<Params = unknown> = WorkflowEvent<Params>;
+
+/**
+ * Extended WorkflowStep with durable Agent communication methods.
+ * All added methods on this interface are durable - they're idempotent and won't
+ * repeat on workflow retry.
+ */
+export interface AgentWorkflowStep extends WorkflowStep {
+  /**
+   * Report successful completion to the Agent (durable).
+   * Triggers onWorkflowComplete() on the Agent.
+   * @param result - Optional result data
+   */
+  reportComplete<T = unknown>(result?: T): Promise<void>;
+
+  /**
+   * Report an error to the Agent (durable).
+   * Triggers onWorkflowError() on the Agent.
+   * @param error - Error or error message
+   */
+  reportError(error: Error | string): Promise<void>;
+
+  /**
+   * Send a custom event to the Agent (durable).
+   * Triggers onWorkflowEvent() on the Agent.
+   * @param event - Custom event payload
+   */
+  sendEvent<T = unknown>(event: T): Promise<void>;
+
+  /**
+   * Update the Agent's state entirely (durable).
+   * This will replace the Agent's state and broadcast to all connected clients.
+   * @param state - New state to set
+   */
+  updateAgentState(state: unknown): Promise<void>;
+
+  /**
+   * Merge partial state into the Agent's existing state (durable).
+   * Performs a shallow merge and broadcasts to all connected clients.
+   * @param partialState - Partial state to merge
+   */
+  mergeAgentState(partialState: Record<string, unknown>): Promise<void>;
+}
 
 /**
  * Internal parameters injected by runWorkflow() to identify the originating Agent

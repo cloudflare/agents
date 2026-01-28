@@ -19,26 +19,24 @@ Extend `AgentWorkflow` instead of `WorkflowEntrypoint` to get typed access to th
 
 ```typescript
 export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
-  async run(event: AgentWorkflowEvent<TaskParams>, step: WorkflowStep) {
-    const params = this.getUserParams(event);
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
 
     // Call Agent methods via RPC
     await this.agent.updateStatus(params.taskId, "processing");
 
-    // Report typed progress back to Agent
+    // Non-durable: progress reporting (lightweight, for frequent updates)
     await this.reportProgress({
       step: "process",
       percent: 0.5,
       message: "Halfway done"
     });
+    this.broadcastToClients({ type: "update", taskId: params.taskId });
 
-    // Broadcast to WebSocket clients
-    await this.broadcastToClients({ type: "update", taskId: params.taskId });
+    // Durable via step: idempotent, won't repeat on retry
+    await step.mergeAgentState({ taskProgress: 0.5 });
+    await step.reportComplete(result);
 
-    // Sync state to Agent (broadcasts to clients)
-    await this.mergeAgentState({ taskProgress: 0.5 });
-
-    await this.reportComplete(result);
     return result;
   }
 }
@@ -57,12 +55,19 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
 
 ### AgentWorkflow Methods
 
+**On `this` (non-durable, lightweight):**
+
 - `reportProgress(progress)` - Report typed progress object to Agent
-- `reportComplete(result?)` - Report successful completion
-- `reportError(error)` - Report an error
+- `broadcastToClients(message)` - Broadcast to WebSocket clients
 - `waitForApproval(step, opts?)` - Wait for approval (throws on rejection)
-- `updateAgentState(state)` - Replace Agent state (broadcasts to clients)
-- `mergeAgentState(partial)` - Merge into Agent state (broadcasts to clients)
+
+**On `step` (durable, idempotent):**
+
+- `step.reportComplete(result?)` - Report successful completion
+- `step.reportError(error)` - Report an error
+- `step.sendEvent(event)` - Send custom event to Agent
+- `step.updateAgentState(state)` - Replace Agent state (broadcasts to clients)
+- `step.mergeAgentState(partial)` - Merge into Agent state (broadcasts to clients)
 
 ### Lifecycle Callbacks
 
