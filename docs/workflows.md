@@ -749,7 +749,7 @@ async onStart() {
 
 ## Limitations
 
-- Workflows can have at most 1,000 steps
+- Workflows can have at most 1,024 steps
 - Maximum 10MB state per workflow
 - Events wait for at most 1 year
 - No direct WebSocket from workflows (use `broadcastToClients()`)
