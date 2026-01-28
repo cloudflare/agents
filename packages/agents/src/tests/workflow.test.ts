@@ -248,6 +248,54 @@ describe("workflow operations", () => {
         'Workflow with ID "duplicate-id" is already being tracked'
       );
     });
+
+    it("should migrate workflow binding names", async () => {
+      const agentStub = await getTestAgent("workflow-migrate-test");
+
+      // Insert workflows with old binding name
+      await agentStub.insertWorkflowTracking("migrate-1", "OLD_WORKFLOW");
+      await agentStub.insertWorkflowTracking("migrate-2", "OLD_WORKFLOW");
+      await agentStub.insertWorkflowTracking("migrate-3", "TEST_WORKFLOW"); // Different name
+
+      // Migrate OLD_WORKFLOW to TEST_WORKFLOW (which exists in env)
+      const migrated = await agentStub.migrateWorkflowBindingTest(
+        "OLD_WORKFLOW",
+        "TEST_WORKFLOW"
+      );
+
+      expect(migrated).toBe(2);
+
+      // Verify the records were updated
+      const workflows = (await agentStub.queryWorkflows({
+        workflowName: "TEST_WORKFLOW"
+      })) as WorkflowInfo[];
+      expect(workflows.length).toBe(3); // 2 migrated + 1 original
+
+      // Verify no workflows remain with old name
+      const oldWorkflows = (await agentStub.queryWorkflows({
+        workflowName: "OLD_WORKFLOW"
+      })) as WorkflowInfo[];
+      expect(oldWorkflows.length).toBe(0);
+    });
+
+    it("should return 0 when no workflows match old binding name", async () => {
+      const agentStub = await getTestAgent("workflow-migrate-empty-test");
+
+      const migrated = await agentStub.migrateWorkflowBindingTest(
+        "NONEXISTENT_WORKFLOW",
+        "TEST_WORKFLOW"
+      );
+
+      expect(migrated).toBe(0);
+    });
+
+    it("should throw error when new binding does not exist", async () => {
+      const agentStub = await getTestAgent("workflow-migrate-invalid-test");
+
+      await expect(
+        agentStub.migrateWorkflowBindingTest("OLD_WORKFLOW", "INVALID_BINDING")
+      ).rejects.toThrow("Workflow binding 'INVALID_BINDING' not found");
+    });
   });
 
   describe("workflow callbacks", () => {

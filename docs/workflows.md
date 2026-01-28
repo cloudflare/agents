@@ -729,6 +729,17 @@ this.deleteWorkflows({
 // Don't call deleteWorkflows() - query historical data as needed
 ```
 
+6. **Handle workflow binding renames carefully** - If you rename a workflow binding in `wrangler.toml`, existing tracked workflows will reference the old name. The agent will warn on startup if it detects this. Use `migrateWorkflowBinding()` to update them:
+
+```typescript
+// After renaming OLD_WORKFLOW to NEW_WORKFLOW in wrangler.toml
+async onStart() {
+  // Migrate any existing tracked workflows to the new binding name
+  const migrated = this.migrateWorkflowBinding('OLD_WORKFLOW', 'NEW_WORKFLOW');
+  // You can remove this code after all agents have migrated
+}
+```
+
 ## Limitations
 
 - Workflows can have at most 1,000 steps

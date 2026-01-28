@@ -696,11 +696,45 @@ export class Agent<
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
             this.broadcastMcpServers();
+
+            // Check for orphaned workflows (tracked but binding no longer exists)
+            this._checkOrphanedWorkflows();
+
             return _onStart(props);
           });
         }
       );
     };
+  }
+
+  /**
+   * Check for workflows referencing unknown bindings and warn with migration suggestion.
+   */
+  private _checkOrphanedWorkflows(): void {
+    // Get distinct workflow names with counts efficiently
+    const distinctNames = this.sql<{ workflow_name: string; count: number }>`
+      SELECT workflow_name, COUNT(*) as count 
+      FROM cf_agents_workflows 
+      GROUP BY workflow_name
+    `;
+
+    const orphaned = distinctNames.filter(
+      (row) => !this._findWorkflowBindingByName(row.workflow_name)
+    );
+
+    if (orphaned.length > 0) {
+      const currentBindings = this._getWorkflowBindingNames();
+      for (const { workflow_name: oldName, count } of orphaned) {
+        const suggestion =
+          currentBindings.length === 1
+            ? `this.migrateWorkflowBinding('${oldName}', '${currentBindings[0]}')`
+            : `this.migrateWorkflowBinding('${oldName}', '<NEW_BINDING_NAME>')`;
+        console.warn(
+          `[Agent] Found ${count} workflow(s) referencing unknown binding '${oldName}'. ` +
+            `If you renamed the binding, call: ${suggestion}`
+        );
+      }
+    }
   }
 
   private _setStateInternal(
@@ -1682,6 +1716,26 @@ export class Agent<
   }
 
   /**
+   * Get all workflow binding names from the environment.
+   */
+  private _getWorkflowBindingNames(): string[] {
+    const names: string[] = [];
+    for (const [key, value] of Object.entries(
+      this.env as Record<string, unknown>
+    )) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "create" in value &&
+        "get" in value
+      ) {
+        names.push(key);
+      }
+    }
+    return names;
+  }
+
+  /**
    * Get the status of a workflow and update the tracking record.
    *
    * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
@@ -1854,6 +1908,44 @@ export class Agent<
 
     this.ctx.storage.sql.exec(query, ...params).toArray();
     return matching.length;
+  }
+
+  /**
+   * Migrate workflow tracking records from an old binding name to a new one.
+   * Use this after renaming a workflow binding in wrangler.toml.
+   *
+   * @param oldName - Previous workflow binding name
+   * @param newName - New workflow binding name
+   * @returns Number of records migrated
+   *
+   * @example
+   * ```typescript
+   * // After renaming OLD_WORKFLOW to NEW_WORKFLOW in wrangler.toml
+   * async onStart() {
+   *   const migrated = this.migrateWorkflowBinding('OLD_WORKFLOW', 'NEW_WORKFLOW');
+   * }
+   * ```
+   */
+  migrateWorkflowBinding(oldName: string, newName: string): number {
+    // Validate new binding exists
+    if (!this._findWorkflowBindingByName(newName)) {
+      throw new Error(`Workflow binding '${newName}' not found in environment`);
+    }
+
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_workflows WHERE workflow_name = ${oldName}
+    `;
+    const count = result[0]?.count ?? 0;
+
+    if (count > 0) {
+      this
+        .sql`UPDATE cf_agents_workflows SET workflow_name = ${newName} WHERE workflow_name = ${oldName}`;
+      console.log(
+        `[Agent] Migrated ${count} workflow(s) from '${oldName}' to '${newName}'`
+      );
+    }
+
+    return count;
   }
 
   /**

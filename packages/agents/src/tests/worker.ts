@@ -362,7 +362,7 @@ export class TestWorkflowAgent extends Agent<Env> {
 
   // Helper to insert workflow tracking directly (for testing duplicate ID handling)
   insertWorkflowTracking(workflowId: string, workflowName: string): void {
-    const id = `test-${Date.now()}`;
+    const id = `test-${workflowId}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     try {
       this.sql`
         INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status)
@@ -478,6 +478,11 @@ export class TestWorkflowAgent extends Agent<Env> {
     olderThan?: Date;
   }): Promise<number> {
     return this.deleteWorkflows(criteria);
+  }
+
+  // Expose migrateWorkflowBinding for testing
+  migrateWorkflowBindingTest(oldName: string, newName: string): number {
+    return this.migrateWorkflowBinding(oldName, newName);
   }
 
   // Test helper to update workflow status directly
