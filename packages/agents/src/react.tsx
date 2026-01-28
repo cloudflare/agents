@@ -144,6 +144,15 @@ export type UseAgentOptions<State = unknown> = Omit<
   onStateUpdate?: (state: State, source: "server" | "client") => void;
   /** Called when MCP server state is updated */
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
+  /**
+   * Whether the WebSocket connection should be enabled.
+   * When `false`, the connection will not be established.
+   * When transitioning from `false` to `true`, the connection will be opened.
+   * When transitioning from `true` to `false`, the connection will be closed.
+   * Follows the React Query `enabled` pattern for conditional data fetching.
+   * @default true
+   */
+  enabled?: boolean;
 };
 
 type AllOptional<T> = T extends [infer A, ...infer R]
@@ -252,7 +261,16 @@ export function useAgent<State>(
   stub: UntypedAgentStub;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
-  const { query, queryDeps, cacheTtl, ...restOptions } = options;
+  const {
+    query,
+    queryDeps,
+    cacheTtl,
+    enabled = true,
+    ...restOptions
+  } = options;
+
+  // Track the previous enabled state for connection lifecycle management
+  const prevEnabledRef = useRef(enabled);
 
   // Keep track of pending RPC calls
   const pendingCallsRef = useRef(
@@ -362,6 +380,7 @@ export function useAgent<State>(
     prefix: "agents",
     room: options.name || "default",
     query: resolvedQuery,
+    startClosed: !enabled,
     ...restOptions,
     onMessage: (message) => {
       if (typeof message.data === "string") {
@@ -419,6 +438,23 @@ export function useAgent<State>(
     call: UntypedAgentMethodCall;
     stub: UntypedAgentStub;
   };
+
+  // Handle enabled state transitions
+  // Reconnect when enabled changes from false to true
+  // Close connection when enabled changes from true to false
+  useEffect(() => {
+    const wasEnabled = prevEnabledRef.current;
+    prevEnabledRef.current = enabled;
+
+    if (!wasEnabled && enabled) {
+      // Transition: disabled -> enabled, open the connection
+      agent.reconnect();
+    } else if (wasEnabled && !enabled) {
+      // Transition: enabled -> disabled, close the connection
+      agent.close();
+    }
+  }, [enabled, agent]);
+
   // Create the call method
   const call = useCallback(
     <T = unknown,>(
