@@ -46,8 +46,8 @@ Create a Workflow that extends `AgentWorkflow` to get typed access to the origin
 ```typescript
 // src/workflows/processing.ts
 import { AgentWorkflow } from "agents";
-import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import type { AgentWorkflowParams } from "agents";
+import type { AgentWorkflowEvent } from "agents";
+import type { WorkflowStep } from "cloudflare:workers";
 import type { MyAgent } from "../agent";
 
 type TaskParams = {
@@ -261,7 +261,7 @@ await this.sendWorkflowEvent("MY_WORKFLOW", workflowId, {
 });
 ```
 
-#### `getWorkflowStatus(workflow, workflowId)`
+#### `getWorkflowStatus(workflowName, workflowId)`
 
 Get the status of a workflow and update tracking record.
 
