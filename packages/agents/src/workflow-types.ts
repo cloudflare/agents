@@ -5,6 +5,8 @@
  * and Cloudflare Workflows for durable, multi-step background processing.
  */
 
+import type { WorkflowSleepDuration } from "cloudflare:workers";
+
 /**
  * Internal parameters injected by runWorkflow() to identify the originating Agent
  */
@@ -105,18 +107,9 @@ export type WorkflowCallback<P = DefaultProgress> =
   | WorkflowEventCallback;
 
 /**
- * Workflow status values matching Cloudflare Workflows API
+ * Workflow status values - derived from Cloudflare's InstanceStatus
  */
-export type WorkflowStatus =
-  | "queued"
-  | "running"
-  | "paused"
-  | "errored"
-  | "terminated"
-  | "complete"
-  | "waiting"
-  | "waitingForPause"
-  | "unknown";
+export type WorkflowStatus = InstanceStatus["status"];
 
 /**
  * Row structure for cf_agents_workflows tracking table
@@ -219,32 +212,13 @@ export type ApprovalEventPayload = {
 };
 
 /**
- * Workflow sleep duration type (re-exported for convenience)
- */
-export type WorkflowTimeout =
-  | `${number} second`
-  | `${number} seconds`
-  | `${number} minute`
-  | `${number} minutes`
-  | `${number} hour`
-  | `${number} hours`
-  | `${number} day`
-  | `${number} days`
-  | `${number} week`
-  | `${number} weeks`
-  | `${number} month`
-  | `${number} months`
-  | `${number} year`
-  | `${number} years`;
-
-/**
  * Options for waitForApproval()
  */
 export type WaitForApprovalOptions = {
   /** Step name for waitForEvent (default: "wait-for-approval") */
   stepName?: string;
   /** Timeout duration (e.g., "7 days") */
-  timeout?: WorkflowTimeout;
+  timeout?: WorkflowSleepDuration;
   /** Event type to wait for (default: "approval") */
   eventType?: string;
 };

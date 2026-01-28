@@ -34,11 +34,7 @@
  */
 
 import { WorkflowEntrypoint } from "cloudflare:workers";
-import type {
-  WorkflowEvent,
-  WorkflowStep,
-  WorkflowSleepDuration
-} from "cloudflare:workers";
+import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { getAgentByName, type Agent } from "./index";
 import type {
   AgentWorkflowParams,
@@ -317,7 +313,7 @@ export class AgentWorkflow<
     // Note: Call reportProgress() before this method if you want to update progress
     const event = await step.waitForEvent(stepName, {
       type: eventType,
-      timeout: timeout as WorkflowSleepDuration | undefined
+      timeout
     });
 
     // Cast the payload to our expected type

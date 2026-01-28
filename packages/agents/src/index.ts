@@ -1959,7 +1959,7 @@ export class Agent<
     workflowId: string,
     status: InstanceStatus
   ): void {
-    const statusName = status.status as WorkflowStatus;
+    const statusName = status.status;
     const now = Math.floor(Date.now() / 1000);
 
     // Determine if workflow is complete
