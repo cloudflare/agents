@@ -711,9 +711,18 @@ export class Agent<
    * Check for workflows referencing unknown bindings and warn with migration suggestion.
    */
   private _checkOrphanedWorkflows(): void {
-    // Get distinct workflow names with counts efficiently
-    const distinctNames = this.sql<{ workflow_name: string; count: number }>`
-      SELECT workflow_name, COUNT(*) as count 
+    // Get distinct workflow names with counts by active/completed status
+    const distinctNames = this.sql<{
+      workflow_name: string;
+      total: number;
+      active: number;
+      completed: number;
+    }>`
+      SELECT 
+        workflow_name,
+        COUNT(*) as total,
+        SUM(CASE WHEN status NOT IN ('complete', 'errored', 'terminated') THEN 1 ELSE 0 END) as active,
+        SUM(CASE WHEN status IN ('complete', 'errored', 'terminated') THEN 1 ELSE 0 END) as completed
       FROM cf_agents_workflows 
       GROUP BY workflow_name
     `;
@@ -724,13 +733,24 @@ export class Agent<
 
     if (orphaned.length > 0) {
       const currentBindings = this._getWorkflowBindingNames();
-      for (const { workflow_name: oldName, count } of orphaned) {
+      for (const {
+        workflow_name: oldName,
+        total,
+        active,
+        completed
+      } of orphaned) {
         const suggestion =
           currentBindings.length === 1
             ? `this.migrateWorkflowBinding('${oldName}', '${currentBindings[0]}')`
             : `this.migrateWorkflowBinding('${oldName}', '<NEW_BINDING_NAME>')`;
+        const breakdown =
+          active > 0 && completed > 0
+            ? ` (${active} active, ${completed} completed)`
+            : active > 0
+              ? ` (${active} active)`
+              : ` (${completed} completed)`;
         console.warn(
-          `[Agent] Found ${count} workflow(s) referencing unknown binding '${oldName}'. ` +
+          `[Agent] Found ${total} workflow(s) referencing unknown binding '${oldName}'${breakdown}. ` +
             `If you renamed the binding, call: ${suggestion}`
         );
       }
