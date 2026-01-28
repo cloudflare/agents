@@ -1273,8 +1273,8 @@ export class AIChatAgent<
     streamId: string,
     reader: ReadableStreamDefaultReader<Uint8Array>,
     message: ChatMessage,
-    continuation: boolean = false,
-    streamCompleted: { value: boolean }
+    streamCompleted: { value: boolean },
+    continuation = false
   ) {
     let activeTextParts: Record<string, TextUIPart> = {};
     let activeReasoningParts: Record<string, ReasoningUIPart> = {};
@@ -1719,8 +1719,8 @@ export class AIChatAgent<
     streamId: string,
     reader: ReadableStreamDefaultReader<Uint8Array>,
     message: ChatMessage,
-    continuation: boolean = false,
-    streamCompleted: { value: boolean }
+    streamCompleted: { value: boolean },
+    continuation = false
   ) {
     // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
     this._broadcastTextEvent(
@@ -1974,7 +1974,7 @@ export class AIChatAgent<
       // Determine response format based on content-type
       const contentType = response.headers.get("content-type") || "";
       const isSSE = contentType.includes("text/event-stream"); // AI SDK v5 SSE format
-      let streamCompleted = { value: false };
+      const streamCompleted = { value: false };
 
       try {
         if (isSSE) {
@@ -1984,8 +1984,8 @@ export class AIChatAgent<
             streamId,
             reader,
             message,
-            continuation,
-            streamCompleted
+            streamCompleted,
+            continuation
           );
         } else {
           await this._sendPlaintextReply(
@@ -1993,8 +1993,8 @@ export class AIChatAgent<
             streamId,
             reader,
             message,
-            continuation,
-            streamCompleted
+            streamCompleted,
+            continuation
           );
         }
       } catch (error) {
