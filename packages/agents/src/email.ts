@@ -258,6 +258,10 @@ export function createSecureReplyEmailResolver<Env>(
   secret: string,
   options?: SecureReplyResolverOptions
 ): EmailResolver<Env> {
+  if (!secret) {
+    throw new Error("secret is required for createSecureReplyEmailResolver");
+  }
+
   const maxAge = options?.maxAge ?? DEFAULT_MAX_AGE_SECONDS;
   const onInvalidSignature = options?.onInvalidSignature;
 
@@ -299,7 +303,10 @@ export function createAddressBasedEmailResolver<Env>(
   defaultAgentName: string
 ): EmailResolver<Env> {
   return async (email: ForwardableEmailMessage, _env: Env) => {
-    const emailMatch = email.to.match(/^([^+@]+)(?:\+([^@]+))?@(.+)$/);
+    // Length limits per RFC 5321: local part max 64 chars, domain max 253 chars
+    const emailMatch = email.to.match(
+      /^([^+@]{1,64})(?:\+([^@]{1,64}))?@(.{1,253})$/
+    );
     if (!emailMatch) {
       return null;
     }

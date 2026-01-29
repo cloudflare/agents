@@ -95,6 +95,31 @@ describe("Email Resolver Case Sensitivity", () => {
         agentId: "john.doe"
       });
     });
+
+    it("should reject local part exceeding 64 characters", async () => {
+      const resolver = createAddressBasedEmailResolver("EmailAgent");
+      const longLocalPart = "a".repeat(65);
+
+      const email = createMockEmail({
+        to: `${longLocalPart}@domain.com`
+      });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should accept local part at exactly 64 characters", async () => {
+      const resolver = createAddressBasedEmailResolver("EmailAgent");
+      const maxLocalPart = "a".repeat(64);
+
+      const email = createMockEmail({
+        to: `${maxLocalPart}@domain.com`
+      });
+
+      const result = await resolver(email, {});
+      expect(result).not.toBeNull();
+      expect(result?.agentId).toBe(maxLocalPart);
+    });
   });
 
   describe("createHeaderBasedEmailResolver", () => {
@@ -116,6 +141,12 @@ describe("Email Resolver Case Sensitivity", () => {
 
   describe("createSecureReplyEmailResolver", () => {
     const TEST_SECRET = "test-secret-key-for-hmac";
+
+    it("should throw error for empty secret", () => {
+      expect(() => createSecureReplyEmailResolver("")).toThrow(
+        "secret is required"
+      );
+    });
 
     it("should return null when required headers are missing", async () => {
       const resolver = createSecureReplyEmailResolver(TEST_SECRET);
