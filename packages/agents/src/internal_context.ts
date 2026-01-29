@@ -14,6 +14,8 @@ export type AgentEmail = {
     to: string;
     raw: string;
   }) => Promise<EmailSendResult>;
+  /** @internal Indicates email was routed via createSecureReplyEmailResolver */
+  _secureRouted?: boolean;
 };
 
 export type AgentContextStore = {

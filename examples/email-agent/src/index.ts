@@ -1,6 +1,7 @@
 import {
   Agent,
   createAddressBasedEmailResolver,
+  createSecureReplyEmailResolver,
   routeAgentEmail,
   routeAgentRequest,
   type AgentEmail
@@ -26,11 +27,31 @@ interface EmailAgentState {
 
 interface Env {
   EmailAgent: DurableObjectNamespace<EmailAgent>;
+  EMAIL_SECRET: string;
 }
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
     throw new Error(message);
+  }
+}
+
+const DEFAULT_SECRET = "change-me-in-production";
+
+function assertSecretConfigured(secret: string | undefined): void {
+  if (!secret) {
+    throw new Error(
+      "EMAIL_SECRET is not set. " +
+        "Please set a secret using `wrangler secret put EMAIL_SECRET` " +
+        "or add it to wrangler.jsonc for local development."
+    );
+  }
+  if (secret === DEFAULT_SECRET) {
+    throw new Error(
+      "EMAIL_SECRET has not been changed from the default value. " +
+        "Please set a unique secret using `wrangler secret put EMAIL_SECRET` " +
+        "or update the value in wrangler.jsonc for local development."
+    );
   }
 }
 
@@ -84,7 +105,8 @@ Current stats:
 - Last updated: ${this.state.lastUpdated.toISOString()}
 
 Best regards,
-Email Agent`
+Email Agent`,
+          secret: this.env.EMAIL_SECRET
         });
       }
     } catch (error) {
@@ -121,13 +143,24 @@ Email Agent`
 }
 
 export default {
-  async email(email, env) {
+  async email(email, env: Env) {
     console.log("📮 Email received via email handler");
 
+    assertSecretConfigured(env.EMAIL_SECRET);
+
+    const secureReplyResolver = createSecureReplyEmailResolver(
+      env.EMAIL_SECRET
+    );
     const addressResolver = createAddressBasedEmailResolver("EmailAgent");
 
     await routeAgentEmail(email, env, {
-      resolver: addressResolver
+      resolver: async (email, env) => {
+        // Check if this is a reply to one of our outbound emails
+        const replyRouting = await secureReplyResolver(email, env);
+        if (replyRouting) return replyRouting;
+        // Otherwise route based on recipient address
+        return addressResolver(email, env);
+      }
     });
   },
   async fetch(request: Request, env: Env) {
@@ -136,6 +169,8 @@ export default {
 
       // Handle test email API endpoint
       if (url.pathname === "/api/test-email" && request.method === "POST") {
+        assertSecretConfigured(env.EMAIL_SECRET);
+
         const emailData = (await request.json()) as {
           from?: string;
           to?: string;
@@ -179,9 +214,16 @@ export default {
         };
 
         // Route the email using our email routing system
-        const resolver = createAddressBasedEmailResolver("EmailAgent");
+        const secureReplyResolver = createSecureReplyEmailResolver(
+          env.EMAIL_SECRET
+        );
+        const addressResolver = createAddressBasedEmailResolver("EmailAgent");
         await routeAgentEmail(mockEmail, env, {
-          resolver
+          resolver: async (email, env) => {
+            const replyRouting = await secureReplyResolver(email, env);
+            if (replyRouting) return replyRouting;
+            return addressResolver(email, env);
+          }
         });
 
         return new Response(

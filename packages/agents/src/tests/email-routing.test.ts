@@ -3,9 +3,11 @@ import { env } from "cloudflare:test";
 import {
   createAddressBasedEmailResolver,
   createHeaderBasedEmailResolver,
+  createSecureReplyEmailResolver,
   createCatchAllEmailResolver,
   routeAgentEmail,
-  getAgentByName
+  getAgentByName,
+  signAgentHeaders
 } from "../index";
 import type { Env } from "./worker";
 
@@ -96,51 +98,268 @@ describe("Email Resolver Case Sensitivity", () => {
   });
 
   describe("createHeaderBasedEmailResolver", () => {
-    it("should handle various case formats in message-id header", async () => {
-      const resolver = createHeaderBasedEmailResolver();
-
-      const testCases = [
-        {
-          messageId: "<agent123@EmailAgent.domain.com>",
-          expectedName: "EmailAgent"
-        },
-        {
-          messageId: "<agent123@email-agent.domain.com>",
-          expectedName: "email-agent"
-        },
-        {
-          messageId: "<agent123@CaseSensitiveAgent.domain.com>",
-          expectedName: "CaseSensitiveAgent"
-        }
-      ];
-
-      for (const { messageId, expectedName } of testCases) {
-        const headers = new Headers({ "message-id": messageId });
-        const email = createMockEmail({ headers });
-
-        const result = await resolver(email, {});
-        expect(result).toEqual({
-          agentName: expectedName,
-          agentId: "agent123"
-        });
-      }
+    it("should throw an error due to security vulnerability", () => {
+      expect(() => createHeaderBasedEmailResolver()).toThrow(
+        /createHeaderBasedEmailResolver has been removed due to a security vulnerability/
+      );
     });
 
-    it("should handle x-agent-name header with various cases", async () => {
-      const resolver = createHeaderBasedEmailResolver();
+    it("should include migration guidance in error message", () => {
+      expect(() => createHeaderBasedEmailResolver()).toThrow(
+        /createAddressBasedEmailResolver/
+      );
+      expect(() => createHeaderBasedEmailResolver()).toThrow(
+        /createSecureReplyEmailResolver/
+      );
+    });
+  });
 
+  describe("createSecureReplyEmailResolver", () => {
+    const TEST_SECRET = "test-secret-key-for-hmac";
+
+    it("should return null when required headers are missing", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const email = createMockEmail();
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should return null when signature is missing", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
       const headers = new Headers({
-        "x-agent-name": "CaseSensitiveAgent",
+        "x-agent-name": "TestAgent",
         "x-agent-id": "test-id"
       });
-
       const email = createMockEmail({ headers });
-      const result = await resolver(email, {});
 
-      expect(result).toEqual({
-        agentName: "CaseSensitiveAgent",
-        agentId: "test-id"
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should return null when timestamp is missing", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const headers = new Headers({
+        "x-agent-name": "TestAgent",
+        "x-agent-id": "test-id",
+        "x-agent-sig": "some-signature"
       });
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should return null when signature is invalid", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const headers = new Headers({
+        "x-agent-name": "TestAgent",
+        "x-agent-id": "test-id",
+        "x-agent-sig": "invalid-signature",
+        "x-agent-sig-ts": Math.floor(Date.now() / 1000).toString()
+      });
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should route correctly with valid signature and set _secureRouted flag", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "TestAgent",
+        "test-id"
+      );
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toEqual({
+        agentName: "TestAgent",
+        agentId: "test-id",
+        _secureRouted: true
+      });
+    });
+
+    it("should reject signature with wrong secret", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const signedHeaders = await signAgentHeaders(
+        "wrong-secret",
+        "TestAgent",
+        "test-id"
+      );
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should reject tampered agent name", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "TestAgent",
+        "test-id"
+      );
+      // Tamper with the agent name
+      signedHeaders["X-Agent-Name"] = "TamperedAgent";
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should reject tampered agent id", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "TestAgent",
+        "test-id"
+      );
+      // Tamper with the agent id
+      signedHeaders["X-Agent-ID"] = "tampered-id";
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should reject expired signatures", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET, {
+        maxAge: 60 // 1 minute
+      });
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "TestAgent",
+        "test-id"
+      );
+      // Set timestamp to 2 minutes ago
+      signedHeaders["X-Agent-Sig-Ts"] = (
+        Math.floor(Date.now() / 1000) - 120
+      ).toString();
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should call onInvalidSignature callback with reason", async () => {
+      const reasons: string[] = [];
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET, {
+        onInvalidSignature: (_email, reason) => {
+          reasons.push(reason);
+        }
+      });
+
+      // Test missing headers
+      const email1 = createMockEmail();
+      await resolver(email1, {});
+      expect(reasons).toContain("missing_headers");
+
+      // Test invalid signature
+      const headers2 = new Headers({
+        "x-agent-name": "TestAgent",
+        "x-agent-id": "test-id",
+        "x-agent-sig": "invalid",
+        "x-agent-sig-ts": Math.floor(Date.now() / 1000).toString()
+      });
+      const email2 = createMockEmail({ headers: headers2 });
+      await resolver(email2, {});
+      expect(reasons).toContain("invalid");
+    });
+
+    it("should call onInvalidSignature with expired reason", async () => {
+      let capturedReason: string | undefined;
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET, {
+        maxAge: 60,
+        onInvalidSignature: (_email, reason) => {
+          capturedReason = reason;
+        }
+      });
+
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "TestAgent",
+        "test-id"
+      );
+      // Set timestamp to 2 minutes ago
+      signedHeaders["X-Agent-Sig-Ts"] = (
+        Math.floor(Date.now() / 1000) - 120
+      ).toString();
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      await resolver(email, {});
+      expect(capturedReason).toBe("expired");
+    });
+  });
+
+  describe("signAgentHeaders", () => {
+    const TEST_SECRET = "test-secret-key";
+
+    it("should return all required headers including timestamp", async () => {
+      const headers = await signAgentHeaders(TEST_SECRET, "MyAgent", "agent-1");
+
+      expect(headers).toHaveProperty("X-Agent-Name", "MyAgent");
+      expect(headers).toHaveProperty("X-Agent-ID", "agent-1");
+      expect(headers).toHaveProperty("X-Agent-Sig");
+      expect(headers).toHaveProperty("X-Agent-Sig-Ts");
+      expect(headers["X-Agent-Sig"]).toBeTruthy();
+      expect(headers["X-Agent-Sig-Ts"]).toBeTruthy();
+      // Timestamp should be a valid unix timestamp
+      const ts = Number.parseInt(headers["X-Agent-Sig-Ts"], 10);
+      expect(ts).toBeGreaterThan(0);
+      expect(ts).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 1);
+    });
+
+    it("should produce different signatures for different inputs", async () => {
+      const headers1 = await signAgentHeaders(
+        TEST_SECRET,
+        "MyAgent",
+        "agent-1"
+      );
+      const headers2 = await signAgentHeaders(
+        TEST_SECRET,
+        "MyAgent",
+        "agent-2"
+      );
+      const headers3 = await signAgentHeaders(
+        TEST_SECRET,
+        "OtherAgent",
+        "agent-1"
+      );
+
+      // Even if called at the same second, different inputs should produce different sigs
+      expect(headers1["X-Agent-Sig"]).not.toBe(headers2["X-Agent-Sig"]);
+      expect(headers1["X-Agent-Sig"]).not.toBe(headers3["X-Agent-Sig"]);
+    });
+
+    it("should produce different signatures for different secrets", async () => {
+      const headers1 = await signAgentHeaders("secret-1", "MyAgent", "agent-1");
+      const headers2 = await signAgentHeaders("secret-2", "MyAgent", "agent-1");
+
+      expect(headers1["X-Agent-Sig"]).not.toBe(headers2["X-Agent-Sig"]);
+    });
+
+    it("should produce verifiable signatures", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "MyAgent",
+        "agent-1"
+      );
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).not.toBeNull();
+      expect(result?.agentName).toBe("MyAgent");
+      expect(result?.agentId).toBe("agent-1");
     });
   });
 
@@ -197,6 +416,43 @@ describe("Email Resolver Case Sensitivity", () => {
       );
     });
 
+    it("should call onNoRoute when resolver returns null", async () => {
+      let callbackCalled = false;
+      let capturedEmail: ForwardableEmailMessage | undefined;
+
+      const resolver = async () => null;
+      const email = createMockEmail();
+
+      await routeAgentEmail(email, env, {
+        resolver,
+        onNoRoute: (e) => {
+          callbackCalled = true;
+          capturedEmail = e;
+        }
+      });
+
+      expect(callbackCalled).toBe(true);
+      expect(capturedEmail).toBe(email);
+    });
+
+    it("should allow rejecting email in onNoRoute callback", async () => {
+      let rejected = false;
+      const email = createMockEmail({
+        setReject: () => {
+          rejected = true;
+        }
+      });
+
+      await routeAgentEmail(email, env, {
+        resolver: async () => null,
+        onNoRoute: (e) => {
+          e.setReject("Unknown recipient");
+        }
+      });
+
+      expect(rejected).toBe(true);
+    });
+
     it("should handle real-world email routing scenario", async () => {
       // Test with actual DurableObject from env
       const userEmail = createMockEmail({
@@ -214,18 +470,24 @@ describe("Email Resolver Case Sensitivity", () => {
       expect(agent).toBeDefined();
     });
 
-    it("should handle email replies with kebab-case in headers", async () => {
-      // Email reply with kebab-case in message-id
+    it("should handle email replies with secure resolver", async () => {
+      const TEST_SECRET = "test-secret";
+      // Sign headers for a reply
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "email-agent",
+        "reply123"
+      );
       const headers = new Headers({
-        "message-id": "<reply123@email-agent.company.com>",
+        ...signedHeaders,
         "in-reply-to": "<original@client.com>"
       });
 
       const replyEmail = createMockEmail({ headers });
-      const resolver = createHeaderBasedEmailResolver();
+      const secureResolver = createSecureReplyEmailResolver(TEST_SECRET);
 
-      // This should route to EmailAgent even though the header uses kebab-case
-      await routeAgentEmail(replyEmail, env, { resolver });
+      // This should route to EmailAgent with verified signature
+      await routeAgentEmail(replyEmail, env, { resolver: secureResolver });
     });
   });
 

@@ -1,6 +1,7 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { agentContext, type AgentEmail } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import { signAgentHeaders } from "./email";
 
 import type {
   Prompt,
@@ -846,6 +847,9 @@ export class Agent<
    * Reply to an email
    * @param email The email to reply to
    * @param options Options for the reply
+   * @param options.secret Secret for signing agent headers (enables secure reply routing).
+   *   Required if the email was routed via createSecureReplyEmailResolver.
+   *   Pass explicit `null` to opt-out of signing (not recommended for secure routing).
    * @returns void
    */
   async replyToEmail(
@@ -856,9 +860,19 @@ export class Agent<
       body: string;
       contentType?: string;
       headers?: Record<string, string>;
+      secret?: string | null;
     }
   ): Promise<void> {
     return this._tryCatch(async () => {
+      // Enforce signing for emails routed via createSecureReplyEmailResolver
+      if (email._secureRouted && options.secret === undefined) {
+        throw new Error(
+          "This email was routed via createSecureReplyEmailResolver. " +
+            "You must pass a secret to replyToEmail() to sign replies, " +
+            "or pass explicit null to opt-out (not recommended)."
+        );
+      }
+
       const agentName = camelCaseToKebabCase(this._ParentClass.name);
       const agentId = this.name;
 
@@ -880,6 +894,17 @@ export class Agent<
       msg.setHeader("Message-ID", messageId);
       msg.setHeader("X-Agent-Name", agentName);
       msg.setHeader("X-Agent-ID", agentId);
+
+      // Sign headers if secret is provided (enables secure reply routing)
+      if (typeof options.secret === "string") {
+        const signedHeaders = await signAgentHeaders(
+          options.secret,
+          agentName,
+          agentId
+        );
+        msg.setHeader("X-Agent-Sig", signedHeaders["X-Agent-Sig"]);
+        msg.setHeader("X-Agent-Sig-Ts", signedHeaders["X-Agent-Sig-Ts"]);
+      }
 
       if (options.headers) {
         for (const [key, value] of Object.entries(options.headers)) {
@@ -2559,100 +2584,33 @@ export async function routeAgentRequest<Env>(
   return response;
 }
 
-export type EmailResolver<Env> = (
-  email: ForwardableEmailMessage,
-  env: Env
-) => Promise<{
-  agentName: string;
-  agentId: string;
-} | null>;
+// Email routing - resolvers and types from ./email
+export {
+  createHeaderBasedEmailResolver,
+  createSecureReplyEmailResolver,
+  createAddressBasedEmailResolver,
+  createCatchAllEmailResolver,
+  signAgentHeaders
+} from "./email";
 
-/**
- * Create a resolver that uses the message-id header to determine the agent to route the email to
- * @returns A function that resolves the agent to route the email to
- */
-export function createHeaderBasedEmailResolver<Env>(): EmailResolver<Env> {
-  return async (email: ForwardableEmailMessage, _env: Env) => {
-    const messageId = email.headers.get("message-id");
-    if (messageId) {
-      const messageIdMatch = messageId.match(/<([^@]+)@([^>]+)>/);
-      if (messageIdMatch) {
-        const [, agentId, domain] = messageIdMatch;
-        const agentName = domain.split(".")[0];
-        return { agentName, agentId };
-      }
-    }
+export type {
+  EmailResolverResult,
+  EmailResolver,
+  SecureReplyResolverOptions,
+  SignatureFailureReason,
+  AgentEmail
+} from "./email";
 
-    const references = email.headers.get("references");
-    if (references) {
-      const referencesMatch = references.match(
-        /<([A-Za-z0-9+/]{43}=)@([^>]+)>/
-      );
-      if (referencesMatch) {
-        const [, base64Id, domain] = referencesMatch;
-        const agentId = Buffer.from(base64Id, "base64").toString("hex");
-        const agentName = domain.split(".")[0];
-        return { agentName, agentId };
-      }
-    }
-
-    const agentName = email.headers.get("x-agent-name");
-    const agentId = email.headers.get("x-agent-id");
-    if (agentName && agentId) {
-      return { agentName, agentId };
-    }
-
-    return null;
-  };
-}
-
-/**
- * Create a resolver that uses the email address to determine the agent to route the email to
- * @param defaultAgentName The default agent name to use if the email address does not contain a sub-address
- * @returns A function that resolves the agent to route the email to
- */
-export function createAddressBasedEmailResolver<Env>(
-  defaultAgentName: string
-): EmailResolver<Env> {
-  return async (email: ForwardableEmailMessage, _env: Env) => {
-    const emailMatch = email.to.match(/^([^+@]+)(?:\+([^@]+))?@(.+)$/);
-    if (!emailMatch) {
-      return null;
-    }
-
-    const [, localPart, subAddress] = emailMatch;
-
-    if (subAddress) {
-      return {
-        agentName: localPart,
-        agentId: subAddress
-      };
-    }
-
-    // Option 2: Use defaultAgentName namespace, localPart as agentId
-    // Common for catch-all email routing to a single EmailAgent namespace
-    return {
-      agentName: defaultAgentName,
-      agentId: localPart
-    };
-  };
-}
-
-/**
- * Create a resolver that uses the agentName and agentId to determine the agent to route the email to
- * @param agentName The name of the agent to route the email to
- * @param agentId The id of the agent to route the email to
- * @returns A function that resolves the agent to route the email to
- */
-export function createCatchAllEmailResolver<Env>(
-  agentName: string,
-  agentId: string
-): EmailResolver<Env> {
-  return async () => ({ agentName, agentId });
-}
+import type { EmailResolver } from "./email";
 
 export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
   resolver: EmailResolver<Env>;
+  /**
+   * Callback invoked when no routing information is found for an email.
+   * Use this to reject the email or perform custom handling.
+   * If not provided, a warning is logged and the email is dropped.
+   */
+  onNoRoute?: (email: ForwardableEmailMessage) => void | Promise<void>;
 };
 
 // Cache the agent namespace map for email routing
@@ -2679,7 +2637,11 @@ export async function routeAgentEmail<
   const routingInfo = await options.resolver(email, env);
 
   if (!routingInfo) {
-    console.warn("No routing information found for email, dropping message");
+    if (options.onNoRoute) {
+      await options.onNoRoute(email);
+    } else {
+      console.warn("No routing information found for email, dropping message");
+    }
     return;
   }
 
@@ -2752,32 +2714,18 @@ export async function routeAgentEmail<
     forward: (rcptTo: string, headers?: Headers) => {
       return email.forward(rcptTo, headers);
     },
-    reply: (options: { from: string; to: string; raw: string }) => {
+    reply: (replyOptions: { from: string; to: string; raw: string }) => {
       return email.reply(
-        new EmailMessage(options.from, options.to, options.raw)
+        new EmailMessage(replyOptions.from, replyOptions.to, replyOptions.raw)
       );
     },
     from: email.from,
-    to: email.to
+    to: email.to,
+    _secureRouted: routingInfo._secureRouted
   };
 
   await agent._onEmail(serialisableEmail);
 }
-
-// AgentEmail is re-exported from ./context
-export type { AgentEmail } from "./internal_context";
-
-export type EmailSendOptions = {
-  to: string;
-  subject: string;
-  body: string;
-  contentType?: string;
-  headers?: Record<string, string>;
-  includeRoutingHeaders?: boolean;
-  agentName?: string;
-  agentId?: string;
-  domain?: string;
-};
 
 /**
  * Get or create an Agent by name

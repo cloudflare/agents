@@ -354,15 +354,10 @@ class MyAgent extends Agent {
     console.log("Received email from:", email.from);
     console.log("Subject:", email.headers.get("subject"));
 
-    const raw = await email.getRaw();
-    console.log("Raw email size:", raw.length);
-
     // Reply to the email
     await this.replyToEmail(email, {
       fromName: "My Agent",
-      subject: "Re: " + email.headers.get("subject"),
-      body: "Thanks for your email!",
-      contentType: "text/plain"
+      body: "Thanks for your email!"
     });
   }
 }
@@ -379,6 +374,8 @@ export default {
   }
 };
 ```
+
+For more details on email routing, resolvers, secure reply flows, and the full API, see the [Email Routing guide](./email.md).
 
 ### Context Management
 
