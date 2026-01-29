@@ -33,6 +33,7 @@ import { Emitter, type Event } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
 import {
+  getErrorCode,
   isTransportNotImplemented,
   isUnauthorized,
   toErrorMessage
@@ -663,9 +664,15 @@ export class MCPClientConnection {
   }
 
   private _capabilityErrorHandler<T>(empty: T, method: string) {
-    return (e: { code: number }) => {
-      // server is badly behaved and returning invalid capabilities. This commonly occurs for resource templates
-      if (e.code === -32601) {
+    return (e: unknown) => {
+      // Server is badly behaved and returning invalid capabilities. This commonly occurs for resource templates.
+      // Check both the error code property and the error message for -32601 (Method not found)
+      const errorCode = getErrorCode(e);
+      const errorMessage = toErrorMessage(e);
+      const isMethodNotFound =
+        errorCode === -32601 || errorMessage.includes('"code":-32601');
+
+      if (isMethodNotFound) {
         const url = this.url.toString();
         this._onObservabilityEvent.fire({
           type: "mcp:client:discover",
@@ -673,7 +680,7 @@ export class MCPClientConnection {
           payload: {
             url,
             capability: method.split("/")[0],
-            error: toErrorMessage(e)
+            error: errorMessage
           },
           timestamp: Date.now(),
           id: nanoid()
