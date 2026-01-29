@@ -12,8 +12,14 @@ import { env, WorkerEntrypoint } from "cloudflare:workers";
 
 function toCamelCase(str: string) {
   return str
-    .replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())
+    .replace(/[-_]([a-z])/g, (_, letter) => letter.toUpperCase())
     .replace(/^[a-z]/, (letter) => letter.toUpperCase());
+}
+
+function toValidIdentifier(str: string) {
+  return str
+    .replace(/[-_]([a-z])/g, (_, letter) => letter.toUpperCase())
+    .replace(/^[A-Z]/, (letter) => letter.toLowerCase());
 }
 
 export class CodeModeProxy extends WorkerEntrypoint<
@@ -67,7 +73,7 @@ export async function experimental_codemode(options: {
     execute: async ({ functionDescription }) => {
       try {
         const response = await generateObject({
-          model: openai("gpt-4.1"),
+          model: openai("gpt-5.1-codex-mini"),
           schema: z.object({
             code: z.string()
           }),
@@ -75,9 +81,11 @@ export async function experimental_codemode(options: {
 
       In addition to regular javascript, you can also use the following functions:
 
-      ${generatedTypes}      
+      ${generatedTypes}
 
       Respond only with the code, nothing else. Output javascript code.
+
+      IMPORTANT: For function names containing hyphens or underscores, you MUST use bracket notation. For example: codemode["tool_abc_list-calendars"]({}) NOT codemode.tool_abc_list-calendars({})
 
       Generate an async function that achieves the goal. This async function doesn't accept any arguments.
 
@@ -130,7 +138,7 @@ export default class CodeModeWorker extends WorkerEntrypoint {
             return (args) => {
               return CodeModeProxy.callFunction({
                 functionName: prop,
-                args: args,                
+                args: args,
               });
             };
           }
@@ -225,7 +233,7 @@ async function generateTypes(tools: ToolSet) {
     availableTypes += `\n${InputType}`;
     availableTypes += `\n${OutputType}`;
     availableTools += `\n\t/*\n\t${tool.description?.trim()}\n\t*/`;
-    availableTools += `\n\t${toolName}: (input: ${toCamelCase(toolName)}Input) => Promise<${toCamelCase(toolName)}Output>;`;
+    availableTools += `\n\t"${toolName}": (input: ${toCamelCase(toolName)}Input) => Promise<${toCamelCase(toolName)}Output>;`;
     availableTools += "\n";
   }
 
