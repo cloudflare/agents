@@ -1,0 +1,12 @@
+{
+  "name": "@cloudflare/agents-workflows-example",
+  "description": "Demo showing workflow integration with Agents - progress tracking, human-in-the-loop approval, and state sync",
+  "author": "",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  }
+}

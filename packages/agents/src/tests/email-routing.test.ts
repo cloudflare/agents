@@ -25,8 +25,8 @@ function createMockEmail(
     raw: new ReadableStream(),
     rawSize: 1024,
     setReject: () => {},
-    forward: async () => {},
-    reply: async () => {},
+    forward: async () => ({ messageId: "mock-forward-id" }),
+    reply: async () => ({ messageId: "mock-reply-id" }),
     ...overrides
   };
 }
