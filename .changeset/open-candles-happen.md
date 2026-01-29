@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 ### Secure Email Reply Routing
