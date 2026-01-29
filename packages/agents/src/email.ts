@@ -12,6 +12,9 @@ export type { AgentEmail } from "./internal_context";
 /** Default signature expiration: 30 days in seconds */
 export const DEFAULT_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
 
+/** Maximum allowed clock skew for future timestamps: 5 minutes */
+const MAX_CLOCK_SKEW_SECONDS = 5 * 60;
+
 /**
  * Compute HMAC-SHA256 signature for agent routing headers
  * @param secret - Secret key for HMAC
@@ -71,8 +74,15 @@ async function verifyAgentSignature(
       return { valid: false, reason: "malformed_timestamp" };
     }
 
-    // Check if signature has expired
+    // Check timestamp validity
     const now = Math.floor(Date.now() / 1000);
+
+    // Reject timestamps too far in the future (prevents extending signature validity)
+    if (timestampNum > now + MAX_CLOCK_SKEW_SECONDS) {
+      return { valid: false, reason: "invalid" };
+    }
+
+    // Check if signature has expired
     if (now - timestampNum > maxAgeSeconds) {
       return { valid: false, reason: "expired" };
     }
@@ -95,7 +105,8 @@ async function verifyAgentSignature(
       return { valid: false, reason: "invalid" };
     }
     return { valid: true };
-  } catch {
+  } catch (error) {
+    console.warn("[agents] Signature verification error:", error);
     return { valid: false, reason: "invalid" };
   }
 }
@@ -120,6 +131,24 @@ export async function signAgentHeaders(
   agentName: string,
   agentId: string
 ): Promise<Record<string, string>> {
+  if (!secret) {
+    throw new Error("secret is required for signing agent headers");
+  }
+  if (!agentName) {
+    throw new Error("agentName is required for signing agent headers");
+  }
+  if (!agentId) {
+    throw new Error("agentId is required for signing agent headers");
+  }
+  // Reject colons to prevent signature confusion attacks
+  // (signature payload uses colon as delimiter: "agentName:agentId:timestamp")
+  if (agentName.includes(":")) {
+    throw new Error("agentName cannot contain colons");
+  }
+  if (agentId.includes(":")) {
+    throw new Error("agentId cannot contain colons");
+  }
+
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const signature = await computeAgentSignature(
     secret,

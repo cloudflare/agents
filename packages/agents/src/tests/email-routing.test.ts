@@ -248,6 +248,43 @@ describe("Email Resolver Case Sensitivity", () => {
       expect(result).toBeNull();
     });
 
+    it("should reject signatures with future timestamps", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "TestAgent",
+        "test-id"
+      );
+      // Set timestamp to 10 minutes in the future (beyond 5 min clock skew allowance)
+      signedHeaders["X-Agent-Sig-Ts"] = (
+        Math.floor(Date.now() / 1000) + 600
+      ).toString();
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      expect(result).toBeNull();
+    });
+
+    it("should allow small clock skew for timestamps", async () => {
+      const resolver = createSecureReplyEmailResolver(TEST_SECRET);
+      const signedHeaders = await signAgentHeaders(
+        TEST_SECRET,
+        "TestAgent",
+        "test-id"
+      );
+      // Set timestamp to 2 minutes in the future (within 5 min clock skew allowance)
+      signedHeaders["X-Agent-Sig-Ts"] = (
+        Math.floor(Date.now() / 1000) + 120
+      ).toString();
+      const headers = new Headers(signedHeaders);
+      const email = createMockEmail({ headers });
+
+      const result = await resolver(email, {});
+      // Should still fail because signature doesn't match (timestamp is part of signed data)
+      expect(result).toBeNull();
+    });
+
     it("should call onInvalidSignature callback with reason", async () => {
       const reasons: string[] = [];
       const resolver = createSecureReplyEmailResolver(TEST_SECRET, {
@@ -360,6 +397,36 @@ describe("Email Resolver Case Sensitivity", () => {
       expect(result).not.toBeNull();
       expect(result?.agentName).toBe("MyAgent");
       expect(result?.agentId).toBe("agent-1");
+    });
+
+    it("should throw error for empty secret", async () => {
+      await expect(signAgentHeaders("", "MyAgent", "agent-1")).rejects.toThrow(
+        "secret is required"
+      );
+    });
+
+    it("should throw error for empty agentName", async () => {
+      await expect(
+        signAgentHeaders(TEST_SECRET, "", "agent-1")
+      ).rejects.toThrow("agentName is required");
+    });
+
+    it("should throw error for empty agentId", async () => {
+      await expect(
+        signAgentHeaders(TEST_SECRET, "MyAgent", "")
+      ).rejects.toThrow("agentId is required");
+    });
+
+    it("should throw error for agentName containing colon", async () => {
+      await expect(
+        signAgentHeaders(TEST_SECRET, "My:Agent", "agent-1")
+      ).rejects.toThrow("agentName cannot contain colons");
+    });
+
+    it("should throw error for agentId containing colon", async () => {
+      await expect(
+        signAgentHeaders(TEST_SECRET, "MyAgent", "agent:1")
+      ).rejects.toThrow("agentId cannot contain colons");
     });
   });
 
