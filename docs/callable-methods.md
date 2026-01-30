@@ -218,6 +218,7 @@ export class AIAgent extends Agent {
 ### Consuming Streams on the Client
 
 ```typescript
+// Preferred format (supports timeout and other options)
 await agent.call("generateText", [prompt], {
   stream: {
     onChunk: (chunk) => {
@@ -233,6 +234,13 @@ await agent.call("generateText", [prompt], {
       console.error("Stream error:", error);
     }
   }
+});
+
+// Legacy format (still supported for backward compatibility)
+await agent.call("generateText", [prompt], {
+  onChunk: (chunk) => appendToOutput(chunk),
+  onDone: (finalValue) => console.log("Done", finalValue),
+  onError: (error) => console.error("Error:", error)
 });
 ```
 
@@ -543,6 +551,8 @@ type CallOptions = {
   };
 };
 ```
+
+> **Backward Compatibility**: The legacy format `{ onChunk, onDone, onError }` (without nesting under `stream`) is still supported. The client auto-detects which format you're using.
 
 ### `getCallableMethods()` Method
 

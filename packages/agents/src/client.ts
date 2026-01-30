@@ -299,38 +299,47 @@ export class AgentClient<State = unknown> extends PartySocket {
    * Call a method on the Agent
    * @param method Name of the method to call
    * @param args Arguments to pass to the method
-   * @param options Options for the call (timeout, streaming)
+   * @param options Options for the call (timeout, streaming) or legacy StreamOptions
    * @returns Promise that resolves with the method's return value
    */
   call<T extends SerializableReturnValue>(
     method: string,
     args?: SerializableValue[],
-    options?: CallOptions
+    options?: CallOptions | StreamOptions
   ): Promise<T>;
   call<T = unknown>(
     method: string,
     args?: unknown[],
-    options?: CallOptions
+    options?: CallOptions | StreamOptions
   ): Promise<T>;
   async call<T>(
     method: string,
     args: unknown[] = [],
-    options?: CallOptions
+    options?: CallOptions | StreamOptions
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = crypto.randomUUID();
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
+      // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
+      const isLegacyFormat =
+        options &&
+        ("onChunk" in options || "onDone" in options || "onError" in options);
+      const streamOptions = isLegacyFormat
+        ? (options as StreamOptions)
+        : (options as CallOptions | undefined)?.stream;
+      const timeout = isLegacyFormat
+        ? undefined
+        : (options as CallOptions | undefined)?.timeout;
+
       // Set up timeout if specified
-      if (options?.timeout) {
+      if (timeout) {
         timeoutId = setTimeout(() => {
           this._pendingCalls.delete(id);
           reject(
-            new Error(
-              `RPC call to ${method} timed out after ${options.timeout}ms`
-            )
+            new Error(`RPC call to ${method} timed out after ${timeout}ms`)
           );
-        }, options.timeout);
+        }, timeout);
       }
 
       this._pendingCalls.set(id, {
@@ -342,7 +351,7 @@ export class AgentClient<State = unknown> extends PartySocket {
           if (timeoutId) clearTimeout(timeoutId);
           resolve(value as T);
         },
-        stream: options?.stream,
+        stream: streamOptions,
         type: null as T
       });
 

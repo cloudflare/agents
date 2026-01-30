@@ -59,17 +59,19 @@ Pending RPC calls are now automatically rejected with a "Connection closed" erro
 - **UUID for RPC IDs**: Replaced `Math.random().toString(36)` with `crypto.randomUUID()` for more robust and unique RPC call identifiers.
 - **Streaming observability**: Added observability events for streaming RPC calls.
 
-## API Changes
+## API Enhancements
 
-The `agent.call()` method now accepts a unified `CallOptions` object:
+The `agent.call()` method now accepts a unified `CallOptions` object with timeout support:
 
 ```typescript
-// Before
-await agent.call("method", [args], { onChunk, onDone, onError });
-
-// After
+// New format (preferred, supports timeout)
 await agent.call("method", [args], {
   timeout: 5000,
   stream: { onChunk, onDone, onError }
 });
+
+// Legacy format (still fully supported for backward compatibility)
+await agent.call("method", [args], { onChunk, onDone, onError });
 ```
+
+Both formats work seamlessly - the client auto-detects which format you're using.

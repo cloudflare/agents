@@ -518,3 +518,25 @@ describe("@callable decorator", () => {
     });
   });
 });
+
+/**
+ * AgentClient.call() Backward Compatibility Note
+ *
+ * The AgentClient.call() method supports two formats for streaming options:
+ *
+ * Legacy format (for backward compatibility):
+ *   agent.call("streamMethod", [args], { onChunk, onDone, onError })
+ *
+ * New format (preferred, supports timeout):
+ *   agent.call("streamMethod", [args], { stream: { onChunk, onDone, onError }, timeout: 5000 })
+ *
+ * The client detects legacy format by checking for onChunk/onDone/onError at the top level.
+ * This detection is implemented in packages/agents/src/client.ts in the call() method.
+ *
+ * The streaming tests above verify the underlying RPC protocol works correctly.
+ * The format detection is a client-side implementation detail that normalizes
+ * options before sending RPC messages - both formats produce identical wire messages.
+ *
+ * Testing AgentClient directly would require PartySocket infrastructure which
+ * isn't available in the vitest cloudflare:test environment.
+ */
