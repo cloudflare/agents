@@ -17,8 +17,8 @@ export type CreatePipelineOptions = {
 
 export class RealtimeAPI {
   gateway: AiGateway;
-  constructor(ai: Ai, gatewayId?: string) {
-    this.gateway = ai.gateway(gatewayId ?? "aig-worker-testing");
+  constructor(ai: Ai, gatewayId: string) {
+    this.gateway = ai.gateway(gatewayId);
   }
 
   async createPipeline(

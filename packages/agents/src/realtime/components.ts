@@ -12,10 +12,11 @@ export interface RealtimePipelineComponent {
   input_kind(): DataKind;
   output_kind(): DataKind;
   schema(): { name: string; type: string; [K: string]: unknown };
+  validate(): void;
 }
 
 export interface RealtimeKitMeetingConfig {
-  meetingId: string;
+  meetingId?: string;
   authToken?: string;
   filters?: RealtimeKitMediaFilter[];
 }
@@ -34,7 +35,7 @@ export type RealtimeKitMediaFilter =
 
 export class RealtimeKitTransport implements RealtimePipelineComponent {
   #meeting?: RealtimeKitClient;
-  readonly meetingId: string;
+  meetingId?: string;
   #authToken?: string;
   readonly filters: RealtimeKitMediaFilter[];
 
@@ -90,6 +91,10 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
     return DataKind.Audio;
   }
 
+  validate(): void {
+    // RealtimeKit doesn't require validation as auth is handled separately
+  }
+
   schema() {
     const schema: Record<string, unknown> = {
       name: this.name,
@@ -108,9 +113,18 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
 
 export class DeepgramSTT implements RealtimePipelineComponent {
   constructor(
-    private readonly gatewayId: string,
+    private gatewayId?: string,
+    private apiKey?: string,
     private readonly config?: { language?: string; model?: string }
-  ) {}
+  ) {
+    this.gatewayId = gatewayId;
+    this.apiKey = apiKey;
+    this.config = config;
+  }
+
+  setGatewayId(gatewayId: string): void {
+    this.gatewayId = gatewayId;
+  }
 
   get name() {
     return "transcription_deepgram";
@@ -124,13 +138,30 @@ export class DeepgramSTT implements RealtimePipelineComponent {
     return DataKind.Text;
   }
 
+  validate(): void {
+    if (!this.gatewayId && !this.apiKey) {
+      throw new Error(
+        "DeepgramSTT: Either gatewayId or apiKey must be provided"
+      );
+    }
+  }
+
   schema() {
+    const provider: Record<string, unknown> = {};
+
+    if (this.gatewayId) {
+      provider.gateway_id = this.gatewayId;
+    }
+    if (this.apiKey) {
+      provider.api_key = this.apiKey;
+    }
+
     return {
       name: this.name,
       type: "speech_to_text",
       provider: {
         deepgram: {
-          gateway_id: this.gatewayId,
+          ...provider,
           ...this.config
         }
       }
@@ -140,13 +171,21 @@ export class DeepgramSTT implements RealtimePipelineComponent {
 
 export class ElevenLabsTTS implements RealtimePipelineComponent {
   constructor(
-    private readonly gatewayId: string,
+    private gatewayId?: string,
+    private apiKey?: string,
     private readonly config?: {
       model?: string;
       voice_id?: string;
       language_code?: string;
     }
-  ) {}
+  ) {
+    this.gatewayId = gatewayId;
+    this.apiKey = apiKey;
+  }
+
+  setGatewayId(gatewayId: string): void {
+    this.gatewayId = gatewayId;
+  }
 
   get name() {
     return "tts_elevenlabs";
@@ -160,72 +199,33 @@ export class ElevenLabsTTS implements RealtimePipelineComponent {
     return DataKind.Audio;
   }
 
+  validate(): void {
+    if (!this.gatewayId && !this.apiKey) {
+      throw new Error(
+        "ElevenLabsTTS: Either gatewayId or apiKey must be provided"
+      );
+    }
+  }
+
   schema() {
+    const provider: Record<string, unknown> = {};
+
+    if (this.gatewayId) {
+      provider.gateway_id = this.gatewayId;
+    }
+    if (this.apiKey) {
+      provider.api_key = this.apiKey;
+    }
+
     return {
       name: this.name,
       type: "text_to_speech",
       provider: {
         elevenlabs: {
-          gateway_id: this.gatewayId,
+          ...provider,
           ...this.config
         }
       }
-    };
-  }
-}
-
-export abstract class TextProcessor implements RealtimePipelineComponent {
-  abstract get url(): string;
-  abstract get parameters(): { send_events: boolean };
-  abstract onRealtimeTranscript(
-    text: string,
-    reply: (text: string | ReadableStream<Uint8Array>) => void
-  ): void;
-
-  get name() {
-    return "text_processor";
-  }
-
-  input_kind() {
-    return DataKind.Text;
-  }
-
-  output_kind() {
-    return DataKind.Text;
-  }
-
-  schema() {
-    return {
-      name: this.name,
-      type: "text_processor",
-      url: this.url,
-      ...this.parameters
-    };
-  }
-}
-
-export abstract class MediaProcessor implements RealtimePipelineComponent {
-  abstract onRealtimeMediaFrame(
-    frame: Uint8Array,
-    reply: (response: Uint8Array) => void
-  ): void;
-
-  get name() {
-    return "media_processor";
-  }
-
-  input_kind() {
-    return DataKind.Media;
-  }
-
-  output_kind() {
-    return DataKind.Media;
-  }
-
-  schema() {
-    return {
-      name: this.name,
-      type: "media_processor"
     };
   }
 }
