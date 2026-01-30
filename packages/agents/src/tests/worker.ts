@@ -34,6 +34,8 @@ export type Env = {
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
+  TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+  TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
@@ -957,6 +959,65 @@ export class TestAddMcpServerAgent extends Agent<Env> {
 
   getLastResolvedArgs() {
     return this.lastResolvedArgs;
+  }
+}
+
+// Test Agent for state management tests
+type TestState = {
+  count: number;
+  items: string[];
+  lastUpdated: string | null;
+};
+
+export class TestStateAgent extends Agent<Env, TestState> {
+  observability = undefined;
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  // Track onStateUpdate calls for testing
+  stateUpdateCalls: Array<{ state: TestState; source: string }> = [];
+
+  onStateUpdate(state: TestState, source: Connection | "server") {
+    this.stateUpdateCalls.push({
+      state,
+      source: source === "server" ? "server" : source.id
+    });
+  }
+
+  // Test helper methods (no @callable needed for DO RPC)
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: TestState) {
+    this.setState(state);
+  }
+
+  getStateUpdateCalls() {
+    return this.stateUpdateCalls;
+  }
+
+  clearStateUpdateCalls() {
+    this.stateUpdateCalls = [];
+  }
+}
+
+// Test Agent without initialState to test undefined behavior
+export class TestStateAgentNoInitial extends Agent<Env> {
+  observability = undefined;
+
+  // No initialState defined - should return undefined
+
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: unknown) {
+    this.setState(state);
   }
 }
 

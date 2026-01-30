@@ -2,13 +2,13 @@
 
 ## Getting Started
 
-- TODO: [Getting Started](./getting-started.md) - Quick start guide for new users
+- [Getting Started](./getting-started.md) - Quick start guide for new users
 - TODO: [Adding to an Existing Project](./adding-to-existing-project.md) - Integrate agents into your app
 - [Understanding the Agent Class](./agent-class.md) - Deep dive into the Agent class architecture
 
 ## Core Concepts
 
-- TODO: [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateUpdate()`
+- [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateUpdate()`
 - TODO: [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
 - TODO: [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - TODO: [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls

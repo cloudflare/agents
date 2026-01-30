@@ -8,6 +8,7 @@ These docs are complete and should be added to the official Cloudflare docs site
 
 | Doc                                                                | Description                                                              | Priority           |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------ | ------------------ |
+| [getting-started.md](./getting-started.md)                         | Quick start guide: create project, first agent, React client, deploy     | High               |
 | [email.md](./email.md)                                             | Email routing with `routeAgentEmail()`, resolvers, secure reply handling | High               |
 | [queue.md](./queue.md)                                             | Background task queue with `queue()`, `dequeue()`, `getQueue()`          | High               |
 | [observability.md](./observability.md)                             | Tracing and monitoring agent activity                                    | Medium             |
@@ -29,6 +30,7 @@ These topics exist on developers.cloudflare.com but our repo has additional cont
 | Doc                                | What's Different                                                         |
 | ---------------------------------- | ------------------------------------------------------------------------ |
 | [agent-class.md](./agent-class.md) | Deep architectural explanation (DO → Server → Agent layers)              |
+| [state.md](./state.md)             | Comprehensive patterns, workflow integration, state vs SQL guidance      |
 | [workflows.md](./workflows.md)     | `AgentWorkflow` class details, typed RPC, state sync from workflows      |
 | [scheduling.md](./scheduling.md)   | AI-assisted scheduling, comparison table, more patterns (retry, backoff) |
 | [client-sdk.md](./client-sdk.md)   | Comprehensive reference, async query, streaming, MCP integration         |

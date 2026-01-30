@@ -54,6 +54,14 @@
       {
         "class_name": "TestAddMcpServerAgent",
         "name": "TestAddMcpServerAgent"
+      },
+      {
+        "class_name": "TestStateAgent",
+        "name": "TestStateAgent"
+      },
+      {
+        "class_name": "TestStateAgentNoInitial",
+        "name": "TestStateAgentNoInitial"
       }
     ]
   },
@@ -84,7 +92,9 @@
         "TestDestroyScheduleAgent",
         "TestScheduleAgent",
         "TestWorkflowAgent",
-        "TestAddMcpServerAgent"
+        "TestAddMcpServerAgent",
+        "TestStateAgent",
+        "TestStateAgentNoInitial"
       ],
       "tag": "v1"
     }
