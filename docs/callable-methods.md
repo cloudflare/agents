@@ -416,6 +416,33 @@ try {
 }
 ```
 
+#### Retrying After Reconnection
+
+PartySocket automatically reconnects after disconnection. To retry a failed call after reconnection, await `agent.ready` before retrying:
+
+```typescript
+async function callWithRetry<T>(
+  agent: AgentClient,
+  method: string,
+  args: unknown[] = []
+): Promise<T> {
+  try {
+    return await agent.call(method, args);
+  } catch (error) {
+    if (error.message === "Connection closed") {
+      await agent.ready; // Wait for reconnection
+      return await agent.call(method, args); // Retry once
+    }
+    throw error;
+  }
+}
+
+// Usage
+const result = await callWithRetry(agent, "processData", [data]);
+```
+
+> **Note:** Only retry idempotent operations. If the server received the request but the connection dropped before the response arrived, retrying could cause duplicate execution.
+
 ## When NOT to Use @callable
 
 ### Worker-to-Agent Calls

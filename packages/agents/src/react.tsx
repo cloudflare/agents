@@ -524,6 +524,14 @@ export function useAgent<State>(
       resetReady();
       setIdentity((prev) => ({ ...prev, identified: false }));
 
+      // Reject all pending calls (consistent with AgentClient behavior)
+      const error = new Error("Connection closed");
+      for (const pending of pendingCallsRef.current.values()) {
+        pending.reject(error);
+        pending.stream?.onError?.("Connection closed");
+      }
+      pendingCallsRef.current.clear();
+
       // Call user's onClose if provided
       options.onClose?.();
     }
@@ -544,7 +552,7 @@ export function useAgent<State>(
       streamOptions?: StreamOptions
     ): Promise<T> => {
       return new Promise((resolve, reject) => {
-        const id = Math.random().toString(36).slice(2);
+        const id = crypto.randomUUID();
         pendingCallsRef.current.set(id, {
           reject,
           resolve: resolve as (value: unknown) => void,
