@@ -1,4 +1,5 @@
 import { createExecutionContext, env } from "cloudflare:test";
+import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
@@ -17,7 +18,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_merge_test";
 
     // Persist assistant message with tool in input-available state
@@ -91,7 +92,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_tool_result_test";
 
     // Persist assistant message with tool in input-available state
@@ -164,7 +165,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_tool_result_auto_continue";
 
     // Persist assistant message with tool in input-available state
@@ -239,7 +240,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     // Persist message with OpenAI itemId in providerMetadata (simulates OpenAI Responses API)
     await agentStub.persistMessages([
@@ -299,7 +300,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_openai_strip_test";
 
     // Persist message with tool that has OpenAI itemId in callProviderMetadata
@@ -362,7 +363,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     // Persist message with other metadata alongside itemId
     await agentStub.persistMessages([
@@ -433,7 +434,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     // Persist message with empty reasoning part (simulates OpenAI Responses API)
     await agentStub.persistMessages([
@@ -487,7 +488,7 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.accept();
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     // Persist message with non-empty reasoning part
     await agentStub.persistMessages([

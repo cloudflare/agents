@@ -28,9 +28,17 @@ The recommended way to add MCP servers is via `Agent.addMcpServer()`:
 
 ```typescript
 export class MyAgent extends Agent<Env, never> {
-  async addServer(name: string, url: string, callbackHost: string) {
-    // Uses HTTP Streamable transport by default
-    await this.addMcpServer(name, url, callbackHost);
+  async addServer(name: string, url: string) {
+    // Simple usage - callback host derived from request
+    await this.addMcpServer(name, url);
+  }
+
+  async addServerWithOptions(name: string, url: string) {
+    // With options
+    await this.addMcpServer(name, url, {
+      callbackHost: "https://my-worker.workers.dev",
+      transport: { type: "sse" }
+    });
   }
 }
 ```

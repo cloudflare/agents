@@ -33,6 +33,7 @@ export type Env = {
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
+  TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
@@ -851,6 +852,111 @@ export class TestMcpJurisdiction extends McpAgent<Env> {
         return { content: [{ text: `Echo: ${message}`, type: "text" }] };
       }
     );
+  }
+}
+
+// Test Agent for addMcpServer overload verification
+export class TestAddMcpServerAgent extends Agent<Env> {
+  observability = undefined;
+
+  // Track resolved arguments from addMcpServer calls
+  lastResolvedArgs: {
+    serverName: string;
+    url: string;
+    callbackHost?: string;
+    agentsPrefix: string;
+    transport?: { headers?: HeadersInit; type?: string };
+    client?: unknown;
+  } | null = null;
+
+  // Override to capture resolved arguments without actually connecting
+  async addMcpServer(
+    serverName: string,
+    url: string,
+    callbackHostOrOptions?:
+      | string
+      | {
+          callbackHost?: string;
+          agentsPrefix?: string;
+          client?: unknown;
+          transport?: { headers?: HeadersInit; type?: string };
+        },
+    agentsPrefix?: string,
+    options?: {
+      client?: unknown;
+      transport?: { headers?: HeadersInit; type?: string };
+    }
+  ): Promise<{ id: string; state: "ready" }> {
+    // Normalize arguments - same logic as Agent.addMcpServer
+    let resolvedCallbackHost: string | undefined;
+    let resolvedAgentsPrefix: string;
+    let resolvedOptions: typeof options;
+
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null
+    ) {
+      // New API: options object as third parameter
+      resolvedCallbackHost = callbackHostOrOptions.callbackHost;
+      resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
+      resolvedOptions = {
+        client: callbackHostOrOptions.client,
+        transport: callbackHostOrOptions.transport
+      };
+    } else {
+      // Legacy API: positional parameters
+      resolvedCallbackHost = callbackHostOrOptions;
+      resolvedAgentsPrefix = agentsPrefix ?? "agents";
+      resolvedOptions = options;
+    }
+
+    // Store resolved arguments for test verification
+    this.lastResolvedArgs = {
+      serverName,
+      url,
+      callbackHost: resolvedCallbackHost,
+      agentsPrefix: resolvedAgentsPrefix,
+      transport: resolvedOptions?.transport,
+      client: resolvedOptions?.client
+    };
+
+    // Return mock result without actually connecting
+    return { id: "test-id", state: "ready" };
+  }
+
+  async testNewApiWithOptions(name: string, url: string, callbackHost: string) {
+    await this.addMcpServer(name, url, {
+      callbackHost,
+      agentsPrefix: "custom-agents",
+      transport: { type: "sse", headers: { Authorization: "Bearer test" } }
+    });
+    // Non-null assertion safe because addMcpServer always sets lastResolvedArgs
+    return this.lastResolvedArgs!;
+  }
+
+  async testNewApiMinimal(name: string, url: string) {
+    await this.addMcpServer(name, url, {});
+    return this.lastResolvedArgs!;
+  }
+
+  async testLegacyApiWithOptions(
+    name: string,
+    url: string,
+    callbackHost: string
+  ) {
+    await this.addMcpServer(name, url, callbackHost, "legacy-prefix", {
+      transport: { type: "streamable-http", headers: { "X-Custom": "value" } }
+    });
+    return this.lastResolvedArgs!;
+  }
+
+  async testLegacyApiMinimal(name: string, url: string, callbackHost: string) {
+    await this.addMcpServer(name, url, callbackHost);
+    return this.lastResolvedArgs!;
+  }
+
+  getLastResolvedArgs() {
+    return this.lastResolvedArgs;
   }
 }
 

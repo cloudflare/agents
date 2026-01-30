@@ -14,6 +14,7 @@ These docs are complete and should be added to the official Cloudflare docs site
 | [workflows.md](./workflows.md)                                     | `AgentWorkflow` class - more detailed than current CF docs               | Medium             |
 | [mcp-servers.md](./mcp-servers.md)                                 | Creating MCP servers with `McpAgent`                                     | Medium             |
 | [securing-mcp-servers.md](./securing-mcp-servers.md)               | OAuth and authentication for MCP servers                                 | Medium             |
+| [mcp-client.md](./mcp-client.md)                                   | Connecting to external MCP servers with `addMcpServer()`                 | Medium             |
 | [cross-domain-authentication.md](./cross-domain-authentication.md) | Auth patterns across domains                                             | Medium             |
 | [client-tools-continuation.md](./client-tools-continuation.md)     | Client-side tool call handling                                           | Low                |
 | [codemode.md](./codemode.md)                                       | Experimental CodeAct pattern                                             | Low (experimental) |

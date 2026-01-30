@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import { MessageType, type OutgoingMessage } from "../types";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import { getAgentByName } from "agents";
 
 function isStreamResumingMessage(
   m: unknown
@@ -37,9 +38,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-123");
       expect(streamId).toBeDefined();
@@ -59,9 +58,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-456");
 
@@ -98,9 +95,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-789");
 
@@ -127,9 +122,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-error");
 
@@ -156,9 +149,7 @@ describe("Resumable Streaming", () => {
       );
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-resume");
       await agentStub.testStoreStreamChunk(
         streamId,
@@ -193,9 +184,7 @@ describe("Resumable Streaming", () => {
       );
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-ack");
       await agentStub.testStoreStreamChunk(
         streamId,
@@ -247,9 +236,7 @@ describe("Resumable Streaming", () => {
       const messages1 = collectMessages(ws1);
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-live");
 
       // Second connection - will be notified to resume
@@ -324,9 +311,7 @@ describe("Resumable Streaming", () => {
       );
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-correct");
       await agentStub.testStoreStreamChunk(
         streamId,
@@ -370,9 +355,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Insert a stale stream (6 minutes old)
       const staleStreamId = "stale-stream-123";
@@ -405,9 +388,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Insert a fresh stream (1 minute old)
       const freshStreamId = "fresh-stream-456";
@@ -441,9 +422,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Create a stream with chunks
       const streamId = await agentStub.testStartStream("req-clear");
@@ -483,9 +462,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       // Start first stream and add chunks without explicit flush
       const stream1 = await agentStub.testStartStream("req-1");
@@ -517,9 +494,7 @@ describe("Resumable Streaming", () => {
 
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
 
       const streamId = await agentStub.testStartStream("req-flush");
       await agentStub.testStoreStreamChunk(
@@ -548,9 +523,7 @@ describe("Resumable Streaming", () => {
       );
       await new Promise((r) => setTimeout(r, 50));
 
-      const agentStub = env.TestChatAgent.get(
-        env.TestChatAgent.idFromName(room)
-      );
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
       const streamId = await agentStub.testStartStream("req-done");
       await agentStub.testStoreStreamChunk(
         streamId,

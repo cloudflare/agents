@@ -50,6 +50,10 @@
       {
         "class_name": "TestWorkflowAgent",
         "name": "TestWorkflowAgent"
+      },
+      {
+        "class_name": "TestAddMcpServerAgent",
+        "name": "TestAddMcpServerAgent"
       }
     ]
   },
@@ -79,7 +83,8 @@
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
         "TestScheduleAgent",
-        "TestWorkflowAgent"
+        "TestWorkflowAgent",
+        "TestAddMcpServerAgent"
       ],
       "tag": "v1"
     }

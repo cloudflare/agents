@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
+import { getAgentByName } from "agents";
 
 describe("AIChatAgent Connection Context - Issue #711", () => {
   it("getCurrentAgent() should return connection in onChatMessage and nested async functions (tool execute)", async () => {
@@ -10,7 +11,7 @@ describe("AIChatAgent Connection Context - Issue #711", () => {
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
     // Get the agent stub to access captured context
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     // Clear any previous captured context
     await agentStub.clearCapturedContext();

@@ -47,7 +47,7 @@
 
 - [Creating MCP Servers](./mcp-servers.md) - Build MCP servers with `McpAgent`
 - [Securing MCP Servers](./securing-mcp-servers.md) - OAuth and authentication for MCP
-- TODO: [Connecting to MCP Servers](./mcp-client.md) - `addMcpServer()` and consuming external MCP tools
+- [Connecting to MCP Servers](./mcp-client.md) - `addMcpServer()` and consuming external MCP tools
 
 ## Authentication & Security
 

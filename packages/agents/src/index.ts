@@ -261,6 +261,26 @@ export type MCPServer = {
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
+
+/**
+ * Options for adding an MCP server
+ */
+export type AddMcpServerOptions = {
+  /** OAuth callback host (auto-derived from request if omitted) */
+  callbackHost?: string;
+  /** Agents routing prefix (default: "agents") */
+  agentsPrefix?: string;
+  /** MCP client options */
+  client?: ConstructorParameters<typeof Client>[1];
+  /** Transport options */
+  transport?: {
+    /** Custom headers for authentication (e.g., bearer tokens, CF Access) */
+    headers?: HeadersInit;
+    /** Transport type: "sse", "streamable-http", or "auto" (default) */
+    type?: TransportType;
+  };
+};
+
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
@@ -2344,19 +2364,33 @@ export class Agent<
   /**
    * Connect to a new MCP Server
    *
+   * @example
+   * // Simple usage
+   * await this.addMcpServer("github", "https://mcp.github.com");
+   *
+   * @example
+   * // With options (preferred for custom headers, transport, etc.)
+   * await this.addMcpServer("github", "https://mcp.github.com", {
+   *   transport: { headers: { "Authorization": "Bearer ..." } }
+   * });
+   *
+   * @example
+   * // Legacy 5-parameter signature (still supported)
+   * await this.addMcpServer("github", url, callbackHost, agentsPrefix, options);
+   *
    * @param serverName Name of the MCP server
-   * @param url MCP Server SSE URL
-   * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request.
-   * @param agentsPrefix agents routing prefix if not using `agents`
-   * @param options MCP client and transport options
+   * @param url MCP Server URL
+   * @param callbackHostOrOptions Options object, or callback host string (legacy)
+   * @param agentsPrefix agents routing prefix if not using `agents` (legacy)
+   * @param options MCP client and transport options (legacy)
    * @returns Server id and state - either "authenticating" with authUrl, or "ready"
    * @throws If connection or discovery fails
    */
   async addMcpServer(
     serverName: string,
     url: string,
-    callbackHost?: string,
-    agentsPrefix = "agents",
+    callbackHostOrOptions?: string | AddMcpServerOptions,
+    agentsPrefix?: string,
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
       transport?: {
@@ -2376,8 +2410,38 @@ export class Agent<
         authUrl?: undefined;
       }
   > {
+    // Normalize arguments - support both new options API and legacy positional API
+    let resolvedCallbackHost: string | undefined;
+    let resolvedAgentsPrefix: string;
+    let resolvedOptions:
+      | {
+          client?: ConstructorParameters<typeof Client>[1];
+          transport?: {
+            headers?: HeadersInit;
+            type?: TransportType;
+          };
+        }
+      | undefined;
+
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null
+    ) {
+      // New API: options object as third parameter
+      resolvedCallbackHost = callbackHostOrOptions.callbackHost;
+      resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
+      resolvedOptions = {
+        client: callbackHostOrOptions.client,
+        transport: callbackHostOrOptions.transport
+      };
+    } else {
+      // Legacy API: positional parameters
+      resolvedCallbackHost = callbackHostOrOptions;
+      resolvedAgentsPrefix = agentsPrefix ?? "agents";
+      resolvedOptions = options;
+    }
+
     // If callbackHost is not provided, derive it from the current request
-    let resolvedCallbackHost = callbackHost;
     if (!resolvedCallbackHost) {
       const { request } = getCurrentAgent();
       if (!request) {
@@ -2391,7 +2455,7 @@ export class Agent<
       resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
     }
 
-    const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    const callbackUrl = `${resolvedCallbackHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
     // TODO: make zod/ai sdk more performant and remove this
     // Late initialization of jsonSchemaFn (needed for getAITools)
@@ -2407,22 +2471,23 @@ export class Agent<
     authProvider.serverId = id;
 
     // Use the transport type specified in options, or default to "auto"
-    const transportType: TransportType = options?.transport?.type ?? "auto";
+    const transportType: TransportType =
+      resolvedOptions?.transport?.type ?? "auto";
 
     // allows passing through transport headers if necessary
     // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
     let headerTransportOpts: SSEClientTransportOptions = {};
-    if (options?.transport?.headers) {
+    if (resolvedOptions?.transport?.headers) {
       headerTransportOpts = {
         eventSourceInit: {
           fetch: (url, init) =>
             fetch(url, {
               ...init,
-              headers: options?.transport?.headers
+              headers: resolvedOptions?.transport?.headers
             })
         },
         requestInit: {
-          headers: options?.transport?.headers
+          headers: resolvedOptions?.transport?.headers
         }
       };
     }
@@ -2432,7 +2497,7 @@ export class Agent<
       url,
       name: serverName,
       callbackUrl,
-      client: options?.client,
+      client: resolvedOptions?.client,
       transport: {
         ...headerTransportOpts,
         authProvider,
