@@ -25,11 +25,12 @@ describe("WebSocket ordering / races", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectWS(`/agents/tag-agent/${room}`);
 
-    // The first 4 messages should be:
-    // 1. State update due to our intialState
-    // 2. Initial state sharing
-    // 3. MCP servers
-    // 4. Our echo message
+    // The first 5 messages should be:
+    // 1. Identity (agent name and instance name)
+    // 2. State update due to our initialState
+    // 3. Initial state sharing
+    // 4. MCP servers
+    // 5. Our echo message
     const firstMessages: { type: string; tagged?: boolean }[] = [];
     let resolvePromise: (value: boolean) => void;
     const donePromise = new Promise((res) => {
@@ -41,7 +42,7 @@ describe("WebSocket ordering / races", () => {
     // Add listener before we send anything
     ws.addEventListener("message", (e: MessageEvent) => {
       const data = JSON.parse(e.data as string);
-      if (firstMessages.length < 4) firstMessages.push(data);
+      if (firstMessages.length < 5) firstMessages.push(data);
       else {
         resolvePromise(true);
         ws.close();
@@ -52,20 +53,22 @@ describe("WebSocket ordering / races", () => {
     // the first echo might not be tagged
     for (let i = 0; i < 25; i++) ws.send("ping");
 
-    // Wait to receive at least the first 3 messages
+    // Wait to receive at least the first messages
     const done = await donePromise;
     expect(done).toBe(true);
 
     const first = firstMessages[0];
-    expect(first.type).toBe(MessageType.CF_AGENT_STATE);
+    expect(first.type).toBe(MessageType.CF_AGENT_IDENTITY);
     const second = firstMessages[1];
     expect(second.type).toBe(MessageType.CF_AGENT_STATE);
     const third = firstMessages[2];
-    expect(third.type).toBe(MessageType.CF_AGENT_MCP_SERVERS);
-
+    expect(third.type).toBe(MessageType.CF_AGENT_STATE);
     const fourth = firstMessages[3];
-    expect(fourth).toBeDefined();
-    expect(fourth.type).toBe("echo");
-    expect(fourth.tagged).toBe(true);
+    expect(fourth.type).toBe(MessageType.CF_AGENT_MCP_SERVERS);
+
+    const fifth = firstMessages[4];
+    expect(fifth).toBeDefined();
+    expect(fifth.type).toBe("echo");
+    expect(fifth.tagged).toBe(true);
   });
 });

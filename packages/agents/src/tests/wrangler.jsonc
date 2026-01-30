@@ -62,6 +62,10 @@
       {
         "class_name": "TestStateAgentNoInitial",
         "name": "TestStateAgentNoInitial"
+      },
+      {
+        "class_name": "TestNoIdentityAgent",
+        "name": "TestNoIdentityAgent"
       }
     ]
   },
@@ -94,7 +98,8 @@
         "TestWorkflowAgent",
         "TestAddMcpServerAgent",
         "TestStateAgent",
-        "TestStateAgentNoInitial"
+        "TestStateAgentNoInitial",
+        "TestNoIdentityAgent"
       ],
       "tag": "v1"
     }

@@ -286,6 +286,23 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
+/**
+ * Default options for Agent configuration.
+ * Child classes can override specific options without spreading.
+ */
+/**
+ * Default options for Agent configuration.
+ * Child classes can override specific options without spreading.
+ */
+export const DEFAULT_AGENT_STATIC_OPTIONS = {
+  /** Whether the Agent should hibernate when inactive */
+  hibernate: true,
+  /** Whether to send identity (name, agent) to clients on connect */
+  sendIdentityOnConnect: true
+};
+
+export type AgentStaticOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
+
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
 >(): {
@@ -425,12 +442,36 @@ export class Agent<
   }
 
   /**
-   * Agent configuration options
+   * Server configuration options (hibernate).
+   * Inherited from partyserver.
    */
   static options = {
-    /** Whether the Agent should hibernate when inactive */
-    hibernate: true // default to hibernate
+    hibernate: true
   };
+
+  /**
+   * Agent-specific configuration options.
+   * Override in subclasses - only specify what you want to change.
+   * @example
+   * class SecureAgent extends Agent {
+   *   static agentOptions = { sendIdentityOnConnect: false };
+   * }
+   */
+  static agentOptions: Partial<Omit<AgentStaticOptions, "hibernate">> = {};
+
+  /**
+   * Resolved options (merges defaults with subclass overrides)
+   */
+  private get _resolvedOptions(): AgentStaticOptions {
+    const ctor = this.constructor as typeof Agent;
+    return {
+      hibernate:
+        ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
+      sendIdentityOnConnect:
+        ctor.agentOptions?.sendIdentityOnConnect ??
+        DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect
+    };
+  }
 
   /**
    * The observability implementation to use for the Agent
@@ -698,6 +739,18 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
+          // Send agent identity first so client knows which instance it's connected to
+          // Can be disabled via static options for security-sensitive instance names
+          if (this._resolvedOptions.sendIdentityOnConnect) {
+            connection.send(
+              JSON.stringify({
+                name: this.name,
+                agent: camelCaseToKebabCase(this._ParentClass.name),
+                type: MessageType.CF_AGENT_IDENTITY
+              })
+            );
+          }
+
           if (this.state) {
             connection.send(
               JSON.stringify({

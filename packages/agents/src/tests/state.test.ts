@@ -271,14 +271,16 @@ describe("state management", () => {
       // Now connect via WebSocket
       const { ws } = await connectWS(`/agents/test-state-agent/${room}`);
 
-      // First message should be the state
-      const msg = (await waitForMessage(ws)) as {
-        type: number;
+      // First message is identity, then state
+      const identityMsg = (await waitForMessage(ws)) as { type: string };
+      expect(identityMsg.type).toBe(MessageType.CF_AGENT_IDENTITY);
+
+      const stateMsg = (await waitForMessage(ws)) as {
+        type: string;
         state: unknown;
       };
-
-      expect(msg.type).toBe(MessageType.CF_AGENT_STATE);
-      expect(msg.state).toEqual(customState);
+      expect(stateMsg.type).toBe(MessageType.CF_AGENT_STATE);
+      expect(stateMsg.state).toEqual(customState);
 
       ws.close();
     });
@@ -330,7 +332,8 @@ describe("state management", () => {
       // Connect via WebSocket
       const { ws } = await connectWS(`/agents/test-state-agent/${room}`);
 
-      // Consume initial messages
+      // Consume initial messages (identity, state, mcp_servers)
+      await waitForMessage(ws);
       await waitForMessage(ws);
       await waitForMessage(ws);
 

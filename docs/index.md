@@ -9,7 +9,7 @@
 ## Core Concepts
 
 - [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateUpdate()`
-- TODO: [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
+- [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
 - TODO: [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - TODO: [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls
 - [getCurrentAgent()](./get-current-agent.md) - Accessing agent context across async calls

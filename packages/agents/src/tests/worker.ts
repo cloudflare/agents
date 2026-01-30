@@ -11,6 +11,7 @@ import { McpAgent } from "../mcp/index.ts";
 import {
   Agent,
   callable,
+  getAgentByName,
   routeAgentRequest,
   type AgentEmail,
   type Connection,
@@ -36,6 +37,7 @@ export type Env = {
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
+  TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
@@ -1021,6 +1023,28 @@ export class TestStateAgentNoInitial extends Agent<Env> {
   }
 }
 
+// Test Agent with sendIdentityOnConnect disabled
+export class TestNoIdentityAgent extends Agent<Env, TestState> {
+  observability = undefined;
+
+  // Opt out of sending identity to clients (for security-sensitive instance names)
+  static agentOptions = { sendIdentityOnConnect: false };
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: TestState) {
+    this.setState(state);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
@@ -1041,6 +1065,21 @@ export default {
 
     if (url.pathname === "/500") {
       return new Response("Internal Server Error", { status: 500 });
+    }
+
+    // Custom basePath routing for testing - routes /custom-state/{name} to TestStateAgent
+    if (url.pathname.startsWith("/custom-state/")) {
+      const instanceName = url.pathname.replace("/custom-state/", "");
+      const agent = await getAgentByName(env.TestStateAgent, instanceName);
+      return agent.fetch(request);
+    }
+
+    // Custom basePath routing with simulated auth - routes /user to TestStateAgent with "auth-user" instance
+    if (url.pathname === "/user" || url.pathname.startsWith("/user?")) {
+      // Simulate server-side auth that determines the instance name
+      const simulatedUserId = "auth-user";
+      const agent = await getAgentByName(env.TestStateAgent, simulatedUserId);
+      return agent.fetch(request);
     }
 
     return (

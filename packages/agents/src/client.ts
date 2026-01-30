@@ -17,12 +17,52 @@ export type AgentClientOptions<State = unknown> = Omit<
   PartySocketOptions,
   "party" | "room"
 > & {
-  /** Name of the agent to connect to */
+  /** Name of the agent to connect to (ignored if basePath is set) */
   agent: string;
-  /** Name of the specific Agent instance */
+  /** Name of the specific Agent instance (ignored if basePath is set) */
   name?: string;
+  /**
+   * Full URL path - bypasses agent/name URL construction.
+   * When set, the client connects to this path directly.
+   * Server must handle routing manually (e.g., with getAgentByName + fetch).
+   * @example
+   * // Client connects to /user, server routes based on session
+   * useAgent({ agent: "UserAgent", basePath: "user" })
+   */
+  basePath?: string;
   /** Called when the Agent's state is updated */
   onStateUpdate?: (state: State, source: "server" | "client") => void;
+  /**
+   * Called when the server sends the agent's identity on connect.
+   * Useful when using basePath, as the actual instance name is determined server-side.
+   * @param name The actual agent instance name
+   * @param agent The agent class name (kebab-case)
+   */
+  onIdentity?: (name: string, agent: string) => void;
+  /**
+   * Called when identity changes on reconnect (different instance than before).
+   * If not provided and identity changes, a warning will be logged.
+   * @param oldName Previous instance name
+   * @param newName New instance name
+   * @param oldAgent Previous agent class name
+   * @param newAgent New agent class name
+   */
+  onIdentityChange?: (
+    oldName: string,
+    newName: string,
+    oldAgent: string,
+    newAgent: string
+  ) => void;
+  /**
+   * Additional path to append to the URL.
+   * Works with both standard routing and basePath.
+   * @example
+   * // With basePath: /user/settings
+   * { basePath: "user", path: "settings" }
+   * // Standard: /agents/my-agent/room/settings
+   * { agent: "MyAgent", name: "room", path: "settings" }
+   */
+  path?: string;
 };
 
 /**
@@ -44,10 +84,15 @@ export type AgentClientFetchOptions = Omit<
   PartyFetchOptions,
   "party" | "room"
 > & {
-  /** Name of the agent to connect to */
+  /** Name of the agent to connect to (ignored if basePath is set) */
   agent: string;
-  /** Name of the specific Agent instance */
+  /** Name of the specific Agent instance (ignored if basePath is set) */
   name?: string;
+  /**
+   * Full URL path - bypasses agent/name URL construction.
+   * When set, the request is made to this path directly.
+   */
+  basePath?: string;
 };
 
 /**
@@ -85,6 +130,19 @@ export class AgentClient<State = unknown> extends PartySocket {
   }
   agent: string;
   name: string;
+
+  /**
+   * Whether the client has received identity from the server.
+   * Becomes true after the first identity message is received.
+   */
+  identified = false;
+
+  /**
+   * Promise that resolves when identity has been received from the server.
+   * Useful for waiting before making calls that depend on knowing the instance.
+   */
+  readonly ready: Promise<void>;
+
   private options: AgentClientOptions<State>;
   private _pendingCalls = new Map<
     string,
@@ -95,18 +153,33 @@ export class AgentClient<State = unknown> extends PartySocket {
       type?: unknown;
     }
   >();
+  private _resolveReady!: () => void;
+  private _previousName: string | null = null;
+  private _previousAgent: string | null = null;
 
   constructor(options: AgentClientOptions<State>) {
     const agentNamespace = camelCaseToKebabCase(options.agent);
-    super({
-      party: agentNamespace,
-      prefix: "agents",
-      room: options.name || "default",
-      ...options
-    });
+
+    // If basePath is provided, use it directly; otherwise construct from agent/name
+    const socketOptions = options.basePath
+      ? { basePath: options.basePath, path: options.path, ...options }
+      : {
+          party: agentNamespace,
+          prefix: "agents",
+          room: options.name || "default",
+          path: options.path,
+          ...options
+        };
+
+    super(socketOptions);
     this.agent = agentNamespace;
     this.name = options.name || "default";
     this.options = options;
+
+    // Initialize ready promise
+    this.ready = new Promise((resolve) => {
+      this._resolveReady = resolve;
+    });
 
     this.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
@@ -116,6 +189,50 @@ export class AgentClient<State = unknown> extends PartySocket {
         } catch (_error) {
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
+          return;
+        }
+        if (parsedMessage.type === MessageType.CF_AGENT_IDENTITY) {
+          const oldName = this._previousName;
+          const oldAgent = this._previousAgent;
+          const newName = parsedMessage.name as string;
+          const newAgent = parsedMessage.agent as string;
+
+          // Resolve ready/identified
+          this.identified = true;
+          this._resolveReady();
+
+          // Detect identity change on reconnect
+          if (
+            oldName !== null &&
+            oldAgent !== null &&
+            (oldName !== newName || oldAgent !== newAgent)
+          ) {
+            if (this.options.onIdentityChange) {
+              this.options.onIdentityChange(
+                oldName,
+                newName,
+                oldAgent,
+                newAgent
+              );
+            } else {
+              console.warn(
+                '[agents] Identity changed on reconnect: "' +
+                  oldName +
+                  '" → "' +
+                  newName +
+                  '". This may indicate session/auth changes. Provide onIdentityChange to handle this explicitly.'
+              );
+            }
+          }
+
+          // Always update from server identity (server is authoritative)
+          this._previousName = newName;
+          this._previousAgent = newAgent;
+          this.name = newName;
+          this.agent = newAgent;
+
+          // Call onIdentity callback
+          this.options.onIdentity?.(newName, newAgent);
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
@@ -209,6 +326,15 @@ export class AgentClient<State = unknown> extends PartySocket {
  */
 export function agentFetch(opts: AgentClientFetchOptions, init?: RequestInit) {
   const agentNamespace = camelCaseToKebabCase(opts.agent);
+
+  // If basePath is provided, use it directly; otherwise construct from agent/name
+  // When basePath is set, room/party aren't used by PartySocket (basePath replaces the URL)
+  if (opts.basePath) {
+    return PartySocket.fetch(
+      { basePath: opts.basePath, ...opts } as unknown as PartyFetchOptions,
+      init
+    );
+  }
 
   return PartySocket.fetch(
     {
