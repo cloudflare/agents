@@ -47,7 +47,6 @@ export function isRealtimeWebsocketMessage(
 export function isRealtimeRequest(request: Request): boolean {
   const url = new URL(request.url);
   const split = url.pathname.split("/realtime/");
-  console.log(split);
   return split.length >= 2;
 }
 

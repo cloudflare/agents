@@ -18,6 +18,8 @@ import { RealtimeAPI } from "./api";
 import {
   DataKind,
   RealtimeKitTransport,
+  DeepgramSTT,
+  ElevenLabsTTS,
   type RealtimePipelineComponent
 } from "./components";
 import { camelCaseToKebabCase } from "../client";
@@ -40,7 +42,7 @@ export type RealtimeSnapshot = {
   flowId?: string;
 };
 
-export class RealtimeAgent<Env = unknown, State = unknown>
+export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   extends Agent<Env, State>
   implements RealtimePipelineComponent
 {
@@ -51,13 +53,15 @@ export class RealtimeAgent<Env = unknown, State = unknown>
   private flowId?: string;
   private token?: string;
   private agentName: string;
+  private gatewayId: string;
   /** Array of transcript entries for the current conversation */
   public transcriptHistory: TranscriptEntry[];
 
   #meeting?: RealtimeKitClient;
 
-  constructor(ctx: AgentContext, env: Env, ai: Ai, gatewayId?: string) {
+  constructor(ctx: AgentContext, env: Env, ai: Ai, gatewayId: string) {
     super(ctx, env);
+    this.gatewayId = gatewayId;
     this.api = new RealtimeAPI(ai, gatewayId);
     // Get the agent name from the class constructor
     this.agentName = camelCaseToKebabCase(
@@ -79,7 +83,21 @@ export class RealtimeAgent<Env = unknown, State = unknown>
     this.keepAlive();
   }
 
-  setPipeline(pipeline: RealtimePipelineComponent[]) {
+  public setPipeline(pipeline: RealtimePipelineComponent[]) {
+    // Set gateway_id in DeepgramSTT and ElevenLabsTTS components if not already set
+    for (const component of pipeline) {
+      if (component instanceof DeepgramSTT) {
+        const comp = component as any;
+        if (!comp.gatewayId) {
+          component.setGatewayId(this.gatewayId);
+        }
+      } else if (component instanceof ElevenLabsTTS) {
+        const comp = component as any;
+        if (!comp.gatewayId) {
+          component.setGatewayId(this.gatewayId);
+        }
+      }
+    }
     this.pipeline = pipeline;
   }
 
@@ -170,12 +188,16 @@ export class RealtimeAgent<Env = unknown, State = unknown>
   /**
    * Possibly undefined if no rtk element is configured.
    */
-  get meeting(): RealtimeKitClient | undefined {
+  get rtkMeeting(): RealtimeKitClient | undefined {
     return this.#meeting;
   }
 
   async keepAlive() {
     this.schedule(10, "keepAlive");
+  }
+
+  async cancelKeepAlive() {
+    this.cancelSchedule("keepAlive");
   }
   /**
    * Called when a RealtimeKit meeting is initialized
@@ -213,7 +235,12 @@ export class RealtimeAgent<Env = unknown, State = unknown>
    * Initialize the realtime pipeline
    * @param agentURL The URL of the agent
    */
-  async init(agentURL: string) {
+  async init(agentURL: string, meetingId: string | null) {
+    // Validate all components
+    for (const component of this.pipeline) {
+      component.validate();
+    }
+
     // Validate component chain
     let last_component: RealtimePipelineComponent | undefined;
     for (const component of this.pipeline) {
@@ -259,6 +286,13 @@ export class RealtimeAgent<Env = unknown, State = unknown>
         schema.worker_url = `https://${agentURL}`;
         if (!component.authToken) {
           realtimeKitComponent = component;
+        }
+        if (meetingId) {
+          component.meetingId = meetingId;
+          schema.meeting_id = meetingId;
+        }
+        if (!component.meetingId) {
+          throw new Error("Meeting ID not set for RealtimeKit transport");
         }
       }
 
@@ -310,7 +344,7 @@ export class RealtimeAgent<Env = unknown, State = unknown>
    * Start the realtime pipeline
    * This will initialize the pipeline and start processing
    */
-  async startRealtimePipeline() {
+  async startRealtimePipeline(meetingId: string | null) {
     if (this.pipelineState !== "idle") {
       throw new Error("Pipeline is already running");
     }
@@ -321,7 +355,7 @@ export class RealtimeAgent<Env = unknown, State = unknown>
       throw new Error("Agent URL not set. Call buildAgentUrl first.");
     }
 
-    await this.init(this.agentUrl);
+    await this.init(this.agentUrl, meetingId);
 
     if (!this.token) {
       throw new Error("Pipeline not initialized - missing auth token");
@@ -357,7 +391,10 @@ export class RealtimeAgent<Env = unknown, State = unknown>
    * Stop the realtime pipeline
    */
   async stopRealtimePipeline() {
-    if (this.pipelineState !== "running") {
+    if (
+      this.pipelineState !== "running" &&
+      this.pipelineState !== "initializing"
+    ) {
       throw new Error("Pipeline is not running");
     }
 
@@ -380,7 +417,8 @@ export class RealtimeAgent<Env = unknown, State = unknown>
     } catch (e) {
       console.error("Failed to stop realtime pipeline", e);
     }
-    this.pipelineState = "stopped";
+    this.pipelineState = "idle";
+    this.cancelKeepAlive();
   }
 
   /**
@@ -420,8 +458,9 @@ export class RealtimeAgent<Env = unknown, State = unknown>
     const path = request.url.split(
       `agents/${this.agentName}/${this.name}/realtime`
     )[1];
+    console.log("path", path.split("?")[0]);
 
-    switch (path) {
+    switch (path.split("?")[0]) {
       case "/rtk/produce": {
         const payload = await request.json<{
           producingTransportId: string;
@@ -452,7 +491,8 @@ export class RealtimeAgent<Env = unknown, State = unknown>
       }
 
       case "/start": {
-        await this.startRealtimePipeline();
+        const meetingId = requestUrl.searchParams.get("meetingId");
+        await this.startRealtimePipeline(meetingId);
         return new Response("{'success':true}", { status: 200 });
       }
 
@@ -635,6 +675,10 @@ export class RealtimeAgent<Env = unknown, State = unknown>
       return [REALTIME_WS_TAG];
     }
     return super.getConnectionTags(connection, ctx);
+  }
+
+  validate(): void {
+    // RealtimeAgent validation is handled by pipeline components
   }
 
   /**
