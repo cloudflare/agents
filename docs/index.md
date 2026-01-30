@@ -31,7 +31,7 @@
 - [Queue](./queue.md) - Immediate background task execution
 - [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Workflows](./workflows.md) - Durable multi-step processing with Cloudflare Workflows
-- TODO: [Human in the Loop](./human-in-the-loop.md) - Approval flows and manual intervention
+- [Human in the Loop](./human-in-the-loop.md) - Approval flows and manual intervention
 
 ## AI Integration
 

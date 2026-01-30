@@ -519,7 +519,7 @@ export function useAgent<State>(
       }
       options.onMessage?.(message);
     },
-    onClose: () => {
+    onClose: (event: CloseEvent) => {
       // Reset ready state for next connection
       resetReady();
       setIdentity((prev) => ({ ...prev, identified: false }));
@@ -533,7 +533,7 @@ export function useAgent<State>(
       pendingCallsRef.current.clear();
 
       // Call user's onClose if provided
-      options.onClose?.();
+      options.onClose?.(event);
     }
   }) as PartySocket & {
     agent: string;
