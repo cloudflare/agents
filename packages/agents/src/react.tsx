@@ -417,7 +417,9 @@ export function useAgent<State>(
   }>({ name: null, agent: null });
 
   // Ready promise - resolves when identity is received
-  const readyRef = useRef<{ promise: Promise<void>; resolve: () => void }>();
+  const readyRef = useRef<
+    { promise: Promise<void>; resolve: () => void } | undefined
+  >(undefined);
   if (!readyRef.current) {
     let resolve: () => void;
     const promise = new Promise<void>((r) => {

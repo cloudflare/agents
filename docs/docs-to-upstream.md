@@ -29,13 +29,14 @@ These docs are complete and should be added to the official Cloudflare docs site
 
 These topics exist on developers.cloudflare.com but our repo has additional content:
 
-| Doc                                | What's Different                                                         |
-| ---------------------------------- | ------------------------------------------------------------------------ |
-| [agent-class.md](./agent-class.md) | Deep architectural explanation (DO → Server → Agent layers)              |
-| [state.md](./state.md)             | Comprehensive patterns, workflow integration, state vs SQL guidance      |
-| [workflows.md](./workflows.md)     | `AgentWorkflow` class details, typed RPC, state sync from workflows      |
-| [scheduling.md](./scheduling.md)   | AI-assisted scheduling, comparison table, more patterns (retry, backoff) |
-| [client-sdk.md](./client-sdk.md)   | Comprehensive reference, async query, streaming, MCP integration         |
+| Doc                                        | What's Different                                                         |
+| ------------------------------------------ | ------------------------------------------------------------------------ |
+| [agent-class.md](./agent-class.md)         | Deep architectural explanation (DO → Server → Agent layers)              |
+| [state.md](./state.md)                     | Comprehensive patterns, workflow integration, state vs SQL guidance      |
+| [http-websockets.md](./http-websockets.md) | Full lifecycle hooks, connection tags, per-connection state, hibernation |
+| [workflows.md](./workflows.md)             | `AgentWorkflow` class details, typed RPC, state sync from workflows      |
+| [scheduling.md](./scheduling.md)           | AI-assisted scheduling, comparison table, more patterns (retry, backoff) |
+| [client-sdk.md](./client-sdk.md)           | Comprehensive reference, async query, streaming, MCP integration         |
 
 ## Notes
 
