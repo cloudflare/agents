@@ -402,4 +402,27 @@ describe("state management", () => {
       expect(state).toEqual(newState);
     });
   });
+
+  describe("error recovery", () => {
+    it("should recover from corrupted state JSON by falling back to initialState", async () => {
+      // Use a unique name so this agent hasn't accessed state yet
+      const agentStub = await getAgentByName(
+        env.TestStateAgent,
+        `corrupted-state-test-${crypto.randomUUID()}`
+      );
+
+      // Insert corrupted state directly (before any state access)
+      await agentStub.insertCorruptedState();
+
+      // Access state - should trigger try-catch and recover to initialState
+      const state = await agentStub.getStateAfterCorruption();
+
+      // Should have recovered to initialState
+      expect(state).toEqual({
+        count: 0,
+        items: [],
+        lastUpdated: null
+      });
+    });
+  });
 });

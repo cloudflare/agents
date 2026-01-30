@@ -70,6 +70,10 @@
       {
         "class_name": "TestCallableAgent",
         "name": "TestCallableAgent"
+      },
+      {
+        "class_name": "TestChildAgent",
+        "name": "TestChildAgent"
       }
     ]
   },
@@ -104,7 +108,8 @@
         "TestStateAgent",
         "TestStateAgentNoInitial",
         "TestNoIdentityAgent",
-        "TestCallableAgent"
+        "TestCallableAgent",
+        "TestChildAgent"
       ],
       "tag": "v1"
     }

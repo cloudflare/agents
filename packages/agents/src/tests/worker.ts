@@ -40,6 +40,7 @@ export type Env = {
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
   TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
+  TestChildAgent: DurableObjectNamespace<TestChildAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
@@ -1008,6 +1009,23 @@ export class TestStateAgent extends Agent<Env, TestState> {
   clearStateUpdateCalls() {
     this.stateUpdateCalls = [];
   }
+
+  // Test helper to insert corrupted state directly into DB (without caching)
+  insertCorruptedState() {
+    // Insert invalid JSON directly, also set wasChanged to trigger the read path
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('STATE', 'invalid{json')`
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('STATE_WAS_CHANGED', 'true')`
+    );
+  }
+
+  // Access state and check if it recovered to initialState
+  getStateAfterCorruption(): TestState {
+    // This should trigger the try-catch and fallback to initialState
+    return this.state;
+  }
 }
 
 // Test Agent without initialState to test undefined behavior
@@ -1129,6 +1147,46 @@ export class TestCallableAgent extends Agent<Env, { value: number }> {
   // NOT decorated with @callable - should fail when called via RPC
   privateMethod(): string {
     return "secret";
+  }
+}
+
+// Base class with @callable methods for testing prototype chain traversal
+export class TestParentAgent extends Agent<Env> {
+  observability = undefined;
+
+  @callable({ description: "Parent method from base class" })
+  parentMethod(): string {
+    return "from parent";
+  }
+
+  @callable()
+  sharedMethod(): string {
+    return "parent implementation";
+  }
+}
+
+// Child agent that extends TestParentAgent - tests getCallableMethods prototype chain
+export class TestChildAgent extends TestParentAgent {
+  @callable({ description: "Child method from derived class" })
+  childMethod(): string {
+    return "from child";
+  }
+
+  // Override parent method - child version should be found first
+  @callable()
+  sharedMethod(): string {
+    return "child implementation";
+  }
+
+  // Non-callable method for testing introspection
+  nonCallableMethod(): string {
+    return "not callable";
+  }
+
+  // Helper to test getCallableMethods returns parent methods
+  getCallableMethodNames(): string[] {
+    const methods = this.getCallableMethods();
+    return Array.from(methods.keys()).sort();
   }
 }
 

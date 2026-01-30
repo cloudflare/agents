@@ -424,7 +424,21 @@ export class Agent<
     ) {
       const state = result[0]?.state as string; // could be null?
 
-      this._state = JSON.parse(state);
+      try {
+        this._state = JSON.parse(state);
+      } catch (e) {
+        console.error(
+          "Failed to parse stored state, falling back to initialState:",
+          e
+        );
+        if (this.initialState !== DEFAULT_STATE) {
+          this._state = this.initialState;
+          // Persist the fixed state to prevent future parse errors
+          this.setState(this.initialState);
+        } else {
+          return undefined as State;
+        }
+      }
       return this._state;
     }
 
@@ -567,6 +581,13 @@ export class Agent<
     try {
       this.ctx.storage.sql.exec(
         "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
+      );
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
       );
     } catch {
       // Column already exists
@@ -1578,18 +1599,30 @@ export class Agent<
           continue;
         }
 
-        // Overlap prevention for interval schedules
+        // Overlap prevention for interval schedules with hung callback detection
         if (row.type === "interval" && row.running === 1) {
+          const executionStartedAt =
+            (row as { execution_started_at?: number }).execution_started_at ??
+            0;
+          const hungTimeoutSeconds = 30;
+          const elapsedSeconds = now - executionStartedAt;
+
+          if (elapsedSeconds < hungTimeoutSeconds) {
+            console.warn(
+              `Skipping interval schedule ${row.id}: previous execution still running`
+            );
+            continue;
+          }
+          // Previous execution appears hung, force reset and re-execute
           console.warn(
-            `Skipping interval schedule ${row.id}: previous execution still running`
+            `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
           );
-          continue;
         }
 
         // Mark interval as running before execution
         if (row.type === "interval") {
           this
-            .sql`UPDATE cf_agents_schedules SET running = 1 WHERE id = ${row.id}`;
+            .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
         }
 
         await agentContext.run(
@@ -1712,18 +1745,28 @@ export class Agent<
    */
   getCallableMethods(): Map<string, CallableMetadata> {
     const result = new Map<string, CallableMetadata>();
-    const prototype = Object.getPrototypeOf(this);
 
-    for (const name of Object.getOwnPropertyNames(prototype)) {
-      if (name === "constructor") continue;
+    // Walk the entire prototype chain to find callable methods from parent classes
+    let prototype = Object.getPrototypeOf(this);
+    while (prototype && prototype !== Object.prototype) {
+      for (const name of Object.getOwnPropertyNames(prototype)) {
+        if (name === "constructor") continue;
+        // Don't override child class methods (first one wins)
+        if (result.has(name)) continue;
 
-      const fn = this[name as keyof this];
-      if (typeof fn === "function") {
-        const meta = callableMetadata.get(fn as Function);
-        if (meta) {
-          result.set(name, meta);
+        try {
+          const fn = prototype[name];
+          if (typeof fn === "function") {
+            const meta = callableMetadata.get(fn as Function);
+            if (meta) {
+              result.set(name, meta);
+            }
+          }
+        } catch {
+          // Skip properties that can't be accessed (e.g., private members)
         }
       }
+      prototype = Object.getPrototypeOf(prototype);
     }
 
     return result;

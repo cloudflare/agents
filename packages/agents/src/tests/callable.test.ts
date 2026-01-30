@@ -1,6 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { RPCRequest, RPCResponse } from "../index";
+import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
 import type { Env } from "./worker";
 import worker from "./worker";
@@ -516,6 +516,26 @@ describe("@callable decorator", () => {
 
       ws.close();
     });
+  });
+});
+
+describe("getCallableMethods prototype chain", () => {
+  it("should find callable methods from parent classes", async () => {
+    const agentStub = await getAgentByName(
+      env.TestChildAgent,
+      "prototype-chain-test"
+    );
+
+    // Get all callable method names
+    const methodNames = await agentStub.getCallableMethodNames();
+
+    // Should include both parent and child methods
+    expect(methodNames).toContain("parentMethod");
+    expect(methodNames).toContain("childMethod");
+    expect(methodNames).toContain("sharedMethod");
+
+    // Should NOT include non-callable methods
+    expect(methodNames).not.toContain("nonCallableMethod");
   });
 });
 
