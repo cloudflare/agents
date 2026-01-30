@@ -9,6 +9,9 @@ declare module "cloudflare:test" {
   }
 }
 
+const createTestExecutionContext = () =>
+  createExecutionContext() as ExecutionContext<Record<string, unknown>>;
+
 /**
  * Tests for jurisdiction option in McpAgent.serve()
  *
@@ -61,7 +64,7 @@ describe("McpAgent jurisdiction option", () => {
         transport: "streamable-http"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -95,7 +98,7 @@ describe("McpAgent jurisdiction option", () => {
         transport: "sse"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "GET"
       });
@@ -115,7 +118,7 @@ describe("McpAgent jurisdiction option", () => {
         transport: "streamable-http"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -147,7 +150,7 @@ describe("McpAgent jurisdiction option", () => {
         transport: "streamable-http"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -183,7 +186,7 @@ describe("McpAgent jurisdiction option", () => {
         transport: "streamable-http"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
 
       // First request (initialization)
       const initRequest = new Request("http://example.com/mcp", {
@@ -241,7 +244,7 @@ describe("McpAgent jurisdiction option", () => {
         transport: "sse"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
 
       // First, establish SSE connection
       const sseRequest = new Request(
@@ -305,7 +308,7 @@ describe("McpAgent jurisdiction option", () => {
         transport: "streamable-http"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
