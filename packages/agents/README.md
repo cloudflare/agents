@@ -251,6 +251,43 @@ const result = await client.stub.processData(payload);
 
 ---
 
+## Workflows Integration
+
+For durable, multi-step tasks that survive failures and can pause for human approval, integrate with [Cloudflare Workflows](https://developers.cloudflare.com/workflows/):
+
+```typescript
+import { AgentWorkflow } from "agents";
+
+export class OrderWorkflow extends AgentWorkflow<OrderAgent, OrderParams> {
+  async run(event, step) {
+    // Step 1: Validate (retries automatically on failure)
+    const validated = await step.do("validate", async () => {
+      return validateOrder(event.payload);
+    });
+
+    // Step 2: Wait for human approval
+    await this.reportProgress({ step: "approval", status: "pending" });
+    const approval = await this.waitForApproval(step, { timeout: "7 days" });
+
+    // Step 3: Process the approved order
+    await step.do("process", async () => {
+      return processOrder(validated, approval);
+    });
+  }
+}
+```
+
+Workflows provide:
+
+- **Durable execution** — steps retry automatically, state persists across failures
+- **Human-in-the-loop** — pause for approval with `waitForApproval()`
+- **Long-running tasks** — run for days or weeks
+- **Progress tracking** — report status back to the agent
+
+See [Workflows](./docs/workflows.md) and [Human in the Loop](./docs/human-in-the-loop.md).
+
+---
+
 ## AI Chat Integration
 
 For AI-powered chat experiences with persistent conversations, streaming responses, and tool support, see [`@cloudflare/ai-chat`](../ai-chat/README.md).
