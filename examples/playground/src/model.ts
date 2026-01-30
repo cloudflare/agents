@@ -5,7 +5,7 @@ import { env } from "cloudflare:workers";
 
 export const model: LanguageModelV3 = (() => {
   if (env.OPENAI_API_KEY) {
-    return openai("gpt-4");
+    return openai("gpt-4o");
   } else {
     const workersai = createWorkersAI({ binding: env.AI });
     return workersai("@cf/meta/llama-2-7b-chat-int8");

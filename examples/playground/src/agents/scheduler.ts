@@ -41,6 +41,9 @@ export class Scheduler extends Agent<Env> {
           date: new Date()
         })} 
 Input to parse: "${event.input}"`,
+        providerOptions: {
+          openai: { strictJsonSchema: false }
+        },
         schema: scheduleSchema, // <- the shape of the object that the scheduler expects
         schemaDescription: "A task to be scheduled",
         schemaName: "task"
