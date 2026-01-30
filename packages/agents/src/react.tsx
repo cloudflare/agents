@@ -463,12 +463,22 @@ export function useAgent<State>(
             if (options.onIdentityChange) {
               options.onIdentityChange(oldName, newName, oldAgent, newAgent);
             } else {
+              const agentChanged = oldAgent !== newAgent;
+              const nameChanged = oldName !== newName;
+              let changeDescription = "";
+              if (agentChanged && nameChanged) {
+                changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
+              } else if (agentChanged) {
+                changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
+              } else {
+                changeDescription = `instance "${oldName}" → "${newName}"`;
+              }
               console.warn(
-                '[agents] Identity changed on reconnect: "' +
-                  oldName +
-                  '" → "' +
-                  newName +
-                  '". This may indicate session/auth changes. Provide onIdentityChange to handle this explicitly.'
+                `[agents] Identity changed on reconnect: ${changeDescription}. ` +
+                  "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
+                  "where the instance is determined by auth/session. " +
+                  "Provide onIdentityChange callback to handle this explicitly, " +
+                  "or ignore if this is expected for your routing pattern."
               );
             }
           }

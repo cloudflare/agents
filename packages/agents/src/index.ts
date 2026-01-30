@@ -172,7 +172,7 @@ export const unstable_callable = (metadata: CallableMetadata = {}) => {
       "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
     );
   }
-  callable(metadata);
+  return callable(metadata);
 };
 
 export type QueueItem<T = string> = {
@@ -298,7 +298,13 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
   /** Whether the Agent should hibernate when inactive */
   hibernate: true,
   /** Whether to send identity (name, agent) to clients on connect */
-  sendIdentityOnConnect: true
+  sendIdentityOnConnect: true,
+  /**
+   * Timeout in seconds before a running interval schedule is considered "hung"
+   * and force-reset. Increase this if you have callbacks that legitimately
+   * take longer than 30 seconds.
+   */
+  hungScheduleTimeoutSeconds: 30
 };
 
 export type AgentStaticOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
@@ -483,7 +489,10 @@ export class Agent<
         ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
       sendIdentityOnConnect:
         ctor.agentOptions?.sendIdentityOnConnect ??
-        DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect
+        DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
+      hungScheduleTimeoutSeconds:
+        ctor.agentOptions?.hungScheduleTimeoutSeconds ??
+        DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds
     };
   }
 
@@ -1621,7 +1630,8 @@ export class Agent<
           const executionStartedAt =
             (row as { execution_started_at?: number }).execution_started_at ??
             0;
-          const hungTimeoutSeconds = 30;
+          const hungTimeoutSeconds =
+            this._resolvedOptions.hungScheduleTimeoutSeconds;
           const elapsedSeconds = now - executionStartedAt;
 
           if (elapsedSeconds < hungTimeoutSeconds) {
