@@ -3,7 +3,7 @@
 ## Getting Started
 
 - [Getting Started](./getting-started.md) - Quick start guide for new users
-- TODO: [Adding to an Existing Project](./adding-to-existing-project.md) - Integrate agents into your app
+- [Adding to an Existing Project](./adding-to-existing-project.md) - Integrate agents into your app
 - [Understanding the Agent Class](./agent-class.md) - Deep dive into the Agent class architecture
 
 ## Core Concepts

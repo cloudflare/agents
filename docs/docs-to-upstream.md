@@ -9,6 +9,7 @@ These docs are complete and should be added to the official Cloudflare docs site
 | Doc                                                                | Description                                                              | Priority           |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------ | ------------------ |
 | [getting-started.md](./getting-started.md)                         | Quick start guide: create project, first agent, React client, deploy     | High               |
+| [adding-to-existing-project.md](./adding-to-existing-project.md)   | Adding agents to existing Workers, Hono, with assets, auth patterns      | High               |
 | [email.md](./email.md)                                             | Email routing with `routeAgentEmail()`, resolvers, secure reply handling | High               |
 | [queue.md](./queue.md)                                             | Background task queue with `queue()`, `dequeue()`, `getQueue()`          | High               |
 | [observability.md](./observability.md)                             | Tracing and monitoring agent activity                                    | Medium             |
