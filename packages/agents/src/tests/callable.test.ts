@@ -322,6 +322,44 @@ describe("@callable decorator", () => {
 
       ws.close();
     });
+
+    it("should auto-close stream with error when method throws immediately", async () => {
+      const room = `callable-stream-throws-${crypto.randomUUID()}`;
+      const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
+      await skipInitialMessages(ws);
+
+      const { chunks, error } = await callStreamingRPC(
+        ws,
+        "streamThrowsImmediately",
+        []
+      );
+
+      // No chunks should be received since it throws immediately
+      expect(chunks).toEqual([]);
+      // Should receive error from auto-close
+      expect(error).toBe("Immediate failure");
+
+      ws.close();
+    });
+
+    it("should handle double-close gracefully (no-op behavior)", async () => {
+      const room = `callable-stream-double-${crypto.randomUUID()}`;
+      const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
+      await skipInitialMessages(ws);
+
+      const { chunks, error } = await callStreamingRPC(
+        ws,
+        "streamDoubleClose",
+        []
+      );
+
+      // Should receive chunk1 and the first error
+      expect(chunks).toEqual(["chunk1"]);
+      expect(error).toBe("First close");
+      // Subsequent calls (end, send, error) should be no-ops, not throw
+
+      ws.close();
+    });
   });
 
   describe("concurrent calls", () => {

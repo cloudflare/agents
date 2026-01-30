@@ -425,4 +425,99 @@ describe("state management", () => {
       });
     });
   });
+
+  describe("onStateUpdate validation", () => {
+    it("should not broadcast state if onStateUpdate throws", async () => {
+      const room = `throwing-state-${crypto.randomUUID()}`;
+
+      // Connect a WebSocket client first
+      const { ws } = await connectWS(
+        `/agents/test-throwing-state-agent/${room}`
+      );
+
+      // Collect all messages
+      const messages: Array<{ type: string; state?: unknown }> = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        messages.push(JSON.parse(e.data as string));
+      });
+
+      // Wait for initial messages (identity, state, mcp_servers)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Clear messages to only capture new ones
+      const initialCount = messages.length;
+
+      // Get the agent stub and try to set invalid state (count = -1 triggers throw)
+      const agentStub = await getAgentByName(env.TestThrowingStateAgent, room);
+
+      // This should throw in onStateUpdate
+      try {
+        await agentStub.updateState({
+          count: -1,
+          items: ["invalid"],
+          lastUpdated: "should-not-broadcast"
+        });
+      } catch {
+        // Expected to throw
+      }
+
+      // Wait a bit for any broadcast that might have happened
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Check that no new state messages were broadcast
+      const newMessages = messages.slice(initialCount);
+      const stateMessages = newMessages.filter(
+        (m) => m.type === MessageType.CF_AGENT_STATE
+      );
+
+      // If onStateUpdate throws, state should NOT be broadcast
+      expect(stateMessages.length).toBe(0);
+
+      ws.close();
+    });
+
+    it("should broadcast state after onStateUpdate succeeds", async () => {
+      const room = `valid-state-${crypto.randomUUID()}`;
+
+      // Connect a WebSocket client first
+      const { ws } = await connectWS(
+        `/agents/test-throwing-state-agent/${room}`
+      );
+
+      // Collect all messages
+      const messages: Array<{ type: string; state?: { count?: number } }> = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        messages.push(JSON.parse(e.data as string));
+      });
+
+      // Wait for initial messages
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Clear messages to only capture new ones
+      const initialCount = messages.length;
+
+      // Get the agent stub and set valid state
+      const agentStub = await getAgentByName(env.TestThrowingStateAgent, room);
+
+      await agentStub.updateState({
+        count: 42,
+        items: ["valid"],
+        lastUpdated: "should-broadcast"
+      });
+
+      // Wait for broadcast
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Should have received a state broadcast
+      const newMessages = messages.slice(initialCount);
+      const stateMessages = newMessages.filter(
+        (m) => m.type === MessageType.CF_AGENT_STATE
+      );
+
+      expect(stateMessages.length).toBe(1);
+      expect(stateMessages[0].state?.count).toBe(42);
+
+      ws.close();
+    });
+  });
 });

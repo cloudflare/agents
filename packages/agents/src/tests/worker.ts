@@ -38,6 +38,7 @@ export type Env = {
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
+  TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
   TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
   TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
   TestChildAgent: DurableObjectNamespace<TestChildAgent>;
@@ -1043,6 +1044,43 @@ export class TestStateAgentNoInitial extends Agent<Env> {
   }
 }
 
+// Test Agent with throwing onStateUpdate - for testing broadcast order
+export class TestThrowingStateAgent extends Agent<Env, TestState> {
+  observability = undefined;
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  // Track if onStateUpdate was called
+  onStateUpdateCalled = false;
+
+  // Throw on specific state values
+  onStateUpdate(state: TestState, _source: Connection | "server") {
+    this.onStateUpdateCalled = true;
+    if (state.count === -1) {
+      throw new Error("Invalid state: count cannot be -1");
+    }
+  }
+
+  // Test helper to update state via RPC
+  updateState(state: TestState) {
+    return this.setState(state);
+  }
+
+  // Check if onStateUpdate was called
+  wasOnStateUpdateCalled(): boolean {
+    return this.onStateUpdateCalled;
+  }
+
+  // Reset the flag
+  resetOnStateUpdateCalled() {
+    this.onStateUpdateCalled = false;
+  }
+}
+
 // Test Agent with sendIdentityOnConnect disabled
 export class TestNoIdentityAgent extends Agent<Env, TestState> {
   observability = undefined;
@@ -1142,6 +1180,26 @@ export class TestCallableAgent extends Agent<Env, { value: number }> {
   streamGracefulError(stream: StreamingResponse) {
     stream.send("chunk1");
     stream.error("Graceful error");
+  }
+
+  // Streaming method that double-closes (error then end) - should not throw
+  @callable({
+    streaming: true,
+    description: "Tests double-close no-op behavior"
+  })
+  streamDoubleClose(stream: StreamingResponse) {
+    stream.send("chunk1");
+    stream.error("First close");
+    // These should be no-ops, not throw
+    stream.end("ignored");
+    stream.send("also ignored");
+    stream.error("also ignored");
+  }
+
+  // Streaming method that throws before sending any response
+  @callable({ streaming: true })
+  streamThrowsImmediately(_stream: StreamingResponse) {
+    throw new Error("Immediate failure");
   }
 
   // NOT decorated with @callable - should fail when called via RPC

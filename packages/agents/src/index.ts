@@ -571,27 +571,27 @@ export class Agent<
 
     // Migration: Add columns for interval scheduling (for existing agents)
     // Use raw exec to avoid error logging through onError for expected failures
-    try {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
-      );
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
-      );
-    } catch {
-      // Column already exists
-    }
-    try {
-      this.ctx.storage.sql.exec(
-        "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
-      );
-    } catch {
-      // Column already exists
-    }
+    const addColumnIfNotExists = (sql: string) => {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch (e) {
+        // Only ignore "duplicate column" errors, re-throw unexpected errors
+        const message = e instanceof Error ? e.message : String(e);
+        if (!message.toLowerCase().includes("duplicate column")) {
+          throw e;
+        }
+      }
+    };
+
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
+    );
 
     // Workflow tracking table for Agent-Workflow integration
     this.sql`
@@ -681,7 +681,7 @@ export class Agent<
           }
 
           if (isStateUpdateMessage(parsed)) {
-            this._setStateInternal(parsed.state as State, connection);
+            await this._setStateInternal(parsed.state as State, connection);
             return;
           }
 
@@ -719,7 +719,16 @@ export class Agent<
                   this.ctx
                 );
 
-                await methodFn.apply(this, [stream, ...args]);
+                try {
+                  await methodFn.apply(this, [stream, ...args]);
+                } catch (err) {
+                  // Auto-close stream with error if method throws before closing
+                  if (!stream.isClosed) {
+                    stream.error(
+                      err instanceof Error ? err.message : String(err)
+                    );
+                  }
+                }
                 return;
               }
 
@@ -894,7 +903,7 @@ export class Agent<
     }
   }
 
-  private _setStateInternal(
+  private async _setStateInternal(
     state: State,
     source: Connection | "server" = "server"
   ) {
@@ -907,14 +916,10 @@ export class Agent<
     INSERT OR REPLACE INTO cf_agents_state (id, state)
     VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
   `;
-    this.broadcast(
-      JSON.stringify({
-        state: state,
-        type: MessageType.CF_AGENT_STATE
-      }),
-      source !== "server" ? [source.id] : []
-    );
-    return this._tryCatch(() => {
+
+    // Call onStateUpdate lifecycle hook before broadcasting
+    // This ensures we don't broadcast if validation fails
+    const result = await this._tryCatch(() => {
       const { connection, request, email } = agentContext.getStore() || {};
       return agentContext.run(
         { agent: this, connection, request, email },
@@ -933,14 +938,26 @@ export class Agent<
         }
       );
     });
+
+    // Broadcast state to connected clients after onStateUpdate succeeds
+    this.broadcast(
+      JSON.stringify({
+        state: state,
+        type: MessageType.CF_AGENT_STATE
+      }),
+      source !== "server" ? [source.id] : []
+    );
+
+    return result;
   }
 
   /**
    * Update the Agent's state
    * @param state New state to set
+   * @returns Promise that resolves after state is updated and broadcast
    */
-  setState(state: State) {
-    this._setStateInternal(state, "server");
+  setState(state: State): Promise<void> {
+    return this._setStateInternal(state, "server");
   }
 
   /**
@@ -1762,8 +1779,12 @@ export class Agent<
               result.set(name, meta);
             }
           }
-        } catch {
-          // Skip properties that can't be accessed (e.g., private members)
+        } catch (e) {
+          // Skip properties that can't be accessed (e.g., private members with #)
+          // These throw TypeError when accessed
+          if (!(e instanceof TypeError)) {
+            throw e;
+          }
         }
       }
       prototype = Object.getPrototypeOf(prototype);
@@ -3081,12 +3102,20 @@ export class StreamingResponse {
   }
 
   /**
+   * Whether the stream has been closed (via end() or error())
+   */
+  get isClosed(): boolean {
+    return this._closed;
+  }
+
+  /**
    * Send a chunk of data to the client
    * @param chunk The data to send
+   * @returns false if stream is already closed (no-op), true if sent
    */
-  send(chunk: unknown) {
+  send(chunk: unknown): boolean {
     if (this._closed) {
-      throw new Error("StreamingResponse is already closed");
+      return false;
     }
     const response: RPCResponse = {
       done: false,
@@ -3096,15 +3125,17 @@ export class StreamingResponse {
       type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
+    return true;
   }
 
   /**
    * End the stream and send the final chunk (if any)
    * @param finalChunk Optional final chunk of data to send
+   * @returns false if stream is already closed (no-op), true if sent
    */
-  end(finalChunk?: unknown) {
+  end(finalChunk?: unknown): boolean {
     if (this._closed) {
-      throw new Error("StreamingResponse is already closed");
+      return false;
     }
     this._closed = true;
     const response: RPCResponse = {
@@ -3115,15 +3146,17 @@ export class StreamingResponse {
       type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
+    return true;
   }
 
   /**
    * Send an error to the client and close the stream
    * @param message Error message to send
+   * @returns false if stream is already closed (no-op), true if sent
    */
-  error(message: string) {
+  error(message: string): boolean {
     if (this._closed) {
-      throw new Error("StreamingResponse is already closed");
+      return false;
     }
     this._closed = true;
     const response: RPCResponse = {
@@ -3133,6 +3166,7 @@ export class StreamingResponse {
       type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
+    return true;
   }
 }
 

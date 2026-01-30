@@ -64,6 +64,10 @@
         "name": "TestStateAgentNoInitial"
       },
       {
+        "class_name": "TestThrowingStateAgent",
+        "name": "TestThrowingStateAgent"
+      },
+      {
         "class_name": "TestNoIdentityAgent",
         "name": "TestNoIdentityAgent"
       },
@@ -107,6 +111,7 @@
         "TestAddMcpServerAgent",
         "TestStateAgent",
         "TestStateAgentNoInitial",
+        "TestThrowingStateAgent",
         "TestNoIdentityAgent",
         "TestCallableAgent",
         "TestChildAgent"
