@@ -19,8 +19,8 @@ export class RealtimeVoiceAgent extends RealtimeAgent {
     const rtk = new RealtimeKitTransport({
       meetingId: "bbb9e53e-c839-4c84-b0cd-b8ef18ed8da2"
     });
-    const tts = new ElevenLabsTTS(GATEWAY_ID);
-    const stt = new DeepgramSTT(GATEWAY_ID);
+    const tts = new ElevenLabsTTS();
+    const stt = new DeepgramSTT();
 
     super(ctx, env, env.AI, GATEWAY_ID);
 
@@ -50,10 +50,6 @@ export class RealtimeVoiceAgent extends RealtimeAgent {
       text: response,
       canInterrupt: true
     };
-  }
-
-  async startPipeline() {
-    await this.startRealtimePipeline();
   }
 }
 
