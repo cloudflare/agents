@@ -26,8 +26,8 @@ export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
 }
 
 export function createMcpHandler<
-  Env = unknown,
-  Props = unknown
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  Props extends Record<string, unknown> = Record<string, unknown>
 >(
   server: McpServer | Server,
   options: CreateMcpHandlerOptions = {}
@@ -113,8 +113,8 @@ let didWarnAboutExperimentalCreateMcpHandler = false;
  * @deprecated This has been renamed to createMcpHandler, and experimental_createMcpHandler will be removed in the next major version
  */
 export function experimental_createMcpHandler<
-  Env = unknown,
-  Props = unknown
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  Props extends Record<string, unknown> = Record<string, unknown>
 >(
   server: McpServer | Server,
   options: CreateMcpHandlerOptions = {}

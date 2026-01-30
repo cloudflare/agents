@@ -2,4 +2,4 @@
 "agents": minor
 ---
 
-Add Props type parameter to ExportedHandler for typed ctx.props
+Add generic type parameters to MCP handler functions for better type safety

@@ -9,6 +9,9 @@ declare module "cloudflare:test" {
   interface ProvidedEnv {}
 }
 
+const createTestExecutionContext = () =>
+  createExecutionContext() as ExecutionContext<Record<string, unknown>>;
+
 /**
  * Tests for createMcpHandler
  * The handler primarily passes options to WorkerTransport and handles routing
@@ -42,7 +45,7 @@ describe("createMcpHandler", () => {
         route: "/custom-mcp"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
 
       // Request to non-matching route
       const wrongRequest = new Request("http://example.com/mcp", {
@@ -63,7 +66,7 @@ describe("createMcpHandler", () => {
       const server = createTestServer();
       const handler = createMcpHandler(server);
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "OPTIONS"
       });
@@ -85,7 +88,7 @@ describe("createMcpHandler", () => {
         }
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "OPTIONS"
       });
@@ -109,7 +112,7 @@ describe("createMcpHandler", () => {
         route: "/mcp"
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -149,7 +152,7 @@ describe("createMcpHandler", () => {
         transport: customTransport
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "OPTIONS"
       });
@@ -176,7 +179,7 @@ describe("createMcpHandler", () => {
         transport: customTransport
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "OPTIONS"
       });
@@ -203,7 +206,7 @@ describe("createMcpHandler", () => {
         sessionIdGenerator: customSessionIdGenerator
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -241,7 +244,7 @@ describe("createMcpHandler", () => {
         }
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -274,7 +277,7 @@ describe("createMcpHandler", () => {
         enableJsonResponse: true
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -311,7 +314,7 @@ describe("createMcpHandler", () => {
         storage: mockStorage
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -343,7 +346,7 @@ describe("createMcpHandler", () => {
         corsOptions: { origin: "https://example.com" }
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/custom-route", {
         method: "OPTIONS"
       });
@@ -373,7 +376,7 @@ describe("createMcpHandler", () => {
         transport: errorTransport
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
@@ -418,7 +421,7 @@ describe("createMcpHandler", () => {
         transport: errorTransport
       });
 
-      const ctx = createExecutionContext();
+      const ctx = createTestExecutionContext();
       const request = new Request("http://example.com/mcp", {
         method: "POST",
         headers: {
