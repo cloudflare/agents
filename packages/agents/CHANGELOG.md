@@ -1,5 +1,168 @@
 # @cloudflare/agents
 
+## 0.3.7
+
+### Patch Changes
+
+- [#799](https://github.com/cloudflare/agents/pull/799) [`d1a0c2b`](https://github.com/cloudflare/agents/commit/d1a0c2b73b1119d71e120091753a6bcca0e2faa9) Thanks [@threepointone](https://github.com/threepointone)! - feat: Add Cloudflare Workflows integration for Agents
+
+  Adds seamless integration between Cloudflare Agents and Cloudflare Workflows for durable, multi-step background processing.
+
+  ### Why use Workflows with Agents?
+
+  Agents excel at real-time communication and state management, while Workflows excel at durable execution. Together:
+  - Agents handle WebSocket connections and quick operations
+  - Workflows handle long-running tasks, retries, and human-in-the-loop flows
+
+  ### AgentWorkflow Base Class
+
+  Extend `AgentWorkflow` instead of `WorkflowEntrypoint` to get typed access to the originating Agent:
+
+  ```typescript
+  export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
+    async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+      const params = event.payload;
+
+      // Call Agent methods via RPC
+      await this.agent.updateStatus(params.taskId, "processing");
+
+      // Non-durable: progress reporting (lightweight, for frequent updates)
+      await this.reportProgress({
+        step: "process",
+        percent: 0.5,
+        message: "Halfway done"
+      });
+      this.broadcastToClients({ type: "update", taskId: params.taskId });
+
+      // Durable via step: idempotent, won't repeat on retry
+      await step.mergeAgentState({ taskProgress: 0.5 });
+      await step.reportComplete(result);
+
+      return result;
+    }
+  }
+  ```
+
+  ### Agent Methods
+  - `runWorkflow(workflowName, params, options?)` - Start workflow with optional metadata for querying
+  - `sendWorkflowEvent(workflowName, workflowId, event)` - Send events to waiting workflows
+  - `getWorkflow(workflowId)` - Get tracked workflow by ID
+  - `getWorkflows(criteria?)` - Query by status, workflowName, or metadata
+  - `deleteWorkflow(workflowId)` - Delete a workflow tracking record
+  - `deleteWorkflows(criteria?)` - Delete workflows by criteria (status, workflowName, metadata, createdBefore)
+  - `approveWorkflow(workflowId, data?)` - Approve a waiting workflow
+  - `rejectWorkflow(workflowId, data?)` - Reject a waiting workflow
+
+  ### AgentWorkflow Methods
+
+  **On `this` (non-durable, lightweight):**
+  - `reportProgress(progress)` - Report typed progress object to Agent
+  - `broadcastToClients(message)` - Broadcast to WebSocket clients
+  - `waitForApproval(step, opts?)` - Wait for approval (throws on rejection)
+
+  **On `step` (durable, idempotent):**
+  - `step.reportComplete(result?)` - Report successful completion
+  - `step.reportError(error)` - Report an error
+  - `step.sendEvent(event)` - Send custom event to Agent
+  - `step.updateAgentState(state)` - Replace Agent state (broadcasts to clients)
+  - `step.mergeAgentState(partial)` - Merge into Agent state (broadcasts to clients)
+  - `step.resetAgentState()` - Reset Agent state to initialState (broadcasts to clients)
+
+  ### Lifecycle Callbacks
+
+  Override these methods to handle workflow events (workflowName is first for easy differentiation):
+
+  ```typescript
+  async onWorkflowProgress(workflowName, workflowId, progress) {} // progress is typed object
+  async onWorkflowComplete(workflowName, workflowId, result?) {}
+  async onWorkflowError(workflowName, workflowId, error) {}
+  async onWorkflowEvent(workflowName, workflowId, event) {}
+  ```
+
+  ### Workflow Tracking
+
+  Workflows are automatically tracked in `cf_agents_workflows` SQLite table:
+  - Status, timestamps, errors
+  - Optional `metadata` field for queryable key-value data
+  - Params/output NOT stored by default (could be large)
+
+  See `docs/workflows.md` for full documentation.
+
+- [#781](https://github.com/cloudflare/agents/pull/781) [`fd79481`](https://github.com/cloudflare/agents/commit/fd7948180abf066fa3d27911a83ffb4c91b3f099) Thanks [@HueCodes](https://github.com/HueCodes)! - fix: properly type tool error content in getAITools
+
+- [#811](https://github.com/cloudflare/agents/pull/811) [`f604008`](https://github.com/cloudflare/agents/commit/f604008957f136241815909319a552bad6738b58) Thanks [@threepointone](https://github.com/threepointone)! - ### Secure Email Reply Routing
+
+  This release introduces secure email reply routing with HMAC-SHA256 signed headers, preventing unauthorized routing of emails to arbitrary agent instances.
+
+  #### Breaking Changes
+
+  **`createHeaderBasedEmailResolver` removed**: This function now throws an error with migration guidance. It was removed because it trusted attacker-controlled email headers for routing.
+
+  **Migration:**
+  - For inbound mail: use `createAddressBasedEmailResolver(agentName)`
+  - For reply flows: use `createSecureReplyEmailResolver(secret)` with signed headers
+
+  **`EmailSendOptions` type removed**: This type was unused and has been removed.
+
+  #### New Features
+
+  **`createSecureReplyEmailResolver`**: A new resolver that verifies HMAC-SHA256 signatures on incoming emails before routing. Signatures include a timestamp and expire after 30 days by default.
+
+  ```ts
+  const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
+    maxAge: 7 * 24 * 60 * 60, // Optional: 7 days (default: 30 days)
+    onInvalidSignature: (email, reason) => {
+      // Optional: log failures for debugging
+      // reason: "missing_headers" | "expired" | "invalid" | "malformed_timestamp"
+      console.warn(`Invalid signature from ${email.from}: ${reason}`);
+    }
+  });
+  ```
+
+  **`signAgentHeaders`**: Helper function to manually sign agent routing headers for use with external email services.
+
+  ```ts
+  const headers = await signAgentHeaders(secret, agentName, agentId);
+  // Returns: { "X-Agent-Name", "X-Agent-ID", "X-Agent-Sig", "X-Agent-Sig-Ts" }
+  ```
+
+  **`replyToEmail` signing**: The `replyToEmail` method now accepts a `secret` option to automatically sign outbound email headers.
+
+  ```ts
+  await this.replyToEmail(email, {
+    fromName: "My Agent",
+    body: "Thanks!",
+    secret: this.env.EMAIL_SECRET // Signs headers for secure reply routing
+  });
+  ```
+
+  If an email was routed via `createSecureReplyEmailResolver`, calling `replyToEmail` without a secret will throw an error (pass explicit `null` to opt-out).
+
+  **`onNoRoute` callback**: `routeAgentEmail` now accepts an `onNoRoute` callback for handling emails that don't match any routing rule.
+
+  ```ts
+  await routeAgentEmail(message, env, {
+    resolver,
+    onNoRoute: (email) => {
+      email.setReject("Unknown recipient");
+    }
+  });
+  ```
+
+- [#813](https://github.com/cloudflare/agents/pull/813) [`7aebab3`](https://github.com/cloudflare/agents/commit/7aebab369d1bef6c685e05a4a3bd6627edcb87db) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [#800](https://github.com/cloudflare/agents/pull/800) [`a54edf5`](https://github.com/cloudflare/agents/commit/a54edf56b462856d1ef4f424c2363ac43a53c46e) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
+- [#815](https://github.com/cloudflare/agents/pull/815) [`ded8d3e`](https://github.com/cloudflare/agents/commit/ded8d3e8aeba0358ebd4aecb5ba15344b5a21db1) Thanks [@threepointone](https://github.com/threepointone)! - docs: add OpenAI provider options documentation to scheduleSchema
+
+  When using `scheduleSchema` with OpenAI models via the AI SDK, users must now pass `providerOptions: { openai: { strictJsonSchema: false } }` to `generateObject`. This is documented in the JSDoc for `scheduleSchema`.
+
+  This is required because `@ai-sdk/openai` now defaults `strictJsonSchema` to `true`, which requires all schema properties to be in the `required` array. The `scheduleSchema` uses optional fields which are not compatible with this strict mode.
+
+- Updated dependencies [[`7aebab3`](https://github.com/cloudflare/agents/commit/7aebab369d1bef6c685e05a4a3bd6627edcb87db), [`77be4f8`](https://github.com/cloudflare/agents/commit/77be4f8149e41730148a360adfff9e66becdd5ed), [`a54edf5`](https://github.com/cloudflare/agents/commit/a54edf56b462856d1ef4f424c2363ac43a53c46e), [`99cbca0`](https://github.com/cloudflare/agents/commit/99cbca0847d0d6c97f44b73f2eb155dabe590032)]:
+  - @cloudflare/codemode@0.0.6
+  - @cloudflare/ai-chat@0.0.5
+
 ## 0.3.6
 
 ### Patch Changes
