@@ -8,6 +8,6 @@ export const model: LanguageModelV3 = (() => {
     return openai("gpt-4");
   } else {
     const workersai = createWorkersAI({ binding: env.AI });
-    return workersai("@cf/meta/llama-2-7b-chat-int8");
+    return workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast" as any);
   }
 })();
