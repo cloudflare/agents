@@ -300,6 +300,93 @@ describe("routeAgentRequest", () => {
   });
 });
 
+describe("connection lifecycle", () => {
+  // Helper to connect via WebSocket
+  async function connectWS(path: string) {
+    const ctx = createExecutionContext();
+    const req = new Request(`http://example.com${path}`, {
+      headers: { Upgrade: "websocket" }
+    });
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    expect(ws).toBeDefined();
+    ws.accept();
+    return { ws, ctx };
+  }
+
+  // Helper to wait for a message
+  function waitForMessage(ws: WebSocket, timeout = 2000): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timeout waiting for message")),
+        timeout
+      );
+      ws.addEventListener(
+        "message",
+        (e: MessageEvent) => {
+          clearTimeout(timer);
+          resolve(JSON.parse(e.data as string));
+        },
+        { once: true }
+      );
+    });
+  }
+
+  it("should send identity message on initial connection", async () => {
+    const { ws } = await connectWS("/agents/test-state-agent/lifecycle-test");
+
+    const msg = (await waitForMessage(ws)) as { type: string; name?: string };
+    expect(msg.type).toBe("cf_agent_identity");
+    expect(msg.name).toBe("lifecycle-test");
+
+    ws.close();
+  });
+
+  it("should send identity message on each reconnection", async () => {
+    // First connection
+    const { ws: ws1 } = await connectWS(
+      "/agents/test-state-agent/reconnect-test"
+    );
+    const msg1 = (await waitForMessage(ws1)) as { type: string; name?: string };
+    expect(msg1.type).toBe("cf_agent_identity");
+    expect(msg1.name).toBe("reconnect-test");
+    ws1.close();
+
+    // Second connection (simulating reconnect)
+    const { ws: ws2 } = await connectWS(
+      "/agents/test-state-agent/reconnect-test"
+    );
+    const msg2 = (await waitForMessage(ws2)) as { type: string; name?: string };
+    expect(msg2.type).toBe("cf_agent_identity");
+    expect(msg2.name).toBe("reconnect-test");
+    ws2.close();
+  });
+
+  it("should allow client to await ready after each connection", async () => {
+    // This test validates the server behavior that enables client-side ready promise reset.
+    // The client tracks "identified" state and resets it on close.
+    // After reconnect, awaiting "ready" should wait for the new identity message.
+    //
+    // Client-side behavior (not tested here, but documented):
+    //   const client = new AgentClient({ agent: "MyAgent", name: "test" });
+    //   await client.ready; // Wait for identity
+    //   console.log(client.identified); // true
+    //   // Connection closes...
+    //   console.log(client.identified); // false (reset on close)
+    //   // PartySocket auto-reconnects...
+    //   await client.ready; // Waits for new identity (new promise)
+
+    const { ws } = await connectWS("/agents/test-state-agent/ready-test");
+
+    // Identity is always the first message
+    const msg = (await waitForMessage(ws)) as { type: string };
+    expect(msg.type).toBe("cf_agent_identity");
+
+    ws.close();
+  });
+});
+
 describe("custom routing patterns", () => {
   describe("basePath routing with getAgentByName", () => {
     it("should route custom paths to agents", async () => {

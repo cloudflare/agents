@@ -127,14 +127,18 @@ export class AgentClient<State = unknown> extends PartySocket {
   /**
    * Whether the client has received identity from the server.
    * Becomes true after the first identity message is received.
+   * Resets to false on connection close.
    */
   identified = false;
 
   /**
    * Promise that resolves when identity has been received from the server.
    * Useful for waiting before making calls that depend on knowing the instance.
+   * Resets on connection close so it can be awaited again after reconnect.
    */
-  readonly ready: Promise<void>;
+  get ready(): Promise<void> {
+    return this._readyPromise;
+  }
 
   private options: AgentClientOptions<State>;
   private _pendingCalls = new Map<
@@ -146,9 +150,16 @@ export class AgentClient<State = unknown> extends PartySocket {
       type?: unknown;
     }
   >();
+  private _readyPromise!: Promise<void>;
   private _resolveReady!: () => void;
   private _previousName: string | null = null;
   private _previousAgent: string | null = null;
+
+  private _resetReady() {
+    this._readyPromise = new Promise((resolve) => {
+      this._resolveReady = resolve;
+    });
+  }
 
   constructor(options: AgentClientOptions<State>) {
     const agentNamespace = camelCaseToKebabCase(options.agent);
@@ -170,9 +181,7 @@ export class AgentClient<State = unknown> extends PartySocket {
     this.options = options;
 
     // Initialize ready promise
-    this.ready = new Promise((resolve) => {
-      this._resolveReady = resolve;
-    });
+    this._resetReady();
 
     this.addEventListener("message", (event) => {
       if (typeof event.data === "string") {
@@ -262,8 +271,13 @@ export class AgentClient<State = unknown> extends PartySocket {
       }
     });
 
-    // Clean up pending calls when connection closes
+    // Clean up pending calls and reset ready state when connection closes
     this.addEventListener("close", () => {
+      // Reset ready state for next connection
+      this.identified = false;
+      this._resetReady();
+
+      // Reject all pending calls
       const error = new Error("Connection closed");
       for (const pending of this._pendingCalls.values()) {
         pending.reject(error);

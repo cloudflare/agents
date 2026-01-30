@@ -396,16 +396,21 @@ export function useAgent<State>(
     agent: string | null;
   }>({ name: null, agent: null });
 
-  // Ready promise - resolves when identity is received
+  // Ready promise - resolves when identity is received, resets on close
   const readyRef = useRef<
     { promise: Promise<void>; resolve: () => void } | undefined
   >(undefined);
-  if (!readyRef.current) {
+
+  const resetReady = () => {
     let resolve: () => void;
     const promise = new Promise<void>((r) => {
       resolve = r;
     });
     readyRef.current = { promise, resolve: resolve! };
+  };
+
+  if (!readyRef.current) {
+    resetReady();
   }
 
   // If basePath is provided, use it directly; otherwise construct from agent/name
@@ -513,6 +518,14 @@ export function useAgent<State>(
         }
       }
       options.onMessage?.(message);
+    },
+    onClose: () => {
+      // Reset ready state for next connection
+      resetReady();
+      setIdentity((prev) => ({ ...prev, identified: false }));
+
+      // Call user's onClose if provided
+      options.onClose?.();
     }
   }) as PartySocket & {
     agent: string;
