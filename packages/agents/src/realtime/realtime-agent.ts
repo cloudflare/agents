@@ -81,6 +81,26 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     this.transcriptHistory = this._loadTranscriptsFromDb();
 
     this.keepAlive();
+
+    const _onMessage = this.onMessage.bind(this);
+
+    this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (typeof message !== "string") {
+        return _onMessage(connection, message);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(message);
+      } catch (_e) {
+        // Not JSON, pass to parent
+        return _onMessage(connection, message);
+      }
+      if (await this.handleWebsocketMessage(parsed)) {
+        return;
+      }
+
+      return _onMessage(connection, message);
+    };
   }
 
   public setPipeline(pipeline: RealtimePipelineComponent[]) {
@@ -523,27 +543,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   override async onMessage(
     connection: Connection,
     message: WSMessage
-  ): Promise<void> {
-    if (typeof message !== "string") {
-      return super.onMessage(connection, message);
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(message);
-    } catch (_e) {
-      // Not JSON, pass to parent
-      return super.onMessage(connection, message);
-    }
-
-    // Check if this is a realtime websocket message
-    if (await this.handleWebsocketMessage(parsed)) {
-      return;
-    }
-
-    // Not a realtime message, pass to parent
-    return super.onMessage(connection, message);
-  }
+  ): Promise<void> {}
 
   /**
    * Handle websocket messages from the realtime pipeline
