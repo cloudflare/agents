@@ -16,7 +16,7 @@
 
 ## Client SDK
 
-- TODO: [Client SDK](./client-sdk.md) - Connecting from React (`useAgent`) and vanilla JS (`AgentClient`), state sync, and RPC calls
+- [Client SDK](./client-sdk.md) - Connecting from React (`useAgent`) and vanilla JS (`AgentClient`), state sync, and RPC calls
 
 ## Communication Channels
 
@@ -29,7 +29,7 @@
 ## Background Processing
 
 - [Queue](./queue.md) - Immediate background task execution
-- TODO: [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
+- [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Workflows](./workflows.md) - Durable multi-step processing with Cloudflare Workflows
 - TODO: [Human in the Loop](./human-in-the-loop.md) - Approval flows and manual intervention
 

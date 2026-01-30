@@ -318,6 +318,18 @@ export class TestScheduleAgent extends Agent<Env> {
     // Intentionally empty - used for testing schedule creation
   }
 
+  // Callback that tracks execution count
+  intervalCallbackCount = 0;
+
+  intervalCallback() {
+    this.intervalCallbackCount++;
+  }
+
+  // Callback that throws an error (for testing error resilience)
+  throwingCallback() {
+    throw new Error("Intentional test error");
+  }
+
   @callable()
   async cancelScheduleById(id: string): Promise<boolean> {
     return this.cancelSchedule(id);
@@ -332,6 +344,43 @@ export class TestScheduleAgent extends Agent<Env> {
   async createSchedule(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "testCallback");
     return schedule.id;
+  }
+
+  @callable()
+  async createIntervalSchedule(intervalSeconds: number): Promise<string> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "intervalCallback"
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async createThrowingIntervalSchedule(
+    intervalSeconds: number
+  ): Promise<string> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "throwingCallback"
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async getIntervalCallbackCount(): Promise<number> {
+    return this.intervalCallbackCount;
+  }
+
+  @callable()
+  async resetIntervalCallbackCount(): Promise<void> {
+    this.intervalCallbackCount = 0;
+  }
+
+  @callable()
+  async getSchedulesByType(
+    type: "scheduled" | "delayed" | "cron" | "interval"
+  ) {
+    return this.getSchedules({ type });
   }
 }
 

@@ -10,16 +10,26 @@ import type {
 } from "../shared";
 
 function convertScheduleToScheduledItem(schedule: Schedule): ScheduledItem {
+  let trigger: string;
+  switch (schedule.type) {
+    case "delayed":
+      trigger = `in ${schedule.delayInSeconds} seconds`;
+      break;
+    case "cron":
+      trigger = `cron: ${schedule.cron}`;
+      break;
+    case "interval":
+      trigger = `every ${schedule.intervalSeconds} seconds`;
+      break;
+    default:
+      trigger = `at ${new Date(schedule.time * 1000).toISOString()}`;
+  }
+
   return {
     description: schedule.payload,
     id: schedule.id,
     nextTrigger: new Date(schedule.time * 1000).toISOString(),
-    trigger:
-      schedule.type === "delayed"
-        ? `in ${schedule.delayInSeconds} seconds`
-        : schedule.type === "cron"
-          ? `at ${schedule.cron}`
-          : `at ${new Date(schedule.time * 1000).toISOString()}`,
+    trigger,
     type: schedule.type
   };
 }

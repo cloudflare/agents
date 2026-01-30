@@ -20,8 +20,11 @@ export function Scheduler({ addToast }: SchedulerProps) {
         setScheduledItems(parsedMessage.data);
       } else if (parsedMessage.type === "run-schedule") {
         addToast(`Running schedule ${parsedMessage.data.description}`, "info");
-        if (parsedMessage.data.type !== "cron") {
-          // remove the schedule from the list
+        // Only remove one-time schedules (cron and interval repeat)
+        if (
+          parsedMessage.data.type !== "cron" &&
+          parsedMessage.data.type !== "interval"
+        ) {
           setScheduledItems((items) =>
             items.filter((item) => item.id !== parsedMessage.data.id)
           );

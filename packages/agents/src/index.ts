@@ -216,6 +216,14 @@ export type Schedule<T = string> = {
       /** Cron expression defining the schedule */
       cron: string;
     }
+  | {
+      /** Type of schedule for recurring execution at fixed intervals */
+      type: "interval";
+      /** Timestamp for the next execution */
+      time: number;
+      /** Number of seconds between executions */
+      intervalSeconds: number;
+    }
 );
 
 function getNextCronTime(cron: string) {
@@ -476,13 +484,32 @@ export class Agent<
         id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
         callback TEXT,
         payload TEXT,
-        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron')),
+        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
         time INTEGER,
         delayInSeconds INTEGER,
         cron TEXT,
+        intervalSeconds INTEGER,
+        running INTEGER DEFAULT 0,
         created_at INTEGER DEFAULT (unixepoch())
       )
     `;
+
+    // Migration: Add columns for interval scheduling (for existing agents)
+    // Use raw exec to avoid error logging through onError for expected failures
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
+      );
+    } catch {
+      // Column already exists
+    }
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
+      );
+    } catch {
+      // Column already exists
+    }
 
     // Workflow tracking table for Agent-Workflow integration
     this.sql`
@@ -1265,6 +1292,68 @@ export class Agent<
   }
 
   /**
+   * Schedule a task to run repeatedly at a fixed interval
+   * @template T Type of the payload data
+   * @param intervalSeconds Number of seconds between executions
+   * @param callback Name of the method to call
+   * @param payload Data to pass to the callback
+   * @returns Schedule object representing the scheduled task
+   */
+  async scheduleEvery<T = string>(
+    intervalSeconds: number,
+    callback: keyof this,
+    payload?: T
+  ): Promise<Schedule<T>> {
+    if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
+      throw new Error("intervalSeconds must be a positive number");
+    }
+
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+
+    if (typeof this[callback] !== "function") {
+      throw new Error(`this.${callback} is not a function`);
+    }
+
+    const id = nanoid(9);
+    const time = new Date(Date.now() + intervalSeconds * 1000);
+    const timestamp = Math.floor(time.getTime() / 1000);
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, intervalSeconds, time, running)
+      VALUES (${id}, ${callback}, ${JSON.stringify(payload)}, 'interval', ${intervalSeconds}, ${timestamp}, 0)
+    `;
+
+    await this._scheduleNextAlarm();
+
+    const schedule: Schedule<T> = {
+      callback: callback,
+      id,
+      intervalSeconds,
+      payload: payload as T,
+      time: timestamp,
+      type: "interval"
+    };
+
+    this.observability?.emit(
+      {
+        displayMessage: `Schedule ${schedule.id} created`,
+        id: nanoid(),
+        payload: {
+          callback: callback as string,
+          id: id
+        },
+        timestamp: Date.now(),
+        type: "schedule:create"
+      },
+      this.ctx
+    );
+
+    return schedule;
+  }
+
+  /**
    * Get a scheduled task by ID
    * @template T Type of the payload data
    * @param id ID of the scheduled task
@@ -1290,7 +1379,7 @@ export class Agent<
   getSchedules<T = string>(
     criteria: {
       id?: string;
-      type?: "scheduled" | "delayed" | "cron";
+      type?: "scheduled" | "delayed" | "cron" | "interval";
       timeRange?: { start?: Date; end?: Date };
     } = {}
   ): Schedule<T>[] {
@@ -1387,7 +1476,9 @@ export class Agent<
     const now = Math.floor(Date.now() / 1000);
 
     // Get all schedules that should be executed now
-    const result = this.sql<Schedule<string>>`
+    const result = this.sql<
+      Schedule<string> & { running?: number; intervalSeconds?: number }
+    >`
       SELECT * FROM cf_agents_schedules WHERE time <= ${now}
     `;
 
@@ -1398,6 +1489,21 @@ export class Agent<
           console.error(`callback ${row.callback} not found`);
           continue;
         }
+
+        // Overlap prevention for interval schedules
+        if (row.type === "interval" && row.running === 1) {
+          console.warn(
+            `Skipping interval schedule ${row.id}: previous execution still running`
+          );
+          continue;
+        }
+
+        // Mark interval as running before execution
+        if (row.type === "interval") {
+          this
+            .sql`UPDATE cf_agents_schedules SET running = 1 WHERE id = ${row.id}`;
+        }
+
         await agentContext.run(
           {
             agent: this,
@@ -1432,21 +1538,30 @@ export class Agent<
             }
           }
         );
+
+        if (this._destroyed) return;
+
         if (row.type === "cron") {
-          if (this._destroyed) return;
           // Update next execution time for cron schedules
           const nextExecutionTime = getNextCronTime(row.cron);
           const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
           this.sql`
-          UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-        `;
+            UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
+          `;
+        } else if (row.type === "interval") {
+          // Reset running flag and schedule next interval execution
+          const nextTimestamp =
+            Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
+
+          this.sql`
+            UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
+          `;
         } else {
-          if (this._destroyed) return;
           // Delete one-time schedules after execution
           this.sql`
-          DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-        `;
+            DELETE FROM cf_agents_schedules WHERE id = ${row.id}
+          `;
         }
       }
     }
