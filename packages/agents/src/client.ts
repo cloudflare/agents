@@ -78,6 +78,16 @@ export type StreamOptions = {
 };
 
 /**
+ * Options for RPC calls
+ */
+export type CallOptions = {
+  /** Timeout in milliseconds. If the call doesn't complete within this time, it will be rejected. */
+  timeout?: number;
+  /** Streaming options for handling streaming responses */
+  stream?: StreamOptions;
+};
+
+/**
  * Options for the agentFetch function
  */
 export type AgentClientFetchOptions = Omit<
@@ -268,6 +278,16 @@ export class AgentClient<State = unknown> extends PartySocket {
         }
       }
     });
+
+    // Clean up pending calls when connection closes
+    this.addEventListener("close", () => {
+      const error = new Error("Connection closed");
+      for (const pending of this._pendingCalls.values()) {
+        pending.reject(error);
+        pending.stream?.onError?.("Connection closed");
+      }
+      this._pendingCalls.clear();
+    });
   }
 
   setState(state: State) {
@@ -279,30 +299,50 @@ export class AgentClient<State = unknown> extends PartySocket {
    * Call a method on the Agent
    * @param method Name of the method to call
    * @param args Arguments to pass to the method
-   * @param streamOptions Options for handling streaming responses
+   * @param options Options for the call (timeout, streaming)
    * @returns Promise that resolves with the method's return value
    */
   call<T extends SerializableReturnValue>(
     method: string,
     args?: SerializableValue[],
-    streamOptions?: StreamOptions
+    options?: CallOptions
   ): Promise<T>;
   call<T = unknown>(
     method: string,
     args?: unknown[],
-    streamOptions?: StreamOptions
+    options?: CallOptions
   ): Promise<T>;
   async call<T>(
     method: string,
     args: unknown[] = [],
-    streamOptions?: StreamOptions
+    options?: CallOptions
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const id = Math.random().toString(36).slice(2);
+      const id = crypto.randomUUID();
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+      // Set up timeout if specified
+      if (options?.timeout) {
+        timeoutId = setTimeout(() => {
+          this._pendingCalls.delete(id);
+          reject(
+            new Error(
+              `RPC call to ${method} timed out after ${options.timeout}ms`
+            )
+          );
+        }, options.timeout);
+      }
+
       this._pendingCalls.set(id, {
-        reject,
-        resolve: (value: unknown) => resolve(value as T),
-        stream: streamOptions,
+        reject: (e: Error) => {
+          if (timeoutId) clearTimeout(timeoutId);
+          reject(e);
+        },
+        resolve: (value: unknown) => {
+          if (timeoutId) clearTimeout(timeoutId);
+          resolve(value as T);
+        },
+        stream: options?.stream,
         type: null as T
       });
 

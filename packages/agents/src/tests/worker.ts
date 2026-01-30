@@ -19,6 +19,7 @@ import {
   type WorkflowStatus,
   type WorkflowInfo
 } from "../index.ts";
+import type { StreamingResponse } from "../index.ts";
 import type { MCPClientConnection } from "../mcp/client-connection";
 
 // Re-export test workflows for wrangler
@@ -38,6 +39,7 @@ export type Env = {
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
+  TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
@@ -1042,6 +1044,91 @@ export class TestNoIdentityAgent extends Agent<Env, TestState> {
 
   updateState(state: TestState) {
     this.setState(state);
+  }
+}
+
+// Test Agent for @callable decorator tests
+export class TestCallableAgent extends Agent<Env, { value: number }> {
+  observability = undefined;
+  initialState = { value: 0 };
+
+  // Basic sync method
+  @callable()
+  add(a: number, b: number): number {
+    return a + b;
+  }
+
+  // Async method
+  @callable()
+  async asyncMethod(delayMs: number): Promise<string> {
+    await new Promise((r) => setTimeout(r, delayMs));
+    return "done";
+  }
+
+  // Method that throws an error
+  @callable()
+  throwError(message: string): never {
+    throw new Error(message);
+  }
+
+  // Void return type
+  @callable()
+  voidMethod(): void {
+    // does nothing, returns undefined
+  }
+
+  // Returns null
+  @callable()
+  returnNull(): null {
+    return null;
+  }
+
+  // Returns undefined
+  @callable()
+  returnUndefined(): undefined {
+    return undefined;
+  }
+
+  // Streaming method - sync
+  @callable({ streaming: true })
+  streamNumbers(stream: StreamingResponse, count: number) {
+    for (let i = 0; i < count; i++) {
+      stream.send(i);
+    }
+    stream.end(count);
+  }
+
+  // Streaming method - async with delays
+  @callable({ streaming: true })
+  async streamWithDelay(
+    stream: StreamingResponse,
+    chunks: string[],
+    delayMs: number
+  ) {
+    for (const chunk of chunks) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      stream.send(chunk);
+    }
+    stream.end("complete");
+  }
+
+  // Streaming method that throws after sending a chunk
+  @callable({ streaming: true })
+  streamError(stream: StreamingResponse) {
+    stream.send("chunk1");
+    throw new Error("Stream failed");
+  }
+
+  // Streaming method that uses stream.error() to send error
+  @callable({ streaming: true, description: "Sends chunk then graceful error" })
+  streamGracefulError(stream: StreamingResponse) {
+    stream.send("chunk1");
+    stream.error("Graceful error");
+  }
+
+  // NOT decorated with @callable - should fail when called via RPC
+  privateMethod(): string {
+    return "secret";
   }
 }
 

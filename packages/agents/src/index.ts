@@ -123,7 +123,7 @@ export type CallableMetadata = {
   streaming?: boolean;
 };
 
-const callableMetadata = new Map<Function, CallableMetadata>();
+const callableMetadata = new WeakMap<Function, CallableMetadata>();
 
 /**
  * Error class for SQL execution failures, containing the query that failed
@@ -683,6 +683,21 @@ export class Agent<
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
                 const stream = new StreamingResponse(connection, id);
+
+                this.observability?.emit(
+                  {
+                    displayMessage: `RPC streaming call to ${method}`,
+                    id: nanoid(),
+                    payload: {
+                      method,
+                      streaming: true
+                    },
+                    timestamp: Date.now(),
+                    type: "rpc"
+                  },
+                  this.ctx
+                );
+
                 await methodFn.apply(this, [stream, ...args]);
                 return;
               }
@@ -1683,11 +1698,35 @@ export class Agent<
   }
 
   /**
-   * Get all methods marked as callable on this Agent
-   * @returns A map of method names to their metadata
+   * Check if a method is callable
+   * @param method The method name to check
+   * @returns True if the method is marked as callable
    */
   private _isCallable(method: string): boolean {
     return callableMetadata.has(this[method as keyof this] as Function);
+  }
+
+  /**
+   * Get all methods marked as callable on this Agent
+   * @returns A map of method names to their metadata
+   */
+  getCallableMethods(): Map<string, CallableMetadata> {
+    const result = new Map<string, CallableMetadata>();
+    const prototype = Object.getPrototypeOf(this);
+
+    for (const name of Object.getOwnPropertyNames(prototype)) {
+      if (name === "constructor") continue;
+
+      const fn = this[name as keyof this];
+      if (typeof fn === "function") {
+        const meta = callableMetadata.get(fn as Function);
+        if (meta) {
+          result.set(name, meta);
+        }
+      }
+    }
+
+    return result;
   }
 
   // ==========================================
@@ -3030,6 +3069,24 @@ export class StreamingResponse {
       id: this._id,
       result: finalChunk,
       success: true,
+      type: MessageType.RPC
+    };
+    this._connection.send(JSON.stringify(response));
+  }
+
+  /**
+   * Send an error to the client and close the stream
+   * @param message Error message to send
+   */
+  error(message: string) {
+    if (this._closed) {
+      throw new Error("StreamingResponse is already closed");
+    }
+    this._closed = true;
+    const response: RPCResponse = {
+      error: message,
+      id: this._id,
+      success: false,
       type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));

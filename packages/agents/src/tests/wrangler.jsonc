@@ -66,6 +66,10 @@
       {
         "class_name": "TestNoIdentityAgent",
         "name": "TestNoIdentityAgent"
+      },
+      {
+        "class_name": "TestCallableAgent",
+        "name": "TestCallableAgent"
       }
     ]
   },
@@ -99,7 +103,8 @@
         "TestAddMcpServerAgent",
         "TestStateAgent",
         "TestStateAgentNoInitial",
-        "TestNoIdentityAgent"
+        "TestNoIdentityAgent",
+        "TestCallableAgent"
       ],
       "tag": "v1"
     }
