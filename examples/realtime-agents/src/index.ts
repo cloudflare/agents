@@ -19,6 +19,9 @@ export class RealtimeVoiceAgent extends RealtimeAgent {
     const rtk = new RealtimeKitTransport({
       meetingId: "bbb9e53e-c839-4c84-b0cd-b8ef18ed8da2"
     });
+
+    // The keys for Elevenlabs and Deepgram are stored inside the AIGateway BYOK.
+    // You can also pass the keys as parameters to the constructors if needed.
     const tts = new ElevenLabsTTS();
     const stt = new DeepgramSTT();
 
