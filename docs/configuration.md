@@ -4,7 +4,7 @@ This guide covers everything you need to configure agents for local development 
 
 ## wrangler.jsonc
 
-The `wrangler.jsonc` (or `wrangler.toml`) file configures your Cloudflare Worker and its bindings. Here's a complete example for an agents project:
+The `wrangler.jsonc` file configures your Cloudflare Worker and its bindings. Here's a complete example for an agents project:
 
 ```jsonc
 {
@@ -105,13 +105,12 @@ Migrations tell Cloudflare how to set up storage for your Durable Objects:
 ]
 ```
 
-| Field                | Description                                                          |
-| -------------------- | -------------------------------------------------------------------- |
-| `tag`                | Version identifier (e.g., "v1", "v2"). Must be unique and sequential |
-| `new_sqlite_classes` | Agent classes that use SQLite storage (state persistence)            |
-| `new_classes`        | Classes without SQLite (rare for agents)                             |
-| `deleted_classes`    | Classes being removed                                                |
-| `renamed_classes`    | Classes being renamed (see [Migrations](#migrations-1) below)        |
+| Field                | Description                                                   |
+| -------------------- | ------------------------------------------------------------- |
+| `tag`                | Version identifier (e.g., "v1", "v2"). Must be unique         |
+| `new_sqlite_classes` | Agent classes that use SQLite storage (state persistence)     |
+| `deleted_classes`    | Classes being removed                                         |
+| `renamed_classes`    | Classes being renamed (see [Migrations](#migrations-1) below) |
 
 #### assets
 
@@ -129,11 +128,14 @@ With a binding, you can serve assets programmatically:
 ```typescript
 export default {
   async fetch(request: Request, env: Env) {
+    // static assets are served by the worker automatically by default
+
+    // route the request to the appropriate agent
     const agentResponse = await routeAgentRequest(request, env);
     if (agentResponse) return agentResponse;
 
-    // Fall back to static assets
-    return env.ASSETS.fetch(request);
+    // add your own routing logic here if you want to handle requests that are not for agents
+    return new Response("Not found", { status: 404 });
   }
 };
 ```
@@ -145,7 +147,7 @@ For Workers AI integration:
 ```jsonc
 "ai": {
   "binding": "AI",
-  "remote": true  // Optional: use remote inference (for local dev)
+  "remote": true  // Mandatory: use remote inference (for local dev)
 }
 ```
 
@@ -242,12 +244,12 @@ Add a script for easy regeneration:
 
 ## Environment Variables & Secrets
 
-### Local Development (.dev.vars)
+### Local Development (.env)
 
-Create a `.dev.vars` file for local secrets (add to `.gitignore`):
+Create a `.env` file for local secrets (add to `.gitignore`):
 
 ```bash
-# .dev.vars
+# .env
 OPENAI_API_KEY=sk-...
 GITHUB_WEBHOOK_SECRET=whsec_...
 DATABASE_URL=postgres://...
@@ -258,7 +260,7 @@ Access in your agent:
 ```typescript
 class MyAgent extends Agent<Env> {
   async onStart() {
-    const apiKey = this.env.OPENAI_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
   }
 }
 ```
@@ -296,13 +298,13 @@ For non-sensitive configuration, use `vars` in wrangler.jsonc:
 Note: All values must be strings. Parse numbers/booleans in code:
 
 ```typescript
-const maxRetries = parseInt(this.env.MAX_RETRIES, 10);
-const debugMode = this.env.DEBUG_MODE === "true";
+const maxRetries = parseInt(process.env.MAX_RETRIES, 10);
+const debugMode = process.env.DEBUG_MODE === "true";
 ```
 
 ### Environment-Specific Variables
 
-Use `[env.{name}]` sections for different environments:
+Use `[env.{name}]` sections for different environments (e.g. staging, production):
 
 ```jsonc
 {
@@ -337,11 +339,9 @@ wrangler deploy --env production
 
 ### Starting the Dev Server
 
-With Vite (recommended for frontend apps):
+With Vite (recommended for full stack apps):
 
 ```bash
-npm run dev
-# or
 npx vite dev
 ```
 
@@ -388,14 +388,6 @@ ls .wrangler/state/v3/d1/
 
 # Open with sqlite3
 sqlite3 .wrangler/state/v3/d1/miniflare-D1DatabaseObject/*.sqlite
-```
-
-### Remote Development
-
-To develop against production Durable Objects (careful!):
-
-```bash
-npx wrangler dev --remote
 ```
 
 ## Dashboard Setup
@@ -486,7 +478,12 @@ Or use a custom domain (simpler):
 
 ```jsonc
 {
-  "custom_domain": "agents.example.com"
+  "routes": [
+    {
+      "pattern": "agents.example.com",
+      "custom_domain": true
+    }
+  ]
 }
 ```
 
@@ -658,68 +655,6 @@ Use `deleted_classes`:
 3. **Test locally first** - Migrations run on deploy
 4. **Back up production data** - Before renaming or deleting
 
-## Common Configurations
-
-### Full-Stack App with AI
-
-```jsonc
-{
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ai-chat-app",
-  "main": "src/server.ts",
-  "compatibility_date": "2025-01-01",
-  "compatibility_flags": ["nodejs_compat"],
-
-  "assets": {
-    "directory": "dist"
-  },
-
-  "durable_objects": {
-    "bindings": [{ "name": "ChatAgent", "class_name": "ChatAgent" }]
-  },
-
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChatAgent"] }],
-
-  "ai": {
-    "binding": "AI"
-  }
-}
-```
-
-### Webhook Handler
-
-```jsonc
-{
-  "name": "webhook-handler",
-  "main": "src/server.ts",
-  "compatibility_date": "2025-01-01",
-  "compatibility_flags": ["nodejs_compat"],
-
-  "durable_objects": {
-    "bindings": [{ "name": "WebhookAgent", "class_name": "WebhookAgent" }]
-  },
-
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WebhookAgent"] }]
-}
-```
-
-### MCP Server
-
-```jsonc
-{
-  "name": "mcp-server",
-  "main": "src/server.ts",
-  "compatibility_date": "2025-01-01",
-  "compatibility_flags": ["nodejs_compat"],
-
-  "durable_objects": {
-    "bindings": [{ "name": "McpAgent", "class_name": "MyMcpAgent" }]
-  },
-
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["MyMcpAgent"] }]
-}
-```
-
 ## Troubleshooting
 
 ### "No such Durable Object class"
@@ -745,10 +680,10 @@ npx wrangler types env.d.ts --include-runtime false
 
 ### Secrets not loading locally
 
-Check that `.dev.vars` exists and contains the variable:
+Check that `.env` exists and contains the variable:
 
 ```bash
-cat .dev.vars
+cat .env
 # Should show: MY_SECRET=value
 ```
 
@@ -768,16 +703,4 @@ Migration tags must be unique. If you see conflicts:
   { "tag": "v1", "new_sqlite_classes": ["A"] },
   { "tag": "v2", "new_sqlite_classes": ["B"] }
 ]
-```
-
-### State not persisting between deploys
-
-Make sure you're using `setState()`, not direct mutation:
-
-```typescript
-// ✅ Correct
-this.setState({ count: this.state.count + 1 });
-
-// ❌ Wrong - won't persist
-this.state.count += 1;
 ```
