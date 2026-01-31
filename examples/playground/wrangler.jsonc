@@ -3,10 +3,7 @@
   "name": "playground",
   "main": "src/server.ts",
   "compatibility_date": "2025-02-19",
-  "compatibility_flags": [
-    "nodejs_compat",
-    "nodejs_compat_populate_process_env"
-  ],
+  "compatibility_flags": ["nodejs_compat"],
   "ai": {
     "binding": "AI",
     "remote": true

@@ -2,8 +2,7 @@ name = "human-in-the-loop"
 main = "./src/server.ts"
 compatibility_date = "2025-02-21"
 compatibility_flags = [
-    "nodejs_compat",
-    "nodejs_compat_populate_process_env",
+    "nodejs_compat"
   ]
 
 assets = { directory = "public" }

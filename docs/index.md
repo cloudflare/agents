@@ -21,7 +21,7 @@
 ## Communication Channels
 
 - [Email Routing](./email.md) - Receiving and responding to emails
-- TODO: [Webhooks](./webhooks.md) - Receiving and sending webhook events
+- [Webhooks](./webhooks.md) - Receiving and sending webhook events
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)
 - TODO: [Voice & Audio](./voice-audio.md) - Voice calls, audio streaming, and speech-to-text
 - TODO: [Messengers](./messengers.md) - Slack, Discord, Telegram, and other chat platforms
@@ -69,7 +69,7 @@
 
 - TODO: [SQL API](./sql.md) - Using `this.sql` for direct database queries
 - TODO: [Memory & Persistence](./memory.md) - Long-term storage patterns
-- TODO: [Configuration](./configuration.md) - wrangler.jsonc setup and bindings
+- [Configuration](./configuration.md) - wrangler.jsonc setup, types, secrets, and deployment
 
 ## Migration Guides
 

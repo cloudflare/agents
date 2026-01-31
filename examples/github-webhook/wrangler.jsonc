@@ -7,17 +7,17 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "TicTacToe",
-        "name": "TicTacToe"
+        "class_name": "RepoAgent",
+        "name": "RepoAgent"
       }
     ]
   },
   "main": "src/server.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["TicTacToe"],
+      "new_sqlite_classes": ["RepoAgent"],
       "tag": "v1"
     }
   ],
-  "name": "tictactoe"
+  "name": "github-webhook"
 }
