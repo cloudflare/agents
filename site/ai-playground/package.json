@@ -12,19 +12,19 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.31",
+    "@ai-sdk/anthropic": "^3.0.33",
     "@ai-sdk/google": "^3.0.18",
     "@ai-sdk/openai": "^3.0.23",
-    "ai": "^6.0.62",
+    "ai": "^6.0.64",
     "ai-gateway-provider": "^3.1.1",
-    "downshift": "^9.0.13",
+    "downshift": "^9.2.0",
     "nanoid": "^5.1.6",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hotkeys-hook": "^5.2.3",
     "react-textarea-autosize": "^8.5.9",
     "streamdown": "^2.1.0",
-    "workers-ai-provider": "^3.0.3",
+    "workers-ai-provider": "^3.0.4",
     "zod": "^4.3.6"
   },
   "keywords": []

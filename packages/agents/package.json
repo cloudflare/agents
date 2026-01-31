@@ -37,11 +37,11 @@
   },
   "devDependencies": {
     "@ai-sdk/openai": "^3.0.23",
-    "@ai-sdk/react": "^3.0.64",
+    "@ai-sdk/react": "^3.0.66",
     "@cloudflare/workers-oauth-provider": "^0.2.2",
     "@types/react": "^19.2.10",
     "@types/yargs": "^17.0.35",
-    "ai": "^6.0.62",
+    "ai": "^6.0.64",
     "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
     "x402": "^1.1.0",
