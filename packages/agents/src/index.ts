@@ -1423,7 +1423,9 @@ export class Agent<
 
       return schedule;
     }
-    throw new Error("Invalid schedule type");
+    throw new Error(
+      `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
+    );
   }
 
   /**
