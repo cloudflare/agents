@@ -30,7 +30,9 @@ export class MyAgent extends Agent {
     if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {
       const mcpServer = (await request.json()) as { url: string; name: string };
       // Use HOST if provided, otherwise it will be derived from the request
-      await this.addMcpServer(mcpServer.name, mcpServer.url, this.env.HOST);
+      await this.addMcpServer(mcpServer.name, mcpServer.url, {
+        callbackHost: this.env.HOST
+      });
       return new Response("Ok", { status: 200 });
     }
 

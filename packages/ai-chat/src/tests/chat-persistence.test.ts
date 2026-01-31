@@ -4,6 +4,7 @@ import worker from "./worker";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
+import { getAgentByName } from "agents";
 
 // Type helper for tool call parts - extracts ToolUIPart from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -198,7 +199,7 @@ describe("Chat Agent Persistence", () => {
 
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     await agentStub.testPersistToolCall("msg-tool-1", "getLocalTime");
 
@@ -256,7 +257,7 @@ describe("Chat Agent Persistence", () => {
 
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     const userMessage: ChatMessage = {
       id: "user-1",
@@ -362,7 +363,7 @@ describe("Chat Agent Persistence", () => {
 
     await ctx.waitUntil(Promise.resolve());
 
-    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     const userMessage: ChatMessage = {
       id: "user-1",

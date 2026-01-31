@@ -123,7 +123,7 @@ export type CallableMetadata = {
   streaming?: boolean;
 };
 
-const callableMetadata = new Map<Function, CallableMetadata>();
+const callableMetadata = new WeakMap<Function, CallableMetadata>();
 
 /**
  * Error class for SQL execution failures, containing the query that failed
@@ -172,7 +172,7 @@ export const unstable_callable = (metadata: CallableMetadata = {}) => {
       "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
     );
   }
-  callable(metadata);
+  return callable(metadata);
 };
 
 export type QueueItem<T = string> = {
@@ -216,6 +216,14 @@ export type Schedule<T = string> = {
       /** Cron expression defining the schedule */
       cron: string;
     }
+  | {
+      /** Type of schedule for recurring execution at fixed intervals */
+      type: "interval";
+      /** Timestamp for the next execution */
+      time: number;
+      /** Number of seconds between executions */
+      intervalSeconds: number;
+    }
 );
 
 function getNextCronTime(cron: string) {
@@ -253,10 +261,53 @@ export type MCPServer = {
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
+
+/**
+ * Options for adding an MCP server
+ */
+export type AddMcpServerOptions = {
+  /** OAuth callback host (auto-derived from request if omitted) */
+  callbackHost?: string;
+  /** Agents routing prefix (default: "agents") */
+  agentsPrefix?: string;
+  /** MCP client options */
+  client?: ConstructorParameters<typeof Client>[1];
+  /** Transport options */
+  transport?: {
+    /** Custom headers for authentication (e.g., bearer tokens, CF Access) */
+    headers?: HeadersInit;
+    /** Transport type: "sse", "streamable-http", or "auto" (default) */
+    type?: TransportType;
+  };
+};
+
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
+
+/**
+ * Default options for Agent configuration.
+ * Child classes can override specific options without spreading.
+ */
+/**
+ * Default options for Agent configuration.
+ * Child classes can override specific options without spreading.
+ */
+export const DEFAULT_AGENT_STATIC_OPTIONS = {
+  /** Whether the Agent should hibernate when inactive */
+  hibernate: true,
+  /** Whether to send identity (name, agent) to clients on connect */
+  sendIdentityOnConnect: true,
+  /**
+   * Timeout in seconds before a running interval schedule is considered "hung"
+   * and force-reset. Increase this if you have callbacks that legitimately
+   * take longer than 30 seconds.
+   */
+  hungScheduleTimeoutSeconds: 30
+};
+
+export type AgentStaticOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
 
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
@@ -379,7 +430,21 @@ export class Agent<
     ) {
       const state = result[0]?.state as string; // could be null?
 
-      this._state = JSON.parse(state);
+      try {
+        this._state = JSON.parse(state);
+      } catch (e) {
+        console.error(
+          "Failed to parse stored state, falling back to initialState:",
+          e
+        );
+        if (this.initialState !== DEFAULT_STATE) {
+          this._state = this.initialState;
+          // Persist the fixed state to prevent future parse errors
+          this.setState(this.initialState);
+        } else {
+          return undefined as State;
+        }
+      }
       return this._state;
     }
 
@@ -397,12 +462,39 @@ export class Agent<
   }
 
   /**
-   * Agent configuration options
+   * Server configuration options (hibernate).
+   * Inherited from partyserver.
    */
   static options = {
-    /** Whether the Agent should hibernate when inactive */
-    hibernate: true // default to hibernate
+    hibernate: true
   };
+
+  /**
+   * Agent-specific configuration options.
+   * Override in subclasses - only specify what you want to change.
+   * @example
+   * class SecureAgent extends Agent {
+   *   static agentOptions = { sendIdentityOnConnect: false };
+   * }
+   */
+  static agentOptions: Partial<Omit<AgentStaticOptions, "hibernate">> = {};
+
+  /**
+   * Resolved options (merges defaults with subclass overrides)
+   */
+  private get _resolvedOptions(): AgentStaticOptions {
+    const ctor = this.constructor as typeof Agent;
+    return {
+      hibernate:
+        ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
+      sendIdentityOnConnect:
+        ctor.agentOptions?.sendIdentityOnConnect ??
+        DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
+      hungScheduleTimeoutSeconds:
+        ctor.agentOptions?.hungScheduleTimeoutSeconds ??
+        DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds
+    };
+  }
 
   /**
    * The observability implementation to use for the Agent
@@ -476,13 +568,39 @@ export class Agent<
         id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
         callback TEXT,
         payload TEXT,
-        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron')),
+        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
         time INTEGER,
         delayInSeconds INTEGER,
         cron TEXT,
+        intervalSeconds INTEGER,
+        running INTEGER DEFAULT 0,
         created_at INTEGER DEFAULT (unixepoch())
       )
     `;
+
+    // Migration: Add columns for interval scheduling (for existing agents)
+    // Use raw exec to avoid error logging through onError for expected failures
+    const addColumnIfNotExists = (sql: string) => {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch (e) {
+        // Only ignore "duplicate column" errors, re-throw unexpected errors
+        const message = e instanceof Error ? e.message : String(e);
+        if (!message.toLowerCase().includes("duplicate column")) {
+          throw e;
+        }
+      }
+    };
+
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
+    );
 
     // Workflow tracking table for Agent-Workflow integration
     this.sql`
@@ -572,7 +690,7 @@ export class Agent<
           }
 
           if (isStateUpdateMessage(parsed)) {
-            this._setStateInternal(parsed.state as State, connection);
+            await this._setStateInternal(parsed.state as State, connection);
             return;
           }
 
@@ -595,7 +713,31 @@ export class Agent<
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
                 const stream = new StreamingResponse(connection, id);
-                await methodFn.apply(this, [stream, ...args]);
+
+                this.observability?.emit(
+                  {
+                    displayMessage: `RPC streaming call to ${method}`,
+                    id: nanoid(),
+                    payload: {
+                      method,
+                      streaming: true
+                    },
+                    timestamp: Date.now(),
+                    type: "rpc"
+                  },
+                  this.ctx
+                );
+
+                try {
+                  await methodFn.apply(this, [stream, ...args]);
+                } catch (err) {
+                  // Auto-close stream with error if method throws before closing
+                  if (!stream.isClosed) {
+                    stream.error(
+                      err instanceof Error ? err.message : String(err)
+                    );
+                  }
+                }
                 return;
               }
 
@@ -651,6 +793,18 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
+          // Send agent identity first so client knows which instance it's connected to
+          // Can be disabled via static options for security-sensitive instance names
+          if (this._resolvedOptions.sendIdentityOnConnect) {
+            connection.send(
+              JSON.stringify({
+                name: this.name,
+                agent: camelCaseToKebabCase(this._ParentClass.name),
+                type: MessageType.CF_AGENT_IDENTITY
+              })
+            );
+          }
+
           if (this.state) {
             connection.send(
               JSON.stringify({
@@ -758,7 +912,7 @@ export class Agent<
     }
   }
 
-  private _setStateInternal(
+  private async _setStateInternal(
     state: State,
     source: Connection | "server" = "server"
   ) {
@@ -771,14 +925,10 @@ export class Agent<
     INSERT OR REPLACE INTO cf_agents_state (id, state)
     VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
   `;
-    this.broadcast(
-      JSON.stringify({
-        state: state,
-        type: MessageType.CF_AGENT_STATE
-      }),
-      source !== "server" ? [source.id] : []
-    );
-    return this._tryCatch(() => {
+
+    // Call onStateUpdate lifecycle hook before broadcasting
+    // This ensures we don't broadcast if validation fails
+    const result = await this._tryCatch(() => {
       const { connection, request, email } = agentContext.getStore() || {};
       return agentContext.run(
         { agent: this, connection, request, email },
@@ -797,14 +947,26 @@ export class Agent<
         }
       );
     });
+
+    // Broadcast state to connected clients after onStateUpdate succeeds
+    this.broadcast(
+      JSON.stringify({
+        state: state,
+        type: MessageType.CF_AGENT_STATE
+      }),
+      source !== "server" ? [source.id] : []
+    );
+
+    return result;
   }
 
   /**
    * Update the Agent's state
    * @param state New state to set
+   * @returns Promise that resolves after state is updated and broadcast
    */
-  setState(state: State) {
-    this._setStateInternal(state, "server");
+  setState(state: State): Promise<void> {
+    return this._setStateInternal(state, "server");
   }
 
   /**
@@ -1267,6 +1429,68 @@ export class Agent<
   }
 
   /**
+   * Schedule a task to run repeatedly at a fixed interval
+   * @template T Type of the payload data
+   * @param intervalSeconds Number of seconds between executions
+   * @param callback Name of the method to call
+   * @param payload Data to pass to the callback
+   * @returns Schedule object representing the scheduled task
+   */
+  async scheduleEvery<T = string>(
+    intervalSeconds: number,
+    callback: keyof this,
+    payload?: T
+  ): Promise<Schedule<T>> {
+    if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
+      throw new Error("intervalSeconds must be a positive number");
+    }
+
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+
+    if (typeof this[callback] !== "function") {
+      throw new Error(`this.${callback} is not a function`);
+    }
+
+    const id = nanoid(9);
+    const time = new Date(Date.now() + intervalSeconds * 1000);
+    const timestamp = Math.floor(time.getTime() / 1000);
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, intervalSeconds, time, running)
+      VALUES (${id}, ${callback}, ${JSON.stringify(payload)}, 'interval', ${intervalSeconds}, ${timestamp}, 0)
+    `;
+
+    await this._scheduleNextAlarm();
+
+    const schedule: Schedule<T> = {
+      callback: callback,
+      id,
+      intervalSeconds,
+      payload: payload as T,
+      time: timestamp,
+      type: "interval"
+    };
+
+    this.observability?.emit(
+      {
+        displayMessage: `Schedule ${schedule.id} created`,
+        id: nanoid(),
+        payload: {
+          callback: callback as string,
+          id: id
+        },
+        timestamp: Date.now(),
+        type: "schedule:create"
+      },
+      this.ctx
+    );
+
+    return schedule;
+  }
+
+  /**
    * Get a scheduled task by ID
    * @template T Type of the payload data
    * @param id ID of the scheduled task
@@ -1292,7 +1516,7 @@ export class Agent<
   getSchedules<T = string>(
     criteria: {
       id?: string;
-      type?: "scheduled" | "delayed" | "cron";
+      type?: "scheduled" | "delayed" | "cron" | "interval";
       timeRange?: { start?: Date; end?: Date };
     } = {}
   ): Schedule<T>[] {
@@ -1389,7 +1613,9 @@ export class Agent<
     const now = Math.floor(Date.now() / 1000);
 
     // Get all schedules that should be executed now
-    const result = this.sql<Schedule<string>>`
+    const result = this.sql<
+      Schedule<string> & { running?: number; intervalSeconds?: number }
+    >`
       SELECT * FROM cf_agents_schedules WHERE time <= ${now}
     `;
 
@@ -1400,6 +1626,34 @@ export class Agent<
           console.error(`callback ${row.callback} not found`);
           continue;
         }
+
+        // Overlap prevention for interval schedules with hung callback detection
+        if (row.type === "interval" && row.running === 1) {
+          const executionStartedAt =
+            (row as { execution_started_at?: number }).execution_started_at ??
+            0;
+          const hungTimeoutSeconds =
+            this._resolvedOptions.hungScheduleTimeoutSeconds;
+          const elapsedSeconds = now - executionStartedAt;
+
+          if (elapsedSeconds < hungTimeoutSeconds) {
+            console.warn(
+              `Skipping interval schedule ${row.id}: previous execution still running`
+            );
+            continue;
+          }
+          // Previous execution appears hung, force reset and re-execute
+          console.warn(
+            `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
+          );
+        }
+
+        // Mark interval as running before execution
+        if (row.type === "interval") {
+          this
+            .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
+        }
+
         await agentContext.run(
           {
             agent: this,
@@ -1434,21 +1688,30 @@ export class Agent<
             }
           }
         );
+
+        if (this._destroyed) return;
+
         if (row.type === "cron") {
-          if (this._destroyed) return;
           // Update next execution time for cron schedules
           const nextExecutionTime = getNextCronTime(row.cron);
           const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
           this.sql`
-          UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-        `;
+            UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
+          `;
+        } else if (row.type === "interval") {
+          // Reset running flag and schedule next interval execution
+          const nextTimestamp =
+            Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
+
+          this.sql`
+            UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
+          `;
         } else {
-          if (this._destroyed) return;
           // Delete one-time schedules after execution
           this.sql`
-          DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-        `;
+            DELETE FROM cf_agents_schedules WHERE id = ${row.id}
+          `;
         }
       }
     }
@@ -1497,11 +1760,49 @@ export class Agent<
   }
 
   /**
-   * Get all methods marked as callable on this Agent
-   * @returns A map of method names to their metadata
+   * Check if a method is callable
+   * @param method The method name to check
+   * @returns True if the method is marked as callable
    */
   private _isCallable(method: string): boolean {
     return callableMetadata.has(this[method as keyof this] as Function);
+  }
+
+  /**
+   * Get all methods marked as callable on this Agent
+   * @returns A map of method names to their metadata
+   */
+  getCallableMethods(): Map<string, CallableMetadata> {
+    const result = new Map<string, CallableMetadata>();
+
+    // Walk the entire prototype chain to find callable methods from parent classes
+    let prototype = Object.getPrototypeOf(this);
+    while (prototype && prototype !== Object.prototype) {
+      for (const name of Object.getOwnPropertyNames(prototype)) {
+        if (name === "constructor") continue;
+        // Don't override child class methods (first one wins)
+        if (result.has(name)) continue;
+
+        try {
+          const fn = prototype[name];
+          if (typeof fn === "function") {
+            const meta = callableMetadata.get(fn as Function);
+            if (meta) {
+              result.set(name, meta);
+            }
+          }
+        } catch (e) {
+          // Skip properties that can't be accessed (e.g., private members with #)
+          // These throw TypeError when accessed
+          if (!(e instanceof TypeError)) {
+            throw e;
+          }
+        }
+      }
+      prototype = Object.getPrototypeOf(prototype);
+    }
+
+    return result;
   }
 
   // ==========================================
@@ -2231,19 +2532,33 @@ export class Agent<
   /**
    * Connect to a new MCP Server
    *
+   * @example
+   * // Simple usage
+   * await this.addMcpServer("github", "https://mcp.github.com");
+   *
+   * @example
+   * // With options (preferred for custom headers, transport, etc.)
+   * await this.addMcpServer("github", "https://mcp.github.com", {
+   *   transport: { headers: { "Authorization": "Bearer ..." } }
+   * });
+   *
+   * @example
+   * // Legacy 5-parameter signature (still supported)
+   * await this.addMcpServer("github", url, callbackHost, agentsPrefix, options);
+   *
    * @param serverName Name of the MCP server
-   * @param url MCP Server SSE URL
-   * @param callbackHost Base host for the agent, used for the redirect URI. If not provided, will be derived from the current request.
-   * @param agentsPrefix agents routing prefix if not using `agents`
-   * @param options MCP client and transport options
+   * @param url MCP Server URL
+   * @param callbackHostOrOptions Options object, or callback host string (legacy)
+   * @param agentsPrefix agents routing prefix if not using `agents` (legacy)
+   * @param options MCP client and transport options (legacy)
    * @returns Server id and state - either "authenticating" with authUrl, or "ready"
    * @throws If connection or discovery fails
    */
   async addMcpServer(
     serverName: string,
     url: string,
-    callbackHost?: string,
-    agentsPrefix = "agents",
+    callbackHostOrOptions?: string | AddMcpServerOptions,
+    agentsPrefix?: string,
     options?: {
       client?: ConstructorParameters<typeof Client>[1];
       transport?: {
@@ -2263,8 +2578,38 @@ export class Agent<
         authUrl?: undefined;
       }
   > {
+    // Normalize arguments - support both new options API and legacy positional API
+    let resolvedCallbackHost: string | undefined;
+    let resolvedAgentsPrefix: string;
+    let resolvedOptions:
+      | {
+          client?: ConstructorParameters<typeof Client>[1];
+          transport?: {
+            headers?: HeadersInit;
+            type?: TransportType;
+          };
+        }
+      | undefined;
+
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null
+    ) {
+      // New API: options object as third parameter
+      resolvedCallbackHost = callbackHostOrOptions.callbackHost;
+      resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
+      resolvedOptions = {
+        client: callbackHostOrOptions.client,
+        transport: callbackHostOrOptions.transport
+      };
+    } else {
+      // Legacy API: positional parameters
+      resolvedCallbackHost = callbackHostOrOptions;
+      resolvedAgentsPrefix = agentsPrefix ?? "agents";
+      resolvedOptions = options;
+    }
+
     // If callbackHost is not provided, derive it from the current request
-    let resolvedCallbackHost = callbackHost;
     if (!resolvedCallbackHost) {
       const { request } = getCurrentAgent();
       if (!request) {
@@ -2278,7 +2623,7 @@ export class Agent<
       resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
     }
 
-    const callbackUrl = `${resolvedCallbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    const callbackUrl = `${resolvedCallbackHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
     // TODO: make zod/ai sdk more performant and remove this
     // Late initialization of jsonSchemaFn (needed for getAITools)
@@ -2294,22 +2639,23 @@ export class Agent<
     authProvider.serverId = id;
 
     // Use the transport type specified in options, or default to "auto"
-    const transportType: TransportType = options?.transport?.type ?? "auto";
+    const transportType: TransportType =
+      resolvedOptions?.transport?.type ?? "auto";
 
     // allows passing through transport headers if necessary
     // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
     let headerTransportOpts: SSEClientTransportOptions = {};
-    if (options?.transport?.headers) {
+    if (resolvedOptions?.transport?.headers) {
       headerTransportOpts = {
         eventSourceInit: {
           fetch: (url, init) =>
             fetch(url, {
               ...init,
-              headers: options?.transport?.headers
+              headers: resolvedOptions?.transport?.headers
             })
         },
         requestInit: {
-          headers: options?.transport?.headers
+          headers: resolvedOptions?.transport?.headers
         }
       };
     }
@@ -2319,7 +2665,7 @@ export class Agent<
       url,
       name: serverName,
       callbackUrl,
-      client: options?.client,
+      client: resolvedOptions?.client,
       transport: {
         ...headerTransportOpts,
         authProvider,
@@ -2768,12 +3114,20 @@ export class StreamingResponse {
   }
 
   /**
+   * Whether the stream has been closed (via end() or error())
+   */
+  get isClosed(): boolean {
+    return this._closed;
+  }
+
+  /**
    * Send a chunk of data to the client
    * @param chunk The data to send
+   * @returns false if stream is already closed (no-op), true if sent
    */
-  send(chunk: unknown) {
+  send(chunk: unknown): boolean {
     if (this._closed) {
-      throw new Error("StreamingResponse is already closed");
+      return false;
     }
     const response: RPCResponse = {
       done: false,
@@ -2783,15 +3137,17 @@ export class StreamingResponse {
       type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
+    return true;
   }
 
   /**
    * End the stream and send the final chunk (if any)
    * @param finalChunk Optional final chunk of data to send
+   * @returns false if stream is already closed (no-op), true if sent
    */
-  end(finalChunk?: unknown) {
+  end(finalChunk?: unknown): boolean {
     if (this._closed) {
-      throw new Error("StreamingResponse is already closed");
+      return false;
     }
     this._closed = true;
     const response: RPCResponse = {
@@ -2802,6 +3158,27 @@ export class StreamingResponse {
       type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
+    return true;
+  }
+
+  /**
+   * Send an error to the client and close the stream
+   * @param message Error message to send
+   * @returns false if stream is already closed (no-op), true if sent
+   */
+  error(message: string): boolean {
+    if (this._closed) {
+      return false;
+    }
+    this._closed = true;
+    const response: RPCResponse = {
+      error: message,
+      id: this._id,
+      success: false,
+      type: MessageType.RPC
+    };
+    this._connection.send(JSON.stringify(response));
+    return true;
   }
 }
 

@@ -1,0 +1,13 @@
+{
+  "name": "@cloudflare/agents-github-webhook",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "A real-time GitHub repository activity monitor built with Cloudflare Agents",
+  "scripts": {
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "npm run build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  }
+}

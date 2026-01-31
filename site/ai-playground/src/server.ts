@@ -253,9 +253,12 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
     const serverId = `mcp-${nanoid(8)}`;
 
     if (!headers) {
-      return await this.addMcpServer(serverId, url, this.env.HOST);
+      return await this.addMcpServer(serverId, url, {
+        callbackHost: this.env.HOST
+      });
     }
-    return await this.addMcpServer(serverId, url, this.env.HOST, "agents", {
+    return await this.addMcpServer(serverId, url, {
+      callbackHost: this.env.HOST,
       transport: {
         type: "auto",
         headers

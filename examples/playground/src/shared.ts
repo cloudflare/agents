@@ -28,7 +28,7 @@ export type OutgoingMessage =
 
 export type ScheduledItem = {
   id: string;
-  type: "cron" | "scheduled" | "delayed";
+  type: "cron" | "scheduled" | "delayed" | "interval";
   trigger: string;
   nextTrigger: string;
   description: string;

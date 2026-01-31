@@ -16,6 +16,8 @@ function createStateWithSetup(
   return `${nonce}.${serverId}`;
 }
 
+// Note: These tests use raw .idFromName()/.get() instead of getAgentByName() because
+// they need the agent ID to construct callback URLs for OAuth testing.
 describe("OAuth2 MCP Client - Hibernation", () => {
   it("should restore MCP connections from database on wake-up", async () => {
     const agentId = env.TestOAuthAgent.idFromName("test-oauth-hibernation");

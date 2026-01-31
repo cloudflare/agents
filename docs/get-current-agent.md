@@ -1,4 +1,4 @@
-# Context Management
+# getCurrentAgent()
 
 ## Automatic Context for Custom Methods
 

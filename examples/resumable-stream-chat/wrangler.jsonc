@@ -1,10 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "compatibility_date": "2025-03-14",
-  "compatibility_flags": [
-    "nodejs_compat",
-    "nodejs_compat_populate_process_env"
-  ],
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "binding": "ASSETS",
     "directory": "dist"
