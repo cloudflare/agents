@@ -2317,12 +2317,6 @@ export class Agent<
       createdBefore?: Date;
     } = {}
   ): number {
-    // First count matching workflows
-    const count = this._countWorkflows(criteria as WorkflowQueryCriteria);
-    if (count === 0) {
-      return 0;
-    }
-
     let query = "DELETE FROM cf_agents_workflows WHERE 1=1";
     const params: (string | number | boolean)[] = [];
 
@@ -2352,8 +2346,8 @@ export class Agent<
       params.push(Math.floor(criteria.createdBefore.getTime() / 1000));
     }
 
-    this.ctx.storage.sql.exec(query, ...params).toArray();
-    return count;
+    const cursor = this.ctx.storage.sql.exec(query, ...params);
+    return cursor.rowsWritten;
   }
 
   /**
