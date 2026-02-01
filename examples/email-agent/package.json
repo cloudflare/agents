@@ -7,6 +7,9 @@
   "scripts": {
     "deploy": "wrangler deploy",
     "start": "wrangler dev",
+    "test": "tsx run-tests.ts",
+    "test:verbose": "tsx run-tests.ts -v",
+    "test:security": "tsx run-tests.ts --security",
     "test-email": "tsx test-mail.ts"
   },
   "dependencies": {
