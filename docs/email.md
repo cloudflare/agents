@@ -177,6 +177,68 @@ async onEmail(email: AgentEmail) {
 }
 ```
 
+### Email Header Utilities
+
+The SDK provides utilities to work with email headers from `postal-mime`:
+
+```ts
+import {
+  parseEmailHeaders,
+  getEmailHeader,
+  hasEmailHeader,
+  hasAnyEmailHeader,
+  getAllEmailHeaders,
+  isAutoReplyEmail
+} from "agents";
+import PostalMime from "postal-mime";
+
+async onEmail(email: AgentEmail) {
+  const raw = await email.getRaw();
+  const parsed = await PostalMime.parse(raw);
+
+  // Convert headers to a simple key-value object
+  const headers = parseEmailHeaders(parsed.headers);
+  console.log("Content-Type:", headers["content-type"]);
+
+  // Or get specific headers directly
+  const contentType = getEmailHeader(parsed.headers, "Content-Type");
+  const priority = getEmailHeader(parsed.headers, "X-Priority");
+
+  // Check if headers exist
+  if (hasEmailHeader(parsed.headers, "X-Priority")) {
+    console.log("This email has a priority header");
+  }
+
+  // Check for multiple headers at once
+  if (hasAnyEmailHeader(parsed.headers, ["X-Spam-Flag", "X-Spam-Score"])) {
+    console.log("This email has spam-related headers");
+  }
+
+  // Get all values for headers that appear multiple times
+  const receivedHeaders = getAllEmailHeaders(parsed.headers, "Received");
+  console.log("Email path:", receivedHeaders);
+
+  // Detect auto-reply emails to avoid sending duplicate responses
+  if (isAutoReplyEmail(parsed.headers, parsed.subject)) {
+    console.log("Skipping auto-reply email");
+    return;
+  }
+
+  // Process the email...
+}
+```
+
+#### Utility Functions
+
+| Function                              | Description                                                                    |
+| ------------------------------------- | ------------------------------------------------------------------------------ |
+| `parseEmailHeaders(headers)`          | Converts postal-mime headers array to a simple `Record<string, string>` object |
+| `getEmailHeader(headers, name)`       | Gets a specific header value (case-insensitive)                                |
+| `hasEmailHeader(headers, name)`       | Checks if a header exists (case-insensitive)                                   |
+| `hasAnyEmailHeader(headers, names)`   | Checks if any of the specified headers exist                                   |
+| `getAllEmailHeaders(headers, name)`   | Gets all values for headers that appear multiple times (e.g., `Received`)      |
+| `isAutoReplyEmail(headers, subject?)` | Detects auto-reply emails based on headers and subject patterns                |
+
 ### Replying to Emails
 
 Use `this.replyToEmail()` to send a reply:

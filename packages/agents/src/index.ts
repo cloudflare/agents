@@ -2932,13 +2932,20 @@ export async function routeAgentRequest<Env>(
   return response;
 }
 
-// Email routing - resolvers and types from ./email
+// Email routing - resolvers, types, and utilities from ./email
 export {
   createHeaderBasedEmailResolver,
   createSecureReplyEmailResolver,
   createAddressBasedEmailResolver,
   createCatchAllEmailResolver,
-  signAgentHeaders
+  signAgentHeaders,
+  // Email header parsing utilities
+  parseEmailHeaders,
+  getEmailHeader,
+  hasEmailHeader,
+  hasAnyEmailHeader,
+  getAllEmailHeaders,
+  isAutoReplyEmail
 } from "./email";
 
 export type {
@@ -2946,7 +2953,10 @@ export type {
   EmailResolver,
   SecureReplyResolverOptions,
   SignatureFailureReason,
-  AgentEmail
+  AgentEmail,
+  // Email header parsing types
+  EmailHeader,
+  ParsedEmailHeaders
 } from "./email";
 
 import type { EmailResolver } from "./email";

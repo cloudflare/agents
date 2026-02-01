@@ -51,6 +51,7 @@
 
 ## Authentication & Security
 
+- TODO: [Securing your Agents](./securing-agents.md) - Authentication, authorization, and access control
 - [Cross-Domain Authentication](./cross-domain-authentication.md) - Auth across different domains
 - [Resumable Streaming](./resumable-streaming.md) - Handling interrupted streams
 
@@ -59,6 +60,10 @@
 - [Observability](./observability.md) - Monitoring and tracing agent activity
 - TODO: [Testing](./testing.md) - Unit tests, integration tests, mocking agents
 - TODO: [Evals](./evals.md) - Evaluating AI agent quality and behavior
+
+## Agent Studio
+
+- TODO: [Agent Studio](./agent-studio.md) - Local dev tool for inspecting and interacting with agent instances
 
 ## Compute Environments
 
