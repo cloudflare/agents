@@ -557,6 +557,14 @@ export class TestWorkflowAgent extends Agent<Env> {
     });
   }
 
+  // Restart workflow with options (for testing resetTracking)
+  async restartWorkflowWithOptions(
+    workflowId: string,
+    options?: { resetTracking?: boolean }
+  ): Promise<void> {
+    return this.restartWorkflow(workflowId, options);
+  }
+
   // Get workflow status from Cloudflare
   async getCloudflareWorkflowStatus(workflowId: string) {
     return this.getWorkflowStatus("TEST_WORKFLOW", workflowId);

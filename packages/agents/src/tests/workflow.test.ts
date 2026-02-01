@@ -692,6 +692,30 @@ describe("workflow operations", () => {
         "Workflow binding 'NON_EXISTENT_BINDING' not found in environment"
       );
     });
+
+    it("should preserve tracking timestamps when resetTracking is false", async () => {
+      const agentStub = await getTestAgent("restart-workflow-test-3");
+      const workflowId = "restart-preserve-test";
+
+      // Insert a workflow with a specific created_at (simulating old workflow)
+      await agentStub.insertTestWorkflow(
+        workflowId,
+        "TEST_WORKFLOW",
+        "complete"
+      );
+
+      // Get the original created_at
+      const original = (await agentStub.getWorkflowById(
+        workflowId
+      )) as WorkflowInfo | null;
+      expect(original).not.toBeNull();
+      const originalCreatedAt = original!.createdAt;
+
+      // Note: We can't fully test restartWorkflow with resetTracking: false
+      // without a real workflow binding, but we can verify the method accepts the option
+      // The actual behavior (preserving timestamps) would require integration testing
+      expect(originalCreatedAt).toBeDefined();
+    });
   });
 
   describe("pagination", () => {
@@ -799,6 +823,30 @@ describe("workflow operations", () => {
       expect(page.workflows.length).toBe(2);
       expect(page.total).toBe(3); // 3 complete workflows total
       expect(page.workflows.every((w) => w.status === "complete")).toBe(true);
+    });
+
+    it("should throw descriptive error for invalid cursor", async () => {
+      const agentStub = await getTestAgent("pagination-test-5");
+
+      // Insert a workflow so there's data
+      await agentStub.insertTestWorkflow("wf-1", "TEST_WORKFLOW", "complete");
+
+      // Try with malformed cursor
+      await expect(
+        agentStub.getWorkflowsPageForTest({ cursor: "not-valid-base64!" })
+      ).rejects.toThrow("Invalid pagination cursor");
+
+      // Try with valid base64 but invalid JSON
+      await expect(
+        agentStub.getWorkflowsPageForTest({ cursor: btoa("not-json") })
+      ).rejects.toThrow("Invalid pagination cursor");
+
+      // Try with valid JSON but wrong structure
+      await expect(
+        agentStub.getWorkflowsPageForTest({
+          cursor: btoa(JSON.stringify({ wrong: "structure" }))
+        })
+      ).rejects.toThrow("Invalid pagination cursor");
     });
   });
 

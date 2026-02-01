@@ -266,6 +266,8 @@ export class TaskAgent extends Agent<Env, AgentState> {
    */
   @callable()
   async restart(workflowId: string): Promise<void> {
+    // Clear persisted UI state before restart
+    this.clearUIState(workflowId);
     await this.restartWorkflow(workflowId);
     this.updateWorkflow(workflowId, {
       status: "queued",

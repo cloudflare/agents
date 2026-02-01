@@ -2260,8 +2260,17 @@ export class Agent<
     createdAt: number;
     workflowId: string;
   } {
-    const data = JSON.parse(atob(cursor));
-    return { createdAt: data.c, workflowId: data.i };
+    try {
+      const data = JSON.parse(atob(cursor));
+      if (typeof data.c !== "number" || typeof data.i !== "string") {
+        throw new Error("Invalid cursor structure");
+      }
+      return { createdAt: data.c, workflowId: data.i };
+    } catch {
+      throw new Error(
+        "Invalid pagination cursor. The cursor may be malformed or corrupted."
+      );
+    }
   }
 
   /**
@@ -2495,10 +2504,12 @@ export class Agent<
         break;
       case "complete":
         // Update tracking status to "complete"
+        // Don't overwrite if already terminated/paused (race condition protection)
         this.sql`
           UPDATE cf_agents_workflows
           SET status = 'complete', updated_at = ${now}, completed_at = ${now}
           WHERE workflow_id = ${callback.workflowId}
+            AND status NOT IN ('terminated', 'paused')
         `;
         await this.onWorkflowComplete(
           callback.workflowName,
@@ -2508,11 +2519,13 @@ export class Agent<
         break;
       case "error":
         // Update tracking status to "errored"
+        // Don't overwrite if already terminated/paused (race condition protection)
         this.sql`
           UPDATE cf_agents_workflows
           SET status = 'errored', updated_at = ${now}, completed_at = ${now},
               error_name = 'WorkflowError', error_message = ${callback.error}
           WHERE workflow_id = ${callback.workflowId}
+            AND status NOT IN ('terminated', 'paused')
         `;
         await this.onWorkflowError(
           callback.workflowName,
