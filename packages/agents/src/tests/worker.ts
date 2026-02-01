@@ -454,14 +454,27 @@ export class TestWorkflowAgent extends Agent<Env> {
     return this.getWorkflow(workflowId) ?? null;
   }
 
-  // Expose getWorkflows for testing
-  async queryWorkflows(criteria?: {
+  // Expose getWorkflows for testing (returns just workflows array for backward compat)
+  async getWorkflowsForTest(criteria?: {
     status?: WorkflowStatus | WorkflowStatus[];
     workflowName?: string;
     metadata?: Record<string, string | number | boolean>;
     limit?: number;
     orderBy?: "asc" | "desc";
+    cursor?: string;
   }): Promise<WorkflowInfo[]> {
+    return this.getWorkflows(criteria).workflows;
+  }
+
+  // Expose getWorkflows with full pagination info for testing
+  getWorkflowsPageForTest(criteria?: {
+    status?: WorkflowStatus | WorkflowStatus[];
+    workflowName?: string;
+    metadata?: Record<string, string | number | boolean>;
+    limit?: number;
+    orderBy?: "asc" | "desc";
+    cursor?: string;
+  }): { workflows: WorkflowInfo[]; total: number; nextCursor: string | null } {
     return this.getWorkflows(criteria);
   }
 

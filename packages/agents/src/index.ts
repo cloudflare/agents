@@ -30,7 +30,8 @@ import type {
   RunWorkflowOptions,
   WorkflowEventPayload,
   WorkflowInfo,
-  WorkflowQueryCriteria
+  WorkflowQueryCriteria,
+  WorkflowPage
 } from "./workflow-types";
 import { MCPConnectionState } from "./mcp/client-connection";
 import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
@@ -1749,6 +1750,277 @@ export class Agent<
   }
 
   /**
+   * Terminate a running workflow.
+   * This immediately stops the workflow and sets its status to "terminated".
+   *
+   * @param workflowId - ID of the workflow to terminate (must be tracked via runWorkflow)
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   * @throws Error if workflow is already completed/errored/terminated (from Cloudflare)
+   *
+   * @note `terminate()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * await this.terminateWorkflow(workflowId);
+   * ```
+   */
+  async terminateWorkflow(workflowId: string): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.terminate();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "terminateWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    // Update tracking table with new status
+    const status = await instance.status();
+    this._updateWorkflowTracking(workflowId, status);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} terminated`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:terminated"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Pause a running workflow.
+   * The workflow can be resumed later with resumeWorkflow().
+   *
+   * @param workflowId - ID of the workflow to pause (must be tracked via runWorkflow)
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   * @throws Error if workflow is not running (from Cloudflare)
+   *
+   * @note `pause()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * await this.pauseWorkflow(workflowId);
+   * ```
+   */
+  async pauseWorkflow(workflowId: string): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.pause();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "pauseWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    const status = await instance.status();
+    this._updateWorkflowTracking(workflowId, status);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} paused`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:paused"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Resume a paused workflow.
+   *
+   * @param workflowId - ID of the workflow to resume (must be tracked via runWorkflow)
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   * @throws Error if workflow is not paused (from Cloudflare)
+   *
+   * @note `resume()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * await this.resumeWorkflow(workflowId);
+   * ```
+   */
+  async resumeWorkflow(workflowId: string): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.resume();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "resumeWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    const status = await instance.status();
+    this._updateWorkflowTracking(workflowId, status);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} resumed`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:resumed"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Restart a workflow instance.
+   * This re-runs the workflow from the beginning with the same ID.
+   *
+   * @param workflowId - ID of the workflow to restart (must be tracked via runWorkflow)
+   * @param options - Optional settings
+   * @param options.resetTracking - If true (default), resets created_at and clears error fields.
+   *                                If false, preserves original timestamps.
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   *
+   * @note `restart()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * // Reset tracking (default)
+   * await this.restartWorkflow(workflowId);
+   *
+   * // Preserve original timestamps
+   * await this.restartWorkflow(workflowId, { resetTracking: false });
+   * ```
+   */
+  async restartWorkflow(
+    workflowId: string,
+    options: { resetTracking?: boolean } = {}
+  ): Promise<void> {
+    const { resetTracking = true } = options;
+
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.restart();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "restartWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    if (resetTracking) {
+      // Reset tracking fields for fresh start
+      const now = Math.floor(Date.now() / 1000);
+      this.sql`
+        UPDATE cf_agents_workflows
+        SET status = 'queued',
+            created_at = ${now},
+            updated_at = ${now},
+            completed_at = NULL,
+            error_name = NULL,
+            error_message = NULL
+        WHERE workflow_id = ${workflowId}
+      `;
+    } else {
+      // Just update status from Cloudflare
+      const status = await instance.status();
+      this._updateWorkflowTracking(workflowId, status);
+    }
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} restarted`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:restarted"
+      },
+      this.ctx
+    );
+  }
+
+  /**
    * Find a workflow binding by its name.
    */
   private _findWorkflowBindingByName(
@@ -1832,12 +2104,34 @@ export class Agent<
   }
 
   /**
-   * Query tracked workflows.
+   * Query tracked workflows with cursor-based pagination.
    *
-   * @param criteria - Query criteria
-   * @returns Array of workflow info
+   * @param criteria - Query criteria including optional cursor for pagination
+   * @returns WorkflowPage with workflows, total count, and next cursor
+   *
+   * @example
+   * ```typescript
+   * // First page
+   * const page1 = this.getWorkflows({ status: 'running', limit: 20 });
+   *
+   * // Next page
+   * if (page1.nextCursor) {
+   *   const page2 = this.getWorkflows({
+   *     status: 'running',
+   *     limit: 20,
+   *     cursor: page1.nextCursor
+   *   });
+   * }
+   * ```
    */
-  getWorkflows(criteria: WorkflowQueryCriteria = {}): WorkflowInfo[] {
+  getWorkflows(criteria: WorkflowQueryCriteria = {}): WorkflowPage {
+    const limit = Math.min(criteria.limit ?? 50, 100);
+    const isAsc = criteria.orderBy === "asc";
+
+    // Get total count (ignores cursor and limit)
+    const total = this._countWorkflows(criteria);
+
+    // Build base query
     let query = "SELECT * FROM cf_agents_workflows WHERE 1=1";
     const params: (string | number | boolean)[] = [];
 
@@ -1855,8 +2149,6 @@ export class Agent<
       params.push(criteria.workflowName);
     }
 
-    // Filter by metadata key-value pairs using json_extract
-    // Use parameterized path construction to prevent SQL injection
     if (criteria.metadata) {
       for (const [key, value] of Object.entries(criteria.metadata)) {
         query += ` AND json_extract(metadata, '$.' || ?) = ?`;
@@ -1864,18 +2156,112 @@ export class Agent<
       }
     }
 
-    query += ` ORDER BY created_at ${criteria.orderBy === "asc" ? "ASC" : "DESC"}`;
-
-    if (criteria.limit) {
-      query += " LIMIT ?";
-      params.push(criteria.limit);
+    // Apply cursor for keyset pagination
+    if (criteria.cursor) {
+      const cursor = this._decodeCursor(criteria.cursor);
+      if (isAsc) {
+        // ASC: get items after cursor
+        query +=
+          " AND (created_at > ? OR (created_at = ? AND workflow_id > ?))";
+      } else {
+        // DESC: get items before cursor
+        query +=
+          " AND (created_at < ? OR (created_at = ? AND workflow_id < ?))";
+      }
+      params.push(cursor.createdAt, cursor.createdAt, cursor.workflowId);
     }
+
+    // Order by created_at and workflow_id for consistent keyset pagination
+    query += ` ORDER BY created_at ${isAsc ? "ASC" : "DESC"}, workflow_id ${isAsc ? "ASC" : "DESC"}`;
+
+    // Fetch limit + 1 to detect if there are more pages
+    query += " LIMIT ?";
+    params.push(limit + 1);
 
     const rows = this.ctx.storage.sql
       .exec(query, ...params)
       .toArray() as WorkflowTrackingRow[];
 
-    return rows.map((row) => this._rowToWorkflowInfo(row));
+    const hasMore = rows.length > limit;
+    const resultRows = hasMore ? rows.slice(0, limit) : rows;
+    const workflows = resultRows.map((row) => this._rowToWorkflowInfo(row));
+
+    // Build next cursor from last item
+    const nextCursor =
+      hasMore && workflows.length > 0
+        ? this._encodeCursor(workflows[workflows.length - 1])
+        : null;
+
+    return { workflows, total, nextCursor };
+  }
+
+  /**
+   * Count workflows matching criteria (for pagination total).
+   */
+  private _countWorkflows(
+    criteria: Omit<WorkflowQueryCriteria, "limit" | "cursor" | "orderBy"> & {
+      createdBefore?: Date;
+    }
+  ): number {
+    let query = "SELECT COUNT(*) as count FROM cf_agents_workflows WHERE 1=1";
+    const params: (string | number | boolean)[] = [];
+
+    if (criteria.status) {
+      const statuses = Array.isArray(criteria.status)
+        ? criteria.status
+        : [criteria.status];
+      const placeholders = statuses.map(() => "?").join(", ");
+      query += ` AND status IN (${placeholders})`;
+      params.push(...statuses);
+    }
+
+    if (criteria.workflowName) {
+      query += " AND workflow_name = ?";
+      params.push(criteria.workflowName);
+    }
+
+    if (criteria.metadata) {
+      for (const [key, value] of Object.entries(criteria.metadata)) {
+        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
+        params.push(key, value);
+      }
+    }
+
+    if (criteria.createdBefore) {
+      query += " AND created_at < ?";
+      params.push(Math.floor(criteria.createdBefore.getTime() / 1000));
+    }
+
+    const result = this.ctx.storage.sql.exec(query, ...params).toArray() as {
+      count: number;
+    }[];
+
+    return result[0]?.count ?? 0;
+  }
+
+  /**
+   * Encode a cursor from workflow info for pagination.
+   * Stores createdAt as Unix timestamp in seconds (matching DB storage).
+   */
+  private _encodeCursor(workflow: WorkflowInfo): string {
+    return btoa(
+      JSON.stringify({
+        c: Math.floor(workflow.createdAt.getTime() / 1000),
+        i: workflow.workflowId
+      })
+    );
+  }
+
+  /**
+   * Decode a pagination cursor.
+   * Returns createdAt as Unix timestamp in seconds (matching DB storage).
+   */
+  private _decodeCursor(cursor: string): {
+    createdAt: number;
+    workflowId: string;
+  } {
+    const data = JSON.parse(atob(cursor));
+    return { createdAt: data.c, workflowId: data.i };
   }
 
   /**
@@ -1923,8 +2309,8 @@ export class Agent<
     } = {}
   ): number {
     // First count matching workflows
-    const matching = this.getWorkflows(criteria as WorkflowQueryCriteria);
-    if (matching.length === 0) {
+    const count = this._countWorkflows(criteria as WorkflowQueryCriteria);
+    if (count === 0) {
       return 0;
     }
 
@@ -1958,7 +2344,7 @@ export class Agent<
     }
 
     this.ctx.storage.sql.exec(query, ...params).toArray();
-    return matching.length;
+    return count;
   }
 
   /**
@@ -2090,8 +2476,17 @@ export class Agent<
    * @param callback - The callback payload
    */
   async onWorkflowCallback(callback: WorkflowCallback): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+
     switch (callback.type) {
       case "progress":
+        // Update tracking status to "running" when receiving progress
+        // Only transition from queued/waiting to avoid overwriting terminal states
+        this.sql`
+          UPDATE cf_agents_workflows
+          SET status = 'running', updated_at = ${now}
+          WHERE workflow_id = ${callback.workflowId} AND status IN ('queued', 'waiting')
+        `;
         await this.onWorkflowProgress(
           callback.workflowName,
           callback.workflowId,
@@ -2099,6 +2494,12 @@ export class Agent<
         );
         break;
       case "complete":
+        // Update tracking status to "complete"
+        this.sql`
+          UPDATE cf_agents_workflows
+          SET status = 'complete', updated_at = ${now}, completed_at = ${now}
+          WHERE workflow_id = ${callback.workflowId}
+        `;
         await this.onWorkflowComplete(
           callback.workflowName,
           callback.workflowId,
@@ -2106,6 +2507,13 @@ export class Agent<
         );
         break;
       case "error":
+        // Update tracking status to "errored"
+        this.sql`
+          UPDATE cf_agents_workflows
+          SET status = 'errored', updated_at = ${now}, completed_at = ${now},
+              error_name = 'WorkflowError', error_message = ${callback.error}
+          WHERE workflow_id = ${callback.workflowId}
+        `;
         await this.onWorkflowError(
           callback.workflowName,
           callback.workflowId,
@@ -2113,6 +2521,7 @@ export class Agent<
         );
         break;
       case "event":
+        // No status change for events - they can occur at any stage
         await this.onWorkflowEvent(
           callback.workflowName,
           callback.workflowId,
@@ -2830,5 +3239,6 @@ export type {
   RunWorkflowOptions,
   WorkflowEventPayload,
   WorkflowInfo,
-  WorkflowQueryCriteria
+  WorkflowQueryCriteria,
+  WorkflowPage
 } from "./workflow-types";
