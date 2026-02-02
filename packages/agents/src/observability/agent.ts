@@ -28,4 +28,20 @@ export type AgentObservabilityEvent =
       {
         connectionId: string;
       }
+    >
+  | BaseEvent<
+      | "workflow:start"
+      | "workflow:event"
+      | "workflow:approved"
+      | "workflow:rejected"
+      | "workflow:terminated"
+      | "workflow:paused"
+      | "workflow:resumed"
+      | "workflow:restarted",
+      {
+        workflowId: string;
+        workflowName?: string;
+        eventType?: string;
+        reason?: string;
+      }
     >;

@@ -46,9 +46,25 @@
       {
         "class_name": "TestScheduleAgent",
         "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestWorkflowAgent",
+        "name": "TestWorkflowAgent"
       }
     ]
   },
+  "workflows": [
+    {
+      "name": "test-processing-workflow",
+      "binding": "TEST_WORKFLOW",
+      "class_name": "TestProcessingWorkflow"
+    },
+    {
+      "name": "simple-test-workflow",
+      "binding": "SIMPLE_WORKFLOW",
+      "class_name": "SimpleTestWorkflow"
+    }
+  ],
   "main": "worker.ts",
   "migrations": [
     {
@@ -62,7 +78,8 @@
         "TestOAuthAgent",
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
-        "TestScheduleAgent"
+        "TestScheduleAgent",
+        "TestWorkflowAgent"
       ],
       "tag": "v1"
     }

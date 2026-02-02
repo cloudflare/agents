@@ -7,6 +7,10 @@
     "nodejs_compat",
     "nodejs_compat_populate_process_env"
   ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
   "assets": {
     "binding": "ASSETS"
   },

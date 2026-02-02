@@ -17,5 +17,9 @@
       "tag": "v1",
       "new_sqlite_classes": ["EmailAgent"]
     }
-  ]
+  ],
+  "vars": {
+    // For production, use `wrangler secret put EMAIL_SECRET` instead
+    "EMAIL_SECRET": "change-me-in-production"
+  }
 }

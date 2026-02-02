@@ -8,8 +8,14 @@ export type AgentEmail = {
   headers: Headers;
   rawSize: number;
   setReject: (reason: string) => void;
-  forward: (rcptTo: string, headers?: Headers) => Promise<void>;
-  reply: (options: { from: string; to: string; raw: string }) => Promise<void>;
+  forward: (rcptTo: string, headers?: Headers) => Promise<EmailSendResult>;
+  reply: (options: {
+    from: string;
+    to: string;
+    raw: string;
+  }) => Promise<EmailSendResult>;
+  /** @internal Indicates email was routed via createSecureReplyEmailResolver */
+  _secureRouted?: boolean;
 };
 
 export type AgentContextStore = {

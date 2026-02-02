@@ -1,7 +1,7 @@
 {
   "author": "",
   "dependencies": {
-    "cronstrue": "^3.9.0",
+    "cronstrue": "^3.11.0",
     "nanoid": "^5.1.6"
   },
   "description": "",

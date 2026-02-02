@@ -330,6 +330,9 @@ evalite<string, Schedule>("Evals for scheduling", {
       const result = await generateObject({
         maxRetries: 5,
         model, // <- the shape of the object that the scheduler expects
+        providerOptions: {
+          openai: { strictJsonSchema: false }
+        },
         prompt: `${getSchedulePrompt({ date: new Date() })}
       
 Input to parse: "${input}"`,

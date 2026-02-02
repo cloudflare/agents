@@ -1,6 +1,7 @@
 import { AIChatAgent } from "../";
 import type { UIMessage as ChatMessage } from "ai";
 import { callable, getCurrentAgent, routeAgentRequest } from "agents";
+import { MessageType, type OutgoingMessage } from "../types";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -146,6 +147,29 @@ export class TestChatAgent extends AIChatAgent<Env> {
   @callable()
   testStoreStreamChunk(streamId: string, body: string): void {
     this._storeStreamChunk(streamId, body);
+  }
+
+  @callable()
+  testBroadcastLiveChunk(
+    requestId: string,
+    streamId: string,
+    body: string
+  ): void {
+    this._storeStreamChunk(streamId, body);
+    const message: OutgoingMessage = {
+      body,
+      done: false,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    };
+    (
+      this as unknown as {
+        _broadcastChatMessage: (
+          msg: OutgoingMessage,
+          exclude?: string[]
+        ) => void;
+      }
+    )._broadcastChatMessage(message);
   }
 
   @callable()

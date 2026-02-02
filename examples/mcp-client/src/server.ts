@@ -12,8 +12,9 @@ export class MyAgent extends Agent {
             status: 200
           });
         } else {
+          const safeError = JSON.stringify(result.authError || "Unknown error");
           return new Response(
-            `<script>alert('Authentication failed: ${result.authError}'); window.close();</script>`,
+            `<script>alert('Authentication failed: ' + ${safeError}); window.close();</script>`,
             {
               headers: { "content-type": "text/html" },
               status: 200

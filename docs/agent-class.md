@@ -354,15 +354,10 @@ class MyAgent extends Agent {
     console.log("Received email from:", email.from);
     console.log("Subject:", email.headers.get("subject"));
 
-    const raw = await email.getRaw();
-    console.log("Raw email size:", raw.length);
-
     // Reply to the email
     await this.replyToEmail(email, {
       fromName: "My Agent",
-      subject: "Re: " + email.headers.get("subject"),
-      body: "Thanks for your email!",
-      contentType: "text/plain"
+      body: "Thanks for your email!"
     });
   }
 }
@@ -371,6 +366,9 @@ class MyAgent extends Agent {
 To route emails to your Agent, use `routeAgentEmail` in your Worker's email handler:
 
 ```ts
+import { routeAgentEmail } from "agents";
+import { createAddressBasedEmailResolver } from "agents/email";
+
 export default {
   async email(message, env, ctx) {
     await routeAgentEmail(message, env, {
@@ -379,6 +377,8 @@ export default {
   }
 };
 ```
+
+For more details on email routing, resolvers, secure reply flows, and the full API, see the [Email Routing guide](./email.md).
 
 ### Context Management
 

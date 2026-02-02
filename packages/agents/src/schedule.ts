@@ -73,7 +73,29 @@ export function unstable_getSchedulePrompt(event: { date: Date }) {
 }
 
 /**
- * The schema for the schedule prompt
+ * The schema for parsing natural language scheduling requests.
+ *
+ * @example
+ * ```typescript
+ * import { generateObject } from "ai";
+ * import { scheduleSchema, getSchedulePrompt } from "agents/schedule";
+ *
+ * const result = await generateObject({
+ *   model,
+ *   prompt: `${getSchedulePrompt({ date: new Date() })} Input: "${userInput}"`,
+ *   schema: scheduleSchema,
+ *   // Required for OpenAI to avoid strict JSON schema validation errors
+ *   providerOptions: {
+ *     openai: { strictJsonSchema: false }
+ *   }
+ * });
+ * ```
+ *
+ * @remarks
+ * When using this schema with OpenAI models via the AI SDK, you must pass
+ * `providerOptions: { openai: { strictJsonSchema: false } }` to `generateObject`.
+ * This is because the schema uses optional fields which are not compatible with
+ * OpenAI's strict structured outputs mode.
  */
 export const scheduleSchema = z.object({
   description: z.string().describe("A description of the task"),
