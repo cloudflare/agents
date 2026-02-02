@@ -1,7 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
-import { getAgentByName, type WorkflowInfo } from "..";
+import { getAgentByName } from "..";
+import type { WorkflowInfo } from "../workflows";
 
 // Helper type for callback records
 type CallbackRecord = {

@@ -7,7 +7,8 @@
 import { env, introspectWorkflowInstance } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
-import { getAgentByName, type WorkflowInfo } from "..";
+import { getAgentByName } from "..";
+import type { WorkflowInfo } from "../workflows";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}

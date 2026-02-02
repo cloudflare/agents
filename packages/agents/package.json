@@ -124,6 +124,11 @@
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./workflows": {
+      "types": "./dist/workflows.d.ts",
+      "import": "./dist/workflows.js",
+      "require": "./dist/workflows.js"
+    },
     "./internal_context": {
       "types": "./dist/internal_context.d.ts",
       "import": "./dist/internal_context.js",
