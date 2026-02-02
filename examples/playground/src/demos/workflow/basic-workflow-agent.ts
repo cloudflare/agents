@@ -119,8 +119,8 @@ export class BasicWorkflowAgent extends Agent<Env, BasicWorkflowState> {
 
   @callable({ description: "Get all workflows with progress" })
   listWorkflows(): WorkflowWithProgress[] {
-    // Get workflows from SDK tracking
-    const workflows = this.getWorkflows({
+    // Get workflows from SDK tracking (returns WorkflowPage with pagination)
+    const { workflows } = this.getWorkflows({
       workflowName: "ProcessingWorkflow"
     });
 
@@ -165,7 +165,9 @@ export class BasicWorkflowAgent extends Agent<Env, BasicWorkflowState> {
     completed: number;
     errored: number;
   } {
-    const workflows = this.getWorkflows({ workflowName: "ProcessingWorkflow" });
+    const { workflows } = this.getWorkflows({
+      workflowName: "ProcessingWorkflow"
+    });
     return {
       queued: workflows.filter((w) => w.status === "queued").length,
       running: workflows.filter((w) => w.status === "running").length,

@@ -132,7 +132,9 @@ export class ApprovalAgent extends Agent<Env, ApprovalAgentState> {
 
   @callable({ description: "Get all approval requests" })
   listRequests(): ApprovalRequest[] {
-    const workflows = this.getWorkflows({ workflowName: "ApprovalWorkflow" });
+    const { workflows } = this.getWorkflows({
+      workflowName: "ApprovalWorkflow"
+    });
     return workflows.map((w) => this._toApprovalRequest(w));
   }
 
@@ -209,7 +211,9 @@ export class ApprovalAgent extends Agent<Env, ApprovalAgentState> {
 
   @callable({ description: "Get approval stats" })
   getStats(): { pending: number; approved: number; rejected: number } {
-    const workflows = this.getWorkflows({ workflowName: "ApprovalWorkflow" });
+    const { workflows } = this.getWorkflows({
+      workflowName: "ApprovalWorkflow"
+    });
     return {
       pending: workflows.filter(
         (w) =>
