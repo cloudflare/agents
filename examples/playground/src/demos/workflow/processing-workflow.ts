@@ -1,5 +1,5 @@
-import { AgentWorkflow } from "agents";
-import type { AgentWorkflowEvent, AgentWorkflowStep } from "agents";
+import { AgentWorkflow } from "agents/workflows";
+import type { AgentWorkflowEvent, AgentWorkflowStep } from "agents/workflows";
 import type { BasicWorkflowAgent } from "./basic-workflow-agent";
 
 export type ProcessingParams = {

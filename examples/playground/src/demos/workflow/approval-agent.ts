@@ -1,5 +1,5 @@
 import { Agent, callable } from "agents";
-import type { WorkflowInfo } from "agents";
+import type { WorkflowInfo } from "agents/workflows";
 
 // No custom state needed - we use SDK's workflow tracking
 // Title/description are stored in workflow metadata
