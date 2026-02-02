@@ -1,14 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
+import { routeAgentEmail, getAgentByName } from "../index";
 import {
   createAddressBasedEmailResolver,
   createHeaderBasedEmailResolver,
   createSecureReplyEmailResolver,
   createCatchAllEmailResolver,
-  routeAgentEmail,
-  getAgentByName,
   signAgentHeaders
-} from "../index";
+} from "../email";
 import type { Env } from "./worker";
 
 // Declare module to get proper typing for env

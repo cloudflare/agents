@@ -3348,32 +3348,9 @@ export async function routeAgentRequest<Env>(
   return response;
 }
 
-// Email routing - resolvers, types, and utilities from ./email
-export {
-  createHeaderBasedEmailResolver,
-  createSecureReplyEmailResolver,
-  createAddressBasedEmailResolver,
-  createCatchAllEmailResolver,
-  signAgentHeaders,
-  // Email header parsing utilities
-  parseEmailHeaders,
-  getEmailHeader,
-  hasEmailHeader,
-  hasAnyEmailHeader,
-  getAllEmailHeaders,
-  isAutoReplyEmail
-} from "./email";
-
-export type {
-  EmailResolverResult,
-  EmailResolver,
-  SecureReplyResolverOptions,
-  SignatureFailureReason,
-  AgentEmail,
-  // Email header parsing types
-  EmailHeader,
-  ParsedEmailHeaders
-} from "./email";
+// Email routing - deprecated resolver kept in root for upgrade discoverability
+// Other email utilities moved to agents/email subpath
+export { createHeaderBasedEmailResolver } from "./email";
 
 import type { EmailResolver } from "./email";
 
