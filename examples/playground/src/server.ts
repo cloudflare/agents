@@ -1,9 +1,8 @@
+import { routeAgentRequest, routeAgentEmail } from "agents";
 import {
-  routeAgentRequest,
-  routeAgentEmail,
   createAddressBasedEmailResolver,
   createSecureReplyEmailResolver
-} from "agents";
+} from "agents/email";
 
 // Core agents
 export { StateAgent } from "./demos/core/state-agent";

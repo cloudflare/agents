@@ -1,4 +1,5 @@
-import { Agent, callable, type AgentEmail, isAutoReplyEmail } from "agents";
+import { Agent, callable } from "agents";
+import { type AgentEmail, isAutoReplyEmail } from "agents/email";
 import PostalMime from "postal-mime";
 
 // ─────────────────────────────────────────────────────────────────────────────

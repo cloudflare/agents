@@ -1,4 +1,5 @@
-import { Agent, type AgentEmail, parseEmailHeaders } from "agents";
+import { Agent } from "agents";
+import { type AgentEmail, parseEmailHeaders } from "agents/email";
 import PostalMime from "postal-mime";
 
 // ─────────────────────────────────────────────────────────────────────────────
