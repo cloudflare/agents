@@ -303,19 +303,19 @@ describe("AgentWorkflow integration", () => {
       );
 
       // Query all workflows
-      const allWorkflows = (await agentStub.queryWorkflows(
+      const allWorkflows = (await agentStub.getWorkflowsForTest(
         {}
       )) as WorkflowInfo[];
       expect(allWorkflows.length).toBe(3);
 
       // Query by status
-      const completeWorkflows = (await agentStub.queryWorkflows({
+      const completeWorkflows = (await agentStub.getWorkflowsForTest({
         status: "complete"
       })) as WorkflowInfo[];
       expect(completeWorkflows.length).toBe(2);
 
       // Query by workflow name
-      const testWorkflows = (await agentStub.queryWorkflows({
+      const testWorkflows = (await agentStub.getWorkflowsForTest({
         workflowName: "TEST_WORKFLOW"
       })) as WorkflowInfo[];
       expect(testWorkflows.length).toBe(2);

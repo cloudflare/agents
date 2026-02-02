@@ -2,17 +2,19 @@
  * Workflow Demo - Task Processing with Approval
  *
  * This example demonstrates:
- * - Multi-step workflow with progress tracking
- * - Human-in-the-loop approval gate
+ * - Multiple concurrent workflows with progress tracking
+ * - Human-in-the-loop approval gate per workflow
  * - Real-time state sync to connected clients
- * - Approve/reject workflow from the Agent
+ * - Workflow list with status tracking
+ * - Approve/reject specific workflows from the Agent
  */
 
 import { Agent, AgentWorkflow, callable, routeAgentRequest } from "agents";
 import type {
   AgentWorkflowEvent,
   AgentWorkflowStep,
-  DefaultProgress
+  DefaultProgress,
+  WorkflowInfo
 } from "agents";
 
 // Workflow parameters
@@ -21,37 +23,185 @@ type TaskParams = {
   taskName: string;
 };
 
-// Agent state synced to clients
-export type AgentState = {
-  currentWorkflowId: string | null;
-  currentTaskName: string | null;
-  progress: DefaultProgress | null;
-  waitingForApproval: boolean;
-  status: "idle" | "running" | "waiting" | "completed" | "error";
-  result: unknown;
-  error: string | null;
+// Persisted UI state stored in workflow metadata
+// This survives page refreshes unlike real-time progress updates
+type PersistedUIState = {
+  waitingForApproval?: boolean;
+  lastProgress?: DefaultProgress;
 };
 
+// Workflow metadata structure
+type WorkflowMetadata = {
+  taskName: string;
+  uiState?: PersistedUIState;
+};
+
+// UI status (subset of WorkflowInfo status with "waiting" for approval UI)
+type UIStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "complete"
+  | "errored"
+  | "paused";
+
+// Per-workflow UI state extends WorkflowInfo with transient UI fields
+export type WorkflowItem = Omit<WorkflowInfo, "status"> & {
+  /** UI-friendly status */
+  status: UIStatus;
+  /** Display name for the task */
+  taskName: string;
+  /** Real-time progress (not persisted in tracking table) */
+  progress: DefaultProgress | null;
+  /** Whether workflow is waiting for user approval */
+  waitingForApproval: boolean;
+  /** Workflow result (not persisted in tracking table) */
+  result?: unknown;
+};
+
+// Shared agent state (minimal - real-time updates only)
+// Pagination is client-side, not shared
+export type AgentState = Record<string, never>; // Empty state
+
+// Page result returned by listWorkflows
+export type WorkflowPage = {
+  workflows: WorkflowItem[];
+  total: number;
+  nextCursor: string | null;
+};
+
+// Broadcast message types for real-time updates
+export type WorkflowUpdate =
+  | { type: "workflow:added"; workflow: WorkflowItem }
+  | {
+      type: "workflow:updated";
+      workflowId: string;
+      updates: Partial<WorkflowItem>;
+    }
+  | { type: "workflow:removed"; workflowId: string };
+
 /**
- * TaskAgent - manages task workflows and syncs state to clients
+ * TaskAgent - manages multiple task workflows and syncs state to clients
  */
 export class TaskAgent extends Agent<Env, AgentState> {
-  // Initialize state when agent starts
-  initialState: AgentState = {
-    currentWorkflowId: null,
-    currentTaskName: null,
-    progress: null,
-    waitingForApproval: false,
-    status: "idle",
-    result: null,
-    error: null
-  };
+  // Empty state - pagination is client-side
+  initialState: AgentState = {};
+
+  /**
+   * Convert WorkflowInfo to WorkflowItem for UI
+   * Reads persisted UI state from metadata.uiState
+   */
+  private toWorkflowItem(
+    info: WorkflowInfo,
+    overrides: Partial<WorkflowItem> = {}
+  ): WorkflowItem {
+    const metadata = info.metadata as WorkflowMetadata | null;
+    const uiState = metadata?.uiState;
+
+    // Use overrides first, then persisted uiState, then defaults
+    const waitingForApproval =
+      overrides.waitingForApproval ?? uiState?.waitingForApproval ?? false;
+    const progress = overrides.progress ?? uiState?.lastProgress ?? null;
+
+    return {
+      ...info,
+      status: this.mapStatus(info.status, waitingForApproval),
+      taskName: metadata?.taskName || "Unknown Task",
+      progress,
+      waitingForApproval,
+      result: overrides.result
+    };
+  }
+
+  /**
+   * Update persisted UI state in metadata
+   */
+  private updateUIState(workflowId: string, uiState: PersistedUIState): void {
+    const workflow = this.getWorkflow(workflowId);
+    if (!workflow) return;
+
+    const metadata = (workflow.metadata as WorkflowMetadata) || {};
+    const updatedMetadata: WorkflowMetadata = {
+      ...metadata,
+      uiState: { ...metadata.uiState, ...uiState }
+    };
+
+    this.sql`
+      UPDATE cf_agents_workflows 
+      SET metadata = ${JSON.stringify(updatedMetadata)}
+      WHERE workflow_id = ${workflowId}
+    `;
+  }
+
+  /**
+   * Clear persisted UI state from metadata
+   */
+  private clearUIState(workflowId: string): void {
+    const workflow = this.getWorkflow(workflowId);
+    if (!workflow) return;
+
+    const metadata = (workflow.metadata as WorkflowMetadata) || {};
+    const { uiState: _, ...rest } = metadata;
+
+    this.sql`
+      UPDATE cf_agents_workflows 
+      SET metadata = ${JSON.stringify(rest)}
+      WHERE workflow_id = ${workflowId}
+    `;
+  }
+
+  /**
+   * Broadcast a workflow update to all connected clients
+   */
+  private broadcastUpdate(update: WorkflowUpdate): void {
+    this.broadcast(JSON.stringify(update));
+  }
+
+  /**
+   * Map tracking table status to UI status
+   */
+  private mapStatus(
+    status: string,
+    waitingForApproval: boolean
+  ): WorkflowItem["status"] {
+    if (waitingForApproval) return "waiting";
+    switch (status) {
+      case "queued":
+        return "queued";
+      case "running":
+        return "running";
+      case "waiting":
+        return "waiting";
+      case "paused":
+        return "paused";
+      case "complete":
+        return "complete";
+      case "errored":
+      case "terminated":
+        return "errored";
+      default:
+        console.warn(
+          `Unknown workflow status: ${status}, defaulting to running`
+        );
+        return "running";
+    }
+  }
+
+  /**
+   * Broadcast a workflow update to all clients
+   */
+  private updateWorkflow(
+    workflowId: string,
+    updates: Partial<WorkflowItem>
+  ): void {
+    this.broadcastUpdate({ type: "workflow:updated", workflowId, updates });
+  }
 
   /**
    * Submit a new task for processing
    */
   @callable()
-  async submitTask(taskName: string): Promise<string> {
+  async submitTask(taskName: string): Promise<WorkflowItem> {
     const taskId = crypto.randomUUID();
 
     // Start the workflow
@@ -61,38 +211,87 @@ export class TaskAgent extends Agent<Env, AgentState> {
       { metadata: { taskName } }
     );
 
-    // Update state to show we're running
-    this.setState({
-      ...this.state,
-      currentWorkflowId: workflowId,
-      currentTaskName: taskName,
+    // Create workflow item for UI
+    const now = new Date();
+    const newWorkflow: WorkflowItem = {
+      id: workflowId,
+      workflowId,
+      workflowName: "TASK_WORKFLOW",
+      metadata: { taskName },
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+      status: "queued",
+      taskName,
       progress: { step: "starting", status: "pending", percent: 0 },
-      waitingForApproval: false,
-      status: "running",
-      result: null,
-      error: null
-    });
+      waitingForApproval: false
+    };
 
-    return workflowId;
+    // Broadcast to all clients
+    this.broadcastUpdate({ type: "workflow:added", workflow: newWorkflow });
+
+    return newWorkflow;
   }
 
   /**
-   * Approve the current waiting workflow
+   * Terminate a specific workflow
    */
   @callable()
-  async approve(reason?: string): Promise<void> {
-    const workflowId = this.state.currentWorkflowId;
-    if (!workflowId) {
-      throw new Error("No workflow to approve");
-    }
+  async terminate(workflowId: string): Promise<void> {
+    await this.terminateWorkflow(workflowId);
+    this.broadcastUpdate({ type: "workflow:removed", workflowId });
+  }
 
+  /**
+   * Pause a running workflow
+   */
+  @callable()
+  async pause(workflowId: string): Promise<void> {
+    await this.pauseWorkflow(workflowId);
+    this.updateWorkflow(workflowId, { status: "paused" });
+  }
+
+  /**
+   * Resume a paused workflow
+   */
+  @callable()
+  async resume(workflowId: string): Promise<void> {
+    await this.resumeWorkflow(workflowId);
+    this.updateWorkflow(workflowId, { status: "running" });
+  }
+
+  /**
+   * Restart a completed/errored workflow
+   */
+  @callable()
+  async restart(workflowId: string): Promise<void> {
+    // Clear persisted UI state before restart
+    this.clearUIState(workflowId);
+    await this.restartWorkflow(workflowId);
+    this.updateWorkflow(workflowId, {
+      status: "queued",
+      progress: { step: "restarting", status: "pending", percent: 0 },
+      waitingForApproval: false,
+      error: undefined,
+      result: undefined
+    });
+  }
+
+  /**
+   * Approve a specific workflow
+   */
+  @callable()
+  async approve(workflowId: string, reason?: string): Promise<void> {
     await this.approveWorkflow(workflowId, {
       reason: reason || "Approved by user",
       metadata: { approvedAt: Date.now() }
     });
 
-    this.setState({
-      ...this.state,
+    // Clear persisted UI state
+    this.clearUIState(workflowId);
+
+    this.updateWorkflow(workflowId, {
       waitingForApproval: false,
       status: "running",
       progress: {
@@ -105,47 +304,80 @@ export class TaskAgent extends Agent<Env, AgentState> {
   }
 
   /**
-   * Reject the current waiting workflow
+   * Reject a specific workflow
    */
   @callable()
-  async reject(reason?: string): Promise<void> {
-    const workflowId = this.state.currentWorkflowId;
-    if (!workflowId) {
-      throw new Error("No workflow to reject");
-    }
-
+  async reject(workflowId: string, reason?: string): Promise<void> {
     await this.rejectWorkflow(workflowId, {
       reason: reason || "Rejected by user"
     });
-
     // State will be updated by onWorkflowError callback
   }
 
   /**
-   * Reset the agent state to start fresh
+   * List workflows with pagination (client-driven)
    */
   @callable()
-  async reset(): Promise<void> {
-    this.setState(this.initialState);
+  listWorkflows(cursor?: string, limit = 5): WorkflowPage {
+    const page = this.getWorkflows({
+      workflowName: "TASK_WORKFLOW",
+      orderBy: "desc",
+      limit,
+      cursor
+    });
+
+    // toWorkflowItem reads persisted UI state from metadata.uiState
+    const workflows = page.workflows.map((info) => this.toWorkflowItem(info));
+
+    return {
+      workflows,
+      total: page.total,
+      nextCursor: page.nextCursor
+    };
   }
 
-  // Lifecycle callbacks from workflow
+  /**
+   * Clear completed and errored workflows
+   */
+  @callable()
+  clearCompleted(): { clearedCount: number } {
+    const count = this.deleteWorkflows({ status: ["complete", "errored"] });
+    // Broadcast that clients should refresh their lists
+    this.broadcast(JSON.stringify({ type: "workflows:cleared", count }));
+    return { clearedCount: count };
+  }
+
+  /**
+   * Remove a specific workflow
+   */
+  @callable()
+  dismissWorkflow(workflowId: string): void {
+    this.deleteWorkflow(workflowId);
+    this.broadcastUpdate({ type: "workflow:removed", workflowId });
+  }
+
+  // Lifecycle callbacks from workflow - broadcast updates to all clients
 
   async onWorkflowProgress(
     workflowName: string,
     workflowId: string,
     progress: unknown
   ): Promise<void> {
-    const p = progress as DefaultProgress;
+    const p = progress as DefaultProgress & { waitingForApproval?: boolean };
     console.log(`Progress: ${workflowName}/${workflowId}`, p);
 
-    this.setState({
-      ...this.state,
+    const waitingForApproval = p.waitingForApproval ?? false;
+
+    // Persist UI state so it survives page refresh
+    this.updateUIState(workflowId, {
+      waitingForApproval,
+      lastProgress: p
+    });
+
+    this.updateWorkflow(workflowId, {
       progress: p,
-      status:
-        p.status === "pending" && this.state.waitingForApproval
-          ? "waiting"
-          : "running"
+      waitingForApproval,
+      status: waitingForApproval ? "waiting" : "running"
     });
   }
 
@@ -156,15 +388,17 @@ export class TaskAgent extends Agent<Env, AgentState> {
   ): Promise<void> {
     console.log(`Complete: ${workflowName}/${workflowId}`, result);
 
-    this.setState({
-      ...this.state,
+    // Clear persisted UI state on completion
+    this.clearUIState(workflowId);
+
+    this.updateWorkflow(workflowId, {
       progress: {
         step: "done",
         status: "complete",
         percent: 1,
         message: "Task completed!"
       },
-      status: "completed",
+      status: "complete",
       result,
       waitingForApproval: false
     });
@@ -177,11 +411,13 @@ export class TaskAgent extends Agent<Env, AgentState> {
   ): Promise<void> {
     console.log(`Error: ${workflowName}/${workflowId}`, error);
 
-    this.setState({
-      ...this.state,
+    // Clear persisted UI state on error
+    this.clearUIState(workflowId);
+
+    this.updateWorkflow(workflowId, {
       progress: { step: "error", status: "error", percent: 0, message: error },
-      status: "error",
-      error,
+      status: "errored",
+      error: { name: "WorkflowError", message: error },
       waitingForApproval: false
     });
   }
@@ -245,13 +481,13 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
     });
 
     // Step 3: Wait for human approval
-    await step.mergeAgentState({ waitingForApproval: true });
-
+    // Signal waiting state via progress (agent will set waitingForApproval)
     await this.reportProgress({
       step: "approval",
       status: "pending",
       percent: 0.5,
-      message: "Waiting for approval..."
+      message: "Waiting for approval...",
+      waitingForApproval: true
     });
 
     // This will throw WorkflowRejectedError if rejected
@@ -261,8 +497,6 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
         timeout: "1 hour"
       }
     );
-
-    await step.mergeAgentState({ waitingForApproval: false });
 
     await this.reportProgress({
       step: "approval",

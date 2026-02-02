@@ -33,7 +33,11 @@ export type AgentObservabilityEvent =
       | "workflow:start"
       | "workflow:event"
       | "workflow:approved"
-      | "workflow:rejected",
+      | "workflow:rejected"
+      | "workflow:terminated"
+      | "workflow:paused"
+      | "workflow:resumed"
+      | "workflow:restarted",
       {
         workflowId: string;
         workflowName?: string;

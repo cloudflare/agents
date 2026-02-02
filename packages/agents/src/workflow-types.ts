@@ -251,10 +251,24 @@ export type WorkflowQueryCriteria = {
   workflowName?: string;
   /** Filter by metadata key-value pairs (exact match) */
   metadata?: Record<string, string | number | boolean>;
-  /** Limit number of results */
+  /** Limit number of results (default 50, max 100) */
   limit?: number;
   /** Order by created_at */
   orderBy?: "asc" | "desc";
+  /** Cursor for pagination (from previous WorkflowPage.nextCursor) */
+  cursor?: string;
+};
+
+/**
+ * Paginated result from getWorkflows()
+ */
+export type WorkflowPage = {
+  /** Workflows for this page */
+  workflows: WorkflowInfo[];
+  /** Total count of workflows matching the criteria (ignoring pagination) */
+  total: number;
+  /** Cursor for next page, or null if no more pages */
+  nextCursor: string | null;
 };
 
 /**

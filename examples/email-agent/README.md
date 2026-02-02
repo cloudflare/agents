@@ -5,27 +5,14 @@ This example demonstrates how to build an email-processing agent using the email
 ## Features
 
 - **Email Routing**: Routes emails to agents based on email addresses (e.g., `agent+id@domain.com`)
+- **Secure Reply Routing**: HMAC-signed headers for secure reply flows
 - **Email Parsing**: Uses PostalMime to parse incoming emails
-- **Auto-Reply**: Automatically responds to incoming emails
+- **Auto-Reply**: Automatically responds to incoming emails with loop prevention
 - **State Management**: Tracks email count and stores recent emails
 - **API Interface**: REST API for testing and management
+- **Security Tests**: Comprehensive test suite including attack bypass attempts
 
-## Email Routing
-
-The agent supports multiple routing strategies:
-
-1. **Address-based routing**: Routes based on email address patterns
-2. **Header-based routing**: Uses `X-Agent-Name` and `X-Agent-ID` headers
-3. **Catch-all routing**: Routes all emails to a single agent
-
-### Case Sensitivity Handling
-
-The routing system automatically handles both CamelCase and kebab-case agent names:
-
-- Agent class `EmailAgent` is accessible as both `EmailAgent` and `email-agent`
-- This allows flexible email address formats while maintaining consistent routing
-
-## Setup
+## Quick Start
 
 1. Install dependencies:
 
@@ -33,124 +20,203 @@ The routing system automatically handles both CamelCase and kebab-case agent nam
    npm install
    ```
 
-2. Start development server:
+2. Configure the secret (required):
+
+   Update `wrangler.jsonc` with a unique secret for local development:
+
+   ```jsonc
+   "vars": {
+     "EMAIL_SECRET": "your-unique-secret-here"
+   }
+   ```
+
+   For production, use Wrangler secrets:
+
+   ```bash
+   wrangler secret put EMAIL_SECRET
+   ```
+
+3. Start development server:
 
    ```bash
    npm start
    ```
 
-3. Test email parsing locally:
+4. Run tests:
 
    ```bash
-   npm run test-email
-   ```
-
-4. Deploy to Cloudflare:
-   ```bash
-   npm run deploy
+   npm test
    ```
 
 ## Testing
 
-### Local Testing
+### Automated Test Suite
 
-Run the email parsing test:
+The example includes a comprehensive test suite with functional and security tests:
 
 ```bash
+# Run all tests (starts server automatically)
+npm test
+
+# Run with verbose output
+npm run test:verbose
+
+# Run only security tests
+npm run test:security
+```
+
+Sample output:
+
+```
+═════════════════════════════════════════════════════════════════
+FUNCTIONAL TESTS
+═════════════════════════════════════════════════════════════════
+  ✅ PASS  Basic Email                    (12ms)
+  ✅ PASS  Unicode Content                (6ms)
+  ✅ PASS  Long Subject                   (6ms)
+  ✅ PASS  Multiline Body                 (7ms)
+  ✅ PASS  Special Characters             (11ms)
+  Subtotal: 5/5 passed
+
+═════════════════════════════════════════════════════════════════
+SECURITY TESTS (Attack Bypass Attempts)
+═════════════════════════════════════════════════════════════════
+  🛡️ BLOCKED  Forged headers (no signature)       (4ms)
+  🛡️ BLOCKED  Fake signature (random)             (4ms)
+  🛡️ BLOCKED  Expired signature (31 days)         (2ms)
+  ...
+  Subtotal: 15/15 attacks blocked
+
+🎉 All tests passed! Security defenses are working.
+```
+
+### Manual Testing
+
+Send test emails with different scenarios:
+
+```bash
+# Run all test scenarios
 npm run test-email
+
+# Run specific scenario
+npm run test-email -- --scenario basic
+
+# Use custom agent ID
+npm run test-email -- --scenario unicode --id my-custom-id
+
+# Show help
+npm run test-email -- --help
 ```
 
-This will test email creation, parsing, and routing logic without requiring a deployment.
+Available scenarios: `basic`, `unicode`, `long-subject`, `multiline`, `special-chars`
 
-### API Testing
+### API Endpoints
 
-Once the agent is running (dev or deployed), you can test with these endpoints:
-
-#### Get Agent Stats
-
-```bash
-curl http://localhost:8787/api/stats/test123
-```
-
-#### Send Test Email (Simple API)
+#### Send Test Email
 
 ```bash
 curl -X POST http://localhost:8787/api/test-email \
   -H "Content-Type: application/json" \
   -d '{
     "from": "user@example.com",
-    "to": "agent+test123@example.com",
+    "to": "EmailAgent+test123@example.com",
     "subject": "Test Email",
     "body": "Hello from test!"
   }'
 ```
 
-### Real Email Testing
+#### Security Test Endpoint
 
-To test with real emails:
+For testing security defenses with custom headers:
 
-1. Deploy the worker:
-
-   ```bash
-   npm run deploy
-   ```
-
-2. Configure your domain's email routing to point to your worker
-
-- go to `https://dash.cloudflare.com/<account id>/<domain>/email/routing/routes`
-
-3. Send emails to addresses like:
-   - `support@yourdomain.com` (routes to EmailAgent with ID "support")
-   - `EmailAgent+urgent@yourdomain.com` (routes to EmailAgent with ID "urgent")
-
-## Email Routing Strategies
-
-### 1. Address-Based Routing
-
-```typescript
-// Routes based on email address patterns
-const resolver = createAddressBasedEmailResolver("EmailAgent");
-
-// How it works with the current EmailAgent implementation:
-// EmailAgent+user123@domain.com → { agentName: "EmailAgent", agentId: "user123" } ✅
-// john.doe@domain.com → { agentName: "EmailAgent", agentId: "john.doe" } ✅
-// support+urgent@domain.com → { agentName: "support", agentId: "urgent" } ❌ (no SupportAgent)
+```bash
+curl -X POST http://localhost:8787/api/test-security \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "attacker@evil.com",
+    "to": "victim@example.com",
+    "subject": "Attack attempt",
+    "body": "Trying to bypass security",
+    "headers": {
+      "X-Agent-Name": "EmailAgent",
+      "X-Agent-ID": "admin-secret",
+      "X-Agent-Sig": "fake-signature",
+      "X-Agent-Sig-Ts": "1234567890"
+    },
+    "secureOnly": true
+  }'
 ```
 
-#### Address-Based Routing Rules
+## Email Routing
+
+The agent supports multiple routing strategies:
+
+### 1. Secure Reply Routing (Recommended for replies)
+
+Uses HMAC-signed headers to securely route email replies back to the correct agent instance:
+
+```typescript
+const secureResolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
+  maxAge: 7 * 24 * 60 * 60, // 7 days
+  onInvalidSignature: (email, reason) => {
+    console.warn(`Invalid signature from ${email.from}: ${reason}`);
+  }
+});
+```
+
+Security features:
+
+- HMAC-SHA256 signatures prevent header forgery
+- Timestamp validation prevents replay attacks (default: 30 day expiry)
+- Future timestamp rejection prevents validity extension attacks
+- Constant-time comparison prevents timing attacks
+
+### 2. Address-Based Routing
+
+Routes based on email address patterns:
+
+```typescript
+const resolver = createAddressBasedEmailResolver("EmailAgent");
+
+// EmailAgent+user123@domain.com → { agentName: "EmailAgent", agentId: "user123" }
+// john.doe@domain.com → { agentName: "EmailAgent", agentId: "john.doe" }
+```
+
+#### Routing Rules
 
 For emails with **sub-addresses** (using `+`):
 
 - `localpart+subaddress@domain.com` → `{ agentName: "localpart", agentId: "subaddress" }`
-- Example: `EmailAgent+customer123@example.com` routes to agent `EmailAgent` with ID `customer123`
 
 For emails **without sub-addresses**:
 
 - `localpart@domain.com` → `{ agentName: defaultAgentName, agentId: "localpart" }`
-- Example: `support@example.com` with `createAddressBasedEmailResolver("EmailAgent")` routes to agent `EmailAgent` with ID `support`
-
-````
-
-### 2. Header-Based Routing
-
-```typescript
-// Routes based on custom header
-// Email with headers:
-//   X-Agent-Name: EmailAgent
-//   X-Agent-ID: customer-123
-// → routes to EmailAgent:customer-123
-````
 
 ### 3. Catch-All Routing
 
+Routes all emails to a single agent:
+
 ```typescript
-// Routes all emails to a single agent regardless of address
 const resolver = createCatchAllEmailResolver("EmailAgent", "main");
 
 // All emails route to EmailAgent:main
-// user@domain.com → EmailAgent:main
-// support@domain.com → EmailAgent:main
-// anything+test@domain.com → EmailAgent:main
+```
+
+### Composing Resolvers
+
+Combine multiple resolvers for flexible routing:
+
+```typescript
+await routeAgentEmail(email, env, {
+  resolver: async (email, env) => {
+    // Try secure reply routing first (for replies)
+    const replyRouting = await secureReplyResolver(email, env);
+    if (replyRouting) return replyRouting;
+
+    // Fall back to address-based routing (for new emails)
+    return addressResolver(email, env);
+  }
+});
 ```
 
 ## Agent Implementation
@@ -159,45 +225,134 @@ The `EmailAgent` class demonstrates:
 
 - **Email Processing**: Parses emails with PostalMime
 - **State Management**: Tracks emails and statistics
-- **Auto-Reply**: Sends automated responses
-- **Loop Prevention**: Detects and prevents auto-reply loops
+- **Auto-Reply**: Sends automated responses with secure signatures
+- **Loop Prevention**: Detects auto-reply headers to prevent infinite loops
 
 ```typescript
 class EmailAgent extends Agent<Env, EmailAgentState> {
   async onEmail(email: AgentEmail) {
     // Parse email content
-    const parsed = await PostalMime.parse(emailBuffer);
+    const parsed = await PostalMime.parse(await email.getRaw());
 
     // Update agent state
     this.setState({
       emailCount: this.state.emailCount + 1,
-      emails: [...this.state.emails, emailData]
+      emails: [...this.state.emails.slice(-9), emailData]
     });
 
-    // Send auto-reply
-    await this.replyToEmail(email, {
-      from_name: "My Agent's name",
-      body: "Thank you for your email!"
-      // optionally set subject, headers, etc
-    });
+    // Send auto-reply (with secure signature for reply routing)
+    if (!this.isAutoReply(parsed)) {
+      await this.replyToEmail(email, {
+        fromName: "My Email Agent",
+        body: "Thank you for your email!",
+        secret: this.env.EMAIL_SECRET
+      });
+    }
   }
 }
 ```
 
-## Use Cases
+### Auto-Reply Loop Prevention
 
-This EmailAgent example supports:
+The agent detects auto-replies by checking:
 
-1. **Unified Email Processing**: All emails route to the EmailAgent with different IDs based on address
-2. **Auto-Responders**: Automatically acknowledge receipt of emails
-3. **Email Parsing**: Email Processing: Parse and extract data from emails
-4. **Thread Management**: Maintain email conversation state
-5. **Multi-Instance Routing**: Route emails to different EmailAgent instances using email addresses
+- `Auto-Submitted` header (RFC 3834)
+- `X-Auto-Response-Suppress` header (Microsoft)
+- `Precedence` header values (`bulk`, `junk`, `list`, `auto_reply`)
+- Subject line patterns ("auto-reply", "out of office", "automatic reply")
+
+## Security
+
+### Secure Reply Flow
+
+When sending outbound emails, the agent signs headers with HMAC-SHA256:
+
+```
+X-Agent-Name: EmailAgent
+X-Agent-ID: customer123
+X-Agent-Sig: <HMAC signature>
+X-Agent-Sig-Ts: <Unix timestamp>
+```
+
+When a reply comes back, the signature is verified before routing. This prevents:
+
+| Attack           | Protection               |
+| ---------------- | ------------------------ |
+| Forged headers   | Signature verification   |
+| Replay attacks   | Timestamp expiration     |
+| Future timestamp | Clock skew limit (5 min) |
+| Timing attacks   | Constant-time comparison |
+
+### Security Tests
+
+The test suite includes 15 attack scenarios:
+
+- Forged headers without signature
+- Random/fake signatures
+- Expired signatures
+- Future timestamps
+- Malformed timestamps
+- SQL injection payloads
+- Path traversal attempts
+- Header injection (newlines)
+- Unicode normalization attacks
+- Case manipulation
+- Long payload DoS attempts
+- Null byte injection
+
+Run security tests: `npm run test:security`
+
+## Deployment
+
+1. Set production secret:
+
+   ```bash
+   wrangler secret put EMAIL_SECRET
+   ```
+
+2. Deploy:
+
+   ```bash
+   npm run deploy
+   ```
+
+3. Configure email routing in Cloudflare Dashboard:
+   - Go to `https://dash.cloudflare.com/<account-id>/<domain>/email/routing/routes`
+   - Add routing rules to point to your worker
+
+4. Send emails to addresses like:
+   - `support@yourdomain.com` → EmailAgent with ID "support"
+   - `EmailAgent+urgent@yourdomain.com` → EmailAgent with ID "urgent"
+
+## Project Structure
+
+```
+email-agent/
+├── src/
+│   └── index.ts          # Main agent and worker code
+├── run-tests.ts          # Automated test runner (functional + security)
+├── test-mail.ts          # Manual test script with CLI
+├── wrangler.jsonc        # Cloudflare Worker configuration
+├── package.json
+└── README.md
+```
+
+## Scripts
+
+| Script                  | Description                           |
+| ----------------------- | ------------------------------------- |
+| `npm start`             | Start development server              |
+| `npm test`              | Run all tests (functional + security) |
+| `npm run test:verbose`  | Run tests with detailed output        |
+| `npm run test:security` | Run only security tests               |
+| `npm run test-email`    | Manual test script with CLI options   |
+| `npm run deploy`        | Deploy to Cloudflare                  |
 
 ## Next Steps
 
 - Add email templates for different types of auto-replies
-- Implement more sophisticated routing logic
+- Implement AI-powered response generation
 - Add email attachment processing
 - Integrate with external services (CRM, ticketing systems)
 - Add email scheduling and delayed sending
+- Implement conversation threading

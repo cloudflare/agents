@@ -284,26 +284,50 @@ const workflow = this.getWorkflow(instanceId);
 
 #### `getWorkflows(criteria?)`
 
-Query tracked workflows.
+Query tracked workflows with cursor-based pagination. Returns a `WorkflowPage` with workflows, total count, and cursor for the next page.
 
 ```typescript
-// Get all running workflows
-const running = this.getWorkflows({ status: "running" });
+// Get running workflows (default limit is 50, max is 100)
+const { workflows, total } = this.getWorkflows({ status: "running" });
 
 // Get workflows by binding name
-const processing = this.getWorkflows({ workflowName: "PROCESSING_WORKFLOW" });
+const { workflows: processing } = this.getWorkflows({
+  workflowName: "PROCESSING_WORKFLOW"
+});
 
 // Filter by metadata
-const userWorkflows = this.getWorkflows({
+const { workflows: userWorkflows } = this.getWorkflows({
   metadata: { userId: "user-456" }
 });
 
-// Get recent completed workflows
-const recent = this.getWorkflows({
+// Pagination example
+const page1 = this.getWorkflows({
   status: ["complete", "errored"],
-  limit: 10,
+  limit: 20,
   orderBy: "desc"
 });
+
+console.log(`Showing ${page1.workflows.length} of ${page1.total} workflows`);
+
+// Get next page using cursor
+if (page1.nextCursor) {
+  const page2 = this.getWorkflows({
+    status: ["complete", "errored"],
+    limit: 20,
+    orderBy: "desc",
+    cursor: page1.nextCursor
+  });
+}
+```
+
+The `WorkflowPage` type:
+
+```typescript
+type WorkflowPage = {
+  workflows: WorkflowInfo[];
+  total: number; // Total matching workflows
+  nextCursor: string | null; // null when no more pages
+};
 ```
 
 #### `deleteWorkflow(instanceId)`
@@ -331,6 +355,58 @@ const count = this.deleteWorkflows({
   status: ["errored", "terminated"]
 });
 ```
+
+#### `terminateWorkflow(instanceId)`
+
+Terminate a running workflow immediately.
+
+```typescript
+await this.terminateWorkflow(instanceId);
+```
+
+This stops the workflow and sets its status to `"terminated"`. Throws if the workflow is not found in the tracking table. Cloudflare will throw if the workflow is already completed, errored, or terminated.
+
+> **Note:** `terminate()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
+
+#### `pauseWorkflow(instanceId)`
+
+Pause a running workflow. The workflow can be resumed later with `resumeWorkflow()`.
+
+```typescript
+await this.pauseWorkflow(instanceId);
+```
+
+Throws if the workflow is not running. Cloudflare will throw if the workflow is already paused, completed, errored, or terminated.
+
+> **Note:** `pause()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
+
+#### `resumeWorkflow(instanceId)`
+
+Resume a paused workflow.
+
+```typescript
+await this.resumeWorkflow(instanceId);
+```
+
+Throws if the workflow is not paused. Cloudflare will throw if the workflow is already running, completed, errored, or terminated.
+
+> **Note:** `resume()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
+
+#### `restartWorkflow(instanceId, options?)`
+
+Restart a workflow instance from the beginning with the same ID.
+
+```typescript
+// Reset tracking (default) - clears timestamps and error fields
+await this.restartWorkflow(instanceId);
+
+// Preserve original timestamps
+await this.restartWorkflow(instanceId, { resetTracking: false });
+```
+
+This is useful for re-running failed workflows or retrying from scratch. The `resetTracking` option (default: `true`) controls whether to reset the `created_at` timestamp and clear error fields.
+
+> **Note:** `restart()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
 
 ### Lifecycle Callbacks
 

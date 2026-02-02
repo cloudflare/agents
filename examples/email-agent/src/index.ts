@@ -91,7 +91,7 @@ export class EmailAgent extends Agent<Env, EmailAgentState> {
 
       this.setState(newState);
 
-      if (this.state.autoReplyEnabled && !this.isAutoReply(parsed)) {
+      if (newState.autoReplyEnabled && !this.isAutoReply(parsed)) {
         await this.replyToEmail(email, {
           fromName: "My Email Agent",
           body: `Thank you for your email! 
@@ -101,8 +101,8 @@ I received your message with subject: "${email.headers.get("subject")}"
 This is an automated response. Your email has been recorded and I will process it accordingly.
 
 Current stats:
-- Total emails processed: ${this.state.emailCount}
-- Last updated: ${this.state.lastUpdated.toISOString()}
+- Total emails processed: ${newState.emailCount}
+- Last updated: ${newState.lastUpdated.toISOString()}
 
 Best regards,
 Email Agent`,
@@ -118,21 +118,35 @@ Email Agent`,
   private isAutoReply(
     parsed: Awaited<ReturnType<typeof PostalMime.parse>>
   ): boolean {
-    const autoReplyHeaders = [
-      "auto-submitted",
-      "x-auto-response-suppress",
-      "precedence"
-    ];
+    // Check headers for auto-reply indicators
+    // Cast header to Record to allow dynamic key access
+    for (const h of parsed.headers) {
+      const header = h as Record<string, string | undefined>;
 
-    for (const header of autoReplyHeaders) {
-      const hasHeader = parsed.headers.some((h) =>
-        Object.keys(h).includes(header)
-      );
-      if (hasHeader) {
+      // auto-submitted header (RFC 3834) - any value except "no" indicates auto-reply
+      const autoSubmitted = header["auto-submitted"];
+      if (autoSubmitted && autoSubmitted.toLowerCase() !== "no") {
+        return true;
+      }
+
+      // x-auto-response-suppress header (Microsoft) - presence indicates auto-reply
+      if (header["x-auto-response-suppress"]) {
+        return true;
+      }
+
+      // precedence header - only specific values indicate auto-reply
+      const precedence = header.precedence;
+      if (
+        precedence &&
+        ["bulk", "junk", "list", "auto_reply"].includes(
+          precedence.toLowerCase()
+        )
+      ) {
         return true;
       }
     }
 
+    // Check subject line for common auto-reply patterns
     const subject = (parsed.subject || "").toLowerCase();
     return (
       subject.includes("auto-reply") ||
@@ -185,21 +199,34 @@ export default {
 
         console.log("📧 Received test email data:", emailData);
 
+        // Create properly formatted RFC 5322 email message
+        const messageId = `<test-${crypto.randomUUID()}@test.local>`;
+        const rawEmail = [
+          `From: ${from}`,
+          `To: ${to}`,
+          `Subject: ${subject}`,
+          `Message-ID: ${messageId}`,
+          `Date: ${new Date().toUTCString()}`,
+          "Content-Type: text/plain; charset=utf-8",
+          "",
+          body
+        ].join("\r\n");
+
         // Create mock email from the JSON payload
         const mockEmail: ForwardableEmailMessage = {
           from,
           to,
           headers: new Headers({
             subject,
-            "Message-ID": `test-message-id-${crypto.randomUUID()}`
+            "Message-ID": messageId
           }),
           raw: new ReadableStream({
             start(controller) {
-              controller.enqueue(new TextEncoder().encode(body));
+              controller.enqueue(new TextEncoder().encode(rawEmail));
               controller.close();
             }
           }),
-          rawSize: body.length,
+          rawSize: rawEmail.length,
           reply: async (message: EmailMessage) => {
             console.log("📧 Reply to email:", message);
             return { messageId: "mock-reply-id" };
@@ -235,6 +262,153 @@ export default {
             headers: { "Content-Type": "application/json" }
           }
         );
+      }
+
+      // Security test endpoint - allows injecting custom X-Agent headers
+      // This is for testing the secure reply resolver's defenses
+      if (url.pathname === "/api/test-security" && request.method === "POST") {
+        assertSecretConfigured(env.EMAIL_SECRET);
+
+        const testData = (await request.json()) as {
+          from?: string;
+          to?: string;
+          subject?: string;
+          body?: string;
+          // Custom headers for security testing
+          headers?: Record<string, string>;
+          // If true, only use secure resolver (no fallback)
+          secureOnly?: boolean;
+        };
+        const {
+          from,
+          to,
+          subject,
+          body,
+          headers: customHeaders,
+          secureOnly
+        } = testData;
+        assert(from, "from is required");
+        assert(to, "to is required");
+        assert(subject, "subject is required");
+        assert(body, "body is required");
+
+        console.log("🔒 Security test with headers:", customHeaders);
+
+        const messageId = `<test-${crypto.randomUUID()}@test.local>`;
+        const emailHeaders = new Headers({
+          subject,
+          "Message-ID": messageId
+        });
+
+        // Add custom headers for security testing
+        if (customHeaders) {
+          for (const [key, value] of Object.entries(customHeaders)) {
+            emailHeaders.set(key, value);
+          }
+        }
+
+        const rawEmail = [
+          `From: ${from}`,
+          `To: ${to}`,
+          `Subject: ${subject}`,
+          `Message-ID: ${messageId}`,
+          `Date: ${new Date().toUTCString()}`,
+          "Content-Type: text/plain; charset=utf-8",
+          "",
+          body
+        ].join("\r\n");
+
+        const mockEmail: ForwardableEmailMessage = {
+          from,
+          to,
+          headers: emailHeaders,
+          raw: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(rawEmail));
+              controller.close();
+            }
+          }),
+          rawSize: rawEmail.length,
+          reply: async (message: EmailMessage) => {
+            console.log("📧 Reply to email:", message);
+            return { messageId: "mock-reply-id" };
+          },
+          forward: async (rcptTo: string, headers?: Headers) => {
+            console.log("📧 Forwarding email to:", rcptTo, headers);
+            return { messageId: "mock-forward-id" };
+          },
+          setReject: (reason: string) => {
+            console.log("📧 Rejecting email:", reason);
+          }
+        };
+
+        const secureReplyResolver = createSecureReplyEmailResolver(
+          env.EMAIL_SECRET,
+          {
+            onInvalidSignature: (email, reason) => {
+              console.log(
+                `🔒 Signature rejected: ${reason} from ${email.from}`
+              );
+            }
+          }
+        );
+        const addressResolver = createAddressBasedEmailResolver("EmailAgent");
+
+        let routedVia: string | null = null;
+
+        try {
+          await routeAgentEmail(mockEmail, env, {
+            resolver: async (email, env) => {
+              // Try secure reply routing first
+              const replyRouting = await secureReplyResolver(email, env);
+              if (replyRouting) {
+                routedVia = "secure";
+                return replyRouting;
+              }
+
+              // If secureOnly, don't fall back to address resolver
+              if (secureOnly) {
+                routedVia = "rejected";
+                return null;
+              }
+
+              // Fall back to address-based routing
+              routedVia = "address";
+              return addressResolver(email, env);
+            }
+          });
+
+          return new Response(
+            JSON.stringify({
+              success: true,
+              routedVia,
+              message:
+                routedVia === "secure"
+                  ? "Routed via secure resolver (signature valid)"
+                  : routedVia === "address"
+                    ? "Routed via address resolver (signature invalid/missing)"
+                    : "Not routed (rejected)"
+            }),
+            {
+              headers: { "Content-Type": "application/json" }
+            }
+          );
+        } catch (routeError) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              routedVia,
+              error:
+                routeError instanceof Error
+                  ? routeError.message
+                  : "Unknown error"
+            }),
+            {
+              headers: { "Content-Type": "application/json" },
+              status: 400
+            }
+          );
+        }
       }
 
       return (
