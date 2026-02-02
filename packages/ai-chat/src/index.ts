@@ -535,6 +535,13 @@ export class AIChatAgent<
           );
           return;
         }
+
+        // Handle client-side tool approval response
+        if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
+          const { toolCallId, approved } = data;
+          this._applyToolApproval(toolCallId, approved);
+          return;
+        }
       }
 
       // Forward unhandled messages to consumer's onMessage
@@ -1008,7 +1015,9 @@ export class AIChatAgent<
       if (
         "toolCallId" in part &&
         "state" in part &&
-        part.state === "output-available"
+        (part.state === "output-available" ||
+          part.state === "approval-responded" ||
+          part.state === "approval-requested")
       ) {
         const toolCallId = part.toolCallId as string;
 
@@ -1968,6 +1977,144 @@ export class AIChatAgent<
 
       message.metadata = mergedMetadata;
     }
+  }
+
+  /**
+   * Applies a tool approval response from the client, updating the persisted message.
+   * This is called when the client sends CF_AGENT_TOOL_APPROVAL for tools with needsApproval.
+   * Updates the tool part state from input-available/approval-requested to approval-responded.
+   *
+   * @param toolCallId - The tool call ID this approval is for
+   * @param approved - Whether the tool execution was approved
+   * @returns true if the approval was applied, false if the message was not found
+   */
+  private async _applyToolApproval(
+    toolCallId: string,
+    approved: boolean
+  ): Promise<boolean> {
+    // Find the message with this tool call.
+    // We check two locations:
+    // 1. _streamingMessage: in-memory message being actively built during AI response
+    //    (not yet persisted to SQLite or available in this.messages)
+    // 2. this.messages: persisted messages loaded from SQLite database
+    //
+    // The user can approve before streaming finishes (e.g., approval UI appears
+    // while AI is still generating text), so we must check _streamingMessage first.
+
+    let message: ChatMessage | undefined;
+
+    // Check streaming message first (in-memory, not yet persisted)
+    if (this._streamingMessage) {
+      for (const part of this._streamingMessage.parts) {
+        if ("toolCallId" in part && part.toolCallId === toolCallId) {
+          message = this._streamingMessage;
+          break;
+        }
+      }
+    }
+
+    // If not found in streaming message, check persisted messages (in SQLite).
+    // Retry with backoff in case streaming completes and persists between attempts.
+    if (!message) {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        message = this._findMessageByToolCallId(toolCallId);
+        if (message) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    if (!message) {
+      console.warn(
+        `[AIChatAgent] _applyToolApproval: Could not find message with toolCallId ${toolCallId} after retries`
+      );
+      return false;
+    }
+
+    // Check if this is the streaming message (not yet persisted)
+    const isStreamingMessage = message === this._streamingMessage;
+
+    // Update the tool part with the approval
+    let updated = false;
+    if (isStreamingMessage) {
+      // Update in place - the message will be persisted when streaming completes
+      for (const part of message.parts) {
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          (part.state === "input-available" ||
+            part.state === "approval-requested")
+        ) {
+          (part as { state: string; approval?: { approved: boolean } }).state =
+            "approval-responded";
+          (
+            part as { state: string; approval?: { approved: boolean } }
+          ).approval = { approved };
+          updated = true;
+          break;
+        }
+      }
+    } else {
+      // For persisted messages, create updated parts
+      const updatedParts = message.parts.map((part) => {
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          (part.state === "input-available" ||
+            part.state === "approval-requested")
+        ) {
+          updated = true;
+          return {
+            ...part,
+            state: "approval-responded" as const,
+            approval: { approved }
+          };
+        }
+        return part;
+      }) as ChatMessage["parts"];
+
+      if (updated) {
+        // Create the updated message and strip OpenAI item IDs
+        const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence(
+          {
+            ...message,
+            parts: updatedParts
+          }
+        );
+
+        // Persist the updated message
+        this.sql`
+          update cf_ai_chat_agent_messages 
+          set message = ${JSON.stringify(updatedMessage)}
+          where id = ${message.id}
+        `;
+
+        // Reload messages to update in-memory state
+        const persisted = this._loadMessagesFromDb();
+        this.messages = autoTransformMessages(persisted);
+      }
+    }
+
+    if (!updated) {
+      console.warn(
+        `[AIChatAgent] _applyToolApproval: Tool part with toolCallId ${toolCallId} not in input-available or approval-requested state`
+      );
+      return false;
+    }
+
+    // Broadcast the update to all clients (only for persisted messages)
+    if (!isStreamingMessage) {
+      const broadcastMessage = this._findMessageByToolCallId(toolCallId);
+      if (broadcastMessage) {
+        this._broadcastChatMessage({
+          type: MessageType.CF_AGENT_MESSAGE_UPDATED,
+          message: broadcastMessage
+        });
+      }
+    }
+
+    return true;
   }
 
   private async _reply(
