@@ -23,7 +23,7 @@ export class MyAgent extends Agent {
     // Add an MCP server
     const result = await this.addMcpServer(
       "github",
-      "https://mcp.github.com/sse"
+      "https://mcp.github.com/mcp"
     );
 
     if (result.state === "authenticating") {
@@ -52,10 +52,10 @@ const result = await this.addMcpServer(name, url, options?);
 
 ```typescript
 // Simple connection
-await this.addMcpServer("notion", "https://mcp.notion.so/sse");
+await this.addMcpServer("notion", "https://mcp.notion.so/mcp");
 
 // With explicit callback host
-await this.addMcpServer("github", "https://mcp.github.com/sse", {
+await this.addMcpServer("github", "https://mcp.github.com/mcp", {
   callbackHost: "https://my-worker.workers.dev"
 });
 ```
@@ -65,26 +65,26 @@ await this.addMcpServer("github", "https://mcp.github.com/sse", {
 MCP supports multiple transport types:
 
 ```typescript
-await this.addMcpServer("server", "https://mcp.example.com", {
+await this.addMcpServer("server", "https://mcp.example.com/mcp", {
   transport: {
-    // Transport type: "sse", "streamable-http", or "auto" (default)
-    type: "sse"
+    // Transport type: "streamable-http" (default), "sse", or "auto"
+    type: "streamable-http"
   }
 });
 ```
 
-| Transport           | Description                                    |
-| ------------------- | ---------------------------------------------- |
-| `"auto"`            | Auto-detect based on server response (default) |
-| `"sse"`             | Server-Sent Events - widely supported          |
-| `"streamable-http"` | HTTP with streaming - newer protocol           |
+| Transport           | Description                                           |
+| ------------------- | ----------------------------------------------------- |
+| `"streamable-http"` | HTTP with streaming - recommended default             |
+| `"sse"`             | Server-Sent Events - legacy / compatibility transport |
+| `"auto"`            | Auto-detect based on server response                  |
 
 ### Custom Headers
 
 For servers behind authentication (like Cloudflare Access) or using bearer tokens:
 
 ```typescript
-await this.addMcpServer("internal", "https://internal-mcp.example.com", {
+await this.addMcpServer("internal", "https://internal-mcp.example.com/mcp", {
   transport: {
     headers: {
       Authorization: "Bearer my-token",
@@ -134,7 +134,7 @@ sequenceDiagram
 
 ```typescript
 async onRequest(request: Request) {
-  const result = await this.addMcpServer("github", "https://mcp.github.com/sse");
+  const result = await this.addMcpServer("github", "https://mcp.github.com/mcp");
 
   if (result.state === "authenticating") {
     // Option 1: Redirect the user
@@ -332,7 +332,7 @@ For fine-grained control, use `this.mcp` directly:
 ```typescript
 // 1. Register the server
 await this.mcp.registerServer(id, {
-  url: "https://mcp.example.com",
+  url: "https://mcp.example.com/mcp",
   name: "My Server",
   callbackUrl: "https://my-worker.workers.dev/agents/my-agent/default/callback",
   transport: { type: "auto" }
@@ -438,7 +438,7 @@ async addMcpServer(
     client?: ClientOptions;
     transport?: {
       headers?: HeadersInit;
-      type?: "sse" | "streamable-http" | "auto";
+      type?: "sse" | "streamable-http" | "auto"; // default: "streamable-http"
     };
   }
 ): Promise<
