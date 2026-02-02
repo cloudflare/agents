@@ -361,10 +361,7 @@ export abstract class McpAgent<
   /** Return a handler for the given path for this MCP.
    * Defaults to Streamable HTTP transport.
    */
-  static serve<
-    Env extends Cloudflare.Env = Cloudflare.Env,
-    Props extends Record<string, unknown> = Record<string, unknown>
-  >(
+  static serve<Env = unknown, Props = unknown>(
     path: string,
     {
       binding = "MCP_OBJECT",

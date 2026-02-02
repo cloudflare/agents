@@ -25,10 +25,7 @@ export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
   transport?: WorkerTransport;
 }
 
-export function createMcpHandler<
-  Env extends Cloudflare.Env = Cloudflare.Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
->(
+export function createMcpHandler<Env = unknown, Props = unknown>(
   server: McpServer | Server,
   options: CreateMcpHandlerOptions = {}
 ): (
@@ -63,9 +60,10 @@ export function createMcpHandler<
         return options.authContext;
       }
 
-      if (ctx.props && Object.keys(ctx.props).length > 0) {
+      const props = ctx.props as Record<string, unknown> | undefined;
+      if (props && Object.keys(props).length > 0) {
         return {
-          props: ctx.props as Record<string, unknown>
+          props
         };
       }
 
@@ -112,10 +110,7 @@ let didWarnAboutExperimentalCreateMcpHandler = false;
 /**
  * @deprecated This has been renamed to createMcpHandler, and experimental_createMcpHandler will be removed in the next major version
  */
-export function experimental_createMcpHandler<
-  Env extends Cloudflare.Env = Cloudflare.Env,
-  Props extends Record<string, unknown> = Record<string, unknown>
->(
+export function experimental_createMcpHandler<Env = unknown, Props = unknown>(
   server: McpServer | Server,
   options: CreateMcpHandlerOptions = {}
 ): (
