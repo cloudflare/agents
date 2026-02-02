@@ -11,12 +11,8 @@ Agents can receive and process emails using Cloudflare's [Email Routing](https:/
 ## Quick Start
 
 ```ts
-import {
-  Agent,
-  createAddressBasedEmailResolver,
-  routeAgentEmail,
-  type AgentEmail
-} from "agents";
+import { Agent, routeAgentEmail } from "agents";
+import { createAddressBasedEmailResolver, type AgentEmail } from "agents/email";
 
 // Your Agent that handles emails
 export class EmailAgent extends Agent {
@@ -51,7 +47,7 @@ Resolvers determine which Agent instance receives an incoming email. Choose the 
 **Recommended for inbound mail.** Routes emails based on the recipient address.
 
 ```ts
-import { createAddressBasedEmailResolver } from "agents";
+import { createAddressBasedEmailResolver } from "agents/email";
 
 const resolver = createAddressBasedEmailResolver("EmailAgent");
 ```
@@ -71,7 +67,7 @@ The sub-address format (`agent+id@domain`) allows routing to different agent nam
 **For reply flows with signature verification.** Verifies that incoming emails are authentic replies to your outbound emails, preventing attackers from routing emails to arbitrary agent instances.
 
 ```ts
-import { createSecureReplyEmailResolver } from "agents";
+import { createSecureReplyEmailResolver } from "agents/email";
 
 const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET);
 ```
@@ -100,7 +96,7 @@ const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
 **For single-instance routing.** Routes all emails to a specific agent instance regardless of the recipient address.
 
 ```ts
-import { createCatchAllEmailResolver } from "agents";
+import { createCatchAllEmailResolver } from "agents/email";
 
 const resolver = createCatchAllEmailResolver("EmailAgent", "default");
 ```
@@ -293,13 +289,12 @@ When an email is routed via `createSecureReplyEmailResolver`, the `replyToEmail(
 Here's a complete email agent with secure reply routing:
 
 ```ts
+import { Agent, routeAgentEmail } from "agents";
 import {
-  Agent,
   createAddressBasedEmailResolver,
   createSecureReplyEmailResolver,
-  routeAgentEmail,
   type AgentEmail
-} from "agents";
+} from "agents/email";
 import PostalMime from "postal-mime";
 
 interface Env {

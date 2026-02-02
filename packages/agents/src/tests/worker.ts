@@ -12,10 +12,10 @@ import {
   Agent,
   callable,
   routeAgentRequest,
-  type AgentEmail,
   type Connection,
   type WSMessage
 } from "../index.ts";
+import type { AgentEmail } from "../email.ts";
 import type { WorkflowStatus, WorkflowInfo } from "../workflows.ts";
 import type { MCPClientConnection } from "../mcp/client-connection";
 

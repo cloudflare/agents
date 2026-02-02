@@ -216,10 +216,11 @@ export type SecureReplyResolverOptions = {
 export function createHeaderBasedEmailResolver<Env>(): EmailResolver<Env> {
   throw new Error(
     "createHeaderBasedEmailResolver has been removed due to a security vulnerability. " +
-      "It trusted attacker-controlled email headers for routing, enabling IDOR attacks. " +
+      "It trusted attacker-controlled email headers for routing, enabling IDOR attacks.\n\n" +
       "Migration options:\n" +
       "  - For inbound mail: use createAddressBasedEmailResolver(agentName)\n" +
-      "  - For reply flows: use createSecureReplyEmailResolver(secret) with signed headers"
+      "  - For reply flows: use createSecureReplyEmailResolver(secret) with signed headers\n\n" +
+      "See https://github.com/cloudflare/agents/blob/main/docs/email.md for details."
   );
 }
 

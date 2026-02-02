@@ -149,7 +149,16 @@ curl -X POST http://localhost:8787/api/test-security \
 
 ## Email Routing
 
-The agent supports multiple routing strategies:
+The agent supports multiple routing strategies. Import the resolvers from `agents/email`:
+
+```typescript
+import { routeAgentEmail } from "agents";
+import {
+  createSecureReplyEmailResolver,
+  createAddressBasedEmailResolver,
+  createCatchAllEmailResolver
+} from "agents/email";
+```
 
 ### 1. Secure Reply Routing (Recommended for replies)
 

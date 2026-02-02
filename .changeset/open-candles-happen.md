@@ -1,5 +1,5 @@
 ---
-"agents": patch
+"agents": minor
 ---
 
 ### Secure Email Reply Routing
@@ -8,12 +8,29 @@ This release introduces secure email reply routing with HMAC-SHA256 signed heade
 
 #### Breaking Changes
 
+**Email utilities moved to `agents/email` subpath**: Email-specific resolvers and utilities have been moved to a dedicated subpath for better organization.
+
+```ts
+// Before
+import { createAddressBasedEmailResolver, signAgentHeaders } from "agents";
+
+// After
+import {
+  createAddressBasedEmailResolver,
+  signAgentHeaders
+} from "agents/email";
+```
+
+The following remain in root: `routeAgentEmail`, `createHeaderBasedEmailResolver` (deprecated).
+
 **`createHeaderBasedEmailResolver` removed**: This function now throws an error with migration guidance. It was removed because it trusted attacker-controlled email headers for routing.
 
 **Migration:**
 
 - For inbound mail: use `createAddressBasedEmailResolver(agentName)`
 - For reply flows: use `createSecureReplyEmailResolver(secret)` with signed headers
+
+See https://github.com/cloudflare/agents/blob/main/docs/email.md for details.
 
 **`EmailSendOptions` type removed**: This type was unused and has been removed.
 

@@ -1,11 +1,9 @@
+import { Agent, routeAgentEmail, routeAgentRequest } from "agents";
 import {
-  Agent,
   createAddressBasedEmailResolver,
   createSecureReplyEmailResolver,
-  routeAgentEmail,
-  routeAgentRequest,
   type AgentEmail
-} from "agents";
+} from "agents/email";
 import PostalMime from "postal-mime";
 
 interface EmailData {
