@@ -18,7 +18,9 @@ export enum MessageType {
   /** Client sends tool result to server (for client-side tools) */
   CF_AGENT_TOOL_RESULT = "cf_agent_tool_result",
   /** Server notifies client that a message was updated (e.g., tool result applied) */
-  CF_AGENT_MESSAGE_UPDATED = "cf_agent_message_updated"
+  CF_AGENT_MESSAGE_UPDATED = "cf_agent_message_updated",
+  /** Client sends tool approval response to server (for tools with needsApproval) */
+  CF_AGENT_TOOL_APPROVAL = "cf_agent_tool_approval"
 }
 
 /**
@@ -119,4 +121,12 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       output: unknown;
       /** Whether server should auto-continue the conversation after applying result */
       autoContinue?: boolean;
+    }
+  | {
+      /** Client sends tool approval response to server (for tools with needsApproval) */
+      type: MessageType.CF_AGENT_TOOL_APPROVAL;
+      /** The tool call ID this approval is for */
+      toolCallId: string;
+      /** Whether the tool execution was approved */
+      approved: boolean;
     };
