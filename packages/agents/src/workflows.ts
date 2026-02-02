@@ -6,7 +6,7 @@
  *
  * @example
  * ```typescript
- * import { AgentWorkflow } from 'agents';
+ * import { AgentWorkflow } from 'agents/workflows';
  * import type { MyAgent } from './agent';
  *
  * type TaskParams = { taskId: string; data: string };
@@ -366,7 +366,14 @@ export type {
   WorkflowEventCallback,
   DefaultProgress,
   WaitForApprovalOptions,
-  ApprovalEventPayload
+  ApprovalEventPayload,
+  WorkflowStatus,
+  WorkflowTrackingRow,
+  RunWorkflowOptions,
+  WorkflowEventPayload,
+  WorkflowInfo,
+  WorkflowQueryCriteria,
+  WorkflowPage
 } from "./workflow-types";
 
 export { WorkflowRejectedError } from "./workflow-types";

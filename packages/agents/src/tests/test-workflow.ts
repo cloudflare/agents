@@ -1,8 +1,8 @@
 /**
  * Test Workflow for integration testing AgentWorkflow functionality
  */
-import { AgentWorkflow } from "../workflow";
-import type { AgentWorkflowEvent, AgentWorkflowStep } from "../workflow";
+import { AgentWorkflow } from "../workflows";
+import type { AgentWorkflowEvent, AgentWorkflowStep } from "../workflows";
 import type { TestWorkflowAgent } from "./worker";
 
 /**

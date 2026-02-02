@@ -45,8 +45,8 @@ Create a Workflow that extends `AgentWorkflow` to get typed access to the origin
 
 ```typescript
 // src/workflows/processing.ts
-import { AgentWorkflow } from "agents";
-import type { AgentWorkflowEvent, AgentWorkflowStep } from "agents";
+import { AgentWorkflow } from "agents/workflows";
+import type { AgentWorkflowEvent, AgentWorkflowStep } from "agents/workflows";
 import type { MyAgent } from "../agent";
 
 type TaskParams = {

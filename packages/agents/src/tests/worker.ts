@@ -14,10 +14,9 @@ import {
   routeAgentRequest,
   type AgentEmail,
   type Connection,
-  type WSMessage,
-  type WorkflowStatus,
-  type WorkflowInfo
+  type WSMessage
 } from "../index.ts";
+import type { WorkflowStatus, WorkflowInfo } from "../workflows.ts";
 import type { MCPClientConnection } from "../mcp/client-connection";
 
 // Re-export test workflows for wrangler

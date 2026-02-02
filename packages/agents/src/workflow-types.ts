@@ -3,6 +3,9 @@
  *
  * These types provide seamless integration between Cloudflare Agents
  * and Cloudflare Workflows for durable, multi-step background processing.
+ *
+ * Note: This file is kept separate from workflows.ts to avoid circular dependencies.
+ * Both index.ts (Agent class) and workflows.ts (AgentWorkflow class) import from here.
  */
 
 import type {

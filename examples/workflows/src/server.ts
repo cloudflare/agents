@@ -9,13 +9,14 @@
  * - Approve/reject specific workflows from the Agent
  */
 
-import { Agent, AgentWorkflow, callable, routeAgentRequest } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
+import { AgentWorkflow } from "agents/workflows";
 import type {
   AgentWorkflowEvent,
   AgentWorkflowStep,
   DefaultProgress,
   WorkflowInfo
-} from "agents";
+} from "agents/workflows";
 
 // Workflow parameters
 type TaskParams = {
