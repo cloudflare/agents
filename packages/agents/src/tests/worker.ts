@@ -1100,6 +1100,36 @@ export class TestStateAgent extends Agent<Env, TestState> {
     });
   }
 
+  // HTTP handler for testing agentFetch and path routing
+  // Only handles specific test paths - returns 404 for others to preserve routing test behavior
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname.split("/").pop() || "";
+
+    // Handle specific paths for browser integration tests
+    if (path === "state") {
+      return Response.json({ state: this.state });
+    }
+    if (path === "state-updates") {
+      return Response.json({ updates: this.stateUpdateCalls });
+    }
+    if (path === "echo") {
+      const body = await request.text();
+      return Response.json({ method: request.method, body, path });
+    }
+    if (path === "connections") {
+      // Count active connections using PartyServer's getConnections()
+      let count = 0;
+      for (const _ of this.getConnections()) {
+        count++;
+      }
+      return Response.json({ count });
+    }
+
+    // Return 404 for unhandled paths - preserves expected routing behavior
+    return new Response("Not found", { status: 404 });
+  }
+
   // Test helper methods (no @callable needed for DO RPC)
   getState() {
     return this.state;
@@ -1417,7 +1447,7 @@ export default {
     }
 
     return (
-      (await routeAgentRequest(request, env)) ||
+      (await routeAgentRequest(request, env, { cors: true })) ||
       new Response("Not found", { status: 404 })
     );
   },

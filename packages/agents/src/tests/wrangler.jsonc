@@ -28,10 +28,6 @@
       },
       { "class_name": "TestRaceAgent", "name": "TAG_AGENT" },
       {
-        "class_name": "TestChatAgent",
-        "name": "TestChatAgent"
-      },
-      {
         "class_name": "TestOAuthAgent",
         "name": "TestOAuthAgent"
       },
@@ -102,7 +98,6 @@
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",
         "TestRaceAgent",
-        "TestChatAgent",
         "TestOAuthAgent",
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
