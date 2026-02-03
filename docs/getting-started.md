@@ -37,7 +37,7 @@ Open [http://localhost:5173](http://localhost:5173) to see your agent in action.
 Let's build a simple counter agent from scratch. Replace `src/server.ts`:
 
 ```typescript
-import { Agent, routeAgentRequest } from "agents";
+import { Agent, routeAgentRequest, callable } from "agents";
 
 // Define the state shape
 type CounterState = {
@@ -49,17 +49,20 @@ export class Counter extends Agent<Env, CounterState> {
   // Initial state for new instances
   initialState: CounterState = { count: 0 };
 
-  // Methods can be called from the client
+  // Methods marked with @callable can be called from the client
+  @callable()
   increment() {
     this.setState({ count: this.state.count + 1 });
     return this.state.count;
   }
 
+  @callable()
   decrement() {
     this.setState({ count: this.state.count - 1 });
     return this.state.count;
   }
 
+  @callable()
   reset() {
     this.setState({ count: 0 });
   }
@@ -67,9 +70,9 @@ export class Counter extends Agent<Env, CounterState> {
 
 // Route requests to agents
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     return (
-      routeAgentRequest(request, env) ||
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }
@@ -143,7 +146,7 @@ Key points:
 
 - **`useAgent`** connects to your agent via WebSocket
 - **`onStateUpdate`** fires whenever the agent's state changes
-- **`agent.stub.methodName()`** calls methods on your agent
+- **`agent.stub.methodName()`** calls methods marked with `@callable()` on your agent
 
 ---
 
@@ -251,12 +254,25 @@ Check that:
 2. The `onStateUpdate` callback is wired up in your client
 3. WebSocket connection is established (check browser dev tools)
 
+### "Method X is not callable" errors
+
+Make sure your methods are decorated with `@callable()`:
+
+```typescript
+import { callable } from "agents";
+
+@callable()
+increment() {
+  // ...
+}
+```
+
 ### Type errors with `agent.stub`
 
 Add the agent type parameter:
 
 ```typescript
-const agent = useAgent<CounterState, Counter>({
+const agent = useAgent<Counter, CounterState>({
   agent: "Counter",
   onStateUpdate: (state) => setCount(state.count)
 });

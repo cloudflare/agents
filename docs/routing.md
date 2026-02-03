@@ -204,7 +204,7 @@ export default {
 
     // Default routing for standard /agents/... paths
     return (
-      routeAgentRequest(request, env) ||
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }
@@ -377,7 +377,7 @@ export default {
 
     // Regular agent routing
     return (
-      routeAgentRequest(request, env) ||
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }
@@ -457,7 +457,7 @@ export { UserProfile } from "./agents/user-profile";
 export default {
   async fetch(request: Request, env: Env) {
     return (
-      routeAgentRequest(request, env) ||
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }
@@ -556,7 +556,7 @@ export default {
     }
 
     return (
-      routeAgentRequest(request, env) ||
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }

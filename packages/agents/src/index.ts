@@ -3564,6 +3564,9 @@ export class StreamingResponse {
    */
   send(chunk: unknown): boolean {
     if (this._closed) {
+      console.warn(
+        "StreamingResponse.send() called after stream was closed - data not sent"
+      );
       return false;
     }
     const response: RPCResponse = {
