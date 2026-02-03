@@ -291,10 +291,6 @@ const DEFAULT_STATE = {} as unknown;
  * Default options for Agent configuration.
  * Child classes can override specific options without spreading.
  */
-/**
- * Default options for Agent configuration.
- * Child classes can override specific options without spreading.
- */
 export const DEFAULT_AGENT_STATIC_OPTIONS = {
   /** Whether the Agent should hibernate when inactive */
   hibernate: true,

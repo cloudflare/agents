@@ -30,7 +30,7 @@ export default {
     }
 
     return (
-      routeAgentRequest(request, env) ||
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }
