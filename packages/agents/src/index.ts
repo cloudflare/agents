@@ -918,7 +918,7 @@ export class Agent<
     source: Connection | "server" = "server"
   ): void {
     // Validation/gating hook (sync only)
-    this.beforeStateChange(nextState, source);
+    this.validateStateChange(nextState, source);
 
     // Persist state
     this._state = nextState;
@@ -989,7 +989,7 @@ export class Agent<
    * IMPORTANT: This hook must be synchronous.
    */
   // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
-  beforeStateChange(nextState: State, source: Connection | "server") {
+  validateStateChange(nextState: State, source: Connection | "server") {
     // override this to validate state updates
   }
 

@@ -148,51 +148,28 @@ export function getAllEmailHeaders(
 }
 
 /**
- * Check if an email appears to be an auto-reply based on common headers.
- * Checks for Auto-Submitted, X-Auto-Response-Suppress, Precedence headers,
- * and common auto-reply subject patterns.
+ * Check if an email appears to be an auto-reply based on standard headers.
+ * Checks for Auto-Submitted (RFC 3834), X-Auto-Response-Suppress, and Precedence headers.
  *
  * @param headers - Headers array from postal-mime Email.headers or similar format
- * @param subject - Optional email subject to check for auto-reply patterns
  * @returns true if email appears to be an auto-reply
  *
  * @example
  * ```typescript
- * if (isAutoReplyEmail(parsed.headers, parsed.subject)) {
+ * if (isAutoReplyEmail(parsed.headers)) {
  *   // Skip processing auto-replies
  *   return;
  * }
  * ```
  */
-export function isAutoReplyEmail(
-  headers: EmailHeader[],
-  subject?: string
-): boolean {
-  // Check auto-reply headers
+export function isAutoReplyEmail(headers: EmailHeader[]): boolean {
   const autoReplyHeaders = [
     "auto-submitted",
     "x-auto-response-suppress",
     "precedence"
   ];
 
-  if (hasAnyEmailHeader(headers, autoReplyHeaders)) {
-    return true;
-  }
-
-  // Check subject for auto-reply patterns
-  if (subject) {
-    const lowerSubject = subject.toLowerCase();
-    if (
-      lowerSubject.includes("auto-reply") ||
-      lowerSubject.includes("out of office") ||
-      lowerSubject.includes("automatic reply") ||
-      lowerSubject.includes("autoreply")
-    ) {
-      return true;
-    }
-  }
-
-  return false;
+  return hasAnyEmailHeader(headers, autoReplyHeaders);
 }
 
 // ============================================================================

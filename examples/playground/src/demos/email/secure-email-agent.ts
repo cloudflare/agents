@@ -107,10 +107,7 @@ export class SecureEmailAgent extends Agent<Env, SecureEmailState> {
 
       // Send auto-reply if enabled and not an auto-reply itself
       // Use the SDK's isAutoReplyEmail utility to detect auto-replies
-      if (
-        this.state.autoReplyEnabled &&
-        !isAutoReplyEmail(parsed.headers, parsed.subject)
-      ) {
+      if (this.state.autoReplyEnabled && !isAutoReplyEmail(parsed.headers)) {
         await this.sendSignedReply(email, parsedEmail);
       }
 

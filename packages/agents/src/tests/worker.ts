@@ -1167,7 +1167,7 @@ export class TestThrowingStateAgent extends Agent<Env, TestState> {
   onErrorCalls: string[] = [];
 
   // Validation hook: throw to reject the update (gates persist+broadcast)
-  beforeStateChange(nextState: TestState, _source: Connection | "server") {
+  validateStateChange(nextState: TestState, _source: Connection | "server") {
     if (nextState.count === -1) {
       throw new Error("Invalid state: count cannot be -1");
     }

@@ -167,34 +167,15 @@ describe("Email Header Parsing Utilities", () => {
       expect(isAutoReplyEmail(headers)).toBe(true);
     });
 
-    it("should detect auto-reply subject patterns", () => {
-      const testCases = [
-        "Auto-Reply: Out of Office",
-        "Re: Auto-reply: Thanks",
-        "Out of Office: Jane Doe",
-        "Automatic reply: Meeting"
-      ];
-
-      for (const subject of testCases) {
-        const headers = createHeaders({});
-        expect(isAutoReplyEmail(headers, subject)).toBe(true);
-      }
-    });
-
-    it("should detect autoreply (no hyphen) in subject", () => {
-      const headers = createHeaders({});
-      expect(isAutoReplyEmail(headers, "Autoreply: Thanks")).toBe(true);
-    });
-
     it("should return false for normal emails", () => {
       const headers = createHeaders({
         From: "user@example.com",
         Subject: "Meeting Tomorrow"
       });
-      expect(isAutoReplyEmail(headers, "Meeting Tomorrow")).toBe(false);
+      expect(isAutoReplyEmail(headers)).toBe(false);
     });
 
-    it("should return false for empty headers and no subject", () => {
+    it("should return false for empty headers", () => {
       expect(isAutoReplyEmail([])).toBe(false);
     });
   });

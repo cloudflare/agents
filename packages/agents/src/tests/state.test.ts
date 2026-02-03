@@ -442,8 +442,8 @@ describe("state management", () => {
     });
   });
 
-  describe("beforeStateChange validation", () => {
-    it("should not broadcast state if beforeStateChange throws", async () => {
+  describe("validateStateChange validation", () => {
+    it("should not broadcast state if validateStateChange throws", async () => {
       const room = `throwing-state-${crypto.randomUUID()}`;
 
       // Connect a WebSocket client first
@@ -466,7 +466,7 @@ describe("state management", () => {
       // Get the agent stub and try to set invalid state (count = -1 triggers throw)
       const agentStub = await getAgentByName(env.TestThrowingStateAgent, room);
 
-      // This should throw in beforeStateChange (sync gate)
+      // This should throw in validateStateChange (sync gate)
       try {
         await agentStub.updateState({
           count: -1,
@@ -492,7 +492,7 @@ describe("state management", () => {
       ws.close();
     });
 
-    it("should broadcast state when beforeStateChange succeeds", async () => {
+    it("should broadcast state when validateStateChange succeeds", async () => {
       const room = `valid-state-${crypto.randomUUID()}`;
 
       // Connect a WebSocket client first

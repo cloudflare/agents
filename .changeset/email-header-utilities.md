@@ -11,7 +11,7 @@ New utilities to simplify working with email headers from postal-mime:
 - `hasEmailHeader(headers, name)` - Checks if a header exists (case-insensitive)
 - `hasAnyEmailHeader(headers, names)` - Checks if any of the specified headers exist
 - `getAllEmailHeaders(headers, name)` - Gets all values for headers that appear multiple times (e.g., `Received`)
-- `isAutoReplyEmail(headers, subject?)` - Detects auto-reply emails based on common headers and subject patterns
+- `isAutoReplyEmail(headers)` - Detects auto-reply emails based on standard headers (RFC 3834)
 
 Example usage:
 
@@ -28,7 +28,7 @@ async onEmail(email: AgentEmail) {
   console.log(headers["content-type"]);
 
   // Detect and skip auto-reply emails
-  if (isAutoReplyEmail(parsed.headers, parsed.subject)) {
+  if (isAutoReplyEmail(parsed.headers)) {
     console.log("Skipping auto-reply");
     return;
   }

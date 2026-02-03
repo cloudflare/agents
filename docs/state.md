@@ -192,7 +192,22 @@ onStateUpdate(state: GameState, source: Connection | "server") {
 
 ## Validating State Updates
 
-If you want to validate or reject state updates, override `beforeStateChange()`.\n+\n+- **Runs before persistence and broadcast**\n+- **Must be synchronous**\n+- **Throwing aborts the update**\n+\n+`typescript\n+beforeStateChange(nextState: GameState, source: Connection | \"server\") {\n+  // Example: reject negative scores\n+  if (nextState.score < 0) {\n+    throw new Error(\"score cannot be negative\");\n+  }\n+}\n+`\n+\n+`onStateUpdate()` is not intended for validation; it is a notification hook and should not block broadcasts.
+If you want to validate or reject state updates, override `validateStateChange()`:
+
+- **Runs before persistence and broadcast**
+- **Must be synchronous**
+- **Throwing aborts the update**
+
+```typescript
+validateStateChange(nextState: GameState, source: Connection | "server") {
+  // Example: reject negative scores
+  if (nextState.score < 0) {
+    throw new Error("score cannot be negative");
+  }
+}
+```
+
+> `onStateUpdate()` is not intended for validation; it is a notification hook and should not block broadcasts.
 
 ### The `source` Parameter
 
