@@ -1,5 +1,15 @@
 # @cloudflare/agents
 
+## 0.3.8
+
+### Patch Changes
+
+- [#833](https://github.com/cloudflare/agents/pull/833) [`6c80022`](https://github.com/cloudflare/agents/commit/6c80022713a120c1a93e6afe16d20aee9ab6c9cb) Thanks [@tarushnagpal](https://github.com/tarushnagpal)! - On invalid OAuth state, clear auth_url in storage and set the MCP connection state to FAILED ready for reconnection.
+
+- [#834](https://github.com/cloudflare/agents/pull/834) [`2b4aecd`](https://github.com/cloudflare/agents/commit/2b4aecde7e6887764b5733033b615427cd564926) Thanks [@threepointone](https://github.com/threepointone)! - Fix AgentClient.close() to immediately reject pending RPC calls instead of waiting for WebSocket close handshake timeout.
+
+  Previously, calling `client.close()` would not reject pending RPC calls until the WebSocket close handshake completed (which could take 15+ seconds in some environments). Now pending calls are rejected immediately when `close()` is called, providing faster feedback on intentional disconnects.
+
 ## 0.3.7
 
 # agents@0.3.7 Release Notes
@@ -268,7 +278,6 @@ await generateObject({
   providerOptions: { openai: { strictJsonSchema: false } }
 });
 ```
-
 
 ### Patch Changes
 
