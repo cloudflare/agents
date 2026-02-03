@@ -1321,6 +1321,11 @@ export function useAgentChat<
       if (toolCallId) {
         // Send approval to server first (server updates message in place)
         sendToolApprovalToServer(toolCallId, approved);
+      } else {
+        console.warn(
+          `[useAgentChat] addToolApprovalResponse: Could not find toolCallId for approval ID "${approvalId}". ` +
+            "Server will not be notified, which may cause duplicate messages."
+        );
       }
 
       // Call AI SDK's addToolApprovalResponse for local state update
