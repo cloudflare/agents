@@ -311,6 +311,9 @@ export class AgentClient<State = unknown> extends PartySocket {
    * Close the connection and immediately reject all pending RPC calls.
    * This provides immediate feedback on intentional close rather than
    * waiting for the WebSocket close handshake to complete.
+   *
+   * Note: Any calls made after `close()` will be rejected when the
+   * underlying WebSocket close event fires.
    */
   close(code?: number, reason?: string) {
     // Immediately reject all pending calls on intentional close
