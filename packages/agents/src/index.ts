@@ -313,14 +313,10 @@ type ResolvedAgentOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
 /**
  * Configuration options for the Agent.
  * Override in subclasses via `static options`.
- *
+ * All fields are optional - defaults are applied at runtime.
  * Note: `hibernate` defaults to `true` if not specified.
  */
-export type AgentStaticOptions = {
-  hibernate?: boolean;
-  sendIdentityOnConnect?: boolean;
-  hungScheduleTimeoutSeconds?: number;
-};
+export type AgentStaticOptions = Partial<ResolvedAgentOptions>;
 
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
@@ -482,10 +478,7 @@ export class Agent<
    *   static options = { sendIdentityOnConnect: false };
    * }
    */
-  // Use intersection with Server's type requirement, but AgentStaticOptions allows optional hibernate in subclasses
-  static options: AgentStaticOptions = {
-    hibernate: true
-  } as AgentStaticOptions;
+  static options: AgentStaticOptions = { hibernate: true };
 
   /**
    * Resolved options (merges defaults with subclass overrides)
