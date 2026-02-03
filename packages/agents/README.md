@@ -66,16 +66,20 @@ export class CounterAgent extends Agent<Env, State> {
 ```tsx
 // client.tsx
 import { useAgent } from "agents/react";
+import { useState } from "react";
 
 function Counter() {
-  const { state, agent } = useAgent<State>({
+  const [count, setCount] = useState(0);
+
+  const agent = useAgent<State>({
     agent: "counter-agent",
-    name: "my-counter"
+    name: "my-counter",
+    onStateUpdate: (state) => setCount(state.count)
   });
 
   return (
     <div>
-      <span>{state.count}</span>
+      <span>{count}</span>
       <button onClick={() => agent.stub.increment()}>+</button>
       <button onClick={() => agent.stub.decrement()}>-</button>
     </div>
@@ -124,7 +128,7 @@ export class MyAgent extends Agent<Env, { items: string[] }> {
     this.setState({ items: [...this.state.items, item] });
   }
 
-  onStateUpdate(state: State, source: "server" | "client") {
+  onStateUpdate(state: State, source: Connection | "server") {
     // Called when state changes from any source
   }
 }
@@ -214,12 +218,15 @@ async onEmail(email: EmailMessage) {
 
 ```tsx
 import { useAgent } from "agents/react";
+import { useState } from "react";
 
 function App() {
-  const { state, agent } = useAgent<MyState>({
+  const [state, setState] = useState<MyState | null>(null);
+
+  const agent = useAgent<MyState>({
     agent: "my-agent",
     name: "instance-name",
-    onStateUpdate: (newState) => console.log("State updated:", newState)
+    onStateUpdate: (newState) => setState(newState)
   });
 
   return (
@@ -357,11 +364,13 @@ export default MyMCP.serve("/mcp", { binding: "MyMCP" });
 
 ```typescript
 // Connect to external MCP servers
-await this.addMcpServer({
-  name: "weather-service",
-  url: "https://weather-mcp.example.com/mcp",
-  transport: "streamable-http"
-});
+await this.addMcpServer(
+  "weather-service",
+  "https://weather-mcp.example.com/mcp",
+  {
+    transport: { type: "streamable-http" }
+  }
+);
 
 // Use with AI SDK
 const result = await generateText({
@@ -394,7 +403,7 @@ import { routeAgentRequest } from "agents";
 export default {
   async fetch(request: Request, env: Env) {
     return (
-      routeAgentRequest(request, env) ??
+      (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
   }
