@@ -2,6 +2,274 @@
 
 ## 0.3.7
 
+# agents@0.3.7 Release Notes
+
+This release introduces **Cloudflare Workflows integration** for durable multi-step processing, **secure email reply routing** with HMAC-SHA256 signatures, **15+ new documentation files**, and significant improvements to state management, the callable RPC system, and scheduling.
+
+## Highlights
+
+- **Workflows Integration** - Seamless integration between Cloudflare Agents and Cloudflare Workflows for durable, multi-step background processing
+- **Secure Email Routing** - HMAC-SHA256 signed email headers prevent unauthorized routing of emails to agent instances
+- **Comprehensive Documentation** - 15+ new docs covering getting started, state, routing, HTTP/WebSocket lifecycle, callable methods, MCP, and scheduling
+- **Synchronous `setState()`** - State updates are now synchronous with a new `validateStateChange()` validation hook
+- **`scheduleEvery()` Method** - Fixed-interval recurring tasks with overlap prevention
+- **Callable System Improvements** - Client-side RPC timeouts, streaming error signaling, introspection API
+- **100+ New Tests** - Comprehensive test coverage across state, routing, callable, and email utilities
+
+---
+
+## Cloudflare Workflows Integration
+
+Agents excel at real-time communication and state management. Workflows excel at durable execution. Together, they enable powerful patterns where Agents handle WebSocket connections while Workflows handle long-running tasks, retries, and human-in-the-loop flows.
+
+### AgentWorkflow Base Class
+
+Extend `AgentWorkflow` instead of `WorkflowEntrypoint` to get typed access to the originating Agent:
+
+```typescript
+import { AgentWorkflow } from "agents/workflows";
+
+export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    // Call Agent methods via RPC
+    await this.agent.updateStatus(params.taskId, "processing");
+
+    // Non-durable: progress reporting
+    await this.reportProgress({ step: "process", percent: 0.5 });
+    this.broadcastToClients({ type: "update", taskId: params.taskId });
+
+    // Durable via step: idempotent, won't repeat on retry
+    await step.mergeAgentState({ taskProgress: 0.5 });
+    await step.reportComplete(result);
+
+    return result;
+  }
+}
+```
+
+### Agent Methods for Workflows
+
+- `runWorkflow(workflowName, params, options?)` - Start workflow with optional metadata
+- `sendWorkflowEvent(workflowName, workflowId, event)` - Send events to waiting workflows
+- `getWorkflow(workflowId)` / `getWorkflows(criteria?)` - Query workflows with cursor-based pagination
+- `deleteWorkflow(workflowId)` / `deleteWorkflows(criteria?)` - Delete workflows by ID or criteria
+- `approveWorkflow(workflowId)` / `rejectWorkflow(workflowId)` - Human-in-the-loop approval flows
+- `terminateWorkflow()`, `pauseWorkflow()`, `resumeWorkflow()`, `restartWorkflow()` - Workflow control
+
+### Lifecycle Callbacks
+
+```typescript
+async onWorkflowProgress(workflowName, workflowId, progress) {}
+async onWorkflowComplete(workflowName, workflowId, result?) {}
+async onWorkflowError(workflowName, workflowId, error) {}
+async onWorkflowEvent(workflowName, workflowId, event) {}
+```
+
+See `docs/workflows.md` for full documentation.
+
+---
+
+## Secure Email Reply Routing
+
+Prevents unauthorized routing of emails to arbitrary agent instances using HMAC-SHA256 signed headers.
+
+### New Resolver
+
+```typescript
+import { createSecureReplyEmailResolver } from "agents/email";
+
+const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
+  maxAge: 7 * 24 * 60 * 60, // Optional: 7 days (default: 30 days)
+  onInvalidSignature: (email, reason) => {
+    console.warn(`Invalid signature from ${email.from}: ${reason}`);
+  }
+});
+```
+
+### Automatic Signing on Reply
+
+```typescript
+await this.replyToEmail(email, {
+  fromName: "My Agent",
+  body: "Thanks!",
+  secret: this.env.EMAIL_SECRET // Signs headers for secure reply routing
+});
+```
+
+### Breaking Changes
+
+- Email utilities moved to `agents/email` subpath
+- `createHeaderBasedEmailResolver` removed (security vulnerability)
+- New `onNoRoute` callback for handling unmatched emails
+
+---
+
+## New Documentation
+
+| Document                        | Description                                                            |
+| ------------------------------- | ---------------------------------------------------------------------- |
+| `getting-started.md`            | Quick start guide: installation, first agent, state basics, deployment |
+| `adding-to-existing-project.md` | Integrating agents into existing Workers, React apps, Hono             |
+| `state.md`                      | State management, `validateStateChange()`, persistence, client sync    |
+| `routing.md`                    | URL routing patterns, `basePath`, server-sent identity                 |
+| `http-websockets.md`            | HTTP/WebSocket lifecycle hooks, connection management, hibernation     |
+| `callable-methods.md`           | `@callable` decorator, RPC over WebSocket, streaming responses         |
+| `mcp-client.md`                 | Connecting to MCP servers, OAuth flows, transport options              |
+| `scheduling.md`                 | One-time, recurring (`scheduleEvery`), and cron-based scheduling       |
+| `workflows.md`                  | Complete Workflows integration guide                                   |
+
+---
+
+## State Management Improvements
+
+### Synchronous `setState()`
+
+`setState()` is now synchronous. Existing `await this.setState(...)` code continues to work.
+
+```typescript
+// Preferred (new)
+this.setState({ count: 1 });
+
+// Still works (backward compatible)
+await this.setState({ count: 1 });
+```
+
+### `validateStateChange()` Hook
+
+New synchronous validation hook that runs before state is persisted:
+
+```typescript
+validateStateChange(nextState: State, source: Connection | "server") {
+  if (nextState.count < 0) {
+    throw new Error("Count cannot be negative");
+  }
+}
+```
+
+### Execution Order
+
+1. `validateStateChange(nextState, source)` - validation (sync, gating)
+2. State persisted to SQLite
+3. State broadcast to connected clients
+4. `onStateUpdate(nextState, source)` - notifications (async via `ctx.waitUntil`, non-gating)
+
+---
+
+## Scheduling: `scheduleEvery()`
+
+Fixed-interval recurring tasks with overlap prevention and error resilience:
+
+```typescript
+await this.scheduleEvery(60, "cleanup");
+await this.scheduleEvery(300, "syncData", { source: "api" });
+```
+
+- Validates interval doesn't exceed 30 days (DO alarm limit)
+- Overlap prevention with hung callback detection (configurable via `hungScheduleTimeoutSeconds`)
+
+---
+
+## Callable System Improvements
+
+### Client-side RPC Timeout
+
+```typescript
+await agent.call("method", [args], {
+  timeout: 5000,
+  stream: { onChunk, onDone, onError }
+});
+```
+
+### New Features
+
+- `StreamingResponse.error(message)` - Graceful stream error signaling
+- `getCallableMethods()` - Introspection API for callable methods
+- Connection close handling - Pending calls rejected on disconnect
+- `crypto.randomUUID()` for more robust RPC IDs
+- Streaming observability events and error logging
+
+---
+
+## MCP Server API
+
+Options-based `addMcpServer()` overload for cleaner configuration:
+
+```typescript
+await this.addMcpServer("server", url, {
+  callbackHost: "https://my-worker.workers.dev",
+  transport: { headers: { Authorization: "Bearer ..." } }
+});
+```
+
+---
+
+## Routing & Identity Enhancements
+
+- **`basePath`** - Bypass default URL construction for custom routing
+- **Server-sent identity** - Agents send `name` and `agent` type on connect
+- **`onIdentity` / `onIdentityChange`** callbacks on the client
+- **`static options = { sendIdentityOnConnect }`** for server-side control
+
+```typescript
+const agent = useAgent({
+  basePath: "user",
+  onIdentity: (name, agentType) => console.log(`Connected to ${name}`)
+});
+```
+
+---
+
+## Email Utilities
+
+- **`isAutoReplyEmail(headers)`** - Detect auto-reply emails using standard RFC headers
+
+---
+
+## Bug Fixes
+
+- Fixed tool error content type in `getAITools` (#781)
+- Fixed React `useRef` type error
+- Memory leak prevention with WeakMap for callable metadata
+- Connection cleanup - pending RPC calls rejected on WebSocket close
+- JSON parse error handling - graceful fallback to `initialState` on corrupted state
+- Fixed resumable streaming to avoid delivering live chunks before resume ACK (#795)
+
+---
+
+## Migration Notes
+
+### Email Imports
+
+```typescript
+// Before
+import { createAddressBasedEmailResolver, signAgentHeaders } from "agents";
+
+// After
+import {
+  createAddressBasedEmailResolver,
+  signAgentHeaders
+} from "agents/email";
+```
+
+### Workflow Imports
+
+```typescript
+import { AgentWorkflow } from "agents/workflows";
+import type { AgentWorkflowStep, WorkflowInfo } from "agents/workflows";
+```
+
+### OpenAI Provider Options
+
+When using `scheduleSchema` with OpenAI models via the AI SDK, pass `providerOptions`:
+
+```typescript
+await generateObject({
+  // ... other options
+  providerOptions: { openai: { strictJsonSchema: false } }
+});
+```
+
+
 ### Patch Changes
 
 - [#825](https://github.com/cloudflare/agents/pull/825) [`0c3c9bb`](https://github.com/cloudflare/agents/commit/0c3c9bb62ceff66ed38d3bbd90c767600f1f3453) Thanks [@threepointone](https://github.com/threepointone)! - Add cursor-based pagination to `getWorkflows()`. Returns a `WorkflowPage` with workflows, total count, and cursor for next page. Default limit is 50 (max 100).
