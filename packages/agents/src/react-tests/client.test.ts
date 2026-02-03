@@ -269,10 +269,10 @@ describe("AgentClient", () => {
       // Start an async call that will take a while
       const callPromise = client.call("asyncMethod", [5000]);
 
-      // Close the connection immediately
+      // Close the connection immediately - pending calls should reject immediately
       client.close();
 
-      // The call should be rejected
+      // The call should be rejected immediately (not waiting for WebSocket close handshake)
       await expect(callPromise).rejects.toThrow("Connection closed");
     });
   });
