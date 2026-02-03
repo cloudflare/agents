@@ -285,14 +285,21 @@ export class AgentClient<State = unknown> extends PartySocket {
       this.identified = false;
       this._resetReady();
 
-      // Reject all pending calls
-      const error = new Error("Connection closed");
-      for (const pending of this._pendingCalls.values()) {
-        pending.reject(error);
-        pending.stream?.onError?.("Connection closed");
-      }
-      this._pendingCalls.clear();
+      // Reject any remaining pending calls (e.g., from unexpected disconnect)
+      this._rejectPendingCalls("Connection closed");
     });
+  }
+
+  /**
+   * Reject all pending RPC calls with the given reason.
+   */
+  private _rejectPendingCalls(reason: string) {
+    const error = new Error(reason);
+    for (const pending of this._pendingCalls.values()) {
+      pending.reject(error);
+      pending.stream?.onError?.(reason);
+    }
+    this._pendingCalls.clear();
   }
 
   setState(state: State) {
@@ -307,12 +314,7 @@ export class AgentClient<State = unknown> extends PartySocket {
    */
   close(code?: number, reason?: string) {
     // Immediately reject all pending calls on intentional close
-    const error = new Error("Connection closed");
-    for (const pending of this._pendingCalls.values()) {
-      pending.reject(error);
-      pending.stream?.onError?.("Connection closed");
-    }
-    this._pendingCalls.clear();
+    this._rejectPendingCalls("Connection closed");
 
     // Then close the underlying socket
     super.close(code, reason);
