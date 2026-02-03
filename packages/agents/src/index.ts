@@ -308,7 +308,19 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
   hungScheduleTimeoutSeconds: 30
 };
 
-export type AgentStaticOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
+type ResolvedAgentOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
+
+/**
+ * Configuration options for the Agent.
+ * Override in subclasses via `static options`.
+ *
+ * Note: `hibernate` defaults to `true` if not specified.
+ */
+export type AgentStaticOptions = {
+  hibernate?: boolean;
+  sendIdentityOnConnect?: boolean;
+  hungScheduleTimeoutSeconds?: number;
+};
 
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
@@ -463,36 +475,31 @@ export class Agent<
   }
 
   /**
-   * Server configuration options (hibernate).
-   * Inherited from partyserver.
-   */
-  static options = {
-    hibernate: true
-  };
-
-  /**
-   * Agent-specific configuration options.
+   * Agent configuration options.
    * Override in subclasses - only specify what you want to change.
    * @example
    * class SecureAgent extends Agent {
-   *   static agentOptions = { sendIdentityOnConnect: false };
+   *   static options = { sendIdentityOnConnect: false };
    * }
    */
-  static agentOptions: Partial<Omit<AgentStaticOptions, "hibernate">> = {};
+  // Use intersection with Server's type requirement, but AgentStaticOptions allows optional hibernate in subclasses
+  static options: AgentStaticOptions = {
+    hibernate: true
+  } as AgentStaticOptions;
 
   /**
    * Resolved options (merges defaults with subclass overrides)
    */
-  private get _resolvedOptions(): AgentStaticOptions {
+  private get _resolvedOptions(): ResolvedAgentOptions {
     const ctor = this.constructor as typeof Agent;
     return {
       hibernate:
         ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
       sendIdentityOnConnect:
-        ctor.agentOptions?.sendIdentityOnConnect ??
+        ctor.options?.sendIdentityOnConnect ??
         DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
       hungScheduleTimeoutSeconds:
-        ctor.agentOptions?.hungScheduleTimeoutSeconds ??
+        ctor.options?.hungScheduleTimeoutSeconds ??
         DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds
     };
   }

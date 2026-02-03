@@ -101,6 +101,6 @@ Disable identity sending for security-sensitive instance names:
 
 ```typescript
 class SecureAgent extends Agent {
-  static agentOptions = { sendIdentityOnConnect: false };
+  static options = { sendIdentityOnConnect: false };
 }
 ```

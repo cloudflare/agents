@@ -1217,7 +1217,7 @@ export class TestNoIdentityAgent extends Agent<Env, TestState> {
   observability = undefined;
 
   // Opt out of sending identity to clients (for security-sensitive instance names)
-  static agentOptions = { sendIdentityOnConnect: false };
+  static options = { sendIdentityOnConnect: false };
 
   initialState: TestState = {
     count: 0,

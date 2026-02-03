@@ -307,7 +307,7 @@ If your instance names contain sensitive data (session IDs, internal user IDs), 
 ```typescript
 class SecureAgent extends Agent {
   // Don't expose instance names to clients
-  static agentOptions = { sendIdentityOnConnect: false };
+  static options = { sendIdentityOnConnect: false };
 }
 ```
 
@@ -645,16 +645,18 @@ Client connection options:
 | `identified` | `boolean`       | Whether identity has been received (reactive) |
 | `ready`      | `Promise<void>` | Resolves when identity is received            |
 
-### `Agent.agentOptions` (Server)
+### `Agent.options` (Server)
 
 Static options for agent configuration:
 
-| Option                  | Type      | Default | Description                         |
-| ----------------------- | --------- | ------- | ----------------------------------- |
-| `sendIdentityOnConnect` | `boolean` | `true`  | Whether to send identity to clients |
+| Option                       | Type      | Default | Description                                          |
+| ---------------------------- | --------- | ------- | ---------------------------------------------------- |
+| `hibernate`                  | `boolean` | `true`  | Whether the agent should hibernate when inactive     |
+| `sendIdentityOnConnect`      | `boolean` | `true`  | Whether to send identity to clients on connect       |
+| `hungScheduleTimeoutSeconds` | `number`  | `30`    | Timeout before a running schedule is considered hung |
 
 ```typescript
 class SecureAgent extends Agent {
-  static agentOptions = { sendIdentityOnConnect: false };
+  static options = { sendIdentityOnConnect: false };
 }
 ```
