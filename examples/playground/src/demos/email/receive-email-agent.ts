@@ -1,5 +1,5 @@
 import { Agent } from "agents";
-import { type AgentEmail, parseEmailHeaders } from "agents/email";
+import type { AgentEmail } from "agents/email";
 import PostalMime from "postal-mime";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,9 +53,10 @@ export class ReceiveEmailAgent extends Agent<Env, ReceiveEmailState> {
       const raw = await email.getRaw();
       const parsed = await PostalMime.parse(raw);
 
-      // Use the SDK's parseEmailHeaders utility to convert postal-mime headers
-      // to a simple key-value object
-      const headers = parseEmailHeaders(parsed.headers);
+      // Convert postal-mime headers to a simple key-value object
+      const headers = Object.fromEntries(
+        parsed.headers.map((h) => [h.key, h.value])
+      );
 
       // Create parsed email record
       const parsedEmail: ParsedEmail = {

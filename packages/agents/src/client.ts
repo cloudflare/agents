@@ -105,9 +105,7 @@ export type AgentClientFetchOptions = Omit<
   basePath?: string;
 };
 
-// Import from client-utils and re-export for backward compatibility
-import { camelCaseToKebabCase } from "./client-utils";
-export { camelCaseToKebabCase };
+import { camelCaseToKebabCase } from "./utils";
 
 /**
  * WebSocket client for connecting to an Agent

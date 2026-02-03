@@ -3,7 +3,7 @@ import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef, use, useMemo, useState, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
-import { camelCaseToKebabCase } from "./client-utils";
+import { camelCaseToKebabCase } from "./utils";
 import type { Method, RPCMethod } from "./serializable";
 import { MessageType } from "./types";
 

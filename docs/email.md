@@ -173,46 +173,17 @@ async onEmail(email: AgentEmail) {
 }
 ```
 
-### Email Header Utilities
+### Detecting Auto-Reply Emails
 
-The SDK provides utilities to work with email headers from `postal-mime`:
+Use `isAutoReplyEmail()` to detect auto-reply emails and avoid mail loops:
 
 ```ts
-import {
-  parseEmailHeaders,
-  getEmailHeader,
-  hasEmailHeader,
-  hasAnyEmailHeader,
-  getAllEmailHeaders,
-  isAutoReplyEmail
-} from "agents";
+import { isAutoReplyEmail } from "agents/email";
 import PostalMime from "postal-mime";
 
 async onEmail(email: AgentEmail) {
   const raw = await email.getRaw();
   const parsed = await PostalMime.parse(raw);
-
-  // Convert headers to a simple key-value object
-  const headers = parseEmailHeaders(parsed.headers);
-  console.log("Content-Type:", headers["content-type"]);
-
-  // Or get specific headers directly
-  const contentType = getEmailHeader(parsed.headers, "Content-Type");
-  const priority = getEmailHeader(parsed.headers, "X-Priority");
-
-  // Check if headers exist
-  if (hasEmailHeader(parsed.headers, "X-Priority")) {
-    console.log("This email has a priority header");
-  }
-
-  // Check for multiple headers at once
-  if (hasAnyEmailHeader(parsed.headers, ["X-Spam-Flag", "X-Spam-Score"])) {
-    console.log("This email has spam-related headers");
-  }
-
-  // Get all values for headers that appear multiple times
-  const receivedHeaders = getAllEmailHeaders(parsed.headers, "Received");
-  console.log("Email path:", receivedHeaders);
 
   // Detect auto-reply emails to avoid sending duplicate responses
   if (isAutoReplyEmail(parsed.headers)) {
@@ -224,16 +195,7 @@ async onEmail(email: AgentEmail) {
 }
 ```
 
-#### Utility Functions
-
-| Function                            | Description                                                                    |
-| ----------------------------------- | ------------------------------------------------------------------------------ |
-| `parseEmailHeaders(headers)`        | Converts postal-mime headers array to a simple `Record<string, string>` object |
-| `getEmailHeader(headers, name)`     | Gets a specific header value (case-insensitive)                                |
-| `hasEmailHeader(headers, name)`     | Checks if a header exists (case-insensitive)                                   |
-| `hasAnyEmailHeader(headers, names)` | Checks if any of the specified headers exist                                   |
-| `getAllEmailHeaders(headers, name)` | Gets all values for headers that appear multiple times (e.g., `Received`)      |
-| `isAutoReplyEmail(headers)`         | Detects auto-reply emails based on standard headers (RFC 3834)                 |
+This checks for standard RFC 3834 headers (`Auto-Submitted`, `X-Auto-Response-Suppress`, `Precedence`) that indicate an email is an auto-reply.
 
 ### Replying to Emails
 

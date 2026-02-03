@@ -6,7 +6,7 @@
 export type { AgentEmail } from "./internal_context";
 
 // ============================================================================
-// Email header parsing utilities
+// Email header utilities
 // ============================================================================
 
 /**
@@ -19,133 +19,6 @@ export type EmailHeader = {
   /** Header value */
   value: string;
 };
-
-/**
- * Parsed email headers as a simple key-value object.
- * Keys are lowercase header names for consistent lookup.
- */
-export type ParsedEmailHeaders = Record<string, string>;
-
-/**
- * Parse an array of email headers into a simple key-value object.
- * Works with postal-mime's Email.headers array format.
- *
- * @param headers - Headers array from postal-mime Email.headers or similar format
- * @returns Object mapping lowercase header names to values
- *
- * @example
- * ```typescript
- * import PostalMime from "postal-mime";
- * import { parseEmailHeaders } from "agents";
- *
- * const raw = await email.getRaw();
- * const parsed = await PostalMime.parse(raw);
- * const headers = parseEmailHeaders(parsed.headers);
- *
- * console.log(headers["content-type"]); // "text/plain; charset=utf-8"
- * console.log(headers["x-custom-header"]); // "custom-value"
- * ```
- */
-export function parseEmailHeaders(headers: EmailHeader[]): ParsedEmailHeaders {
-  const result: ParsedEmailHeaders = {};
-  for (const header of headers) {
-    // postal-mime header format: { key: string, value: string }
-    // key is already lowercase per postal-mime types
-    result[header.key] = header.value;
-  }
-  return result;
-}
-
-/**
- * Get a specific header value from an email headers array.
- * Provides case-insensitive lookup.
- *
- * @param headers - Headers array from postal-mime Email.headers or similar format
- * @param name - Header name (case-insensitive)
- * @returns Header value or undefined if not found
- *
- * @example
- * ```typescript
- * const contentType = getEmailHeader(parsed.headers, "Content-Type");
- * const customHeader = getEmailHeader(parsed.headers, "X-Custom-Header");
- * ```
- */
-export function getEmailHeader(
-  headers: EmailHeader[],
-  name: string
-): string | undefined {
-  const lowerName = name.toLowerCase();
-  const header = headers.find((h) => h.key === lowerName);
-  return header?.value;
-}
-
-/**
- * Check if a specific header exists in an email headers array.
- * Provides case-insensitive lookup.
- *
- * @param headers - Headers array from postal-mime Email.headers or similar format
- * @param name - Header name (case-insensitive)
- * @returns true if header exists
- *
- * @example
- * ```typescript
- * if (hasEmailHeader(parsed.headers, "X-Priority")) {
- *   // Handle priority header
- * }
- * ```
- */
-export function hasEmailHeader(headers: EmailHeader[], name: string): boolean {
-  const lowerName = name.toLowerCase();
-  return headers.some((h) => h.key === lowerName);
-}
-
-/**
- * Check if any of the specified headers exist in an email headers array.
- * Useful for detecting auto-replies or specific email types.
- *
- * @param headers - Headers array from postal-mime Email.headers or similar format
- * @param names - Array of header names (case-insensitive)
- * @returns true if any of the specified headers exist
- *
- * @example
- * ```typescript
- * // Check for auto-reply indicators
- * const isAutoReply = hasAnyEmailHeader(parsed.headers, [
- *   "Auto-Submitted",
- *   "X-Auto-Response-Suppress",
- *   "Precedence"
- * ]);
- * ```
- */
-export function hasAnyEmailHeader(
-  headers: EmailHeader[],
-  names: string[]
-): boolean {
-  const lowerNames = new Set(names.map((n) => n.toLowerCase()));
-  return headers.some((h) => lowerNames.has(h.key));
-}
-
-/**
- * Get all values for a specific header from an email headers array.
- * Some headers (like Received) can appear multiple times.
- *
- * @param headers - Headers array from postal-mime Email.headers or similar format
- * @param name - Header name (case-insensitive)
- * @returns Array of header values (empty if header not found)
- *
- * @example
- * ```typescript
- * // Get all Received headers (useful for tracing email path)
- * const receivedHeaders = getAllEmailHeaders(parsed.headers, "Received");
- * ```
- */
-export function getAllEmailHeaders(
-  headers: EmailHeader[],
-  name: string
-): string[] {
-  const lowerName = name.toLowerCase();
-  return headers.filter((h) => h.key === lowerName).map((h) => h.value);
-}
 
 /**
  * Check if an email appears to be an auto-reply based on standard headers.
@@ -163,13 +36,13 @@ export function getAllEmailHeaders(
  * ```
  */
 export function isAutoReplyEmail(headers: EmailHeader[]): boolean {
-  const autoReplyHeaders = [
+  const autoReplyHeaders = new Set([
     "auto-submitted",
     "x-auto-response-suppress",
     "precedence"
-  ];
+  ]);
 
-  return hasAnyEmailHeader(headers, autoReplyHeaders);
+  return headers.some((h) => autoReplyHeaders.has(h.key));
 }
 
 // ============================================================================

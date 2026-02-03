@@ -21,7 +21,7 @@ import {
   getServerByName,
   routePartykitRequest
 } from "partyserver";
-import { camelCaseToKebabCase } from "./client";
+import { camelCaseToKebabCase } from "./utils";
 import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type {
   WorkflowCallback,
