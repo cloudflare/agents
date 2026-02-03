@@ -447,6 +447,9 @@ export class Agent<
           // Persist the fixed state to prevent future parse errors
           this.setState(this.initialState);
         } else {
+          // No initialState defined - clear corrupted data to prevent infinite retry loop
+          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
+          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_WAS_CHANGED}`;
           return undefined as State;
         }
       }
@@ -1716,6 +1719,12 @@ export class Agent<
               ).bind(this)(JSON.parse(row.payload as string), row);
             } catch (e) {
               console.error(`error executing callback "${row.callback}"`, e);
+              // Route schedule errors through onError for consistency
+              try {
+                await this.onError(e);
+              } catch {
+                // swallow onError errors
+              }
             }
           }
         );
