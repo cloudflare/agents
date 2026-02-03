@@ -732,6 +732,8 @@ export class Agent<
                 try {
                   await methodFn.apply(this, [stream, ...args]);
                 } catch (err) {
+                  // Log error server-side for observability
+                  console.error(`Error in streaming method "${method}":`, err);
                   // Auto-close stream with error if method throws before closing
                   if (!stream.isClosed) {
                     stream.error(
@@ -1465,8 +1467,17 @@ export class Agent<
     callback: keyof this,
     payload?: T
   ): Promise<Schedule<T>> {
+    // DO alarms have a max schedule time of 30 days
+    const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60; // 30 days in seconds
+
     if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
       throw new Error("intervalSeconds must be a positive number");
+    }
+
+    if (intervalSeconds > MAX_INTERVAL_SECONDS) {
+      throw new Error(
+        `intervalSeconds cannot exceed ${MAX_INTERVAL_SECONDS} seconds (30 days)`
+      );
     }
 
     if (typeof callback !== "string") {

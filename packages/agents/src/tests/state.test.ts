@@ -12,35 +12,19 @@
  * 2. DEFAULT_STATE sentinel pattern - Uses object identity (`===`) with `{}` sentinel.
  *    A Symbol('uninitialized') would be more explicit and safer.
  *
- * 3. No state validation - No runtime validation that state matches the State type.
- *    Clients can send any JSON via WebSocket. Consider adding validateState() hook
- *    or Zod integration.
- *
- * 4. JSON.parse without error handling - In state getter, if DB contains malformed JSON,
- *    it will throw. Should wrap in try-catch and fall back to initialState.
- *
- * 5. SQL writes could be atomic - The STATE_ROW_ID and STATE_WAS_CHANGED writes in
+ * 3. SQL writes could be atomic - The STATE_ROW_ID and STATE_WAS_CHANGED writes in
  *    _setStateInternal could be combined into a single transaction.
  *
  * CLIENT-SIDE (packages/agents/src/client.ts & react.tsx):
  *
- * 6. No optimistic update confirmation - setState() immediately calls onStateUpdate
+ * 4. No optimistic update confirmation - setState() immediately calls onStateUpdate
  *    before server confirmation. No way to know if update succeeded or rollback on failure.
  *
- * 7. camelCaseToKebabCase is duplicated - Same function in client.ts and react.tsx.
- *    Should extract to shared utility.
- *
- * 8. No state getter on client - Clients can setState and receive onStateUpdate, but
+ * 5. No state getter on client - Clients can setState and receive onStateUpdate, but
  *    no getState() or state property. Users must track state themselves.
  *
- * 9. Silent failure on parse errors - Invalid JSON is silently swallowed with a TODO.
+ * 6. Silent failure on parse errors - Invalid JSON is silently swallowed with a TODO.
  *    Should log in development or provide onError callback.
- *
- * TESTS TO ADD:
- * - Test state getter side effects (onStateUpdate called on first access with initialState)
- * - Test malformed JSON recovery from DB
- * - Test client sends invalid state shape
- * - Test concurrent state updates from multiple clients
  */
 
 import { createExecutionContext, env } from "cloudflare:test";
