@@ -19,11 +19,25 @@ function createHeaders(
 }
 
 describe("isAutoReplyEmail", () => {
-  it("should detect Auto-Submitted header", () => {
+  it("should detect Auto-Submitted: auto-replied", () => {
     const headers = createHeaders({
       "Auto-Submitted": "auto-replied"
     });
     expect(isAutoReplyEmail(headers)).toBe(true);
+  });
+
+  it("should detect Auto-Submitted: auto-generated", () => {
+    const headers = createHeaders({
+      "Auto-Submitted": "auto-generated"
+    });
+    expect(isAutoReplyEmail(headers)).toBe(true);
+  });
+
+  it("should NOT detect Auto-Submitted: no (normal email per RFC 3834)", () => {
+    const headers = createHeaders({
+      "Auto-Submitted": "no"
+    });
+    expect(isAutoReplyEmail(headers)).toBe(false);
   });
 
   it("should detect X-Auto-Response-Suppress header", () => {
@@ -33,11 +47,32 @@ describe("isAutoReplyEmail", () => {
     expect(isAutoReplyEmail(headers)).toBe(true);
   });
 
-  it("should detect Precedence header", () => {
+  it("should detect Precedence: bulk", () => {
     const headers = createHeaders({
       Precedence: "bulk"
     });
     expect(isAutoReplyEmail(headers)).toBe(true);
+  });
+
+  it("should detect Precedence: junk", () => {
+    const headers = createHeaders({
+      Precedence: "junk"
+    });
+    expect(isAutoReplyEmail(headers)).toBe(true);
+  });
+
+  it("should detect Precedence: list", () => {
+    const headers = createHeaders({
+      Precedence: "list"
+    });
+    expect(isAutoReplyEmail(headers)).toBe(true);
+  });
+
+  it("should NOT detect Precedence: normal", () => {
+    const headers = createHeaders({
+      Precedence: "normal"
+    });
+    expect(isAutoReplyEmail(headers)).toBe(false);
   });
 
   it("should return false for normal emails", () => {

@@ -36,13 +36,28 @@ export type EmailHeader = {
  * ```
  */
 export function isAutoReplyEmail(headers: EmailHeader[]): boolean {
-  const autoReplyHeaders = new Set([
-    "auto-submitted",
-    "x-auto-response-suppress",
-    "precedence"
-  ]);
+  return headers.some((h) => {
+    const key = h.key.toLowerCase();
+    const value = h.value.toLowerCase();
 
-  return headers.some((h) => autoReplyHeaders.has(h.key));
+    // RFC 3834: Auto-Submitted header
+    // "no" means normal (human-sent) email, anything else indicates auto-reply
+    if (key === "auto-submitted") {
+      return value !== "no";
+    }
+
+    // X-Auto-Response-Suppress: any value indicates sender doesn't want auto-replies
+    if (key === "x-auto-response-suppress") {
+      return true;
+    }
+
+    // Precedence: only bulk/junk/list indicate automated/mass mail
+    if (key === "precedence") {
+      return value === "bulk" || value === "junk" || value === "list";
+    }
+
+    return false;
+  });
 }
 
 // ============================================================================
