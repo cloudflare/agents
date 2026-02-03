@@ -1163,17 +1163,34 @@ export class TestThrowingStateAgent extends Agent<Env, TestState> {
   // Track if onStateUpdate was called
   onStateUpdateCalled = false;
 
-  // Throw on specific state values
-  onStateUpdate(state: TestState, _source: Connection | "server") {
-    this.onStateUpdateCalled = true;
-    if (state.count === -1) {
+  // Track errors routed through onError (should not affect broadcasts)
+  onErrorCalls: string[] = [];
+
+  // Validation hook: throw to reject the update (gates persist+broadcast)
+  beforeStateChange(nextState: TestState, _source: Connection | "server") {
+    if (nextState.count === -1) {
       throw new Error("Invalid state: count cannot be -1");
     }
   }
 
+  // Notification hook: should not gate broadcasts; errors go to onError
+  onStateUpdate(state: TestState, _source: Connection | "server") {
+    this.onStateUpdateCalled = true;
+    if (state.count === -2) {
+      throw new Error("onStateUpdate failed: count cannot be -2");
+    }
+  }
+
+  override onError(error: unknown): void {
+    this.onErrorCalls.push(
+      error instanceof Error ? error.message : String(error)
+    );
+    // Do not throw - this is a test agent
+  }
+
   // Test helper to update state via RPC
   updateState(state: TestState) {
-    return this.setState(state);
+    this.setState(state);
   }
 
   // Check if onStateUpdate was called
@@ -1184,6 +1201,14 @@ export class TestThrowingStateAgent extends Agent<Env, TestState> {
   // Reset the flag
   resetOnStateUpdateCalled() {
     this.onStateUpdateCalled = false;
+  }
+
+  getOnErrorCalls() {
+    return this.onErrorCalls;
+  }
+
+  clearOnErrorCalls() {
+    this.onErrorCalls = [];
   }
 }
 

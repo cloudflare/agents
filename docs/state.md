@@ -136,7 +136,7 @@ Use `setState()` to update state. This:
 
 1. Saves to SQLite (persistent)
 2. Broadcasts to all connected clients
-3. Triggers `onStateUpdate()`
+3. Triggers `onStateUpdate()` (after broadcast; best-effort)
 
 ```typescript
 // Replace entire state
@@ -181,7 +181,7 @@ this.setState({
 
 ## Responding to State Changes
 
-Override `onStateUpdate()` to react when state changes:
+Override `onStateUpdate()` to react when state changes (notifications/side-effects):
 
 ```typescript
 onStateUpdate(state: GameState, source: Connection | "server") {
@@ -189,6 +189,10 @@ onStateUpdate(state: GameState, source: Connection | "server") {
   console.log("Updated by:", source === "server" ? "server" : source.id);
 }
 ```
+
+## Validating State Updates
+
+If you want to validate or reject state updates, override `beforeStateChange()`.\n+\n+- **Runs before persistence and broadcast**\n+- **Must be synchronous**\n+- **Throwing aborts the update**\n+\n+`typescript\n+beforeStateChange(nextState: GameState, source: Connection | \"server\") {\n+  // Example: reject negative scores\n+  if (nextState.score < 0) {\n+    throw new Error(\"score cannot be negative\");\n+  }\n+}\n+`\n+\n+`onStateUpdate()` is not intended for validation; it is a notification hook and should not block broadcasts.
 
 ### The `source` Parameter
 

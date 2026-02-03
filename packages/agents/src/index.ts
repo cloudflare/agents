@@ -691,7 +691,7 @@ export class Agent<
           }
 
           if (isStateUpdateMessage(parsed)) {
-            await this._setStateInternal(parsed.state as State, connection);
+            this._setStateInternal(parsed.state as State, connection);
             return;
           }
 
@@ -913,61 +913,84 @@ export class Agent<
     }
   }
 
-  private async _setStateInternal(
-    state: State,
+  private _setStateInternal(
+    nextState: State,
     source: Connection | "server" = "server"
-  ) {
-    this._state = state;
-    this.sql`
-    INSERT OR REPLACE INTO cf_agents_state (id, state)
-    VALUES (${STATE_ROW_ID}, ${JSON.stringify(state)})
-  `;
-    this.sql`
-    INSERT OR REPLACE INTO cf_agents_state (id, state)
-    VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
-  `;
+  ): void {
+    // Validation/gating hook (sync only)
+    this.beforeStateChange(nextState, source);
 
-    // Call onStateUpdate lifecycle hook before broadcasting
-    // This ensures we don't broadcast if validation fails
-    const result = await this._tryCatch(() => {
-      const { connection, request, email } = agentContext.getStore() || {};
-      return agentContext.run(
-        { agent: this, connection, request, email },
-        async () => {
-          this.observability?.emit(
-            {
-              displayMessage: "State updated",
-              id: nanoid(),
-              payload: {},
-              timestamp: Date.now(),
-              type: "state:update"
-            },
-            this.ctx
-          );
-          return this.onStateUpdate(state, source);
-        }
-      );
-    });
+    // Persist state
+    this._state = nextState;
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_state (id, state)
+      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
+    `;
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_state (id, state)
+      VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
+    `;
 
-    // Broadcast state to connected clients after onStateUpdate succeeds
+    // Broadcast state to connected clients immediately
     this.broadcast(
       JSON.stringify({
-        state: state,
+        state: nextState,
         type: MessageType.CF_AGENT_STATE
       }),
       source !== "server" ? [source.id] : []
     );
 
-    return result;
+    // Notification hook (non-gating). Run after broadcast and do not block.
+    // Use waitUntil for reliability after the handler returns.
+    const { connection, request, email } = agentContext.getStore() || {};
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          await agentContext.run(
+            { agent: this, connection, request, email },
+            async () => {
+              this.observability?.emit(
+                {
+                  displayMessage: "State updated",
+                  id: nanoid(),
+                  payload: {},
+                  timestamp: Date.now(),
+                  type: "state:update"
+                },
+                this.ctx
+              );
+              await this.onStateUpdate(nextState, source);
+            }
+          );
+        } catch (e) {
+          // onStateUpdate errors should not affect state or broadcasts
+          try {
+            await this.onError(e);
+          } catch {
+            // swallow
+          }
+        }
+      })()
+    );
   }
 
   /**
    * Update the Agent's state
    * @param state New state to set
-   * @returns Promise that resolves after state is updated and broadcast
    */
-  setState(state: State): Promise<void> {
-    return this._setStateInternal(state, "server");
+  setState(state: State): void {
+    this._setStateInternal(state, "server");
+  }
+
+  /**
+   * Called before the Agent's state is persisted and broadcast.
+   * Override to validate or reject an update by throwing an error.
+   *
+   * IMPORTANT: This hook must be synchronous.
+   */
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+  beforeStateChange(nextState: State, source: Connection | "server") {
+    // override this to validate state updates
   }
 
   /**

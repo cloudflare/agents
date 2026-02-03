@@ -136,8 +136,8 @@ describe("message handling edge cases", () => {
       const room = `identity-all-messages-${crypto.randomUUID()}`;
       const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
 
-      // Collect all 3 initial messages
-      const messages = await collectMessages(ws, 3);
+      // Collect initial messages (state may arrive 1-2 times depending on timing)
+      const messages = await collectMessages(ws, 5);
 
       const types = messages.map((m: unknown) => (m as { type: string }).type);
 
@@ -153,7 +153,7 @@ describe("message handling edge cases", () => {
       const { ws } = await connectWS(`/agents/test-no-identity-agent/${room}`);
 
       // Collect messages - should NOT include identity
-      const messages = await collectMessages(ws, 3, 1000);
+      const messages = await collectMessages(ws, 5, 1000);
 
       const types = messages.map((m: unknown) => (m as { type: string }).type);
 

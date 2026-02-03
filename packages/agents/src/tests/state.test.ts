@@ -228,7 +228,15 @@ describe("state management", () => {
       };
       await agentStub.updateState(newState);
 
-      const calls = await agentStub.getStateUpdateCalls();
+      // onStateUpdate runs via waitUntil; poll until observed
+      let calls: Array<{ state: unknown; source: string }> = [];
+      const start = Date.now();
+      while (calls.length === 0 && Date.now() - start < 500) {
+        calls = await agentStub.getStateUpdateCalls();
+        if (calls.length === 0) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      }
 
       expect(calls.length).toBe(1);
       expect(calls[0].state).toEqual(newState);
@@ -248,7 +256,15 @@ describe("state management", () => {
         lastUpdated: null
       });
 
-      const calls = await agentStub.getStateUpdateCalls();
+      // onStateUpdate runs via waitUntil; poll until observed
+      let calls: Array<{ state: unknown; source: string }> = [];
+      const start = Date.now();
+      while (calls.length === 0 && Date.now() - start < 500) {
+        calls = await agentStub.getStateUpdateCalls();
+        if (calls.length === 0) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      }
 
       expect(calls.length).toBe(1);
       expect(calls[0].source).toBe("server");
@@ -426,8 +442,8 @@ describe("state management", () => {
     });
   });
 
-  describe("onStateUpdate validation", () => {
-    it("should not broadcast state if onStateUpdate throws", async () => {
+  describe("beforeStateChange validation", () => {
+    it("should not broadcast state if beforeStateChange throws", async () => {
       const room = `throwing-state-${crypto.randomUUID()}`;
 
       // Connect a WebSocket client first
@@ -450,7 +466,7 @@ describe("state management", () => {
       // Get the agent stub and try to set invalid state (count = -1 triggers throw)
       const agentStub = await getAgentByName(env.TestThrowingStateAgent, room);
 
-      // This should throw in onStateUpdate
+      // This should throw in beforeStateChange (sync gate)
       try {
         await agentStub.updateState({
           count: -1,
@@ -476,7 +492,7 @@ describe("state management", () => {
       ws.close();
     });
 
-    it("should broadcast state after onStateUpdate succeeds", async () => {
+    it("should broadcast state when beforeStateChange succeeds", async () => {
       const room = `valid-state-${crypto.randomUUID()}`;
 
       // Connect a WebSocket client first
@@ -516,6 +532,53 @@ describe("state management", () => {
 
       expect(stateMessages.length).toBe(1);
       expect(stateMessages[0].state?.count).toBe(42);
+
+      ws.close();
+    });
+
+    it("should still broadcast state even if onStateUpdate throws", async () => {
+      const room = `on-state-update-throws-${crypto.randomUUID()}`;
+
+      // Connect a WebSocket client first
+      const { ws } = await connectWS(
+        `/agents/test-throwing-state-agent/${room}`
+      );
+
+      // Collect all messages
+      const messages: Array<{ type: string; state?: { count?: number } }> = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        messages.push(JSON.parse(e.data as string));
+      });
+
+      // Wait for initial messages
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Clear messages to only capture new ones
+      const initialCount = messages.length;
+
+      const agentStub = await getAgentByName(env.TestThrowingStateAgent, room);
+      await agentStub.clearOnErrorCalls();
+
+      // This triggers onStateUpdate to throw (count === -2) but should not block broadcast
+      await agentStub.updateState({
+        count: -2,
+        items: ["still-broadcast"],
+        lastUpdated: "onStateUpdate-throws"
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const newMessages = messages.slice(initialCount);
+      const stateMessages = newMessages.filter(
+        (m) => m.type === MessageType.CF_AGENT_STATE
+      );
+
+      expect(stateMessages.length).toBe(1);
+      expect(stateMessages[0].state?.count).toBe(-2);
+
+      // Error should have been routed through onError (best-effort)
+      const errors = await agentStub.getOnErrorCalls();
+      expect(errors.some((e) => e.includes("onStateUpdate failed"))).toBe(true);
 
       ws.close();
     });
