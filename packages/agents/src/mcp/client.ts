@@ -709,7 +709,17 @@ export class MCPClientManager {
     // This prevents DoS attacks where attacker consumes valid state before legitimate callback
     const stateValidation = await authProvider.checkState(state);
     if (!stateValidation.valid) {
-      throw new Error(`Invalid state: ${stateValidation.error}`);
+      this.clearServerAuthUrl(serverId);
+      if (this.mcpConnections[serverId]) {
+        this.mcpConnections[serverId].connectionState =
+          MCPConnectionState.FAILED;
+      }
+      this._onServerStateChanged.fire();
+      return {
+        serverId,
+        authSuccess: false,
+        authError: stateValidation.error || "Invalid state"
+      };
     }
 
     if (error) {

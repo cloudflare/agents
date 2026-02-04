@@ -2,6 +2,13 @@
 
 Integrate [Cloudflare Workflows](https://developers.cloudflare.com/workflows/) with Agents for durable, multi-step background processing while Agents handle real-time communication.
 
+## Quick Links
+
+- [Start a workflow](#2-start-workflow-from-agent)
+- [Human approval](#human-in-the-loop-approvals)
+- [Pagination](#pagination)
+- [Workflow controls](#workflow-control-methods)
+
 ## Introduction
 
 ### What are Cloudflare Workflows?

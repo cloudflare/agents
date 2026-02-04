@@ -635,9 +635,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackRequest2 = new Request(
         `${callbackUrl}?code=malicious-code&state=${state}`
       );
-      await expect(
-        manager.handleCallbackRequest(callbackRequest2)
-      ).rejects.toThrow("State not found or already used");
+      const result2 = await manager.handleCallbackRequest(callbackRequest2);
+      expect(result2.authSuccess).toBe(false);
+      expect(result2.authError).toBe("State not found or already used");
     });
 
     it("should reject expired state (10 minute TTL)", async () => {
@@ -674,9 +674,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const callbackRequest = new Request(
         `${callbackUrl}?code=test-code&state=${expiredState}`
       );
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("State expired");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("State expired");
     });
 
     it("should only match callbacks with valid state for existing servers", async () => {

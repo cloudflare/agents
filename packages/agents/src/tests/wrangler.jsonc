@@ -28,10 +28,6 @@
       },
       { "class_name": "TestRaceAgent", "name": "TAG_AGENT" },
       {
-        "class_name": "TestChatAgent",
-        "name": "TestChatAgent"
-      },
-      {
         "class_name": "TestOAuthAgent",
         "name": "TestOAuthAgent"
       },
@@ -50,6 +46,34 @@
       {
         "class_name": "TestWorkflowAgent",
         "name": "TestWorkflowAgent"
+      },
+      {
+        "class_name": "TestAddMcpServerAgent",
+        "name": "TestAddMcpServerAgent"
+      },
+      {
+        "class_name": "TestStateAgent",
+        "name": "TestStateAgent"
+      },
+      {
+        "class_name": "TestStateAgentNoInitial",
+        "name": "TestStateAgentNoInitial"
+      },
+      {
+        "class_name": "TestThrowingStateAgent",
+        "name": "TestThrowingStateAgent"
+      },
+      {
+        "class_name": "TestNoIdentityAgent",
+        "name": "TestNoIdentityAgent"
+      },
+      {
+        "class_name": "TestCallableAgent",
+        "name": "TestCallableAgent"
+      },
+      {
+        "class_name": "TestChildAgent",
+        "name": "TestChildAgent"
       }
     ]
   },
@@ -74,12 +98,18 @@
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",
         "TestRaceAgent",
-        "TestChatAgent",
         "TestOAuthAgent",
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
         "TestScheduleAgent",
-        "TestWorkflowAgent"
+        "TestWorkflowAgent",
+        "TestAddMcpServerAgent",
+        "TestStateAgent",
+        "TestStateAgentNoInitial",
+        "TestThrowingStateAgent",
+        "TestNoIdentityAgent",
+        "TestCallableAgent",
+        "TestChildAgent"
       ],
       "tag": "v1"
     }

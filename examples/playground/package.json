@@ -1,19 +1,23 @@
 {
-  "author": "",
+  "name": "@cloudflare/agents-playground",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
   "dependencies": {
     "cronstrue": "^3.11.0",
-    "nanoid": "^5.1.6"
+    "lucide-react": "^0.563.0",
+    "nanoid": "^5.1.6",
+    "postal-mime": "^2.7.3",
+    "react-router-dom": "^7.13.0"
   },
-  "description": "",
-  "keywords": [],
-  "license": "ISC",
-  "name": "@cloudflare/agents-playground",
-  "private": true,
-  "scripts": {
-    "deploy": "vite build && wrangler deploy",
-    "types": "wrangler types env.d.ts --include-runtime false",
-    "start": "vite dev"
-  },
-  "type": "module",
-  "version": "0.0.0"
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.1.18"
+  }
 }

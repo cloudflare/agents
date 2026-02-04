@@ -83,7 +83,7 @@ export class Codemode extends Agent<Env, State> {
     description: "Add an MCP server to the agent"
   })
   addMcp({ name, url }: { name: string; url: string }) {
-    void this.addMcpServer(name, url, "http://localhost:5173")
+    void this.addMcpServer(name, url, { callbackHost: "http://localhost:5173" })
       .then(() => {
         console.log("mcpServer added", name, url);
       })

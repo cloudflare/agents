@@ -173,6 +173,30 @@ async onEmail(email: AgentEmail) {
 }
 ```
 
+### Detecting Auto-Reply Emails
+
+Use `isAutoReplyEmail()` to detect auto-reply emails and avoid mail loops:
+
+```ts
+import { isAutoReplyEmail } from "agents/email";
+import PostalMime from "postal-mime";
+
+async onEmail(email: AgentEmail) {
+  const raw = await email.getRaw();
+  const parsed = await PostalMime.parse(raw);
+
+  // Detect auto-reply emails to avoid sending duplicate responses
+  if (isAutoReplyEmail(parsed.headers)) {
+    console.log("Skipping auto-reply email");
+    return;
+  }
+
+  // Process the email...
+}
+```
+
+This checks for standard RFC 3834 headers (`Auto-Submitted`, `X-Auto-Response-Suppress`, `Precedence`) that indicate an email is an auto-reply.
+
 ### Replying to Emails
 
 Use `this.replyToEmail()` to send a reply:

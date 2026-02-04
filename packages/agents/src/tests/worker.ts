@@ -11,10 +11,12 @@ import { McpAgent } from "../mcp/index.ts";
 import {
   Agent,
   callable,
+  getAgentByName,
   routeAgentRequest,
   type Connection,
   type WSMessage
 } from "../index.ts";
+import type { StreamingResponse } from "../index.ts";
 import type { AgentEmail } from "../email.ts";
 import type { WorkflowStatus, WorkflowInfo } from "../workflows.ts";
 import type { MCPClientConnection } from "../mcp/client-connection";
@@ -32,6 +34,13 @@ export type Env = {
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
+  TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
+  TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+  TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
+  TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
+  TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
+  TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
+  TestChildAgent: DurableObjectNamespace<TestChildAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
@@ -317,6 +326,31 @@ export class TestScheduleAgent extends Agent<Env> {
     // Intentionally empty - used for testing schedule creation
   }
 
+  // Callback that tracks execution count
+  intervalCallbackCount = 0;
+
+  intervalCallback() {
+    this.intervalCallbackCount++;
+  }
+
+  // Callback that throws an error (for testing error resilience)
+  throwingCallback() {
+    throw new Error("Intentional test error");
+  }
+
+  // Track slow callback execution for concurrent execution testing
+  slowCallbackExecutionCount = 0;
+  slowCallbackStartTimes: number[] = [];
+  slowCallbackEndTimes: number[] = [];
+
+  async slowCallback() {
+    this.slowCallbackExecutionCount++;
+    this.slowCallbackStartTimes.push(Date.now());
+    // Simulate a slow operation (500ms)
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    this.slowCallbackEndTimes.push(Date.now());
+  }
+
   @callable()
   async cancelScheduleById(id: string): Promise<boolean> {
     return this.cancelSchedule(id);
@@ -330,6 +364,116 @@ export class TestScheduleAgent extends Agent<Env> {
   @callable()
   async createSchedule(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "testCallback");
+    return schedule.id;
+  }
+
+  @callable()
+  async createIntervalSchedule(intervalSeconds: number): Promise<string> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "intervalCallback"
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async createThrowingIntervalSchedule(
+    intervalSeconds: number
+  ): Promise<string> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "throwingCallback"
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async getIntervalCallbackCount(): Promise<number> {
+    return this.intervalCallbackCount;
+  }
+
+  @callable()
+  async resetIntervalCallbackCount(): Promise<void> {
+    this.intervalCallbackCount = 0;
+  }
+
+  @callable()
+  async getSchedulesByType(
+    type: "scheduled" | "delayed" | "cron" | "interval"
+  ) {
+    return this.getSchedules({ type });
+  }
+
+  @callable()
+  async createSlowIntervalSchedule(intervalSeconds: number): Promise<string> {
+    const schedule = await this.scheduleEvery(intervalSeconds, "slowCallback");
+    return schedule.id;
+  }
+
+  @callable()
+  async getSlowCallbackStats(): Promise<{
+    executionCount: number;
+    startTimes: number[];
+    endTimes: number[];
+  }> {
+    return {
+      executionCount: this.slowCallbackExecutionCount,
+      startTimes: this.slowCallbackStartTimes,
+      endTimes: this.slowCallbackEndTimes
+    };
+  }
+
+  @callable()
+  async resetSlowCallbackStats(): Promise<void> {
+    this.slowCallbackExecutionCount = 0;
+    this.slowCallbackStartTimes = [];
+    this.slowCallbackEndTimes = [];
+  }
+
+  @callable()
+  async getScheduleRunningState(id: string): Promise<{
+    running: number;
+    execution_started_at: number | null;
+  } | null> {
+    const result = this.sql<{
+      running: number;
+      execution_started_at: number | null;
+    }>`
+      SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${id}
+    `;
+    return result[0] ?? null;
+  }
+
+  @callable()
+  async simulateHungSchedule(intervalSeconds: number): Promise<string> {
+    // Create an interval schedule
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "intervalCallback"
+    );
+
+    // Manually set running=1 and execution_started_at to 60 seconds ago
+    // to simulate a hung callback
+    const hungStartTime = Math.floor(Date.now() / 1000) - 60;
+    this
+      .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${hungStartTime} WHERE id = ${schedule.id}`;
+
+    return schedule.id;
+  }
+
+  @callable()
+  async simulateLegacyHungSchedule(intervalSeconds: number): Promise<string> {
+    // Create an interval schedule
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "intervalCallback"
+    );
+
+    // Manually set running=1 but leave execution_started_at as NULL
+    // to simulate a legacy schedule that was running before the migration
+    this
+      .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = NULL WHERE id = ${schedule.id}`;
+
     return schedule.id;
   }
 }
@@ -825,6 +969,446 @@ export class TestMcpJurisdiction extends McpAgent<Env> {
   }
 }
 
+// Test Agent for addMcpServer overload verification
+export class TestAddMcpServerAgent extends Agent<Env> {
+  observability = undefined;
+
+  // Track resolved arguments from addMcpServer calls
+  lastResolvedArgs: {
+    serverName: string;
+    url: string;
+    callbackHost?: string;
+    agentsPrefix: string;
+    transport?: { headers?: HeadersInit; type?: string };
+    client?: unknown;
+  } | null = null;
+
+  // Override to capture resolved arguments without actually connecting
+  async addMcpServer(
+    serverName: string,
+    url: string,
+    callbackHostOrOptions?:
+      | string
+      | {
+          callbackHost?: string;
+          agentsPrefix?: string;
+          client?: unknown;
+          transport?: { headers?: HeadersInit; type?: string };
+        },
+    agentsPrefix?: string,
+    options?: {
+      client?: unknown;
+      transport?: { headers?: HeadersInit; type?: string };
+    }
+  ): Promise<{ id: string; state: "ready" }> {
+    // Normalize arguments - same logic as Agent.addMcpServer
+    let resolvedCallbackHost: string | undefined;
+    let resolvedAgentsPrefix: string;
+    let resolvedOptions: typeof options;
+
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null
+    ) {
+      // New API: options object as third parameter
+      resolvedCallbackHost = callbackHostOrOptions.callbackHost;
+      resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
+      resolvedOptions = {
+        client: callbackHostOrOptions.client,
+        transport: callbackHostOrOptions.transport
+      };
+    } else {
+      // Legacy API: positional parameters
+      resolvedCallbackHost = callbackHostOrOptions;
+      resolvedAgentsPrefix = agentsPrefix ?? "agents";
+      resolvedOptions = options;
+    }
+
+    // Store resolved arguments for test verification
+    this.lastResolvedArgs = {
+      serverName,
+      url,
+      callbackHost: resolvedCallbackHost,
+      agentsPrefix: resolvedAgentsPrefix,
+      transport: resolvedOptions?.transport,
+      client: resolvedOptions?.client
+    };
+
+    // Return mock result without actually connecting
+    return { id: "test-id", state: "ready" };
+  }
+
+  async testNewApiWithOptions(name: string, url: string, callbackHost: string) {
+    await this.addMcpServer(name, url, {
+      callbackHost,
+      agentsPrefix: "custom-agents",
+      transport: { type: "sse", headers: { Authorization: "Bearer test" } }
+    });
+    // Non-null assertion safe because addMcpServer always sets lastResolvedArgs
+    return this.lastResolvedArgs!;
+  }
+
+  async testNewApiMinimal(name: string, url: string) {
+    await this.addMcpServer(name, url, {});
+    return this.lastResolvedArgs!;
+  }
+
+  async testLegacyApiWithOptions(
+    name: string,
+    url: string,
+    callbackHost: string
+  ) {
+    await this.addMcpServer(name, url, callbackHost, "legacy-prefix", {
+      transport: { type: "streamable-http", headers: { "X-Custom": "value" } }
+    });
+    return this.lastResolvedArgs!;
+  }
+
+  async testLegacyApiMinimal(name: string, url: string, callbackHost: string) {
+    await this.addMcpServer(name, url, callbackHost);
+    return this.lastResolvedArgs!;
+  }
+
+  getLastResolvedArgs() {
+    return this.lastResolvedArgs;
+  }
+}
+
+// Test Agent for state management tests
+type TestState = {
+  count: number;
+  items: string[];
+  lastUpdated: string | null;
+};
+
+export class TestStateAgent extends Agent<Env, TestState> {
+  observability = undefined;
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  // Track onStateUpdate calls for testing
+  stateUpdateCalls: Array<{ state: TestState; source: string }> = [];
+
+  onStateUpdate(state: TestState, source: Connection | "server") {
+    this.stateUpdateCalls.push({
+      state,
+      source: source === "server" ? "server" : source.id
+    });
+  }
+
+  // HTTP handler for testing agentFetch and path routing
+  // Only handles specific test paths - returns 404 for others to preserve routing test behavior
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname.split("/").pop() || "";
+
+    // Handle specific paths for browser integration tests
+    if (path === "state") {
+      return Response.json({ state: this.state });
+    }
+    if (path === "state-updates") {
+      return Response.json({ updates: this.stateUpdateCalls });
+    }
+    if (path === "echo") {
+      const body = await request.text();
+      return Response.json({ method: request.method, body, path });
+    }
+    if (path === "connections") {
+      // Count active connections using PartyServer's getConnections()
+      let count = 0;
+      for (const _ of this.getConnections()) {
+        count++;
+      }
+      return Response.json({ count });
+    }
+
+    // Return 404 for unhandled paths - preserves expected routing behavior
+    return new Response("Not found", { status: 404 });
+  }
+
+  // Test helper methods (no @callable needed for DO RPC)
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: TestState) {
+    this.setState(state);
+  }
+
+  getStateUpdateCalls() {
+    return this.stateUpdateCalls;
+  }
+
+  clearStateUpdateCalls() {
+    this.stateUpdateCalls = [];
+  }
+
+  // Test helper to insert corrupted state directly into DB (without caching)
+  insertCorruptedState() {
+    // Insert invalid JSON directly, also set wasChanged to trigger the read path
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('STATE', 'invalid{json')`
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('STATE_WAS_CHANGED', 'true')`
+    );
+  }
+
+  // Access state and check if it recovered to initialState
+  getStateAfterCorruption(): TestState {
+    // This should trigger the try-catch and fallback to initialState
+    return this.state;
+  }
+}
+
+// Test Agent without initialState to test undefined behavior
+export class TestStateAgentNoInitial extends Agent<Env> {
+  observability = undefined;
+
+  // No initialState defined - should return undefined
+
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: unknown) {
+    this.setState(state);
+  }
+}
+
+// Test Agent with throwing onStateUpdate - for testing broadcast order
+export class TestThrowingStateAgent extends Agent<Env, TestState> {
+  observability = undefined;
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  // Track if onStateUpdate was called
+  onStateUpdateCalled = false;
+
+  // Track errors routed through onError (should not affect broadcasts)
+  onErrorCalls: string[] = [];
+
+  // Validation hook: throw to reject the update (gates persist+broadcast)
+  validateStateChange(nextState: TestState, _source: Connection | "server") {
+    if (nextState.count === -1) {
+      throw new Error("Invalid state: count cannot be -1");
+    }
+  }
+
+  // Notification hook: should not gate broadcasts; errors go to onError
+  onStateUpdate(state: TestState, _source: Connection | "server") {
+    this.onStateUpdateCalled = true;
+    if (state.count === -2) {
+      throw new Error("onStateUpdate failed: count cannot be -2");
+    }
+  }
+
+  override onError(error: unknown): void {
+    this.onErrorCalls.push(
+      error instanceof Error ? error.message : String(error)
+    );
+    // Do not throw - this is a test agent
+  }
+
+  // Test helper to update state via RPC
+  updateState(state: TestState) {
+    this.setState(state);
+  }
+
+  // Check if onStateUpdate was called
+  wasOnStateUpdateCalled(): boolean {
+    return this.onStateUpdateCalled;
+  }
+
+  // Reset the flag
+  resetOnStateUpdateCalled() {
+    this.onStateUpdateCalled = false;
+  }
+
+  getOnErrorCalls() {
+    return this.onErrorCalls;
+  }
+
+  clearOnErrorCalls() {
+    this.onErrorCalls = [];
+  }
+}
+
+// Test Agent with sendIdentityOnConnect disabled
+export class TestNoIdentityAgent extends Agent<Env, TestState> {
+  observability = undefined;
+
+  // Opt out of sending identity to clients (for security-sensitive instance names)
+  static options = { sendIdentityOnConnect: false };
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: TestState) {
+    this.setState(state);
+  }
+}
+
+// Test Agent for @callable decorator tests
+export class TestCallableAgent extends Agent<Env, { value: number }> {
+  observability = undefined;
+  initialState = { value: 0 };
+
+  // Basic sync method
+  @callable()
+  add(a: number, b: number): number {
+    return a + b;
+  }
+
+  // Async method
+  @callable()
+  async asyncMethod(delayMs: number): Promise<string> {
+    await new Promise((r) => setTimeout(r, delayMs));
+    return "done";
+  }
+
+  // Method that throws an error
+  @callable()
+  throwError(message: string): never {
+    throw new Error(message);
+  }
+
+  // Void return type
+  @callable()
+  voidMethod(): void {
+    // does nothing, returns undefined
+  }
+
+  // Returns null
+  @callable()
+  returnNull(): null {
+    return null;
+  }
+
+  // Returns undefined
+  @callable()
+  returnUndefined(): undefined {
+    return undefined;
+  }
+
+  // Streaming method - sync
+  @callable({ streaming: true })
+  streamNumbers(stream: StreamingResponse, count: number) {
+    for (let i = 0; i < count; i++) {
+      stream.send(i);
+    }
+    stream.end(count);
+  }
+
+  // Streaming method - async with delays
+  @callable({ streaming: true })
+  async streamWithDelay(
+    stream: StreamingResponse,
+    chunks: string[],
+    delayMs: number
+  ) {
+    for (const chunk of chunks) {
+      await new Promise((r) => setTimeout(r, delayMs));
+      stream.send(chunk);
+    }
+    stream.end("complete");
+  }
+
+  // Streaming method that throws after sending a chunk
+  @callable({ streaming: true })
+  streamError(stream: StreamingResponse) {
+    stream.send("chunk1");
+    throw new Error("Stream failed");
+  }
+
+  // Streaming method that uses stream.error() to send error
+  @callable({ streaming: true, description: "Sends chunk then graceful error" })
+  streamGracefulError(stream: StreamingResponse) {
+    stream.send("chunk1");
+    stream.error("Graceful error");
+  }
+
+  // Streaming method that double-closes (error then end) - should not throw
+  @callable({
+    streaming: true,
+    description: "Tests double-close no-op behavior"
+  })
+  streamDoubleClose(stream: StreamingResponse) {
+    stream.send("chunk1");
+    stream.error("First close");
+    // These should be no-ops, not throw
+    stream.end("ignored");
+    stream.send("also ignored");
+    stream.error("also ignored");
+  }
+
+  // Streaming method that throws before sending any response
+  @callable({ streaming: true })
+  streamThrowsImmediately(_stream: StreamingResponse) {
+    throw new Error("Immediate failure");
+  }
+
+  // NOT decorated with @callable - should fail when called via RPC
+  privateMethod(): string {
+    return "secret";
+  }
+}
+
+// Base class with @callable methods for testing prototype chain traversal
+export class TestParentAgent extends Agent<Env> {
+  observability = undefined;
+
+  @callable({ description: "Parent method from base class" })
+  parentMethod(): string {
+    return "from parent";
+  }
+
+  @callable()
+  sharedMethod(): string {
+    return "parent implementation";
+  }
+}
+
+// Child agent that extends TestParentAgent - tests getCallableMethods prototype chain
+export class TestChildAgent extends TestParentAgent {
+  @callable({ description: "Child method from derived class" })
+  childMethod(): string {
+    return "from child";
+  }
+
+  // Override parent method - child version should be found first
+  @callable()
+  sharedMethod(): string {
+    return "child implementation";
+  }
+
+  // Non-callable method for testing introspection
+  nonCallableMethod(): string {
+    return "not callable";
+  }
+
+  // Helper to test getCallableMethods returns parent methods
+  getCallableMethodNames(): string[] {
+    const methods = this.getCallableMethods();
+    return Array.from(methods.keys()).sort();
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
@@ -849,8 +1433,23 @@ export default {
       return new Response("Internal Server Error", { status: 500 });
     }
 
+    // Custom basePath routing for testing - routes /custom-state/{name} to TestStateAgent
+    if (url.pathname.startsWith("/custom-state/")) {
+      const instanceName = url.pathname.replace("/custom-state/", "");
+      const agent = await getAgentByName(env.TestStateAgent, instanceName);
+      return agent.fetch(request);
+    }
+
+    // Custom basePath routing with simulated auth - routes /user to TestStateAgent with "auth-user" instance
+    if (url.pathname === "/user" || url.pathname.startsWith("/user?")) {
+      // Simulate server-side auth that determines the instance name
+      const simulatedUserId = "auth-user";
+      const agent = await getAgentByName(env.TestStateAgent, simulatedUserId);
+      return agent.fetch(request);
+    }
+
     return (
-      (await routeAgentRequest(request, env)) ||
+      (await routeAgentRequest(request, env, { cors: true })) ||
       new Response("Not found", { status: 404 })
     );
   },

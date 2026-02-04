@@ -3,29 +3,9 @@ import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef, use, useMemo, useState, useEffect } from "react";
 import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
 import type { StreamOptions } from "./client";
+import { camelCaseToKebabCase } from "./utils";
 import type { Method, RPCMethod } from "./serializable";
 import { MessageType } from "./types";
-
-/**
- * Convert a camelCase string to a kebab-case string
- * @param str The string to convert
- * @returns The kebab-case string
- */
-function camelCaseToKebabCase(str: string): string {
-  // If string is all uppercase, convert to lowercase
-  if (str === str.toUpperCase() && str !== str.toLowerCase()) {
-    return str.toLowerCase().replace(/_/g, "-");
-  }
-
-  // Otherwise handle camelCase to kebab-case
-  let kebabified = str.replace(
-    /[A-Z]/g,
-    (letter) => `-${letter.toLowerCase()}`
-  );
-  kebabified = kebabified.startsWith("-") ? kebabified.slice(1) : kebabified;
-  // Convert any remaining underscores to hyphens and remove trailing -'s
-  return kebabified.replace(/_/g, "-").replace(/-$/, "");
-}
 
 type QueryObject = Record<string, string | null>;
 
@@ -130,10 +110,19 @@ export type UseAgentOptions<State = unknown> = Omit<
   Parameters<typeof usePartySocket>[0],
   "party" | "room" | "query"
 > & {
-  /** Name of the agent to connect to */
+  /** Name of the agent to connect to (ignored if basePath is set) */
   agent: string;
-  /** Name of the specific Agent instance */
+  /** Name of the specific Agent instance (ignored if basePath is set) */
   name?: string;
+  /**
+   * Full URL path - bypasses agent/name URL construction.
+   * When set, the client connects to this path directly.
+   * Server must handle routing manually (e.g., with getAgentByName + fetch).
+   * @example
+   * // Client connects to /user, server routes based on session
+   * useAgent({ agent: "UserAgent", basePath: "user" })
+   */
+  basePath?: string;
   /** Query parameters - can be static object or async function */
   query?: QueryObject | (() => Promise<QueryObject>);
   /** Dependencies for async query caching */
@@ -144,6 +133,37 @@ export type UseAgentOptions<State = unknown> = Omit<
   onStateUpdate?: (state: State, source: "server" | "client") => void;
   /** Called when MCP server state is updated */
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
+  /**
+   * Called when the server sends the agent's identity on connect.
+   * Useful when using basePath, as the actual instance name is determined server-side.
+   * @param name The actual agent instance name
+   * @param agent The agent class name (kebab-case)
+   */
+  onIdentity?: (name: string, agent: string) => void;
+  /**
+   * Called when identity changes on reconnect (different instance than before).
+   * If not provided and identity changes, a warning will be logged.
+   * @param oldName Previous instance name
+   * @param newName New instance name
+   * @param oldAgent Previous agent class name
+   * @param newAgent New agent class name
+   */
+  onIdentityChange?: (
+    oldName: string,
+    newName: string,
+    oldAgent: string,
+    newAgent: string
+  ) => void;
+  /**
+   * Additional path to append to the URL.
+   * Works with both standard routing and basePath.
+   * @example
+   * // With basePath: /user/settings
+   * { basePath: "user", path: "settings" }
+   * // Standard: /agents/my-agent/room/settings
+   * { agent: "MyAgent", name: "room", path: "settings" }
+   */
+  path?: string;
 };
 
 type AllOptional<T> = T extends [infer A, ...infer R]
@@ -224,6 +244,8 @@ export function useAgent<State = unknown>(
 ): PartySocket & {
   agent: string;
   name: string;
+  identified: boolean;
+  ready: Promise<void>;
   setState: (state: State) => void;
   call: UntypedAgentMethodCall;
   stub: UntypedAgentStub;
@@ -238,6 +260,8 @@ export function useAgent<
 ): PartySocket & {
   agent: string;
   name: string;
+  identified: boolean;
+  ready: Promise<void>;
   setState: (state: State) => void;
   call: AgentMethodCall<AgentT>;
   stub: AgentStub<AgentT>;
@@ -247,6 +271,8 @@ export function useAgent<State>(
 ): PartySocket & {
   agent: string;
   name: string;
+  identified: boolean;
+  ready: Promise<void>;
   setState: (state: State) => void;
   call: UntypedAgentMethodCall | AgentMethodCall<unknown>;
   stub: UntypedAgentStub;
@@ -357,12 +383,55 @@ export function useAgent<State>(
     }
   }
 
+  // Store identity in React state for reactivity
+  const [identity, setIdentity] = useState({
+    name: options.name || "default",
+    agent: agentNamespace,
+    identified: false
+  });
+
+  // Track previous identity for change detection
+  const previousIdentityRef = useRef<{
+    name: string | null;
+    agent: string | null;
+  }>({ name: null, agent: null });
+
+  // Ready promise - resolves when identity is received, resets on close
+  const readyRef = useRef<
+    { promise: Promise<void>; resolve: () => void } | undefined
+  >(undefined);
+
+  const resetReady = () => {
+    let resolve: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    readyRef.current = { promise, resolve: resolve! };
+  };
+
+  if (!readyRef.current) {
+    resetReady();
+  }
+
+  // If basePath is provided, use it directly; otherwise construct from agent/name
+  const socketOptions = options.basePath
+    ? {
+        basePath: options.basePath,
+        path: options.path,
+        query: resolvedQuery,
+        ...restOptions
+      }
+    : {
+        party: agentNamespace,
+        prefix: "agents",
+        room: options.name || "default",
+        path: options.path,
+        query: resolvedQuery,
+        ...restOptions
+      };
+
   const agent = usePartySocket({
-    party: agentNamespace,
-    prefix: "agents",
-    room: options.name || "default",
-    query: resolvedQuery,
-    ...restOptions,
+    ...socketOptions,
     onMessage: (message) => {
       if (typeof message.data === "string") {
         let parsedMessage: Record<string, unknown>;
@@ -372,6 +441,54 @@ export function useAgent<State>(
           // silently ignore invalid messages for now
           // TODO: log errors with log levels
           return options.onMessage?.(message);
+        }
+        if (parsedMessage.type === MessageType.CF_AGENT_IDENTITY) {
+          const oldName = previousIdentityRef.current.name;
+          const oldAgent = previousIdentityRef.current.agent;
+          const newName = parsedMessage.name as string;
+          const newAgent = parsedMessage.agent as string;
+
+          // Update reactive state (triggers re-render)
+          setIdentity({ name: newName, agent: newAgent, identified: true });
+
+          // Resolve ready promise
+          readyRef.current?.resolve();
+
+          // Detect identity change on reconnect
+          if (
+            oldName !== null &&
+            oldAgent !== null &&
+            (oldName !== newName || oldAgent !== newAgent)
+          ) {
+            if (options.onIdentityChange) {
+              options.onIdentityChange(oldName, newName, oldAgent, newAgent);
+            } else {
+              const agentChanged = oldAgent !== newAgent;
+              const nameChanged = oldName !== newName;
+              let changeDescription = "";
+              if (agentChanged && nameChanged) {
+                changeDescription = `agent "${oldAgent}" → "${newAgent}", instance "${oldName}" → "${newName}"`;
+              } else if (agentChanged) {
+                changeDescription = `agent "${oldAgent}" → "${newAgent}"`;
+              } else {
+                changeDescription = `instance "${oldName}" → "${newName}"`;
+              }
+              console.warn(
+                `[agents] Identity changed on reconnect: ${changeDescription}. ` +
+                  "This can happen with server-side routing (e.g., basePath with getAgentByName) " +
+                  "where the instance is determined by auth/session. " +
+                  "Provide onIdentityChange callback to handle this explicitly, " +
+                  "or ignore if this is expected for your routing pattern."
+              );
+            }
+          }
+
+          // Track for next change detection
+          previousIdentityRef.current = { name: newName, agent: newAgent };
+
+          // Call onIdentity callback
+          options.onIdentity?.(newName, newAgent);
+          return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           options.onStateUpdate?.(parsedMessage.state as State, "server");
@@ -411,10 +528,28 @@ export function useAgent<State>(
         }
       }
       options.onMessage?.(message);
+    },
+    onClose: (event: CloseEvent) => {
+      // Reset ready state for next connection
+      resetReady();
+      setIdentity((prev) => ({ ...prev, identified: false }));
+
+      // Reject all pending calls (consistent with AgentClient behavior)
+      const error = new Error("Connection closed");
+      for (const pending of pendingCallsRef.current.values()) {
+        pending.reject(error);
+        pending.stream?.onError?.("Connection closed");
+      }
+      pendingCallsRef.current.clear();
+
+      // Call user's onClose if provided
+      options.onClose?.(event);
     }
   }) as PartySocket & {
     agent: string;
     name: string;
+    identified: boolean;
+    ready: Promise<void>;
     setState: (state: State) => void;
     call: UntypedAgentMethodCall;
     stub: UntypedAgentStub;
@@ -427,7 +562,7 @@ export function useAgent<State>(
       streamOptions?: StreamOptions
     ): Promise<T> => {
       return new Promise((resolve, reject) => {
-        const id = Math.random().toString(36).slice(2);
+        const id = crypto.randomUUID();
         pendingCallsRef.current.set(id, {
           reject,
           resolve: resolve as (value: unknown) => void,
@@ -453,14 +588,20 @@ export function useAgent<State>(
   };
 
   agent.call = call;
-  agent.agent = agentNamespace;
-  agent.name = options.name || "default";
+  // Use reactive identity state (updates on identity message)
+  agent.agent = identity.agent;
+  agent.name = identity.name;
+  agent.identified = identity.identified;
+  agent.ready = readyRef.current!.promise;
   agent.stub = createStubProxy(call);
 
   // warn if agent isn't in lowercase
-  if (agent.agent !== agent.agent.toLowerCase()) {
+  if (identity.agent !== identity.agent.toLowerCase()) {
     console.warn(
-      `Agent name: ${agent.agent} should probably be in lowercase. Received: ${agent.agent}`
+      "Agent name: " +
+        identity.agent +
+        " should probably be in lowercase. Received: " +
+        identity.agent
     );
   }
 

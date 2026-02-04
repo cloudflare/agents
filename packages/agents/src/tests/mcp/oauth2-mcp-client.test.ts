@@ -16,6 +16,8 @@ function createStateWithSetup(
   return `${nonce}.${serverId}`;
 }
 
+// Note: These tests use raw .idFromName()/.get() instead of getAgentByName() because
+// they need the agent ID to construct callback URLs for OAuth testing.
 describe("OAuth2 MCP Client - Hibernation", () => {
   it("should restore MCP connections from database on wake-up", async () => {
     const agentId = env.TestOAuthAgent.idFromName("test-oauth-hibernation");
@@ -408,6 +410,9 @@ describe("OAuth2 MCP Client - State Security", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
+    // Configure JSON handler to verify error responses
+    await agentStub.configureOAuthForTest({ useJsonHandler: true });
+
     agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
@@ -433,7 +438,8 @@ describe("OAuth2 MCP Client - State Security", () => {
       new Request(`${callbackUrl}?code=test-code&state=${state}`)
     );
     expect(response2.status).toBeGreaterThanOrEqual(400);
-    expect(await response2.text()).toContain("State not found or already used");
+    const body = (await response2.json()) as { error: string };
+    expect(body.error).toContain("State not found or already used");
   });
 
   it("should reject state with mismatched serverId", async () => {
@@ -445,6 +451,9 @@ describe("OAuth2 MCP Client - State Security", () => {
 
     await agentStub.setName("default");
     await agentStub.onStart();
+
+    // Configure JSON handler to verify error responses
+    await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
     agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -482,7 +491,8 @@ describe("OAuth2 MCP Client - State Security", () => {
       new Request(`${callbackUrl}?code=test-code&state=${tamperedState}`)
     );
     expect(response.status).toBeGreaterThanOrEqual(400);
-    expect(await response.text()).toContain("State serverId mismatch");
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("State serverId mismatch");
   });
 });
 

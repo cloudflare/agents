@@ -6,6 +6,61 @@
 export type { AgentEmail } from "./internal_context";
 
 // ============================================================================
+// Email header utilities
+// ============================================================================
+
+/**
+ * Header object as returned by postal-mime and similar email parsing libraries.
+ * Each header has a lowercase key and a string value.
+ */
+export type EmailHeader = {
+  /** Lowercase header name (e.g., "content-type", "x-custom-header") */
+  key: string;
+  /** Header value */
+  value: string;
+};
+
+/**
+ * Check if an email appears to be an auto-reply based on standard headers.
+ * Checks for Auto-Submitted (RFC 3834), X-Auto-Response-Suppress, and Precedence headers.
+ *
+ * @param headers - Headers array from postal-mime Email.headers or similar format
+ * @returns true if email appears to be an auto-reply
+ *
+ * @example
+ * ```typescript
+ * if (isAutoReplyEmail(parsed.headers)) {
+ *   // Skip processing auto-replies
+ *   return;
+ * }
+ * ```
+ */
+export function isAutoReplyEmail(headers: EmailHeader[]): boolean {
+  return headers.some((h) => {
+    const key = h.key.toLowerCase();
+    const value = h.value.toLowerCase();
+
+    // RFC 3834: Auto-Submitted header
+    // "no" means normal (human-sent) email, anything else indicates auto-reply
+    if (key === "auto-submitted") {
+      return value !== "no";
+    }
+
+    // X-Auto-Response-Suppress: any value indicates sender doesn't want auto-replies
+    if (key === "x-auto-response-suppress") {
+      return true;
+    }
+
+    // Precedence: only bulk/junk/list indicate automated/mass mail
+    if (key === "precedence") {
+      return value === "bulk" || value === "junk" || value === "list";
+    }
+
+    return false;
+  });
+}
+
+// ============================================================================
 // Signing utilities
 // ============================================================================
 

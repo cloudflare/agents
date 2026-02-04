@@ -1,0 +1,23 @@
+{
+  "assets": {
+    "directory": "public"
+  },
+  "compatibility_date": "2025-03-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "RepoAgent",
+        "name": "RepoAgent"
+      }
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["RepoAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "github-webhook"
+}

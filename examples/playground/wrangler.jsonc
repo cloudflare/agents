@@ -1,43 +1,82 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "playground",
+  "name": "agents-playground",
+  "compatibility_date": "2025-01-29",
+  "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
-  "compatibility_date": "2025-02-19",
-  "compatibility_flags": [
-    "nodejs_compat",
-    "nodejs_compat_populate_process_env"
-  ],
-  "ai": {
-    "binding": "AI",
-    "remote": true
-  },
-  "assets": {
-    "binding": "ASSETS"
-  },
   "durable_objects": {
     "bindings": [
-      {
-        "class_name": "Scheduler",
-        "name": "Scheduler"
-      },
-      {
-        "class_name": "Stateful",
-        "name": "Stateful"
-      },
-      {
-        "class_name": "Chat",
-        "name": "Chat"
-      },
-      {
-        "class_name": "Rpc",
-        "name": "Rpc"
-      }
+      // Core demo agents
+      { "name": "StateAgent", "class_name": "StateAgent" },
+      { "name": "CallableAgent", "class_name": "CallableAgent" },
+      { "name": "StreamingAgent", "class_name": "StreamingAgent" },
+      { "name": "ScheduleAgent", "class_name": "ScheduleAgent" },
+      { "name": "SqlAgent", "class_name": "SqlAgent" },
+      { "name": "ConnectionsAgent", "class_name": "ConnectionsAgent" },
+      { "name": "RoutingAgent", "class_name": "RoutingAgent" },
+      // AI demo agents
+      { "name": "ChatAgent", "class_name": "ChatAgent" },
+      // Multi-agent demo agents
+      { "name": "SupervisorAgent", "class_name": "SupervisorAgent" },
+      { "name": "ChildAgent", "class_name": "ChildAgent" },
+      { "name": "LobbyAgent", "class_name": "LobbyAgent" },
+      { "name": "RoomAgent", "class_name": "RoomAgent" },
+      // Workflow demo agents
+      { "name": "BasicWorkflowAgent", "class_name": "BasicWorkflowAgent" },
+      { "name": "ApprovalAgent", "class_name": "ApprovalAgent" },
+      // Email demo agents
+      { "name": "ReceiveEmailAgent", "class_name": "ReceiveEmailAgent" },
+      { "name": "SecureEmailAgent", "class_name": "SecureEmailAgent" }
     ]
   },
+  "workflows": [
+    {
+      "name": "ProcessingWorkflow",
+      "binding": "ProcessingWorkflow",
+      "class_name": "ProcessingWorkflow"
+    },
+    {
+      "name": "ApprovalWorkflow",
+      "binding": "ApprovalWorkflow",
+      "class_name": "ApprovalWorkflow"
+    }
+  ],
   "migrations": [
     {
-      "new_sqlite_classes": ["Scheduler", "Stateful", "Chat", "Rpc"],
-      "tag": "v1"
+      "tag": "v1",
+      "new_sqlite_classes": [
+        // Core demo agents
+        "StateAgent",
+        "CallableAgent",
+        "StreamingAgent",
+        "ScheduleAgent",
+        "SqlAgent",
+        "ConnectionsAgent",
+        "RoutingAgent",
+        // AI demo agents
+        "ChatAgent",
+        // Multi-agent demo agents
+        "SupervisorAgent",
+        "ChildAgent",
+        "LobbyAgent",
+        "RoomAgent",
+        // Workflow demo agents
+        "BasicWorkflowAgent",
+        "ApprovalAgent",
+        // Email demo agents
+        "ReceiveEmailAgent",
+        "SecureEmailAgent"
+      ]
     }
-  ]
+  ],
+  "vars": {
+    // For production, use: wrangler secret put EMAIL_SECRET
+    "EMAIL_SECRET": "demo-secret-change-in-production"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "not_found_handling": "single-page-application"
+  }
 }
