@@ -197,16 +197,15 @@ export class MCPClientManager {
 
   private failConnection(
     serverId: string,
-    rawError: string
+    error: string
   ): MCPOAuthCallbackResult {
     this.clearServerAuthUrl(serverId);
-    const escapedError = escapeHtml(rawError);
     if (this.mcpConnections[serverId]) {
       this.mcpConnections[serverId].connectionState = MCPConnectionState.FAILED;
-      this.mcpConnections[serverId].connectionError = escapedError;
+      this.mcpConnections[serverId].connectionError = error;
     }
     this._onServerStateChanged.fire();
-    return { serverId, authSuccess: false, authError: escapedError };
+    return { serverId, authSuccess: false, authError: error };
   }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
@@ -692,12 +691,12 @@ export class MCPClientManager {
     const error = url.searchParams.get("error");
     const errorDescription = url.searchParams.get("error_description");
 
+    // Early validation - these throw because we can't identify the connection
     if (!state) {
       throw new Error("Unauthorized: no state provided");
     }
 
     const serverId = this.extractServerIdFromState(state);
-
     if (!serverId) {
       throw new Error(
         "No serverId found in state parameter. Expected format: {nonce}.{serverId}"
@@ -706,7 +705,6 @@ export class MCPClientManager {
 
     const servers = this.getServersFromStorage();
     const serverExists = servers.some((server) => server.id === serverId);
-
     if (!serverExists) {
       throw new Error(
         `No server found with id "${serverId}". Was the request matched with \`isCallbackRequest()\`?`
@@ -717,74 +715,61 @@ export class MCPClientManager {
       throw new Error(`Could not find serverId: ${serverId}`);
     }
 
+    // We have a valid connection - all errors from here should fail the connection
     const conn = this.mcpConnections[serverId];
-    if (!conn.options.transport.authProvider) {
-      throw new Error(
-        "Trying to finalize authentication for a server connection without an authProvider"
-      );
-    }
-
-    const authProvider = conn.options.transport.authProvider;
-    authProvider.serverId = serverId;
-
-    // Two-phase state validation: check first (non-destructive), consume later
-    // This prevents DoS attacks where attacker consumes valid state before legitimate callback
-    const stateValidation = await authProvider.checkState(state);
-    if (!stateValidation.valid) {
-      return this.failConnection(
-        serverId,
-        stateValidation.error || "Invalid state"
-      );
-    }
-
-    if (error) {
-      return this.failConnection(serverId, errorDescription || error);
-    }
-
-    if (!code) {
-      throw new Error("Unauthorized: no code provided");
-    }
-
-    if (
-      this.mcpConnections[serverId].connectionState ===
-        MCPConnectionState.READY ||
-      this.mcpConnections[serverId].connectionState ===
-        MCPConnectionState.CONNECTED
-    ) {
-      this.clearServerAuthUrl(serverId);
-      return {
-        serverId,
-        authSuccess: true
-      };
-    }
-
-    if (
-      this.mcpConnections[serverId].connectionState !==
-      MCPConnectionState.AUTHENTICATING
-    ) {
-      throw new Error(
-        `Failed to authenticate: the client is in "${this.mcpConnections[serverId].connectionState}" state, expected "authenticating"`
-      );
-    }
 
     try {
+      if (!conn.options.transport.authProvider) {
+        throw new Error(
+          "Trying to finalize authentication for a server connection without an authProvider"
+        );
+      }
+
+      const authProvider = conn.options.transport.authProvider;
+      authProvider.serverId = serverId;
+
+      // Two-phase state validation: check first (non-destructive), consume later
+      // This prevents DoS attacks where attacker consumes valid state before legitimate callback
+      const stateValidation = await authProvider.checkState(state);
+      if (!stateValidation.valid) {
+        throw new Error(stateValidation.error || "Invalid state");
+      }
+
+      if (error) {
+        // Escape external OAuth error params to prevent XSS
+        throw new Error(escapeHtml(errorDescription || error));
+      }
+
+      if (!code) {
+        throw new Error("Unauthorized: no code provided");
+      }
+
+      // Already authenticated - just return success
+      if (
+        conn.connectionState === MCPConnectionState.READY ||
+        conn.connectionState === MCPConnectionState.CONNECTED
+      ) {
+        this.clearServerAuthUrl(serverId);
+        return { serverId, authSuccess: true };
+      }
+
+      if (conn.connectionState !== MCPConnectionState.AUTHENTICATING) {
+        throw new Error(
+          `Failed to authenticate: the client is in "${conn.connectionState}" state, expected "authenticating"`
+        );
+      }
+
       await authProvider.consumeState(state);
       await conn.completeAuthorization(code);
       await authProvider.deleteCodeVerifier();
       this.clearServerAuthUrl(serverId);
-      if (this.mcpConnections[serverId]) {
-        this.mcpConnections[serverId].connectionError = null;
-      }
+      conn.connectionError = null;
       this._onServerStateChanged.fire();
 
-      return {
-        serverId,
-        authSuccess: true
-      };
-    } catch (authError) {
-      const errorMessage =
-        authError instanceof Error ? authError.message : String(authError);
-      return this.failConnection(serverId, errorMessage);
+      return { serverId, authSuccess: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return this.failConnection(serverId, message);
     }
   }
 

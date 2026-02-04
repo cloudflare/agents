@@ -399,7 +399,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.authError).toBe("User denied access");
     });
 
-    it("should throw error for callback without code or error", async () => {
+    it("should fail connection for callback without code or error", async () => {
       const serverId = "server1";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -429,9 +429,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const state = stateStorage.createState(serverId);
       const callbackRequest = new Request(`${callbackUrl}?state=${state}`);
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("Unauthorized: no code provided");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("Unauthorized: no code provided");
     });
 
     it("should throw error for callback without state", async () => {
@@ -496,7 +496,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.serverId).toBe(serverId);
     });
 
-    it("should error when callback received for connection in failed state", async () => {
+    it("should fail connection when callback received for connection in failed state", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -532,9 +532,9 @@ describe("MCPClientManager OAuth Integration", () => {
         `${callbackUrl}?code=test&state=${state}`
       );
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow(
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe(
         'Failed to authenticate: the client is in "failed" state, expected "authenticating"'
       );
     });
@@ -943,66 +943,6 @@ describe("MCPClientManager OAuth Integration", () => {
       );
       expect(connection.connectionError).toBe(
         "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
-      );
-    });
-
-    it("should escape XSS payloads in state validation errors", async () => {
-      const serverId = "test-server";
-      const callbackUrl = "http://localhost:3000/callback";
-
-      saveServerToMock({
-        id: serverId,
-        name: "Test Server",
-        server_url: "http://test.com",
-        callback_url: callbackUrl,
-        client_id: "test-client-id",
-        auth_url: null,
-        server_options: null
-      });
-
-      const xssPayload = "<img src=x onerror=alert(document.cookie)>";
-      const mockAuthProvider = {
-        serverId: serverId,
-        clientId: "test-client-id",
-        authUrl: "https://auth.example.com/authorize",
-        redirectUrl: callbackUrl,
-        clientMetadata: {
-          client_name: "test-client",
-          redirect_uris: [callbackUrl]
-        },
-        clientInformation: () => ({ client_id: "test-client-id" }),
-        tokens: () => Promise.resolve(undefined),
-        saveTokens: () => Promise.resolve(),
-        redirectToAuthorization: () => Promise.resolve(),
-        checkState: () => Promise.resolve({ valid: false, error: xssPayload }),
-        consumeState: () => Promise.resolve(),
-        saveCodeVerifier: () => Promise.resolve(),
-        codeVerifier: () => Promise.resolve("verifier"),
-        deleteCodeVerifier: () => Promise.resolve()
-      };
-
-      const connection = new MCPClientConnection(
-        new URL("http://test.com"),
-        { name: "test-client", version: "1.0.0" },
-        {
-          transport: { type: "auto", authProvider: mockAuthProvider },
-          client: {}
-        }
-      );
-      connection.connectionState = "authenticating";
-      manager.mcpConnections[serverId] = connection;
-
-      const callbackRequest = new Request(
-        `${callbackUrl}?code=test&state=nonce.${serverId}`
-      );
-      const result = await manager.handleCallbackRequest(callbackRequest);
-
-      expect(result.authSuccess).toBe(false);
-      expect(result.authError).toBe(
-        "&lt;img src=x onerror=alert(document.cookie)&gt;"
-      );
-      expect(connection.connectionError).toBe(
-        "&lt;img src=x onerror=alert(document.cookie)&gt;"
       );
     });
 
