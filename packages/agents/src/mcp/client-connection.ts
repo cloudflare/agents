@@ -95,6 +95,7 @@ export type MCPDiscoveryResult = {
 export class MCPClientConnection {
   client: Client;
   connectionState: MCPConnectionState = MCPConnectionState.CONNECTING;
+  connectionError: string | null = null;
   lastConnectedTransport: BaseTransportType | undefined;
   instructions?: string;
   tools: Tool[] = [];

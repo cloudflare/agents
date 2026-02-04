@@ -259,6 +259,7 @@ export type MCPServer = {
   // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
   // to communicate a change to a non-ready state.
   state: MCPConnectionState;
+  error: string | null;
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
@@ -3182,6 +3183,7 @@ export class Agent<
         mcpState.servers[server.id] = {
           auth_url: server.auth_url,
           capabilities: serverConn?.serverCapabilities ?? null,
+          error: serverConn?.connectionError ?? null,
           instructions: serverConn?.instructions ?? null,
           name: server.name,
           server_url: server.server_url,

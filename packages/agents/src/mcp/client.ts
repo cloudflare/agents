@@ -1,4 +1,5 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import escapeHtml from "escape-html";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
@@ -710,23 +711,32 @@ export class MCPClientManager {
     const stateValidation = await authProvider.checkState(state);
     if (!stateValidation.valid) {
       this.clearServerAuthUrl(serverId);
+      const escapedError = escapeHtml(stateValidation.error || "Invalid state");
       if (this.mcpConnections[serverId]) {
         this.mcpConnections[serverId].connectionState =
           MCPConnectionState.FAILED;
+        this.mcpConnections[serverId].connectionError = escapedError;
       }
       this._onServerStateChanged.fire();
       return {
         serverId,
         authSuccess: false,
-        authError: stateValidation.error || "Invalid state"
+        authError: escapedError
       };
     }
 
     if (error) {
+      const escapedError = escapeHtml(errorDescription || error);
+      if (this.mcpConnections[serverId]) {
+        this.mcpConnections[serverId].connectionState =
+          MCPConnectionState.FAILED;
+        this.mcpConnections[serverId].connectionError = escapedError;
+      }
+      this._onServerStateChanged.fire();
       return {
         serverId,
         authSuccess: false,
-        authError: errorDescription || error
+        authError: escapedError
       };
     }
 
@@ -770,13 +780,19 @@ export class MCPClientManager {
     } catch (authError) {
       const errorMessage =
         authError instanceof Error ? authError.message : String(authError);
+      const escapedError = escapeHtml(errorMessage);
 
+      if (this.mcpConnections[serverId]) {
+        this.mcpConnections[serverId].connectionState =
+          MCPConnectionState.FAILED;
+        this.mcpConnections[serverId].connectionError = escapedError;
+      }
       this._onServerStateChanged.fire();
 
       return {
         serverId,
         authSuccess: false,
-        authError: errorMessage
+        authError: escapedError
       };
     }
   }
