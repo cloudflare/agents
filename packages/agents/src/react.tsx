@@ -534,6 +534,10 @@ export function useAgent<State>(
       resetReady();
       setIdentity((prev) => ({ ...prev, identified: false }));
 
+      // Invalidate the query cache so reconnection will re-run the async query
+      // This ensures fresh auth tokens are fetched on reconnect
+      deleteCacheEntry(cacheKey);
+
       // Reject all pending calls (consistent with AgentClient behavior)
       const error = new Error("Connection closed");
       for (const pending of pendingCallsRef.current.values()) {
