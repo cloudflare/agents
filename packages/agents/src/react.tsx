@@ -301,10 +301,10 @@ export function useAgent<State>(
   // Track current cache key in a ref for use in onClose handler.
   // This ensures we invalidate the correct cache entry when the connection closes,
   // even if the component re-renders with different props before onClose fires.
+  // We update synchronously during render (not in useEffect) to avoid race
+  // conditions where onClose could fire before the effect runs.
   const cacheKeyRef = useRef(cacheKey);
-  useEffect(() => {
-    cacheKeyRef.current = cacheKey;
-  }, [cacheKey]);
+  cacheKeyRef.current = cacheKey;
 
   const ttl = cacheTtl ?? 5 * 60 * 1000;
 
