@@ -99,7 +99,8 @@ export const _testUtils = {
   getCacheEntry,
   deleteCacheEntry,
   clearCache: () => queryCache.clear(),
-  createStubProxy
+  createStubProxy,
+  createCacheKey
 };
 
 /**
@@ -296,6 +297,14 @@ export function useAgent<State>(
     () => createCacheKey(agentNamespace, options.name, queryDeps || []),
     [agentNamespace, options.name, queryDeps]
   );
+
+  // Track current cache key in a ref for use in onClose handler.
+  // This ensures we invalidate the correct cache entry when the connection closes,
+  // even if the component re-renders with different props before onClose fires.
+  const cacheKeyRef = useRef(cacheKey);
+  useEffect(() => {
+    cacheKeyRef.current = cacheKey;
+  }, [cacheKey]);
 
   const ttl = cacheTtl ?? 5 * 60 * 1000;
 
@@ -534,9 +543,14 @@ export function useAgent<State>(
       resetReady();
       setIdentity((prev) => ({ ...prev, identified: false }));
 
-      // Invalidate the query cache so reconnection will re-run the async query
-      // This ensures fresh auth tokens are fetched on reconnect
-      deleteCacheEntry(cacheKey);
+      // Invalidate the query cache and trigger re-render so reconnection will
+      // re-run the async query with fresh tokens. We must both:
+      // 1. Delete the cache entry so getCacheEntry() returns undefined
+      // 2. Bump cacheInvalidatedAt to trigger useMemo to recompute queryPromise
+      // Without the state bump, the component keeps the old resolved query value
+      // and PartySocket would reconnect with stale query params.
+      deleteCacheEntry(cacheKeyRef.current);
+      setCacheInvalidatedAt(Date.now());
 
       // Reject all pending calls (consistent with AgentClient behavior)
       const error = new Error("Connection closed");

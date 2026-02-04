@@ -7,9 +7,12 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, cleanup } from "vitest-browser-react";
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useAgent, _testUtils, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
+
+// Helper to generate cache keys the same way useAgent does internally
+const createCacheKey = _testUtils.createCacheKey;
 
 // biome-ignore lint/suspicious/noExplicitAny: Tests don't need strict typing
 type TestAgent = ReturnType<typeof useAgent<any>>;
@@ -171,11 +174,12 @@ describe("Cache invalidation on disconnect", () => {
       let cacheWasEmptyInOnClose = false;
       let capturedAgent: TestAgent | null = null;
 
-      // Pre-populate the cache with an entry that matches what useAgent would create
-      const cacheKey = JSON.stringify([
+      // Use the same cache key generation as useAgent internally uses
+      const cacheKey = createCacheKey(
         "test-state-agent",
-        "onclose-cache-test"
-      ]);
+        "onclose-cache-test",
+        []
+      );
       _testUtils.setCacheEntry(
         cacheKey,
         Promise.resolve({ token: "test" }),
@@ -281,9 +285,9 @@ describe("Cache invalidation on disconnect", () => {
       let agent1: TestAgent | null = null;
       let agent2: TestAgent | null = null;
 
-      // Set up cache entries for both instances
-      const cacheKey1 = JSON.stringify(["test-state-agent", "multi-test-1"]);
-      const cacheKey2 = JSON.stringify(["test-state-agent", "multi-test-2"]);
+      // Use the same cache key generation as useAgent internally uses
+      const cacheKey1 = createCacheKey("test-state-agent", "multi-test-1", []);
+      const cacheKey2 = createCacheKey("test-state-agent", "multi-test-2", []);
 
       _testUtils.setCacheEntry(
         cacheKey1,
@@ -346,6 +350,122 @@ describe("Cache invalidation on disconnect", () => {
 
       // Cache for agent2 should still exist
       expect(_testUtils.queryCache.has(cacheKey2)).toBe(true);
+    });
+  });
+
+  describe("cache key ref timing", () => {
+    // Component that allows changing the name prop dynamically
+    function DynamicNameComponent({
+      initialName,
+      host,
+      protocol,
+      onAgent,
+      onNameChange
+    }: {
+      initialName: string;
+      host: string;
+      protocol: "ws" | "wss";
+      onAgent: (agent: TestAgent) => void;
+      onNameChange: (setName: (name: string) => void) => void;
+    }) {
+      const [name, setName] = useState(initialName);
+
+      useEffect(() => {
+        onNameChange(setName);
+      }, [onNameChange]);
+
+      const agent = useAgent({
+        agent: "TestStateAgent",
+        name,
+        host,
+        protocol
+      });
+
+      useEffect(() => {
+        onAgent(agent);
+      }, [agent, agent.identified, onAgent]);
+
+      return (
+        <div data-testid="agent-status">
+          {agent.identified ? `connected-${name}` : "connecting"}
+        </div>
+      );
+    }
+
+    it("should invalidate correct cache entry when name changes before disconnect", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+      let setNameFn: ((name: string) => void) | null = null;
+
+      // Pre-populate cache entries for both names
+      const cacheKeyName1 = createCacheKey(
+        "test-state-agent",
+        "dynamic-name-1",
+        []
+      );
+      const cacheKeyName2 = createCacheKey(
+        "test-state-agent",
+        "dynamic-name-2",
+        []
+      );
+
+      _testUtils.setCacheEntry(
+        cacheKeyName1,
+        Promise.resolve({ token: "token-for-name-1" }),
+        300000
+      );
+      _testUtils.setCacheEntry(
+        cacheKeyName2,
+        Promise.resolve({ token: "token-for-name-2" }),
+        300000
+      );
+
+      expect(_testUtils.queryCache.has(cacheKeyName1)).toBe(true);
+      expect(_testUtils.queryCache.has(cacheKeyName2)).toBe(true);
+
+      render(
+        <SuspenseWrapper>
+          <DynamicNameComponent
+            initialName="dynamic-name-1"
+            host={host}
+            protocol={protocol}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+            onNameChange={(setName) => {
+              setNameFn = setName;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      // Wait for initial connection with name-1
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+          expect(capturedAgent?.name).toBe("dynamic-name-1");
+        },
+        { timeout: 10000 }
+      );
+
+      // Both cache entries should still exist
+      expect(_testUtils.queryCache.has(cacheKeyName1)).toBe(true);
+      expect(_testUtils.queryCache.has(cacheKeyName2)).toBe(true);
+
+      // Trigger disconnect - this should invalidate name-1's cache, not name-2's
+      // The ref ensures we use the correct cache key at the time of disconnect
+      capturedAgent!.reconnect();
+
+      // Wait for the cache to be invalidated
+      await vi.waitFor(
+        () => {
+          expect(_testUtils.queryCache.has(cacheKeyName1)).toBe(false);
+        },
+        { timeout: 10000 }
+      );
+
+      // name-2's cache should be unaffected
+      expect(_testUtils.queryCache.has(cacheKeyName2)).toBe(true);
     });
   });
 });
