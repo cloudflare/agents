@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -52,7 +52,7 @@
   "peerDependencies": {
     "@ai-sdk/openai": "^3.0.0",
     "@ai-sdk/react": "^3.0.0",
-    "@cloudflare/ai-chat": "^0.0.5",
+    "@cloudflare/ai-chat": "^0.0.6",
     "@cloudflare/codemode": "^0.0.6",
     "ai": "^6.0.0",
     "react": "^19.0.0",
