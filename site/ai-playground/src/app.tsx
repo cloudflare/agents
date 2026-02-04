@@ -110,7 +110,8 @@ const App = () => {
           id,
           name: server.name,
           url: server.server_url,
-          state: server.state
+          state: server.state,
+          error: server.error
         })
       );
 

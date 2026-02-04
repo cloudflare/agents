@@ -12,6 +12,7 @@ export type McpServerInfo = {
   name?: string;
   url?: string;
   state: string;
+  error?: string | null;
 };
 
 export type McpServersComponentState = {
@@ -60,14 +61,6 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   const authenticatingServer = mcpState.servers.find(
     (s) => s.state === "authenticating"
   );
-
-  // Clear error when a server becomes ready
-  useEffect(() => {
-    const hasReadyServer = mcpState.servers.some((s) => s.state === "ready");
-    if (hasReadyServer) {
-      setError("");
-    }
-  }, [mcpState.servers]);
 
   const logRef = useRef<HTMLDivElement>(null);
   const [showAuth, setShowAuth] = useState<boolean>(false);
@@ -364,11 +357,6 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
       </p>
 
       <div className="my-4">
-        {/* Error display */}
-        {error && (
-          <div className="mb-2 text-xs text-red-600 truncate">{error}</div>
-        )}
-
         {/* Add new server form - URL input + key icon + Add button */}
         <div className="relative mb-4">
           <div className="flex space-x-2">
@@ -515,25 +503,36 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
             {mcpState.servers.map((server) => (
               <div
                 key={server.id}
-                className="flex items-center justify-between p-2 border border-gray-200 rounded-md bg-gray-50"
+                className={`p-2 border rounded-md ${
+                  server.state === "failed"
+                    ? "border-red-200 bg-red-50"
+                    : "border-gray-200 bg-gray-50"
+                }`}
               >
-                <div className="flex items-center space-x-2 min-w-0 flex-1">
-                  {getStatusBadge(server.state)}
-                  <span
-                    className="text-sm text-gray-700 truncate"
-                    title={server.url}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2 min-w-0 flex-1">
+                    {getStatusBadge(server.state)}
+                    <span
+                      className="text-sm text-gray-700 truncate"
+                      title={server.url}
+                    >
+                      {server.url}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="ml-2 px-2 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded-md transition-colors shrink-0"
+                    onClick={() => handleDisconnect(server.id)}
+                    disabled={disconnectingServerId === server.id}
                   >
-                    {server.url}
-                  </span>
+                    {disconnectingServerId === server.id ? "..." : "×"}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className="ml-2 px-2 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded-md transition-colors shrink-0"
-                  onClick={() => handleDisconnect(server.id)}
-                  disabled={disconnectingServerId === server.id}
-                >
-                  {disconnectingServerId === server.id ? "..." : "×"}
-                </button>
+                {server.state === "failed" && server.error && (
+                  <div className="mt-2 text-xs text-red-600 break-words">
+                    {server.error}
+                  </div>
+                )}
               </div>
             ))}
           </div>
