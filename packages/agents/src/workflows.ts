@@ -46,6 +46,12 @@ import type {
 import { WorkflowRejectedError } from "./workflow-types";
 
 /**
+ * WeakSet to track which prototypes have been wrapped.
+ * This prevents re-wrapping on subsequent instantiations of the same class.
+ */
+const wrappedPrototypes = new WeakSet<object>();
+
+/**
  * Base class for Workflows that need access to their originating Agent.
  *
  * @template AgentType - The Agent class type (for typed RPC access)
@@ -75,43 +81,72 @@ export class AgentWorkflow<
    */
   private _workflowName!: string;
 
+  /**
+   * Instance-level guard to prevent double initialization.
+   * Used when a subclass calls super.run() after its own run() was wrapped.
+   */
+  private __agentInitCalled = false;
+
   constructor(ctx: ExecutionContext, env: Env) {
     super(ctx, env);
 
-    // Store original run method - cast to accept clean event type and wrapped step
-    // (user's implementation expects WorkflowEvent<Params> and AgentWorkflowStep)
-    const originalRun = this.run.bind(this) as (
-      event: WorkflowEvent<Params>,
-      step: AgentWorkflowStep
-    ) => Promise<unknown>;
+    const proto = Object.getPrototypeOf(this);
 
-    // Override run to initialize agent before user code executes
-    this.run = async (
-      event: WorkflowEvent<AgentWorkflowParams<Params>>,
-      step: WorkflowStep
-    ) => {
-      // Extract internal params
-      const { __agentName, __agentBinding, __workflowName, ...userParams } =
-        event.payload;
+    // Only wrap if:
+    // 1. This prototype defines its own run method (hasOwnProperty)
+    // 2. It hasn't been wrapped yet (WeakSet check)
+    // This prevents double-wrapping inherited methods and ensures each subclass
+    // that defines run() gets wrapped exactly once.
+    if (Object.hasOwn(proto, "run") && !wrappedPrototypes.has(proto)) {
+      const originalRun = proto.run as (
+        event: WorkflowEvent<Params>,
+        step: AgentWorkflowStep
+      ) => Promise<unknown>;
 
-      // Initialize agent connection
-      await this._initAgent(
-        __agentName,
-        __agentBinding,
-        __workflowName,
-        event.instanceId
-      );
+      // Replace the prototype's run method with a wrapper that initializes
+      // the agent before calling the user's implementation
+      proto.run = async function (
+        this: AgentWorkflow<AgentType, Params, ProgressType, Env>,
+        event: WorkflowEvent<AgentWorkflowParams<Params>>,
+        step: WorkflowStep
+      ) {
+        // Instance-level guard: only init once per instance
+        // (prevents double init if super.run() is called from a subclass)
+        if (!this.__agentInitCalled) {
+          const { __agentName, __agentBinding, __workflowName, ...userParams } =
+            event.payload;
 
-      // Pass cleaned event and wrapped step to user's implementation
-      const cleanedEvent = {
-        ...event,
-        payload: userParams as Params
-      } as WorkflowEvent<Params>;
+          // Initialize agent connection
+          await this._initAgent(
+            __agentName,
+            __agentBinding,
+            __workflowName,
+            event.instanceId
+          );
+          this.__agentInitCalled = true;
 
-      const wrappedStep = this._wrapStep(step);
+          // Pass cleaned event and wrapped step to user's implementation
+          const cleanedEvent = {
+            ...event,
+            payload: userParams as Params
+          } as WorkflowEvent<Params>;
 
-      return originalRun(cleanedEvent, wrappedStep);
-    };
+          const wrappedStep = this._wrapStep(step);
+
+          return originalRun.call(this, cleanedEvent, wrappedStep);
+        }
+
+        // If already initialized (e.g., called via super.run()),
+        // just call the original with the event as-is
+        return originalRun.call(
+          this,
+          event as WorkflowEvent<Params>,
+          step as AgentWorkflowStep
+        );
+      };
+
+      wrappedPrototypes.add(proto);
+    }
   }
 
   /**
