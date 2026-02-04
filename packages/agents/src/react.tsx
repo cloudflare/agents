@@ -311,6 +311,10 @@ export function useAgent<State>(
   // Track cache invalidation to force re-render when TTL expires
   const [cacheInvalidatedAt, setCacheInvalidatedAt] = useState<number>(0);
 
+  // Disable socket while waiting for async query to refresh after disconnect
+  const isAsyncQuery = query && typeof query === "function";
+  const [awaitingQueryRefresh, setAwaitingQueryRefresh] = useState(false);
+
   // Get or create the query promise
   // biome-ignore lint/correctness/useExhaustiveDependencies: cacheInvalidatedAt intentionally forces re-evaluation when TTL expires
   const queryPromise = useMemo(() => {
@@ -392,6 +396,13 @@ export function useAgent<State>(
     }
   }
 
+  // Re-enable socket after async query resolves
+  useEffect(() => {
+    if (awaitingQueryRefresh && resolvedQuery !== undefined) {
+      setAwaitingQueryRefresh(false);
+    }
+  }, [awaitingQueryRefresh, resolvedQuery]);
+
   // Store identity in React state for reactivity
   const [identity, setIdentity] = useState({
     name: options.name || "default",
@@ -439,8 +450,11 @@ export function useAgent<State>(
         ...restOptions
       };
 
+  const socketEnabled = !awaitingQueryRefresh && (restOptions.enabled ?? true);
+
   const agent = usePartySocket({
     ...socketOptions,
+    enabled: socketEnabled,
     onMessage: (message) => {
       if (typeof message.data === "string") {
         let parsedMessage: Record<string, unknown>;
@@ -543,12 +557,12 @@ export function useAgent<State>(
       resetReady();
       setIdentity((prev) => ({ ...prev, identified: false }));
 
-      // Invalidate the query cache and trigger re-render so reconnection will
-      // re-run the async query with fresh tokens. We must both:
-      // 1. Delete the cache entry so getCacheEntry() returns undefined
-      // 2. Bump cacheInvalidatedAt to trigger useMemo to recompute queryPromise
-      // Without the state bump, the component keeps the old resolved query value
-      // and PartySocket would reconnect with stale query params.
+      // Pause reconnection for async queries until fresh query params are ready
+      if (isAsyncQuery) {
+        setAwaitingQueryRefresh(true);
+      }
+
+      // Invalidate cache and trigger re-render to fetch fresh query params
       deleteCacheEntry(cacheKeyRef.current);
       setCacheInvalidatedAt(Date.now());
 
