@@ -46,6 +46,13 @@ export type MCPServerOptions = {
 };
 
 /**
+ * Result of an OAuth callback request
+ */
+export type MCPOAuthCallbackResult =
+  | { serverId: string; authSuccess: true; authError?: undefined }
+  | { serverId: string; authSuccess: false; authError: string };
+
+/**
  * Options for registering an MCP server
  */
 export type RegisterServerOptions = {
@@ -186,6 +193,20 @@ export class MCPClientManager {
       "UPDATE cf_agents_mcp_servers SET auth_url = NULL WHERE id = ?",
       serverId
     );
+  }
+
+  private failConnection(
+    serverId: string,
+    rawError: string
+  ): MCPOAuthCallbackResult {
+    this.clearServerAuthUrl(serverId);
+    const escapedError = escapeHtml(rawError);
+    if (this.mcpConnections[serverId]) {
+      this.mcpConnections[serverId].connectionState = MCPConnectionState.FAILED;
+      this.mcpConnections[serverId].connectionError = escapedError;
+    }
+    this._onServerStateChanged.fire();
+    return { serverId, authSuccess: false, authError: escapedError };
   }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
@@ -664,7 +685,7 @@ export class MCPClientManager {
     return servers.some((server) => server.id === serverId);
   }
 
-  async handleCallbackRequest(req: Request) {
+  async handleCallbackRequest(req: Request): Promise<MCPOAuthCallbackResult> {
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -710,34 +731,14 @@ export class MCPClientManager {
     // This prevents DoS attacks where attacker consumes valid state before legitimate callback
     const stateValidation = await authProvider.checkState(state);
     if (!stateValidation.valid) {
-      this.clearServerAuthUrl(serverId);
-      const escapedError = escapeHtml(stateValidation.error || "Invalid state");
-      if (this.mcpConnections[serverId]) {
-        this.mcpConnections[serverId].connectionState =
-          MCPConnectionState.FAILED;
-        this.mcpConnections[serverId].connectionError = escapedError;
-      }
-      this._onServerStateChanged.fire();
-      return {
+      return this.failConnection(
         serverId,
-        authSuccess: false,
-        authError: escapedError
-      };
+        stateValidation.error || "Invalid state"
+      );
     }
 
     if (error) {
-      const escapedError = escapeHtml(errorDescription || error);
-      if (this.mcpConnections[serverId]) {
-        this.mcpConnections[serverId].connectionState =
-          MCPConnectionState.FAILED;
-        this.mcpConnections[serverId].connectionError = escapedError;
-      }
-      this._onServerStateChanged.fire();
-      return {
-        serverId,
-        authSuccess: false,
-        authError: escapedError
-      };
+      return this.failConnection(serverId, errorDescription || error);
     }
 
     if (!code) {
@@ -771,6 +772,9 @@ export class MCPClientManager {
       await conn.completeAuthorization(code);
       await authProvider.deleteCodeVerifier();
       this.clearServerAuthUrl(serverId);
+      if (this.mcpConnections[serverId]) {
+        this.mcpConnections[serverId].connectionError = null;
+      }
       this._onServerStateChanged.fire();
 
       return {
@@ -780,20 +784,7 @@ export class MCPClientManager {
     } catch (authError) {
       const errorMessage =
         authError instanceof Error ? authError.message : String(authError);
-      const escapedError = escapeHtml(errorMessage);
-
-      if (this.mcpConnections[serverId]) {
-        this.mcpConnections[serverId].connectionState =
-          MCPConnectionState.FAILED;
-        this.mcpConnections[serverId].connectionError = escapedError;
-      }
-      this._onServerStateChanged.fire();
-
-      return {
-        serverId,
-        authSuccess: false,
-        authError: escapedError
-      };
+      return this.failConnection(serverId, errorMessage);
     }
   }
 
