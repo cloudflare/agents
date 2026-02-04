@@ -152,4 +152,64 @@ describe("Cache TTL", () => {
     expect(_testUtils.queryCache.has(key)).toBe(false);
     expect(_testUtils.getCacheEntry(key)).toBeUndefined();
   });
+
+  it("should allow re-caching after deletion (simulates reconnect scenario)", () => {
+    const key = "reconnect-scenario";
+    const longTtl = 5 * 60 * 1000; // 5 minutes
+
+    // Initial connection - cache the query result
+    const initialPromise = Promise.resolve({ token: "initial-token" });
+    _testUtils.setCacheEntry(key, initialPromise, longTtl);
+
+    // Verify initial cache
+    const cached = _testUtils.getCacheEntry(key);
+    expect(cached).toBeDefined();
+    expect(cached?.promise).toBe(initialPromise);
+
+    // Simulate disconnect - delete the cache entry
+    _testUtils.deleteCacheEntry(key);
+    expect(_testUtils.getCacheEntry(key)).toBeUndefined();
+
+    // Simulate reconnect - new query should be cached
+    const reconnectPromise = Promise.resolve({ token: "fresh-token" });
+    _testUtils.setCacheEntry(key, reconnectPromise, longTtl);
+
+    // Verify new cache entry
+    const newCached = _testUtils.getCacheEntry(key);
+    expect(newCached).toBeDefined();
+    expect(newCached?.promise).toBe(reconnectPromise);
+    expect(newCached?.promise).not.toBe(initialPromise);
+  });
+
+  it("should handle deletion of non-existent key gracefully", () => {
+    const key = "non-existent-key";
+
+    // Should not throw
+    expect(() => _testUtils.deleteCacheEntry(key)).not.toThrow();
+    expect(_testUtils.getCacheEntry(key)).toBeUndefined();
+  });
+
+  it("should isolate cache entries by key (different agents/instances)", () => {
+    const key1 = JSON.stringify(["agent-a", "instance-1", "dep1"]);
+    const key2 = JSON.stringify(["agent-a", "instance-2", "dep1"]);
+    const key3 = JSON.stringify(["agent-b", "instance-1", "dep1"]);
+
+    const promise1 = Promise.resolve({ token: "token-1" });
+    const promise2 = Promise.resolve({ token: "token-2" });
+    const promise3 = Promise.resolve({ token: "token-3" });
+
+    _testUtils.setCacheEntry(key1, promise1, 60000);
+    _testUtils.setCacheEntry(key2, promise2, 60000);
+    _testUtils.setCacheEntry(key3, promise3, 60000);
+
+    expect(_testUtils.queryCache.size).toBe(3);
+
+    // Delete only one entry (simulating one connection closing)
+    _testUtils.deleteCacheEntry(key1);
+
+    // Other entries should remain
+    expect(_testUtils.getCacheEntry(key1)).toBeUndefined();
+    expect(_testUtils.getCacheEntry(key2)?.promise).toBe(promise2);
+    expect(_testUtils.getCacheEntry(key3)?.promise).toBe(promise3);
+  });
 });
