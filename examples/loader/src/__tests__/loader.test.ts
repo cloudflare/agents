@@ -5,12 +5,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 // (server.ts includes BrowserLoopback which requires @cloudflare/playwright,
 // which is incompatible with vitest-pool-workers)
 import worker from "../server-without-browser";
-import type { ExecutionResult, CoderState } from "../server-without-browser";
+import type { ExecutionResult, ThinkState } from "../server-without-browser";
 
 // Declare the env types for cloudflare:test
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {
-    Coder: DurableObjectNamespace;
+    Think: DurableObjectNamespace;
   }
 }
 
@@ -35,7 +35,7 @@ async function agentRequest(
   options: RequestInit = {}
 ): Promise<Response> {
   const ctx = createExecutionContext();
-  const url = `http://localhost/agents/coder/test${path}`;
+  const url = `http://localhost/agents/think/test${path}`;
   const req = new Request(url, options);
   return worker.fetch(req, env as unknown as Env, ctx);
 }
@@ -701,7 +701,7 @@ describe("Agent State", () => {
     const response = await agentRequest("/state");
     expect(response.status).toBe(200);
 
-    const state = (await response.json()) as CoderState;
+    const state = (await response.json()) as ThinkState;
     expect(state.sessionId).toBeDefined();
     expect(state.status).toBeDefined();
     expect(state.codeVersion).toBeDefined();
@@ -709,7 +709,7 @@ describe("Agent State", () => {
 
   it("should show idle status when not executing", async () => {
     const response = await agentRequest("/state");
-    const state = (await response.json()) as CoderState;
+    const state = (await response.json()) as ThinkState;
     expect(state.status).toBe("idle");
   });
 });
@@ -912,7 +912,7 @@ describe("Session Isolation", () => {
     options: RequestInit = {}
   ): Promise<Response> {
     const ctx = createExecutionContext();
-    const url = `http://localhost/agents/coder/${room}${path}`;
+    const url = `http://localhost/agents/think/${room}${path}`;
     const req = new Request(url, options);
     return worker.fetch(req, env as unknown as Env, ctx);
   }
@@ -947,10 +947,10 @@ describe("Session Isolation", () => {
 
     const state1 = (await (
       await roomRequest(room1, "/state")
-    ).json()) as CoderState;
+    ).json()) as ThinkState;
     const state2 = (await (
       await roomRequest(room2, "/state")
-    ).json()) as CoderState;
+    ).json()) as ThinkState;
 
     expect(state1.sessionId).toBeDefined();
     expect(state2.sessionId).toBeDefined();

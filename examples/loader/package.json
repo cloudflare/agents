@@ -10,7 +10,11 @@
     "types": "wrangler types env.d.ts --include-runtime false",
     "deploy": "vite build && wrangler deploy",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "test:e2e:watch": "vitest --config vitest.e2e.config.ts",
+    "test:e2e:verbose": "E2E_VERBOSE=true vitest run --config vitest.e2e.config.ts",
+    "test:e2e:slow": "E2E_INCLUDE_SLOW=true vitest run --config vitest.e2e.config.ts"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.25",

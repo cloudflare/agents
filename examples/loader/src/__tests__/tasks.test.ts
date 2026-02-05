@@ -350,11 +350,11 @@ describe("Cycle Detection", () => {
   });
 
   it("allows valid dependency chains", () => {
-    const { graph: g1, task: t1 } = createTestTask(graph, {
+    const { graph: g1, task: _t1 } = createTestTask(graph, {
       id: "a",
       title: "Task A"
     });
-    const { graph: g2, task: t2 } = createTestTask(g1, {
+    const { graph: g2, task: _t2 } = createTestTask(g1, {
       id: "b",
       title: "Task B",
       dependencies: ["a"]
@@ -758,7 +758,7 @@ describe("Task Tree Operations", () => {
         id: "root",
         title: "Root"
       });
-      const { graph: g2, task: c1 } = createTestTask(g1, {
+      const { graph: g2, task: _c1 } = createTestTask(g1, {
         id: "c1",
         title: "Child 1",
         parentId: "root"
@@ -985,7 +985,7 @@ describe("Serialization", () => {
     });
 
     it("round-trips complex graph", () => {
-      const { graph: g1, task: root } = createTestTask(graph, {
+      const { graph: g1, task: _root } = createTestTask(graph, {
         id: "root",
         title: "Root"
       });
@@ -1177,7 +1177,7 @@ describe("Complex Workflows", () => {
     });
 
     // All 4 tasks should be ready (no dependencies)
-    let ready = getReadyTasks(g4);
+    const ready = getReadyTasks(g4);
     expect(ready.length).toBe(4);
 
     // Complete subtasks in parallel

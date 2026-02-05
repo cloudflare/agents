@@ -3,22 +3,26 @@
   "name": "loader-demos",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "experimental",
+    "allow_irrevocable_stub_storage"
+  ],
   "assets": {
     "directory": "public"
   },
   "durable_objects": {
     "bindings": [
       {
-        "name": "Coder",
-        "class_name": "Coder"
+        "name": "Think",
+        "class_name": "Think"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["Coder"]
+      "new_sqlite_classes": ["Think"]
     }
   ],
   "observability": {

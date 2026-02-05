@@ -294,7 +294,7 @@ export class BrowserLoopback extends WorkerEntrypoint<
       // Truncate if needed
       const maxLen = options?.maxContentLength ?? 50000;
       if (content.length > maxLen) {
-        content = content.slice(0, maxLen) + "\n\n[Content truncated...]";
+        content = `${content.slice(0, maxLen)}\n\n[Content truncated...]`;
       }
 
       // Extract links if requested
@@ -473,7 +473,7 @@ export class BrowserLoopback extends WorkerEntrypoint<
       let content = await page.evaluate(() => document.body.innerText);
       const maxLen = options?.maxContentLength ?? 10000;
       if (content.length > maxLen) {
-        content = content.slice(0, maxLen) + "\n\n[Content truncated...]";
+        content = `${content.slice(0, maxLen)}\n\n[Content truncated...]`;
       }
 
       // Optional screenshot

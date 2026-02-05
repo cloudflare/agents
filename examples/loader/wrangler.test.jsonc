@@ -11,15 +11,15 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "Coder",
-        "class_name": "Coder"
+        "name": "Think",
+        "class_name": "Think"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["Coder"]
+      "new_sqlite_classes": ["Think"]
     }
   ],
   "observability": {

@@ -11,7 +11,15 @@ import {
   type SubagentContext,
   type SubagentResult
 } from "./agent-tools";
-import { SubagentManager, type SubagentEnv } from "./subagent";
+import {
+  SubagentManager,
+  type SubagentEnv,
+  type SubagentCheckPayload,
+  SUBAGENT_CONFIG,
+  registerStaticTestValue,
+  getStaticTestValue,
+  STATIC_TEST_MAP
+} from "./subagent";
 import type { BashLoopback } from "./loopbacks/bash";
 import type { FetchLoopback } from "./loopbacks/fetch";
 import type { BraveSearchLoopback } from "./loopbacks/brave-search";
@@ -44,8 +52,16 @@ export { EchoLoopback } from "./loopbacks/echo";
 export { FetchLoopback } from "./loopbacks/fetch";
 export { FSLoopback } from "./loopbacks/fs";
 
-// Re-export Subagent for facet-based parallel execution
-export { Subagent } from "./subagent";
+// Re-export Subagent and test facets for facet-based parallel execution
+export {
+  Subagent,
+  StorageTestFacet,
+  StaticTestFacet,
+  RpcTestFacet,
+  registerStaticTestValue,
+  getStaticTestValue,
+  STATIC_TEST_MAP
+} from "./subagent";
 
 // inline this until enable_ctx_exports is supported by default
 declare global {
@@ -63,7 +79,7 @@ declare global {
 /**
  * State synced to connected clients via WebSocket
  */
-export interface CoderState {
+export interface ThinkState {
   sessionId: string;
   status: "idle" | "thinking" | "executing" | "waiting";
   activeFile?: string;
@@ -114,12 +130,18 @@ const MAX_CONTEXT_MESSAGES = 50;
 
 /**
  * Feature flag for experimental subagent endpoints.
- * Set ENABLE_SUBAGENT_API=true in environment to enable.
+ * Pass --var ENABLE_SUBAGENT_API=true to wrangler dev to enable.
  *
  * These endpoints use Durable Object Facets which are experimental
  * and may not work in all environments (e.g., vitest-pool-workers).
  */
-const ENABLE_SUBAGENT_API = false; // Set to true when facets are stable
+function isSubagentApiEnabled(env: Env): boolean {
+  // Check for string "true" since wrangler --var passes strings
+  return (
+    (env as unknown as { ENABLE_SUBAGENT_API?: string }).ENABLE_SUBAGENT_API ===
+    "true"
+  );
+}
 
 /**
  * Interface for the dynamic worker entrypoint
@@ -157,7 +179,7 @@ class TimeoutError extends Error {
 }
 
 /**
- * The main Coder Agent - orchestrates dynamic code execution
+ * The main Think Agent - orchestrates dynamic code execution
  *
  * Architecture:
  * - This Agent (Durable Object) is the persistent "brain"
@@ -165,7 +187,7 @@ class TimeoutError extends Error {
  * - Yjs document stores the code with full version history
  * - Loopback bindings provide tools to dynamic workers
  */
-export class Coder extends Agent<Env, CoderState> {
+export class Think extends Agent<Env, ThinkState> {
   // Yjs storage for code with versioning
   private yjsStorage: YjsStorage | null = null;
 
@@ -184,7 +206,7 @@ export class Coder extends Agent<Env, CoderState> {
   /**
    * Initial state for the Agent - provides defaults before any state is set
    */
-  initialState: CoderState = {
+  initialState: ThinkState = {
     sessionId: crypto.randomUUID(),
     status: "idle",
     codeVersion: 0
@@ -224,6 +246,10 @@ export class Coder extends Agent<Env, CoderState> {
     }
     // Initialize chat history tables
     this.initChatTables();
+
+    // Recover any orphaned subagents from a previous instance
+    // (e.g., if the DO restarted while subagents were running)
+    await this.recoverOrphanedSubagents();
   }
 
   /**
@@ -360,7 +386,7 @@ export class Coder extends Agent<Env, CoderState> {
 
     const title =
       messageContent.length > 50
-        ? messageContent.slice(0, 47) + "..."
+        ? `${messageContent.slice(0, 47)}...`
         : messageContent;
 
     const task = createTask({
@@ -395,12 +421,11 @@ export class Coder extends Agent<Env, CoderState> {
     this.loadTaskGraph();
 
     const currentTaskId = this.currentTaskId;
-    const self = this;
 
     return {
       currentTaskId,
 
-      getTaskGraph: () => self.taskGraph,
+      getTaskGraph: () => this.taskGraph,
 
       createSubtask: (input) => {
         const task = createTask({
@@ -411,33 +436,33 @@ export class Coder extends Agent<Env, CoderState> {
           parentId: currentTaskId
         });
 
-        const result = addTask(self.taskGraph, task);
+        const result = addTask(this.taskGraph, task);
         if ("type" in result && typeof result.type === "string") {
           return { error: (result as TaskValidationError).message };
         }
 
-        self.taskGraph = result as TaskGraph;
-        self.saveTask(task);
+        this.taskGraph = result as TaskGraph;
+        this.saveTask(task);
 
         return task;
       },
 
       completeTask: (taskId: string, result?: string) => {
-        const updated = completeTask(self.taskGraph, taskId, result);
+        const updated = completeTask(this.taskGraph, taskId, result);
         if (!updated) return false;
 
-        self.taskGraph = updated;
+        this.taskGraph = updated;
 
         // Save the updated task
         const task = updated.tasks.get(taskId);
-        if (task) self.saveTask(task);
+        if (task) this.saveTask(task);
 
         // Also save any tasks that became unblocked
         for (const t of updated.tasks.values()) {
           if (t.id !== taskId) {
-            const original = self.taskGraph.tasks.get(t.id);
+            const original = this.taskGraph.tasks.get(t.id);
             if (original && original.status !== t.status) {
-              self.saveTask(t);
+              this.saveTask(t);
             }
           }
         }
@@ -445,16 +470,16 @@ export class Coder extends Agent<Env, CoderState> {
         return true;
       },
 
-      getReadyTasks: () => getReadyTasks(self.taskGraph),
+      getReadyTasks: () => getReadyTasks(this.taskGraph),
 
       getProgress: () => {
         if (currentTaskId) {
-          return getSubtreeProgress(self.taskGraph, currentTaskId);
+          return getSubtreeProgress(this.taskGraph, currentTaskId);
         }
-        return getProgress(self.taskGraph);
+        return getProgress(this.taskGraph);
       },
 
-      getTaskTree: () => getTaskTree(self.taskGraph)
+      getTaskTree: () => getTaskTree(this.taskGraph)
     };
   }
 
@@ -475,6 +500,171 @@ export class Coder extends Agent<Env, CoderState> {
       );
     }
     return this.subagentManager;
+  }
+
+  /**
+   * Schedule a status check for a subagent.
+   * Uses the Agents SDK schedule() API for durable scheduling.
+   */
+  private async scheduleSubagentCheck(
+    taskId: string,
+    delaySeconds: number = SUBAGENT_CONFIG.initialCheckDelay
+  ): Promise<void> {
+    const payload: SubagentCheckPayload = {
+      taskId,
+      attempt: 1,
+      maxAttempts: SUBAGENT_CONFIG.maxCheckAttempts
+    };
+
+    await this.schedule(delaySeconds, "checkSubagentStatus", payload);
+  }
+
+  /**
+   * Callback method for scheduled subagent status checks.
+   * Called by the Agents SDK scheduler when a check is due.
+   */
+  async checkSubagentStatus(payload: SubagentCheckPayload): Promise<void> {
+    const manager = this.getSubagentManager();
+    const status = await manager.getSubagentStatus(payload.taskId);
+
+    // If status is null, the subagent was already cleaned up
+    if (!status) {
+      console.log(
+        `Subagent ${payload.taskId}: already cleaned up, skipping check`
+      );
+      return;
+    }
+
+    // If complete or failed, update task graph and clean up
+    if (status.status === "complete" || status.status === "failed") {
+      console.log(`Subagent ${payload.taskId}: ${status.status}`);
+      await this.handleSubagentComplete(payload.taskId, status);
+      return;
+    }
+
+    // Still running - check for timeout
+    if (manager.isTimedOut(payload.taskId)) {
+      console.log(`Subagent ${payload.taskId}: timed out`);
+      await this.handleSubagentTimeout(payload.taskId);
+      return;
+    }
+
+    // Still running, schedule another check if we haven't hit max attempts
+    if (payload.attempt < payload.maxAttempts) {
+      const nextPayload: SubagentCheckPayload = {
+        taskId: payload.taskId,
+        attempt: payload.attempt + 1,
+        maxAttempts: payload.maxAttempts
+      };
+      await this.schedule(
+        SUBAGENT_CONFIG.checkInterval,
+        "checkSubagentStatus",
+        nextPayload
+      );
+    } else {
+      // Max attempts reached without completion - mark as timed out
+      console.log(
+        `Subagent ${payload.taskId}: max check attempts reached, marking as timed out`
+      );
+      await this.handleSubagentTimeout(payload.taskId);
+    }
+  }
+
+  /**
+   * Handle successful or failed subagent completion
+   */
+  private async handleSubagentComplete(
+    taskId: string,
+    status: { status: string; result?: string; error?: string }
+  ): Promise<void> {
+    const manager = this.getSubagentManager();
+
+    // Update task graph if available
+    this.loadTaskGraph();
+    const task = this.taskGraph.tasks.get(taskId);
+    if (task) {
+      if (status.status === "complete") {
+        const updated = completeTask(
+          this.taskGraph,
+          taskId,
+          status.result || "Completed by subagent"
+        );
+        if (updated) {
+          this.taskGraph = updated;
+          this.saveTask(task);
+        }
+      } else if (status.status === "failed") {
+        // Task failed - mark in graph
+        const failedTask = {
+          ...task,
+          status: "failed" as const,
+          error: status.error
+        };
+        this.taskGraph.tasks.set(taskId, failedTask);
+        this.saveTask(failedTask);
+      }
+    }
+
+    // Clean up the subagent tracking
+    manager.deleteSubagent(taskId);
+  }
+
+  /**
+   * Handle subagent timeout
+   */
+  private async handleSubagentTimeout(taskId: string): Promise<void> {
+    const manager = this.getSubagentManager();
+
+    // Update task graph if available
+    this.loadTaskGraph();
+    const task = this.taskGraph.tasks.get(taskId);
+    if (task) {
+      const failedTask = {
+        ...task,
+        status: "failed" as const,
+        error: "Subagent execution timed out"
+      };
+      this.taskGraph.tasks.set(taskId, failedTask);
+      this.saveTask(failedTask);
+    }
+
+    // Clean up
+    manager.markTimedOut(taskId);
+  }
+
+  /**
+   * Recover orphaned subagents on startup.
+   * Called from onStart() to detect and handle subagents that were
+   * interrupted by a server restart.
+   */
+  private async recoverOrphanedSubagents(): Promise<void> {
+    const manager = this.getSubagentManager();
+    const running = manager.getRunningSubagents();
+
+    if (running.length === 0) return;
+
+    console.log(`Recovering ${running.length} orphaned subagent(s)...`);
+
+    for (const subagent of running) {
+      // Mark as interrupted in tracking
+      manager.markInterrupted(subagent.taskId);
+
+      // Update task graph
+      this.loadTaskGraph();
+      const task = this.taskGraph.tasks.get(subagent.taskId);
+      if (task) {
+        const failedTask = {
+          ...task,
+          status: "failed" as const,
+          error: "Interrupted by server restart"
+        };
+        this.taskGraph.tasks.set(subagent.taskId, failedTask);
+        this.saveTask(failedTask);
+      }
+
+      // Clean up
+      manager.deleteSubagent(subagent.taskId);
+    }
   }
 
   /**
@@ -518,6 +708,10 @@ export class Coder extends Agent<Env, CoderState> {
             },
             input.context
           );
+
+          // Schedule a status check to monitor the subagent
+          await self.scheduleSubagentCheck(input.taskId);
+
           return { facetName };
         } catch (error) {
           return {
@@ -698,7 +892,7 @@ export class Coder extends Agent<Env, CoderState> {
       };
       if (result.success) {
         const out = result.output || "";
-        return `success: ${out.length > 100 ? out.slice(0, 100) + "..." : out}`;
+        return `success: ${out.length > 100 ? `${out.slice(0, 100)}...` : out}`;
       }
       return `error: ${result.error?.slice(0, 200) ?? "unknown"}`;
     }
@@ -1426,14 +1620,14 @@ export default class extends WorkerEntrypoint {
 
   /**
    * Handle HTTP requests to the Agent
-   * The pathname is the full path, e.g., /agents/coder/room/state
+   * The pathname is the full path, e.g., /agents/think/room/state
    * We extract the sub-path after the room identifier
    */
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
     // Extract the sub-path after /agents/{agent}/{room}
-    // pathname: /agents/coder/test/state → subPath: /state
+    // pathname: /agents/think/test/state → subPath: /state
     const pathParts = url.pathname.split("/");
     const subPath = `/${pathParts.slice(4).join("/")}`;
 
@@ -1456,6 +1650,401 @@ export default class extends WorkerEntrypoint {
       });
     }
 
+    // ==========================================================================
+    // Debug: Test facet storage sharing
+    // This endpoint tests whether facets share SQLite storage with the parent
+    // ==========================================================================
+    if (subPath === "/debug/storage-test" && request.method === "POST") {
+      const testId = `storage-test-${Date.now()}`;
+      const testKey = `test_key_${testId}`;
+      const testValue = `parent_wrote_${testId}`;
+
+      // Step 1: Create the test table and write a value from the parent
+      try {
+        this.ctx.storage.sql.exec(`
+          CREATE TABLE IF NOT EXISTS storage_test (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          )
+        `);
+        this.ctx.storage.sql.exec(
+          "INSERT OR REPLACE INTO storage_test (key, value) VALUES (?, ?)",
+          testKey,
+          testValue
+        );
+      } catch (error) {
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: "Failed to write from parent",
+            details: error instanceof Error ? error.message : String(error)
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // Step 2: Create a StorageTestFacet and have it read the value
+      let facetReadResult: {
+        found: boolean;
+        value: string | null;
+        error?: string;
+      };
+      let facetWriteResult: { success: boolean; error?: string };
+      let facetTables: { tables: string[]; error?: string };
+      let facetError: string | null = null;
+
+      try {
+        type ExportsWithStorageTest = typeof this.ctx.exports & {
+          StorageTestFacet: (opts: { props: { testId: string } }) => {
+            readTestValue: (key: string) => {
+              found: boolean;
+              value: string | null;
+              error?: string;
+            };
+            writeTestValue: (
+              key: string,
+              value: string
+            ) => { success: boolean; error?: string };
+            listTables: () => { tables: string[]; error?: string };
+          };
+        };
+        const exports = this.ctx.exports as ExportsWithStorageTest;
+
+        const facet = this.ctx.facets.get(`storage-test-${testId}`, () => ({
+          class: exports.StorageTestFacet({ props: { testId } })
+        }));
+
+        // Have the facet list tables it can see
+        facetTables = facet.listTables();
+
+        // Have the facet try to read the value the parent wrote
+        facetReadResult = facet.readTestValue(testKey);
+
+        // Have the facet write a value
+        const facetWriteKey = `facet_key_${testId}`;
+        const facetWriteValue = `facet_wrote_${testId}`;
+        facetWriteResult = facet.writeTestValue(facetWriteKey, facetWriteValue);
+
+        // Clean up the facet
+        this.ctx.facets.delete(`storage-test-${testId}`);
+
+        // Step 3: Try to read the facet's written value from parent
+        let parentReadFacetValue: string | null = null;
+        try {
+          const rows = this.ctx.storage.sql
+            .exec("SELECT value FROM storage_test WHERE key = ?", facetWriteKey)
+            .toArray();
+          if (rows.length > 0) {
+            parentReadFacetValue = (rows[0] as { value: string }).value;
+          }
+        } catch {
+          // Ignore - just for additional verification
+        }
+
+        // Determine if storage is shared
+        const storageIsShared =
+          facetReadResult.found &&
+          facetReadResult.value === testValue &&
+          facetWriteResult.success &&
+          parentReadFacetValue === facetWriteValue;
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            storageIsShared,
+            testId,
+            parentWrite: { key: testKey, value: testValue },
+            facetRead: facetReadResult,
+            facetWrite: facetWriteResult,
+            parentReadFacetValue,
+            facetVisibleTables: facetTables.tables,
+            conclusion: storageIsShared
+              ? "CONFIRMED: Facets share SQLite storage with parent"
+              : "ISOLATED: Facets have separate storage from parent"
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      } catch (error) {
+        facetError = error instanceof Error ? error.message : String(error);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: "Facet operation failed",
+            facetError,
+            testId,
+            parentWrite: { key: testKey, value: testValue }
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // ==========================================================================
+    // Debug: Test facet static variable sharing
+    // This endpoint tests whether facets share static variables with the parent
+    // ==========================================================================
+    if (subPath === "/debug/static-test" && request.method === "POST") {
+      const testId = `static-test-${Date.now()}`;
+      const testKey = `parent_key_${testId}`;
+      const testValue = `parent_value_${testId}`;
+
+      // Step 1: Set a value in the static Map from the parent
+      registerStaticTestValue(testKey, testValue);
+
+      // Verify parent can read it back
+      const parentReadBack = getStaticTestValue(testKey);
+
+      // Step 2: Create a StaticTestFacet and have it check the value
+      let facetResult: {
+        keyChecked: string;
+        found: boolean;
+        value: string | null;
+        mapSize: number;
+        allKeys: string[];
+      };
+      let facetError: string | null = null;
+
+      try {
+        type ExportsWithStaticTest = typeof this.ctx.exports & {
+          StaticTestFacet: (opts: {
+            props: { testId: string; keyToCheck: string };
+          }) => {
+            checkStaticValue: () => {
+              keyChecked: string;
+              found: boolean;
+              value: string | null;
+              mapSize: number;
+              allKeys: string[];
+            };
+            setStaticValue: (key: string, value: string) => void;
+          };
+        };
+        const exports = this.ctx.exports as ExportsWithStaticTest;
+
+        const facet = this.ctx.facets.get(`static-test-${testId}`, () => ({
+          class: exports.StaticTestFacet({
+            props: { testId, keyToCheck: testKey }
+          })
+        }));
+
+        // Have the facet check if it can see the parent's static value
+        facetResult = facet.checkStaticValue();
+
+        // Have the facet set a value too
+        const facetSetKey = `facet_key_${testId}`;
+        const facetSetValue = `facet_value_${testId}`;
+        facet.setStaticValue(facetSetKey, facetSetValue);
+
+        // Check if parent can see the facet's value
+        const parentReadFacetValue = getStaticTestValue(facetSetKey);
+
+        // Clean up
+        this.ctx.facets.delete(`static-test-${testId}`);
+        STATIC_TEST_MAP.delete(testKey);
+        STATIC_TEST_MAP.delete(facetSetKey);
+
+        // Determine if static variables are shared
+        const staticIsShared =
+          facetResult.found &&
+          facetResult.value === testValue &&
+          parentReadFacetValue === facetSetValue;
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            staticIsShared,
+            testId,
+            parentWrite: { key: testKey, value: testValue },
+            parentReadBack,
+            facetResult,
+            parentReadFacetValue,
+            conclusion: staticIsShared
+              ? "CONFIRMED: Facets share static variables with parent (same isolate)"
+              : "ISOLATED: Facets have separate static variables (different isolate)"
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      } catch (error) {
+        facetError = error instanceof Error ? error.message : String(error);
+        // Clean up on error
+        STATIC_TEST_MAP.delete(testKey);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: "Facet operation failed",
+            facetError,
+            testId,
+            parentWrite: { key: testKey, value: testValue }
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // ==========================================================================
+    // Debug: Test facet RPC back to parent
+    // This endpoint tests whether facets can make RPC calls back to the parent
+    // ==========================================================================
+    if (subPath === "/debug/rpc-test" && request.method === "POST") {
+      const testId = `rpc-test-${Date.now()}`;
+
+      // The parent's DO ID - facets need this to call back
+      const parentDOId = this.ctx.id.toString();
+
+      let exportsCheck: {
+        hasExports: boolean;
+        exportKeys: string[];
+        hasThink: boolean;
+        error?: string;
+      };
+      let filesCheck: {
+        success: boolean;
+        files?: string[];
+        error?: string;
+      };
+      let rpcCheck: {
+        success: boolean;
+        result?: unknown;
+        error?: string;
+      };
+      let facetError: string | null = null;
+
+      try {
+        type ExportsWithRpcTest = typeof this.ctx.exports & {
+          RpcTestFacet: (opts: {
+            props: { testId: string; parentDOId: string };
+          }) => {
+            checkExportsAvailable: () => {
+              hasExports: boolean;
+              exportKeys: string[];
+              hasThink: boolean;
+              error?: string;
+            };
+            callParentFiles: () => Promise<{
+              success: boolean;
+              files?: string[];
+              error?: string;
+            }>;
+            testDirectRpc: () => Promise<{
+              success: boolean;
+              result?: unknown;
+              error?: string;
+            }>;
+          };
+        };
+        const exports = this.ctx.exports as ExportsWithRpcTest;
+
+        const facet = this.ctx.facets.get(`rpc-test-${testId}`, () => ({
+          class: exports.RpcTestFacet({
+            props: { testId, parentDOId }
+          })
+        }));
+
+        // Check if exports are available in the facet
+        exportsCheck = facet.checkExportsAvailable();
+
+        // Try to call the parent's /files endpoint via RPC
+        filesCheck = await facet.callParentFiles();
+
+        // Try a direct RPC call
+        rpcCheck = await facet.testDirectRpc();
+
+        // Clean up
+        this.ctx.facets.delete(`rpc-test-${testId}`);
+
+        // Determine if RPC works
+        const rpcWorks = filesCheck.success || rpcCheck.success;
+
+        return new Response(
+          JSON.stringify({
+            success: true,
+            rpcWorks,
+            testId,
+            parentDOId,
+            exportsCheck,
+            filesCheck,
+            rpcCheck,
+            conclusion: rpcWorks
+              ? "CONFIRMED: Facets can make RPC calls back to parent"
+              : "FAILED: Facets cannot make RPC calls to parent"
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      } catch (error) {
+        facetError = error instanceof Error ? error.message : String(error);
+        return new Response(
+          JSON.stringify({
+            success: false,
+            error: "Facet operation failed",
+            facetError,
+            testId,
+            parentDOId
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // ==========================================================================
+    // RPC Endpoints for Subagent Access
+    // These endpoints allow subagent facets to call back to the parent for
+    // bash, fetch, and search operations.
+    // ==========================================================================
+
+    if (subPath === "/rpc/bash" && request.method === "POST") {
+      const { command, options } = (await request.json()) as {
+        command: string;
+        options?: { cwd?: string; env?: Record<string, string> };
+      };
+
+      const sessionId = this.state.sessionId;
+      const bashLoopback = this.ctx.exports.BashLoopback({
+        props: { sessionId }
+      }) as { exec: (cmd: string, opts?: unknown) => Promise<unknown> };
+
+      const result = await bashLoopback.exec(command, options);
+      return new Response(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (subPath === "/rpc/fetch" && request.method === "POST") {
+      const { url, method, headers, body } = (await request.json()) as {
+        url: string;
+        method?: string;
+        headers?: Record<string, string>;
+        body?: string;
+      };
+
+      const sessionId = this.state.sessionId;
+      const fetchLoopback = this.ctx.exports.FetchLoopback({
+        props: { sessionId }
+      }) as { request: (url: string, opts?: unknown) => Promise<unknown> };
+
+      const result = await fetchLoopback.request(url, {
+        method,
+        headers,
+        body
+      });
+      return new Response(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    if (subPath === "/rpc/search" && request.method === "POST") {
+      const { query } = (await request.json()) as { query: string };
+
+      const sessionId = this.state.sessionId;
+      const searchLoopback = this.ctx.exports.BraveSearchLoopback({
+        props: { sessionId, apiKey: this.env.BRAVE_API_KEY }
+      }) as { search: (q: string) => Promise<unknown> };
+
+      const result = await searchLoopback.search(query);
+      return new Response(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
     // Chat endpoint for HTTP-based chat (useful for testing)
     if (subPath === "/chat" && request.method === "POST") {
       const { message } = (await request.json()) as { message: string };
@@ -1463,7 +2052,7 @@ export default class extends WorkerEntrypoint {
       // Create a simple response collector
       const responses: unknown[] = [];
       const mockConnection = {
-        id: "http-" + crypto.randomUUID(),
+        id: `http-${crypto.randomUUID()}`,
         send: (data: string) => {
           responses.push(JSON.parse(data));
         }
@@ -1590,9 +2179,10 @@ export default class extends WorkerEntrypoint {
     // ==========================================================================
     // Subagent Test Endpoints (for integration testing)
     // Guarded by ENABLE_SUBAGENT_API flag - experimental feature
+    // Pass --var ENABLE_SUBAGENT_API=true to wrangler dev to enable
     // ==========================================================================
 
-    if (ENABLE_SUBAGENT_API) {
+    if (isSubagentApiEnabled(this.env)) {
       // Get subagent status
       if (subPath === "/subagents" && request.method === "GET") {
         const manager = this.getSubagentManager();
@@ -1634,6 +2224,10 @@ export default class extends WorkerEntrypoint {
         try {
           const manager = this.getSubagentManager();
           const facetName = await manager.spawnSubagent(task, context);
+
+          // Schedule a status check to monitor the subagent
+          await this.scheduleSubagentCheck(task.id);
+
           return new Response(
             JSON.stringify({
               success: true,

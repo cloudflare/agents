@@ -1184,10 +1184,13 @@ export function createDelegateToSubagentTool(ctx: ToolContext) {
 Use this when you have a subtask that can be executed independently:
 - The subagent runs in parallel with your main work
 - It has its own focused LLM context
+- Full tool access: read/write files, bash, fetch, web search (via RPC to parent)
 - Good for: file operations, searches, refactoring, tests
 
-The subagent will update the task status automatically when done.
-You can check on delegated tasks with checkSubagentStatus or wait for all with waitForSubagents.
+Architecture: Subagents run in isolated environments but have full access to parent's tools via RPC. They receive task context via props and return results to the parent.
+
+The parent updates task status when the subagent completes.
+Check progress with checkSubagentStatus or wait for all with waitForSubagents.
 
 IMPORTANT: Only delegate tasks that are truly independent - don't delegate tasks that depend on work you're still doing.`,
     inputSchema: jsonSchema<{
@@ -1433,6 +1436,15 @@ For truly independent subtasks, you can delegate work to subagents that run in p
 - **checkSubagentStatus**: Check if a delegated task is complete
 - **waitForSubagents**: Wait for all delegated work to finish
 
+**Subagent Capabilities:**
+Subagents have full tool access via RPC to the parent:
+- Read/write/delete files in the project (parent's Yjs storage)
+- Execute bash commands
+- Make HTTP requests (fetch)
+- Perform web searches
+
+**Architecture Note:** Subagents run in isolated environments (separate DO facets) but communicate with the parent via RPC. They receive task data via props and return results to the parent, which updates the task graph.
+
 **When to delegate:**
 - Independent file operations (e.g., "update config in file A" while you work on file B)
 - Parallel searches or explorations
@@ -1449,7 +1461,7 @@ For truly independent subtasks, you can delegate work to subagents that run in p
 1. Only delegate after creating a subtask with createSubtask
 2. Be specific in the description - the subagent has limited context
 3. Use checkSubagentStatus or waitForSubagents to get results
-4. Subagents share the file system but have isolated LLM contexts
+4. The parent handles task status updates based on subagent results
 
 ## Code Style
 

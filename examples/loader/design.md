@@ -1,31 +1,34 @@
-# Cloud-Native Coding Agent Runtime
+# Project Think - Cloud-Native Coding Agent Runtime
 
 ## Implementation Status
 
-| Component          | Status      | Notes                                         |
-| ------------------ | ----------- | --------------------------------------------- |
-| Coder Agent (DO)   | ✅ Complete | Full Agent class with state, SQL, WebSocket   |
-| LOADER Execution   | ✅ Complete | Dynamic worker loading with harness           |
-| Loopback Pattern   | ✅ Complete | EchoLoopback, BashLoopback, FSLoopback        |
-| Timeouts & Errors  | ✅ Complete | Configurable timeout, error categorization    |
-| Yjs Storage        | ✅ Complete | SQLite persistence, versioning, snapshots     |
-| File Operations    | ✅ Complete | read/write/edit/delete via Yjs                |
-| just-bash          | ✅ Complete | Shell commands in isolates                    |
-| In-memory FS       | ✅ Complete | Scratch space for temp files                  |
-| WebSocket Sync     | ⚡ Partial  | Binary broadcast, needs full Yjs protocol     |
-| Controlled Fetch   | ✅ Complete | URL/method allowlist, request logging         |
-| Web Search         | ✅ Complete | Brave Search API, web + news search           |
-| Browser Automation | ✅ Complete | Playwright, browse/screenshot/interact/scrape |
-| Code Execution     | ✅ Complete | LOADER-based JS sandbox, module support       |
-| LLM Integration    | ✅ Complete | GPT-5.2, 13 tools, auto tool loop, reasoning  |
-| Action Logging     | ✅ Complete | Audit trail for all tool calls                |
-| Message Storage    | ❌ Planned  | One row per message, R2 for large content     |
-| Streaming Protocol | ❌ Planned  | Fine-grained WebSocket events                 |
-| Background Tasks   | ⚡ Building | schedule() API, recovery logic module         |
-| Task Management    | ✅ Complete | Hierarchical tasks, dependencies, LLM tools   |
-| Subagent Parallel  | ✅ Complete | DO Facets, parallel execution, delegation     |
-| UI                 | ❌ Planned  | Chat, code editor, status                     |
-| Sandbox            | ❌ Planned  | Full VM for heavy workloads                   |
+| Component          | Status      | Notes                                          |
+| ------------------ | ----------- | ---------------------------------------------- |
+| Think Agent (DO)   | ✅ Complete | Full Agent class with state, SQL, WebSocket    |
+| LOADER Execution   | ✅ Complete | Dynamic worker loading with harness            |
+| Loopback Pattern   | ✅ Complete | EchoLoopback, BashLoopback, FSLoopback         |
+| Timeouts & Errors  | ✅ Complete | Configurable timeout, error categorization     |
+| Yjs Storage        | ✅ Complete | SQLite persistence, versioning, snapshots      |
+| File Operations    | ✅ Complete | read/write/edit/delete via Yjs                 |
+| just-bash          | ✅ Complete | Shell commands in isolates                     |
+| In-memory FS       | ✅ Complete | Scratch space for temp files                   |
+| WebSocket Sync     | ⚡ Partial  | Binary broadcast, needs full Yjs protocol      |
+| Controlled Fetch   | ✅ Complete | URL/method allowlist, request logging          |
+| Web Search         | ✅ Complete | Brave Search API, web + news search            |
+| Browser Automation | ✅ Complete | Playwright, browse/screenshot/interact/scrape  |
+| Code Execution     | ✅ Complete | LOADER-based JS sandbox, module support        |
+| LLM Integration    | ✅ Complete | GPT-5.2, 13 tools, auto tool loop, reasoning   |
+| Action Logging     | ✅ Complete | Audit trail for all tool calls                 |
+| Message Storage    | ❌ Planned  | One row per message, R2 for large content      |
+| Streaming Protocol | ✅ Complete | text_delta, tool_call/result, text_done        |
+| Subagent Streaming | ❌ Designed | Optional streaming from facets to parent       |
+| Background Tasks   | ✅ Complete | schedule() API, subagent monitoring & recovery |
+| Task Management    | ✅ Complete | Hierarchical tasks, dependencies, LLM tools    |
+| Subagent Parallel  | ✅ Complete | DO Facets (isolated storage), parallel exec    |
+| Extensibility      | ❌ Planned  | Three-layer customization (core/class/props)   |
+| Multi-Model        | ❌ Planned  | Smart routing: primary/fast/summarizer/vision  |
+| UI                 | ❌ Planned  | Chat, code editor, status                      |
+| Sandbox            | ❌ Planned  | Full VM for heavy workloads                    |
 
 ---
 
@@ -63,8 +66,8 @@ The core insight: **coding agents are replacing agent frameworks**. Instead of o
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                     Coder Agent (Durable Object)                        │
-│                     extends Agent<Env, CoderState>                      │
+│                     Think Agent (Durable Object)                        │
+│                     extends Agent<Env, ThinkState>                      │
 │                                                                         │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────────┐  │
 │  │   State     │  │   SQLite    │  │  Scheduler  │  │   WebSocket   │  │
@@ -134,7 +137,7 @@ The core insight: **coding agents are replacing agent frameworks**. Instead of o
 Dynamic workers loaded via LOADER can't receive RpcStubs directly. Instead, we pass ServiceStubs that "loop back" through ctx.exports:
 
 ```typescript
-// In the Coder Agent
+// In the Think Agent
 getEnvForLoader(): Record<string, Fetcher> {
   return {
     BASH: this.ctx.exports.BashLoopback({ props: { sessionId: this.sessionId } }),
@@ -251,6 +254,195 @@ When the event arrives, the Agent:
 - Parent Agent's storage
 - Other Durable Objects
 - Secrets/environment variables (unless passed)
+
+---
+
+## Extensibility Architecture
+
+Think is designed as an **opinionated but customizable** thinking machine. The core capabilities are fixed, but users can augment behavior through two mechanisms:
+
+### Three-Layer Customization Model
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 3: Props (Dynamic/Runtime)                       │
+│  - Per-request additional instructions                  │
+│  - Per-tenant model preferences                         │
+│  - (Future) Per-request custom tools                    │
+├─────────────────────────────────────────────────────────┤
+│  Layer 2: Class Extension (Static/Build-time)           │
+│  - Product-specific instructions                        │
+│  - Domain-specific tools                                │
+│  - Company-wide model config                            │
+├─────────────────────────────────────────────────────────┤
+│  Layer 1: Core (Immutable)                              │
+│  - CORE_SYSTEM_PROMPT                                   │
+│  - Core tools (bash, files, fetch, browse, etc.)        │
+│  - Smart model routing logic                            │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Layer 1: Core (Immutable)
+
+The fundamental identity of Think. Cannot be removed or replaced:
+
+- **Core System Prompt**: Defines Think as a coding assistant with specific capabilities
+- **Core Tools**: bash, readFile, writeFile, editFile, listFiles, fetch, webSearch, newsSearch, browseUrl, screenshot, interactWithPage, scrapeElements, executeCode, task management tools
+- **Smart Model Routing**: Think decides when to use fast vs primary models
+
+### Layer 2: Class Extension
+
+For building products on Think. Extend the class and override protected methods:
+
+```typescript
+class CustomerServiceThink extends Think {
+  // Add domain-specific instructions (merged with core)
+  protected getAdditionalInstructions(): string {
+    return `You are helping Acme Corp customers. Be friendly and helpful.
+Always check order status before discussing refunds.`;
+  }
+
+  // Add domain-specific tools (merged with core)
+  protected getCustomTools(): Record<string, Tool> {
+    return {
+      lookupOrder: this.orderLookupTool(),
+      refundOrder: this.refundTool(),
+      checkInventory: this.inventoryTool()
+    };
+  }
+
+  // Override model configuration
+  protected getModelConfig(): Partial<ModelRoles> {
+    return {
+      primary: "claude-3-opus",
+      fast: "claude-haiku"
+    };
+  }
+}
+```
+
+### Layer 3: Props (Dynamic Runtime)
+
+For per-request customization. Passed via `getAgentByName()` or `routeAgentRequest()`:
+
+```typescript
+// In your Worker fetch handler
+const agent = await getAgentByName(env.Think, `user-${userId}`, {
+  props: {
+    additionalInstructions: "This user prefers concise answers.",
+    models: {
+      primary: "gpt-5.2",
+      fast: "gpt-4o-mini"
+    }
+  }
+});
+
+// Or via routeAgentRequest for all agents
+return routeAgentRequest(request, env, {
+  props: {
+    additionalInstructions: tenant.systemPrompt,
+    models: tenant.modelConfig
+  }
+});
+```
+
+### ThinkProps Interface
+
+```typescript
+interface ThinkProps {
+  // Augment the system prompt (added after core + class-level)
+  additionalInstructions?: string;
+
+  // Override model roles (must be serializable identifiers)
+  models?: Partial<{
+    primary: string; // e.g., "gpt-5.2", "claude-3-opus"
+    fast: string; // e.g., "gpt-4o-mini", "claude-haiku"
+    summarizer: string; // For context compaction
+    vision: string; // For screenshot analysis
+  }>;
+
+  // TODO: Custom tools via props
+  // Challenge: Tools have executable functions, props must be serializable
+  // Potential solutions:
+  // - Tool definitions that reference registered tools by name
+  // - Tool schemas that Think instantiates internally
+  // - Code strings that Think evaluates (security implications)
+}
+```
+
+### Multi-Model Architecture
+
+Think uses different models for different purposes, even within a single run:
+
+| Model Role   | When Used                                | Default                 |
+| ------------ | ---------------------------------------- | ----------------------- |
+| `primary`    | Main reasoning loop, complex planning    | gpt-5.2 with reasoning  |
+| `fast`       | Subagent tasks, quick checks             | gpt-4o-mini             |
+| `summarizer` | Context compaction when history grows    | Same as fast            |
+| `vision`     | Screenshot analysis, image understanding | gpt-4o (vision-capable) |
+
+**Within a Single Run Example:**
+
+1. User asks: "Build me a landing page"
+2. `primary` analyzes request, creates task plan
+3. `fast` handles subagents for parallel research (docs, inspiration)
+4. `primary` synthesizes research, writes components
+5. `vision` takes screenshot, evaluates visual result
+6. `primary` iterates based on visual feedback
+7. `summarizer` compresses conversation when approaching context limit
+
+This routing is **opinionated** - Think decides when to use each model. Users configure **which** models fill each role, not **when** they're used.
+
+### How Layers Merge
+
+```typescript
+// System prompt: Core + Class + Props
+private buildSystemPrompt(): string {
+  let prompt = CORE_SYSTEM_PROMPT;  // Layer 1: immutable
+
+  const classAdditions = this.getAdditionalInstructions();
+  if (classAdditions) {
+    prompt += `\n\n## Additional Context\n${classAdditions}`;  // Layer 2
+  }
+
+  if (this.props?.additionalInstructions) {
+    prompt += `\n\n## Session Context\n${this.props.additionalInstructions}`;  // Layer 3
+  }
+
+  return prompt;
+}
+
+// Tools: Core + Class + (Future: Props)
+private buildTools(): Record<string, Tool> {
+  return {
+    ...createCoreTools(this.toolContext),      // Layer 1: immutable
+    ...this.getCustomTools(),                   // Layer 2: class extension
+    // ...(this.props?.customTools ?? {}),      // Layer 3: future
+  };
+}
+
+// Model selection: Props > Class > Default
+private resolveModel(role: keyof ModelRoles): LanguageModel {
+  const modelId =
+    this.props?.models?.[role] ??              // Layer 3: props
+    this.getModelConfig()[role] ??             // Layer 2: class
+    DEFAULT_MODELS[role];                       // Layer 1: default
+
+  return this.createModel(modelId);
+}
+```
+
+### Design Philosophy
+
+| What Users CAN Do               | What Users CANNOT Do        |
+| ------------------------------- | --------------------------- |
+| Add domain instructions         | Remove core prompt          |
+| Add custom tools                | Remove core tools           |
+| Configure which models to use   | Change when models are used |
+| Customize per-request via props | Pass non-serializable props |
+| Extend via subclass             | Break fundamental behavior  |
+
+Think is a **thinking machine** - users can give it domain knowledge and specialized tools, but they can't change what it fundamentally is.
 
 ---
 
@@ -535,6 +727,18 @@ createSubtask({ type: "code", title: "Implement backend", dependencies: [...] })
 
 For truly independent subtasks, work can be delegated to subagents that run in parallel using Durable Object Facets.
 
+> **IMPORTANT: Facet Isolation (Verified via E2E Tests)**
+>
+> Facets run in **separate isolates** from their parent. This means:
+>
+> - **Isolated SQLite storage** - facets cannot read the parent's tables
+> - **Isolated static variables** - no shared in-memory state
+> - **RPC via stub.fetch()** - facets CAN call back to parent via `ctx.exports.Think`
+>
+> Subagents access parent's tools (files, bash, fetch) via the `ParentRPC` class,
+> which uses the DO stub's `fetch()` method to make HTTP requests to parent endpoints.
+> This was verified by E2E testing in `e2e/facets.test.ts`.
+
 ### Module: `src/subagent.ts`
 
 Implements parallel task execution:
@@ -561,15 +765,35 @@ export class SubagentManager {
   abortSubagent(taskId: string): void;
   deleteSubagent(taskId: string): void;
   get activeCount(): number;
+
+  // Recovery methods (for hibernation handling)
+  getRunningSubagents(): Array<{
+    taskId: string;
+    facetName: string;
+    startedAt: number;
+  }>;
+  markInterrupted(taskId: string): void;
+  isTimedOut(taskId: string): boolean;
+  markTimedOut(taskId: string): void;
 }
+
+// Configuration for subagent monitoring
+export const SUBAGENT_CONFIG = {
+  initialCheckDelay: 30, // seconds before first status check
+  checkInterval: 60, // seconds between subsequent checks
+  maxCheckAttempts: 10, // max checks before marking as timed out
+  maxExecutionTime: 600 // max execution time (10 minutes)
+};
 ```
 
 ### How It Works
 
-1. **Facet Architecture**: Each subagent runs as a facet of the parent Coder DO
-   - Shares SQLite storage (task graph, file system)
+1. **Facet Architecture**: Each subagent runs as a facet of the parent Think DO
+   - **ISOLATED storage** (facets do NOT share SQLite with parent)
+   - Task data passed via props when facet is created
    - Has isolated LLM context (focused system prompt)
    - Runs truly in parallel with parent and other facets
+   - Returns results to parent, which updates task graph
 
 2. **Task Delegation Flow**:
 
@@ -577,7 +801,7 @@ export class SubagentManager {
    // Parent creates subtask
    const task = createSubtask({ type: "explore", title: "Research options" });
 
-   // Parent delegates to subagent
+   // Parent delegates to subagent (passes all data via props)
    await delegateToSubagent({
      taskId: task.id,
      title: "Research options",
@@ -595,8 +819,45 @@ export class SubagentManager {
 3. **Subagent Execution**:
    - Gets focused system prompt (just the task description)
    - Runs limited agent loop (max 15 steps)
-   - Updates shared task graph on completion/failure
-   - Reports result back to parent
+   - **Full tool access via ParentRPC** (bash, fetch, file read/write)
+   - Uses `ctx.exports.Think` to get stub and call parent's HTTP endpoints
+   - Returns result to parent via SubagentResult
+   - **Parent updates task graph** based on returned result
+
+4. **Hibernation & Recovery Handling**:
+   The parent DO may hibernate while subagents are running. We handle this with:
+   - **Scheduled status checks**: When a subagent is spawned, the parent schedules
+     a status check using `this.schedule()` (Agents SDK). Checks run every 60s.
+   - **Timeout detection**: If a subagent exceeds `maxExecutionTime` (10 min),
+     it's marked as timed out and cleaned up.
+   - **Startup recovery**: On `onStart()`, the Think class detects orphaned subagents
+     (still marked "running" in SQLite) and marks them as "interrupted".
+
+   ```typescript
+   // Parent schedules monitoring when spawning
+   async spawnSubagent(task) {
+     const facetName = await manager.spawnSubagent(task);
+     await this.schedule(30, "checkSubagentStatus", { taskId: task.id, attempt: 1 });
+     return facetName;
+   }
+
+   // Callback handles status polling and rescheduling
+   async checkSubagentStatus(payload: SubagentCheckPayload) {
+     const status = await manager.getSubagentStatus(payload.taskId);
+     if (status?.status === "complete" || status?.status === "failed") {
+       await this.handleSubagentComplete(payload.taskId, status);
+     } else if (manager.isTimedOut(payload.taskId)) {
+       await this.handleSubagentTimeout(payload.taskId);
+     } else if (payload.attempt < payload.maxAttempts) {
+       await this.schedule(60, "checkSubagentStatus", { ...payload, attempt: payload.attempt + 1 });
+     }
+   }
+
+   // Startup recovery for orphaned subagents
+   async onStart() {
+     await this.recoverOrphanedSubagents(); // Marks "running" as "interrupted"
+   }
+   ```
 
 ### LLM Tools for Delegation
 
@@ -632,16 +893,17 @@ waitForSubagents();
 - Sequential work where order matters
 - Very simple tasks (overhead not worth it)
 
-### Shared vs Isolated
+### Parent vs Subagent Resources
 
-| Resource      | Shared    | Isolated         |
-| ------------- | --------- | ---------------- |
-| SQLite        | ✅ Yes    |                  |
-| Task Graph    | ✅ Yes    |                  |
-| Yjs Storage   | ✅ Yes    |                  |
-| LLM Context   |           | ✅ Yes           |
-| System Prompt |           | ✅ Yes (focused) |
-| Tool Calls    | ✅ Logged |                  |
+| Resource      | Parent Owns | Subagent Access                  |
+| ------------- | ----------- | -------------------------------- |
+| SQLite        | ✅ Yes      | ❌ Isolated (separate storage)   |
+| Task Graph    | ✅ Yes      | Via result return to parent      |
+| Yjs Storage   | ✅ Yes      | Via ParentRPC (read/write files) |
+| Bash/Fetch    | ✅ Yes      | Via ParentRPC                    |
+| LLM Context   |             | ✅ Own isolated context          |
+| System Prompt |             | ✅ Focused prompt for task       |
+| Tool Calls    | ✅ Logged   | Logged on parent via RPC         |
 
 ---
 
@@ -750,6 +1012,7 @@ async onConnect(connection: Connection, ctx: ConnectionContext) {
 ```sql
 CREATE TABLE messages (
   id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,            -- Links to session
   role TEXT NOT NULL,                  -- 'user' | 'assistant'
 
   -- Content (inline if small, R2 if large)
@@ -775,6 +1038,11 @@ CREATE TABLE messages (
   checkpoint TEXT,                     -- For resuming interrupted work
   heartbeat_at INTEGER,                -- Last heartbeat timestamp
 
+  -- Subagent/Facet tracking
+  facet_name TEXT,                     -- NULL for parent agent, 'subagent-{taskId}' for subagents
+  parent_message_id TEXT,              -- Links subagent messages to delegating parent message
+  delegated_task_ids JSON,             -- Array of task IDs spawned from this message
+
   -- Metadata
   timestamp INTEGER NOT NULL,
   tokens_input INTEGER,
@@ -783,11 +1051,13 @@ CREATE TABLE messages (
 
   -- For retry chains
   attempt INTEGER DEFAULT 1,
-  parent_id TEXT
+  retry_parent_id TEXT                 -- Links to original message when retrying
 );
 
+CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX idx_messages_status ON messages(status);
-CREATE INDEX idx_messages_timestamp ON messages(timestamp);
+CREATE INDEX idx_messages_facet ON messages(facet_name);
+CREATE INDEX idx_messages_parent ON messages(parent_message_id);
 ```
 
 ### Tool Results Strategy
@@ -928,6 +1198,112 @@ async onConnect(connection: Connection) {
 }
 ```
 
+## Subagent Streaming (Optional)
+
+Subagents run as Durable Object Facets, executing focused LLM loops in parallel. By default,
+subagents complete silently and report results through the task graph. Optional streaming
+allows the parent to relay subagent progress to connected clients.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Parent Agent (Think DO)                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  WebSocket Connections                                    │   │
+│  │  ├── Tab 1 (receives all events)                         │   │
+│  │  └── Tab 2 (receives all events)                         │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                              ▲                                  │
+│                              │ relay events                     │
+│  ┌───────────────────────────┴──────────────────────────────┐   │
+│  │              SubagentStreamRelay                          │   │
+│  │  - Receives events from subagent facets                   │   │
+│  │  - Prefixes with subagent taskId                          │   │
+│  │  - Broadcasts to parent's WebSocket connections           │   │
+│  └───────────────────────────────────────────────────────────┘   │
+│                              ▲                                  │
+│         ┌────────────────────┼────────────────────┐             │
+│         │                    │                    │             │
+│  ┌──────┴──────┐      ┌──────┴──────┐      ┌──────┴──────┐      │
+│  │ Subagent A  │      │ Subagent B  │      │ Subagent C  │      │
+│  │ (Facet)     │      │ (Facet)     │      │ (Facet)     │      │
+│  │ streamText()│      │ streamText()│      │ streamText()│      │
+│  └─────────────┘      └─────────────┘      └─────────────┘      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Subagent Stream Events
+
+When streaming is enabled, subagents emit events through a callback:
+
+```typescript
+interface SubagentStreamEvent {
+  taskId: string; // Which subagent this came from
+  type:
+    | "subagent_text_delta" // Text streaming from subagent
+    | "subagent_tool_call" // Subagent calling a tool
+    | "subagent_tool_result" // Tool completed
+    | "subagent_complete" // Subagent finished
+    | "subagent_error"; // Subagent failed
+  delta?: string; // For text_delta
+  toolName?: string; // For tool events
+  input?: unknown; // For tool_call
+  output?: unknown; // For tool_result
+  result?: string; // For complete
+  error?: string; // For error
+}
+```
+
+### Implementation Plan
+
+**Phase 1: Subagent streaming infrastructure**
+
+- [ ] Add `streamToParent` callback option to `SubagentManager.spawnSubagent()`
+- [ ] Update `Subagent.execute()` to optionally use `streamText()` instead of `generateText()`
+- [ ] Create `SubagentStreamRelay` class in parent to collect and broadcast events
+
+**Phase 2: Event relay to WebSocket clients**
+
+- [ ] Add WebSocket message types for subagent events
+- [ ] Prefix all subagent events with `taskId` for client disambiguation
+- [ ] Handle concurrent subagent streams (multiple facets streaming simultaneously)
+
+**Phase 3: UI integration (future)**
+
+- [ ] Collapsible subagent panels in chat UI
+- [ ] Real-time progress for each delegated task
+- [ ] Aggregate view: "3 subagents working... [Expand]"
+
+### Configuration
+
+```typescript
+interface SubagentOptions {
+  streaming?: boolean; // Enable streaming (default: false)
+  streamingThrottle?: number; // Debounce ms for text deltas (default: 50)
+  broadcastToolCalls?: boolean; // Include tool events (default: true)
+}
+
+// Usage
+await ctx.subagents.delegateTask({
+  taskId: "task-123",
+  title: "Implement feature X",
+  description: "...",
+  streaming: true // Opt-in to streaming
+});
+```
+
+### Trade-offs
+
+| Approach               | Pros                      | Cons                           |
+| ---------------------- | ------------------------- | ------------------------------ |
+| No streaming (current) | Simple, less overhead     | No real-time visibility        |
+| Polling status         | Works with generateText() | Latency, extra requests        |
+| Full streaming         | Real-time UX              | More complex, higher bandwidth |
+
+**Recommendation**: Keep non-streaming as default for simplicity. Enable streaming for
+user-facing subagent work where progress visibility matters.
+
 ## Background Task Resilience
 
 ### Using schedule() API
@@ -1019,7 +1395,7 @@ async recoverOrphanedTasks() {
 Synced to connected clients via WebSocket:
 
 ```typescript
-interface CoderState {
+interface ThinkState {
   // Current session
   sessionId: string;
 
@@ -1049,7 +1425,7 @@ interface CoderState {
 ```tsx
 import { useAgent } from "agents/react";
 
-function CoderInterface() {
+function ThinkInterface() {
   const [messages, setMessages] = useState([]);
 
   const agent = useAgent({
@@ -1166,8 +1542,186 @@ OPENAI_API_KEY=sk-xxx BRAVE_API_KEY=xxx npm test
 ### Known Limitations
 
 - **Browser tests**: `@cloudflare/playwright` cannot run in `vitest-pool-workers` due to Node.js dependencies
+- **Facet tests**: Durable Object Facets don't work in `vitest-pool-workers` test environment
 - **Live API tests**: Require actual API keys and make real network calls
 - **Cost awareness**: LLM tests consume API tokens; use sparingly in CI
+
+### E2E Testing Harness
+
+To test features that don't work in `vitest-pool-workers` (facets, browser automation), we use a
+separate E2E test suite that runs against a real `wrangler dev` server.
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    vitest.e2e.config.ts                         │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  globalSetup: e2e/setup.ts                                │   │
+│  │  - Spawns `wrangler dev --port 8799`                      │   │
+│  │  - Waits for server ready                                 │   │
+│  │  - Exports BASE_URL to tests                              │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  E2E Tests (e2e/*.test.ts)                                │   │
+│  │  - HTTP requests to BASE_URL                              │   │
+│  │  - WebSocket connections                                  │   │
+│  │  - Real facet spawning                                    │   │
+│  │  - Full chat flow                                         │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  globalTeardown: e2e/teardown.ts                          │   │
+│  │  - Kills wrangler dev process                             │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### File Structure
+
+```
+e2e/
+├── setup.ts              # globalSetup - starts wrangler dev
+├── teardown.ts           # globalTeardown - stops wrangler dev
+├── helpers.ts            # Shared test utilities
+├── chat.test.ts          # Chat flow tests
+├── facets.test.ts        # Subagent/facet tests
+├── streaming.test.ts     # WebSocket streaming tests
+└── tasks.test.ts         # Task management with subagents
+vitest.e2e.config.ts      # Separate config for E2E
+```
+
+#### Setup Implementation
+
+```typescript
+// e2e/setup.ts
+import { spawn, ChildProcess } from "child_process";
+import { setTimeout } from "timers/promises";
+
+let wranglerProcess: ChildProcess;
+
+export async function setup() {
+  const PORT = process.env.E2E_PORT || "8799";
+
+  // Skip spawning if external URL provided
+  if (process.env.E2E_URL) {
+    process.env.BASE_URL = process.env.E2E_URL;
+    return;
+  }
+
+  console.log("Starting wrangler dev...");
+
+  wranglerProcess = spawn("npx", ["wrangler", "dev", "--port", PORT], {
+    cwd: process.cwd(),
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env }
+  });
+
+  // Wait for server ready
+  await waitForReady(`http://localhost:${PORT}`, 30000);
+
+  process.env.BASE_URL = `http://localhost:${PORT}`;
+  console.log(`E2E server ready at ${process.env.BASE_URL}`);
+}
+
+async function waitForReady(url: string, timeout: number) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    try {
+      const res = await fetch(`${url}/health`);
+      if (res.ok) return;
+    } catch {
+      // Server not ready yet
+    }
+    await setTimeout(500);
+  }
+  throw new Error(`Server failed to start within ${timeout}ms`);
+}
+
+export async function teardown() {
+  if (wranglerProcess) {
+    console.log("Stopping wrangler dev...");
+    wranglerProcess.kill("SIGTERM");
+  }
+}
+```
+
+#### E2E Test Example
+
+```typescript
+// e2e/facets.test.ts
+import { describe, it, expect, beforeAll } from "vitest";
+
+const BASE_URL = process.env.BASE_URL!;
+
+describe("Subagent Facets (E2E)", () => {
+  it("should spawn a subagent and complete task", async () => {
+    const agentId = `e2e-facet-${Date.now()}`;
+
+    // Create a task
+    const taskRes = await fetch(`${BASE_URL}/agents/${agentId}/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: "Test task",
+        description: "A simple test"
+      })
+    });
+    const { taskId } = await taskRes.json();
+
+    // Spawn subagent for the task
+    const spawnRes = await fetch(
+      `${BASE_URL}/agents/${agentId}/subagents/spawn`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ taskId })
+      }
+    );
+    expect(spawnRes.status).toBe(200);
+    const { facetName } = await spawnRes.json();
+
+    // Poll for completion
+    let status = "running";
+    while (status === "running") {
+      await new Promise((r) => setTimeout(r, 1000));
+      const statusRes = await fetch(
+        `${BASE_URL}/agents/${agentId}/subagents/${taskId}`
+      );
+      const data = await statusRes.json();
+      status = data.status;
+    }
+
+    expect(status).toBe("complete");
+  });
+});
+```
+
+#### Running E2E Tests
+
+```bash
+# Run E2E tests (auto-starts wrangler dev)
+npm run test:e2e
+
+# Run against external URL (CI with preview deploy)
+E2E_URL=https://loader-preview.workers.dev npm run test:e2e
+
+# Run specific test file
+npm run test:e2e -- e2e/facets.test.ts
+```
+
+#### Test Coverage (E2E)
+
+| Category            | Tests | What it validates                     |
+| ------------------- | ----- | ------------------------------------- |
+| Chat Flow           | TBD   | Send → stream → persist → history     |
+| Subagent Delegation | TBD   | delegateToSubagent → facet → result   |
+| WebSocket Streaming | TBD   | Connect → text_delta → tool events    |
+| Task + Subagent     | TBD   | Create subtasks → delegate → complete |
+| Message Storage     | TBD   | Persist → reconnect → load history    |
+| Error Recovery      | TBD   | Network drop → reconnect → resume     |
 
 ## References
 

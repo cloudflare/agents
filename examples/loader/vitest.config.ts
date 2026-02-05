@@ -14,6 +14,8 @@ export default defineWorkersConfig({
     sequence: {
       concurrent: false
     },
+    // Exclude e2e tests - they run separately with vitest.e2e.config.ts
+    exclude: ["e2e/**", "**/node_modules/**"],
     poolOptions: {
       workers: {
         // Use test-specific wrangler config that uses server.ts (no BrowserLoopback)

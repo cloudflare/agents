@@ -133,7 +133,7 @@ export function calculateBackoff(
   const max = config.maxBackoffSeconds ?? SCHEDULING_CONFIG.maxBackoffSeconds;
 
   // 2^attempt * base, capped at max
-  const delay = Math.pow(2, attempt) * (base / 2);
+  const delay = 2 ** attempt * (base / 2);
   return Math.min(delay, max);
 }
 

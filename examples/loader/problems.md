@@ -134,7 +134,7 @@ export default defineWorkersConfig({
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
           durableObjects: {
-            Coder: "Coder"
+            Think: "Think"
           },
           compatibilityFlags: ["nodejs_compat", "experimental"]
         }
@@ -149,7 +149,7 @@ And proper test environment declaration:
 ```typescript
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {
-    Coder: DurableObjectNamespace;
+    Think: DurableObjectNamespace;
   }
 }
 ```
@@ -309,72 +309,83 @@ of type 'DurableObjectClass or LoopbackDurableObjectNamespace or LoopbackColoLoc
 
 **Root Cause**:
 
-- Facets require the class to be recognized as a `DurableObjectClass`
-- In the vitest-pool-workers environment, the class is just a regular ES class
-- The runtime expects a namespace binding or internal DO class representation
-- The `experimental` compatibility flag is set, but facets have additional runtime requirements
+- Facets require a proper DO class binding, not a raw ES6 class
+- The `ctx.facets.get()` expects one of:
+  1. `DurableObjectClass` - a bound DO from wrangler.toml
+  2. `LoopbackDurableObjectNamespace` - from `ctx.exports.ClassName({ props })`
+  3. `LoopbackColoLocalActorNamespace` - another loopback type
+- Simply exporting a class doesn't make it a valid facet class
 
-**Attempts**:
+**Solution**: Use the **Props Pattern** for facets:
 
-1. Pass raw class to `facets.get()` - Failed with type error
-2. Export class from main module - Same error
-3. Add class to wrangler DO bindings - Would create separate DO, not facet
-
-**Solution**: Design for graceful degradation and test in production:
+1. **Extend DurableObject with props type parameter**:
 
 ```typescript
-// Make SubagentManager handle missing facets gracefully
-async spawnSubagent(task: Task, context?: string): Promise<string> {
-  const facetName = `subagent-${task.id}`;
-
-  // This may throw if facets aren't supported
-  const facet = this.ctx.facets.get<Subagent>(facetName, () => ({
-    class: Subagent
-  }));
-
-  // Catch errors from async execution to prevent unhandled rejections
-  facet.execute({...}).catch((error: Error) => {
-    console.error(`Subagent ${facetName} execution failed:`, error.message);
-    this.activeSubagents.delete(task.id);
-  });
-
-  return facetName;
+// Define props interface
+interface SubagentProps {
+  taskId: string;
+  title: string;
+  description: string;
+  context?: string;
+  parentSessionId: string;
 }
 
-// Return sensible defaults when facets aren't available
-async getSubagentStatus(taskId: string): Promise<SubagentStatus | null> {
-  if (!this.activeSubagents.has(taskId)) return null;
-
-  try {
-    const facet = this.ctx.facets.get<Subagent>(...);
-    return facet.getStatus();
-  } catch {
-    // Facets not available - return tracking info
-    const tracking = this.activeSubagents.get(taskId);
-    return tracking ? { taskId, status: "pending", startedAt: tracking.startedAt } : null;
+// Use two type parameters - second one is props
+export class Subagent extends DurableObject<SubagentEnv, SubagentProps> {
+  async execute(): Promise<SubagentResult> {
+    // Access props via this.ctx.props
+    const { taskId, title, description } = this.ctx.props;
+    // ...
   }
 }
 ```
 
-**Test Strategy**:
+2. **Create facets with props**:
 
-1. **Unit tests (run by default)**: Test types, tracking logic, task creation
-2. **Infrastructure tests (run by default)**: Verify endpoints exist, tasks are created
-3. **Facet tests (skip by default)**: Require `RUN_FACET_TESTS=true` and production environment
-4. **LLM integration tests (skip by default)**: Require `RUN_SLOW_TESTS=true` and API key
-
-```bash
-# Regular tests (always pass)
-npm test
-
-# Test facets in production
-wrangler dev  # Then test manually or with curl
-
-# Full integration
-RUN_SLOW_TESTS=true npm test -- src/__tests__/loader.subagent.test.ts
+```typescript
+// Pass props when creating the facet
+const facet = this.ctx.facets.get<Subagent>(facetName, () => ({
+  class: this.ctx.exports.Subagent({ props }) // Returns LoopbackDurableObjectNamespace
+}));
 ```
 
-**Lesson**: Experimental APIs may have different behavior in test vs production environments. Design tests to degrade gracefully and document how to run full integration tests.
+3. **Store props in SQLite for status checks**:
+
+```typescript
+// Store props when spawning
+this.ctx.storage.sql.exec(
+  `INSERT INTO active_subagents (task_id, facet_name, props_json, ...) VALUES (?, ?, ?, ...)`,
+  taskId, facetName, JSON.stringify(props), ...
+);
+
+// Retrieve and recreate facet for status checks
+const tracking = this.getTracking(taskId);
+const facet = this.ctx.facets.get<Subagent>(facetName, () => ({
+  class: this.ctx.exports.Subagent({ props: tracking.props })
+}));
+```
+
+4. **Add required compatibility flag**:
+
+```jsonc
+// wrangler.jsonc
+"compatibility_flags": ["nodejs_compat", "experimental", "allow_irrevocable_stub_storage"]
+```
+
+**Test Strategy**:
+
+1. **Unit tests**: Run in vitest-pool-workers, skip facet tests
+2. **E2E tests**: Run against real `wrangler dev` with LLM integration
+
+```bash
+# Unit tests (skip facets)
+npm test
+
+# E2E tests with real facets and LLM
+npm run test:e2e
+```
+
+**Lesson**: For Durable Object Facets, the class MUST be accessed via `ctx.exports.ClassName({ props })` with a two-parameter DurableObject type. This returns a `LoopbackDurableObjectNamespace` that the facets API recognizes. Store props persistently to recreate facets across requests.
 
 ---
 
@@ -458,21 +469,189 @@ for (const row of rows) {
 
 ---
 
+## 12. E2E Harness for Facet Testing
+
+**When**: After implementing subagent facets that couldn't be tested in vitest-pool-workers
+
+**Problem**: Durable Object Facets work in real wrangler dev but fail in vitest-pool-workers (see #9). We needed a way to test facets without manual testing.
+
+**Solution**: Create a separate E2E test suite that runs against a real `wrangler dev` server.
+
+**Architecture**:
+
+```
+vitest.e2e.config.ts     - Separate config (Node.js environment, not pool-workers)
+e2e/setup.ts             - globalSetup spawns wrangler dev, writes URL to file
+e2e/helpers.ts           - Read URL from file, HTTP/WebSocket utilities
+e2e/*.test.ts            - Tests make real HTTP requests to wrangler dev
+```
+
+**Key Implementation Details**:
+
+1. **Global setup spawns wrangler dev**:
+
+```typescript
+// e2e/setup.ts
+wranglerProcess = spawn("npx", [
+  "wrangler",
+  "dev",
+  "--port",
+  "8799",
+  "--local",
+  "--var",
+  "ENABLE_SUBAGENT_API:true" // Pass env vars with --var
+]);
+await waitForServer(`http://localhost:${port}`);
+writeFileSync(CONFIG_FILE, JSON.stringify({ baseUrl, pid }));
+```
+
+2. **Config file for cross-process communication**:
+
+```typescript
+// globalSetup runs in separate process from tests
+// Use file to share server URL
+const CONFIG_FILE = "e2e/.e2e-config.json";
+writeFileSync(CONFIG_FILE, JSON.stringify({ baseUrl, pid }));
+
+// Tests read from file
+export function getBaseUrl(): string {
+  const config = JSON.parse(readFileSync(CONFIG_FILE, "utf-8"));
+  return config.baseUrl;
+}
+```
+
+3. **Environment variables via --var**:
+
+```typescript
+// Server reads from env
+function isSubagentApiEnabled(env: Env): boolean {
+  return (
+    (env as { ENABLE_SUBAGENT_API?: string }).ENABLE_SUBAGENT_API === "true"
+  );
+}
+
+// E2E passes via wrangler --var (colon-separated, not equals)
+["wrangler", "dev", "--var", "ENABLE_SUBAGENT_API:true"];
+```
+
+4. **Exclude E2E from regular tests**:
+
+```typescript
+// vitest.config.ts (unit tests)
+test: {
+  exclude: ["e2e/**", "**/node_modules/**"]
+}
+
+// vitest.e2e.config.ts (E2E tests)
+test: {
+  include: ["e2e/**/*.test.ts"],
+  globalSetup: ["./e2e/setup.ts"]
+}
+```
+
+**Running Tests**:
+
+```bash
+npm test           # Unit tests only (298 passing)
+npm run test:e2e   # E2E tests against wrangler dev (14 passing)
+```
+
+**Results**:
+
+- Facet spawn confirmed working in wrangler dev
+- Subagent API endpoints verified
+- Status tracking tested end-to-end
+- Can add LLM execution tests with API key: `OPENAI_API_KEY=... npm run test:e2e`
+
+**Lesson**: When unit test frameworks don't support certain runtime features, create a separate E2E suite that tests against the real runtime. Use globalSetup to manage server lifecycle.
+
+---
+
+## 13. Durable Object Facet Isolation (Not Shared!)
+
+**When**: Implementing subagent tool access (Phase 5.5)
+
+**Problem**: Initially assumed that DO Facets would share storage and/or static variables with their parent, allowing direct data access. This assumption was wrong.
+
+**Initial Assumptions**:
+
+1. Facets might share SQLite storage with parent (same database)
+2. Facets might share static variables (same isolate)
+3. A `StorageLoopback` with static Map could bridge data between parent and facet
+
+**Reality (Verified via E2E Tests)**:
+
+1. **SQLite is ISOLATED** - Facets have their own separate storage
+2. **Static variables are ISOLATED** - Facets run in separate isolates
+3. **No in-memory sharing is possible** - Each facet is a completely separate environment
+
+**Evidence**:
+
+```
+Storage test: ISOLATED: Facets have separate storage from parent
+Static test: ISOLATED: Facets have separate static variables (different isolate)
+```
+
+**Solution**: Use RPC pattern for subagent tool access:
+
+1. **Props for initial data**: Pass `parentDOId` when creating facet
+2. **ParentRPC for tool access**: Facets call back to parent via `ctx.exports.Think`
+3. **HTTP endpoints**: Parent exposes `/rpc/bash`, `/rpc/fetch`, `/rpc/search`, `/file/*`
+
+```typescript
+// In Subagent facet
+const parentRpc = new ParentRPC(this.ctx, this.ctx.props.parentDOId);
+
+// Access parent's tools via RPC
+const content = await parentRpc.readFile("main.ts");
+const result = await parentRpc.bash("npm test");
+```
+
+**Architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Parent Think DO                              │
+│  - SQLite (tasks, files, actions)                               │
+│  - YjsStorage                                                   │
+│  - BashLoopback, FetchLoopback, etc.                            │
+│  - HTTP endpoints: /rpc/bash, /rpc/fetch, /file/*               │
+└─────────────────────────────────────────────────────────────────┘
+                              ▲
+                              │ stub.fetch() via ParentRPC
+                              │
+┌─────────────────────────────────────────────────────────────────┐
+│                    Subagent Facet (Isolated!)                   │
+│  - Own SQLite (empty/unused)                                    │
+│  - Own static variables (not shared)                            │
+│  - ParentRPC client for tool access                             │
+│  - Props: { taskId, title, description, parentDOId }            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Insight**: The RPC mechanism (`ctx.exports.Think.get(doId).fetch()`) DOES work - facets can call back to their parent. What doesn't work is direct memory/storage sharing.
+
+**Lesson**: Don't assume isolation boundaries. **Test them empirically.** The experimental Facets API creates fully isolated environments, not lightweight children with shared state.
+
+---
+
 ## Summary
 
-| Problem                    | Category                | Impact               |
-| -------------------------- | ----------------------- | -------------------- |
-| AI SDK v6 changes          | API versioning          | Build errors         |
-| Zod schema issues          | Library integration     | Runtime errors       |
-| Reserved `fetch` method    | Platform knowledge      | Runtime errors       |
-| vitest-pool-workers config | Testing                 | Tests wouldn't run   |
-| Playwright in tests        | Environment limitations | Tests failing        |
-| RPC type coercion          | Platform behavior       | Runtime errors       |
-| Static vs instance state   | Architecture            | State not persisting |
-| Dual entry points          | Build configuration     | Browser in prod only |
-| Facets in test env         | Experimental APIs       | Tests need prod env  |
-| AI SDK tool types          | TypeScript complexity   | Build errors         |
-| SQL tagged template        | API differences         | Build errors         |
+| Problem                    | Category                | Impact                |
+| -------------------------- | ----------------------- | --------------------- |
+| AI SDK v6 changes          | API versioning          | Build errors          |
+| Zod schema issues          | Library integration     | Runtime errors        |
+| Reserved `fetch` method    | Platform knowledge      | Runtime errors        |
+| vitest-pool-workers config | Testing                 | Tests wouldn't run    |
+| Playwright in tests        | Environment limitations | Tests failing         |
+| RPC type coercion          | Platform behavior       | Runtime errors        |
+| Static vs instance state   | Architecture            | State not persisting  |
+| Dual entry points          | Build configuration     | Browser in prod only  |
+| Facets in test env         | Experimental APIs       | Tests need prod env   |
+| AI SDK tool types          | TypeScript complexity   | Build errors          |
+| SQL tagged template        | API differences         | Build errors          |
+| E2E harness for facets     | Testing strategy        | Facets now testable   |
+| Facet isolation            | Wrong assumption        | Architecture redesign |
 
 The biggest lessons:
 
@@ -484,3 +663,5 @@ The biggest lessons:
 6. **Experimental APIs need production testing** - Facets, new features may not work in vitest
 7. **Pragmatic typing** - Sometimes `any` with documentation beats fighting TypeScript
 8. **Know your SQL API** - Tagged templates vs raw SQL have different interfaces
+9. **E2E for runtime-specific features** - Use globalSetup to manage real server lifecycle
+10. **Test isolation assumptions empirically** - Facets are fully isolated, not lightweight children

@@ -1,5 +1,5 @@
 /**
- * Main entry point for the Coder Agent.
+ * Main entry point for the Think Agent (Project Think).
  *
  * This file re-exports everything from server-without-browser.ts and adds BrowserLoopback.
  * We use this separation because @cloudflare/playwright requires node:child_process

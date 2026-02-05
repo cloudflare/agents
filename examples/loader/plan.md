@@ -4,7 +4,7 @@
 
 - [x] Basic project scaffold with wrangler.jsonc
 - [x] LOADER binding configured
-- [x] Agent class (Coder) skeleton
+- [x] Agent class (Think) skeleton
 - [x] React frontend scaffold with Vite
 - [x] **Phase 1: Core Runtime Foundation** - COMPLETE
   - [x] 1.1 Basic LOADER Execution
@@ -32,15 +32,32 @@
   - [x] LLM task tools (createSubtask, listTasks, completeTask)
   - [x] Orchestration-level root task creation
   - [x] Hybrid approach: orchestration owns lifecycle, LLM can decompose
-- [x] **Phase 5.5: Subagent Parallel Execution** - COMPLETE (blocked by facets)
+- [x] **Phase 5.5: Subagent Parallel Execution** - COMPLETE
   - [x] Subagent class using DO Facets (src/subagent.ts)
   - [x] SubagentManager for spawning/tracking facets
   - [x] LLM delegation tools (delegateToSubagent, checkSubagentStatus, waitForSubagents)
-  - [x] Shared SQLite/Yjs storage, isolated LLM context
-  - [ ] **BLOCKED**: Facets don't work in vitest-pool-workers, endpoints disabled
+  - [x] **ISOLATED storage** - facets cannot share SQLite (verified by E2E test)
+  - [x] **ISOLATED static variables** - facets run in separate isolates (verified by E2E test)
+  - [x] **RPC to parent works** - facets can call `ctx.exports.Think` and use `stub.fetch()`
+  - [x] Props-based data passing, parent handles task graph updates
+  - [x] Scheduled status checks via this.schedule() (Agents SDK)
+  - [x] Hibernation recovery (orphan detection on onStart())
+  - [x] Timeout detection and cleanup
+  - [x] Unit tests for recovery logic
+  - [x] E2E tests verifying isolation and RPC (e2e/facets.test.ts)
+  - [x] **ParentRPC class** for subagent tool access (src/loopbacks/parent-rpc.ts)
+  - [x] RPC endpoints on parent (/rpc/bash, /rpc/fetch, /rpc/search)
+  - [ ] **BLOCKED**: Facets don't work in vitest-pool-workers (E2E tests pass in wrangler dev)
+  - [ ] **FUTURE**: Investigate native JS RPC instead of HTTP-based RPC
+    - Currently using `stub.fetch()` to call HTTP endpoints on parent (/rpc/bash, /rpc/fetch, etc.)
+    - Cloudflare supports native JS RPC: call public async methods directly on stub (e.g., `stub.rpcBash()`)
+    - Benefits: No HTTP serialization, type-safe, cleaner code
+    - Requires: Adding public async methods to Think class for bash/fetch/search/file operations
+    - Reference: https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests
 - [ ] **Phase 5.6: Async Tool Calls** - PARTIAL
   - [x] scheduling.ts module with pure functions
-  - [x] Recovery logic designed
+  - [x] Recovery logic for subagents (implemented in server-without-browser.ts)
+  - [x] Integration with subagent spawning (scheduleSubagentCheck, checkSubagentStatus)
   - [ ] Integration with main agent loop
   - [ ] Tools that sleep/resume across requests
 - [ ] **Phase 5.7: Context Compaction**
@@ -60,21 +77,81 @@
   - [ ] R2/KV storage for persistent memory
   - [ ] Semantic search over past conversations
   - [ ] User preferences and learned patterns
+- [ ] **Phase 5.11: Subagent Streaming** (Optional)
+  - [ ] Add `streamToParent` callback to SubagentManager
+  - [ ] Update Subagent.execute() to use streamText() optionally
+  - [ ] Create SubagentStreamRelay for event aggregation
+  - [ ] Add WebSocket message types for subagent events
+  - [ ] Handle concurrent subagent streams
+- [x] **Phase 5.12: E2E Testing Harness** - COMPLETE
+  - [x] Create vitest.e2e.config.ts with separate config
+  - [x] Implement e2e/setup.ts (globalSetup - spawn wrangler dev with --var)
+  - [x] Implement teardown in setup.ts (globalTeardown - kill process)
+  - [x] Create e2e/helpers.ts with shared utilities
+  - [x] Add e2e/facets.test.ts - subagent API and spawn tests
+  - [x] Add e2e/smoke.test.ts - basic connectivity tests
+  - [x] Add e2e/streaming.test.ts - WebSocket streaming tests (stub)
+  - [x] Enable ENABLE_SUBAGENT_API via --var ENABLE_SUBAGENT_API:true
+  - [x] Add npm run test:e2e script
+  - **Result**: 14 passing, 23 todo (facets spawn successfully!)
+- [ ] **Phase 5.13: Extensibility Architecture** - PLANNED
+  - [ ] Add `ThinkProps` interface for runtime customization
+  - [ ] Implement `onStart(props)` to capture props
+  - [ ] Change private methods to protected for extension points
+  - [ ] Add `getAdditionalInstructions()` protected method (returns empty by default)
+  - [ ] Add `getCustomTools()` protected method (returns empty by default)
+  - [ ] Add `getModelConfig()` protected method (returns defaults)
+  - [ ] Implement three-layer prompt building (core + class + props)
+  - [ ] Implement three-layer tool building (core + class)
+  - [ ] Implement model resolution (props > class > default)
+  - [ ] Add tests for class extension pattern
+  - [ ] Add tests for props-based customization
+  - [ ] Document extension patterns with examples
+  - [ ] **FUTURE**: Custom tools via props (see Phase 5.15)
+- [ ] **Phase 5.14: Multi-Model Architecture** - PLANNED
+  - [ ] Define `ModelRoles` interface (primary, fast, summarizer, vision)
+  - [ ] Implement `resolveModel(role)` with fallback chain
+  - [ ] Update chat loop to use `primary` model
+  - [ ] Update subagent spawning to use `fast` model
+  - [ ] Add context length tracking for summarization trigger
+  - [ ] Implement automatic summarization with `summarizer` model
+  - [ ] Integrate `vision` model for screenshot analysis
+  - [ ] Add model usage logging/metrics
+  - [ ] Tests for model routing logic
+- [ ] **Phase 5.15: Custom Tools via Props** - FUTURE
+  - **Challenge**: Props must be serializable, but tools contain executable functions
+  - **Potential approaches to explore**:
+    - [ ] **Named tool registry**: Props pass tool names (strings), Think looks up from a pre-registered registry
+    - [ ] **Tool schemas**: Props pass JSON schema definitions, Think instantiates tools from schemas
+    - [ ] **MCP server endpoints**: Props pass MCP server URLs, Think connects and discovers tools dynamically
+    - [ ] **Code strings**: Props pass tool implementation as code strings, Think evaluates (security implications!)
+    - [ ] **Hybrid**: Class registers tool "slots", props enable/configure them
+  - **Questions to answer**:
+    - [ ] What's the use case? Per-tenant tools? Per-request tools?
+    - [ ] How important is full dynamic tool definition vs just configuration?
+    - [ ] Can MCP solve this elegantly?
+    - [ ] What are the security implications of each approach?
+  - **Dependencies**: Phase 5.13 (Extensibility Architecture) should be complete first
 - [ ] Phase 6: Chat UI
 - [ ] Phase 7: Code Editor
 - [ ] Phase 8: Advanced Features (Multi-Session, Multiplayer)
 
 ### Agent Architecture Features Status
 
-| Feature            | Priority | Status         | Module          | Notes                                       |
-| ------------------ | -------- | -------------- | --------------- | ------------------------------------------- |
-| Task Management    | High     | ✅ Complete    | `tasks.ts`      | 71 tests, LLM tools, hybrid orchestration   |
-| Async Tool Calls   | High     | ⚡ Partial     | `scheduling.ts` | Module exists, needs agent loop integration |
-| Subagent Pattern   | Medium   | ⚡ Blocked     | `subagent.ts`   | Implemented but facets don't work in tests  |
-| Context Compaction | Medium   | ❌ Not Started | `context.ts`    | Summarize older messages                    |
-| Streaming Tools    | Low      | ✅ Complete    | Phase 5.8       | text_delta + tool_call/result streaming     |
-| Tool Caching       | Low      | ❌ Not Started | -               | Cache expensive results                     |
-| Long-term Memory   | Future   | ❌ Not Started | -               | R2/KV for persistent memory                 |
+| Feature            | Priority | Status         | Module          | Notes                                         |
+| ------------------ | -------- | -------------- | --------------- | --------------------------------------------- |
+| Task Management    | High     | ✅ Complete    | `tasks.ts`      | 71 tests, LLM tools, hybrid orchestration     |
+| Async Tool Calls   | High     | ⚡ Partial     | `scheduling.ts` | Subagent recovery complete, main loop TBD     |
+| E2E Testing        | High     | ✅ Complete    | `e2e/`          | wrangler dev harness, 10 passing tests        |
+| Subagent Pattern   | Medium   | ✅ Complete    | `subagent.ts`   | With hibernation recovery, status monitoring  |
+| Extensibility      | High     | ❌ Planned     | `server.ts`     | Three-layer: core/class/props customization   |
+| Multi-Model        | Medium   | ❌ Planned     | `server.ts`     | Smart routing: primary/fast/summarizer/vision |
+| Subagent Streaming | Low      | ❌ Designed    | `subagent.ts`   | Optional streaming from facets to parent      |
+| Context Compaction | Medium   | ❌ Not Started | `context.ts`    | Summarize older messages                      |
+| Streaming Tools    | Low      | ✅ Complete    | Phase 5.8       | text_delta + tool_call/result streaming       |
+| Tool Caching       | Low      | ❌ Not Started | -               | Cache expensive results                       |
+| Tools via Props    | Future   | ❌ Not Started | `server.ts`     | Serialization challenge, multiple approaches  |
+| Long-term Memory   | Future   | ❌ Not Started | -               | R2/KV for persistent memory                   |
 
 ### Architecture Decisions Made
 
@@ -83,12 +160,17 @@
 | Action Logging     | SQLite, summarized    | Audit trail, debugging, future approval      |
 | Session Model      | User DO + Session DO  | Multi-tab/multi-device, future multiplayer   |
 | Message Storage    | SQLite + R2 for large | Row limit compliance, full history           |
+| Message Hierarchy  | parent_message_id     | Link subagent messages to delegating parent  |
 | Reasoning Text     | Truncated on save     | Stream full, store summary (first 500 chars) |
 | Background Tasks   | schedule() API        | Built-in, handles DO evictions, retries      |
 | Retry Strategy     | Exponential backoff   | 3 attempts: 2s, 4s, 8s delays                |
 | Task Management    | Hierarchical tasks    | Break complex work into subtasks             |
-| Subagent Pattern   | DO Facets             | Shared storage, isolated LLM context         |
+| Subagent Pattern   | DO Facets             | **Isolated storage**, props-based data       |
+| Subagent Streaming | Opt-in via callback   | Default silent, stream when UX requires it   |
 | Context Compaction | Summarize older msgs  | Keep main agent coherent                     |
+| Extensibility      | Augment, not replace  | Core immutable, class extends, props dynamic |
+| Multi-Model        | Role-based routing    | Think decides when, users configure which    |
+| Custom Tools Props | TBD - serialization   | Props must be serializable, tools have funcs |
 
 ---
 
@@ -106,14 +188,14 @@
 
 **Implementation**:
 
-- `executeCode(code: string, modules?: Record<string, string>)` in Coder Agent
+- `executeCode(code: string, modules?: Record<string, string>)` in Think Agent
 - `env.LOADER.get()` with unique execution ID
 - Harness module wraps user code and captures console.log
 - Returns `ExecutionResult` with success, output, logs, errors
 
 **Key Files**:
 
-- `src/server.ts` - Coder Agent with `executeCode()` and `buildHarnessModule()`
+- `src/server.ts` - Think Agent with `executeCode()` and `buildHarnessModule()`
 
 ### 1.2 Loopback Binding Pattern ✓
 
@@ -364,7 +446,7 @@ curl -X POST -d '{"code":"export default async (env) => {
 ```bash
 curl -X POST -H "Content-Type: application/json" \
   -d '{"message":"Search the web for TypeScript 5.4 new features"}' \
-  http://localhost:8787/agents/coder/test/chat
+  http://localhost:8787/agents/think/test/chat
 ```
 
 ### 3.5 Browser Automation (Playwright) ✓ COMPLETE
@@ -400,7 +482,7 @@ curl -X POST -H "Content-Type: application/json" \
 ```bash
 curl -X POST -H "Content-Type: application/json" \
   -d '{"message":"Browse to the Cloudflare Workers docs and summarize the main features"}' \
-  http://localhost:8787/agents/coder/test/chat
+  http://localhost:8787/agents/think/test/chat
 ```
 
 ### 3.6 Code Execution (LOADER sandbox) ✓ COMPLETE
@@ -425,7 +507,7 @@ curl -X POST -H "Content-Type: application/json" \
 **Key Files**:
 
 - `src/agent-tools.ts` - `createExecuteCodeTool()` and `ExecuteCodeFn` type
-- `src/server-without-browser.ts` - `executeCode()` method in Coder Agent
+- `src/server-without-browser.ts` - `executeCode()` method in Think Agent
 
 **LLM Tool**:
 
@@ -444,7 +526,7 @@ curl -X POST -H "Content-Type: application/json" \
 ```bash
 curl -X POST -H "Content-Type: application/json" \
   -d '{"message":"Calculate the sum and average of [1,2,3,4,5,6,7,8,9,10]"}' \
-  http://localhost:8787/agents/coder/test/chat
+  http://localhost:8787/agents/think/test/chat
 ```
 
 ---
@@ -891,9 +973,255 @@ const TASK_CONFIG = {
 
 ---
 
+## Phase 5.13: Extensibility Architecture
+
+**Goal**: Make Think customizable via class extension and runtime props while keeping the core opinionated.
+
+### Design Philosophy
+
+Think is an **opinionated thinking machine**:
+
+- **Core is immutable**: System prompt, core tools, and model routing logic cannot be removed
+- **Class extension augments**: Subclasses add domain knowledge and tools
+- **Props customize at runtime**: Per-request additional instructions and model preferences
+
+### ThinkProps Interface
+
+```typescript
+interface ThinkProps {
+  // Augment system prompt (added after core + class-level)
+  additionalInstructions?: string;
+
+  // Override model roles (serializable identifiers, not LanguageModel objects)
+  models?: Partial<{
+    primary: string; // e.g., "gpt-5.2", "claude-3-opus"
+    fast: string; // e.g., "gpt-4o-mini", "claude-haiku"
+    summarizer: string; // For context compaction
+    vision: string; // For screenshot analysis
+  }>;
+
+  // NOTE: Custom tools via props is deferred
+  // Challenge: Tools contain executable functions, props must be serializable
+  // Future options to explore:
+  // - Tool definitions that reference registered tools by name
+  // - Tool schemas that Think instantiates from a registry
+  // - MCP server endpoints that Think calls dynamically
+}
+```
+
+### Protected Extension Points
+
+Change these methods from private to protected:
+
+```typescript
+class Think extends Agent<Env, ThinkState> {
+  // Override to add domain-specific instructions
+  protected getAdditionalInstructions(): string {
+    return ""; // Default: no additions
+  }
+
+  // Override to add domain-specific tools
+  protected getCustomTools(): Record<string, Tool> {
+    return {}; // Default: no custom tools
+  }
+
+  // Override to configure models
+  protected getModelConfig(): Partial<ModelRoles> {
+    return {}; // Default: use system defaults
+  }
+}
+```
+
+### Implementation Tasks
+
+1. **Add ThinkProps interface** and update onStart to capture props
+2. **Change private → protected** for extension methods
+3. **Implement getAdditionalInstructions()** with default empty implementation
+4. **Implement getCustomTools()** with default empty implementation
+5. **Implement getModelConfig()** with default empty implementation
+6. **Update buildSystemPrompt()** to merge three layers
+7. **Update buildTools()** to merge core + class tools
+8. **Update model selection** to check props > class > default
+9. **Add tests** for extension patterns
+10. **Document** with examples in README
+
+### Acceptance Criteria
+
+- [ ] Can extend Think and add custom instructions
+- [ ] Can extend Think and add custom tools
+- [ ] Can pass additionalInstructions via props
+- [ ] Can pass model config via props
+- [ ] Core prompt and tools are always present
+- [ ] Props override class config, class overrides defaults
+- [ ] Tests cover all three layers
+
+---
+
+## Phase 5.14: Multi-Model Architecture
+
+**Goal**: Use different models for different tasks, with smart automatic routing.
+
+### Model Roles
+
+| Role         | When Used                        | Default              | Override via   |
+| ------------ | -------------------------------- | -------------------- | -------------- |
+| `primary`    | Main reasoning, complex planning | gpt-5.2 w/ reasoning | Class or Props |
+| `fast`       | Subagents, quick checks          | gpt-4o-mini          | Class or Props |
+| `summarizer` | Context compaction               | Same as fast         | Class or Props |
+| `vision`     | Screenshot analysis              | gpt-4o               | Class or Props |
+
+### Model Registry
+
+Think maintains a registry of known model identifiers:
+
+```typescript
+const MODEL_REGISTRY: Record<string, () => LanguageModel> = {
+  "gpt-5.2": () => createOpenAI()("gpt-5.2"),
+  "gpt-4o": () => createOpenAI()("gpt-4o"),
+  "gpt-4o-mini": () => createOpenAI()("gpt-4o-mini"),
+  "claude-3-opus": () => createAnthropic()("claude-3-opus"),
+  "claude-3-sonnet": () => createAnthropic()("claude-3-sonnet"),
+  "claude-haiku": () => createAnthropic()("claude-3-haiku")
+  // ... more models
+};
+```
+
+### Model Resolution
+
+```typescript
+private resolveModel(role: keyof ModelRoles): LanguageModel {
+  // Layer 3: Props (runtime)
+  if (this.props?.models?.[role]) {
+    return this.createModelFromId(this.props.models[role]);
+  }
+
+  // Layer 2: Class config
+  const classConfig = this.getModelConfig();
+  if (classConfig[role]) {
+    return this.createModelFromId(classConfig[role]);
+  }
+
+  // Layer 1: Defaults
+  return this.createModelFromId(DEFAULT_MODELS[role]);
+}
+
+private createModelFromId(id: string): LanguageModel {
+  const factory = MODEL_REGISTRY[id];
+  if (!factory) {
+    throw new Error(`Unknown model: ${id}`);
+  }
+  return factory();
+}
+```
+
+### Automatic Routing (Opinionated)
+
+Think decides when to use each model:
+
+```typescript
+// Main chat loop → primary
+const response = await this.chat(message, this.resolveModel("primary"));
+
+// Subagent execution → fast
+await this.spawnSubagent(task, this.resolveModel("fast"));
+
+// Context too long → summarizer
+if (this.contextLength > this.maxContext * 0.8) {
+  await this.compactContext(this.resolveModel("summarizer"));
+}
+
+// Screenshot in message → vision
+if (hasImages(message)) {
+  response = await this.chat(message, this.resolveModel("vision"));
+}
+```
+
+### Implementation Tasks
+
+1. **Define ModelRoles interface**
+2. **Create MODEL_REGISTRY** with supported models
+3. **Implement resolveModel()** with fallback chain
+4. **Update handleChatMessage()** to use primary model
+5. **Update SubagentManager** to use fast model
+6. **Add context length tracking**
+7. **Implement compactContext()** with summarizer model
+8. **Detect images in messages** and route to vision model
+9. **Add model usage metrics** (which model, tokens, cost estimate)
+10. **Tests** for model routing logic
+
+### Acceptance Criteria
+
+- [ ] Main chat uses primary model by default
+- [ ] Subagents use fast model by default
+- [ ] Can override models via class extension
+- [ ] Can override models via props
+- [ ] Unknown model IDs throw helpful errors
+- [ ] Model metrics logged for debugging
+- [ ] Vision model used when images present
+- [ ] Summarizer triggered on context overflow
+
+---
+
 ## Phase 6: Chat UI
 
 **Goal**: Human-usable interface for interacting with the agent.
+
+### Development Approach: Incremental "Pull"
+
+Instead of building all backend infrastructure first, we **pull in features as the UI demands them**:
+
+```
+Build UI → Hit limitation → Add minimal backend support → Continue UI → Repeat
+```
+
+**Rationale**: Nothing is shipped yet, so backward compatibility isn't a concern. We prioritize development visibility and iterate quickly.
+
+**What Exists Today**:
+
+- Simple `chat_messages` table (id, session_id, role, content, tool_calls, timestamp)
+- WebSocket streaming works (text_delta, tool_call, tool_result, text_done)
+- `/chat/history` and `/chat/clear` endpoints
+- Subagent spawning/completion via task system
+
+**Add When Needed**:
+
+| Need                          | Solution                                                | When                          |
+| ----------------------------- | ------------------------------------------------------- | ----------------------------- |
+| Real-time subagent visibility | WebSocket events (subagent_spawned, subagent_completed) | Day 1-2                       |
+| Persistent subagent history   | `parent_message_id` column for nested display           | When we want history          |
+| Better status display         | `status` column or rely on existing WS events           | When UI needs states          |
+| Reasoning on reconnect        | `reasoning` column + truncation helper                  | When reconnect UX matters     |
+| Large content handling        | R2 integration                                          | When content exceeds 50KB     |
+| Token management              | Token counting columns                                  | When context overflow happens |
+
+### 6.0 Subagent Visibility (Incremental)
+
+**Goal**: See what subagents are doing in real-time.
+
+**Phase 1 - WebSocket Events** (no schema change):
+
+```typescript
+// Emit when subagent spawns
+{ type: "subagent_spawned", taskId: string, description: string }
+
+// Emit periodic status
+{ type: "subagent_status", taskId: string, status: "running", elapsed: number }
+
+// Emit on completion
+{ type: "subagent_completed", taskId: string, success: boolean, result?: string, error?: string }
+```
+
+**Phase 2 - Persistent History** (when needed):
+
+- Add `facet_name` column to identify subagent messages
+- Add `parent_message_id` column to link to delegating message
+- UI shows subagent activity nested under parent message
+
+**Tasks**:
+
+- [ ] Add subagent WebSocket events to SubagentManager
+- [ ] UI component to display subagent activity
+- [ ] (Later) Schema migration for persistent subagent messages
 
 ### 6.1 Chat Interface
 
@@ -902,6 +1230,7 @@ const TASK_CONFIG = {
 - [ ] Can send messages and see responses
 - [ ] Streaming responses display in real-time (text + reasoning)
 - [ ] Tool calls visible with expandable details
+- [ ] Subagent activity visible (spawned, running, completed)
 - [ ] History pagination for long sessions
 - [ ] Cancel in-progress operations
 
@@ -911,6 +1240,7 @@ const TASK_CONFIG = {
 - [ ] Wire up to useAgent hook
 - [ ] Implement message streaming with deltas
 - [ ] Show tool call details (collapsible)
+- [ ] Show subagent status (inline or sidebar)
 - [ ] Add send button and input
 - [ ] Add cancel button during execution
 - [ ] Implement infinite scroll for history
@@ -1066,21 +1396,24 @@ These workarounds were needed due to complex third-party types:
 
 ### Facet Tests
 
-Currently skipped because facets don't work in vitest-pool-workers:
+Facets don't work in vitest-pool-workers but DO work in E2E (wrangler dev):
 
-- [ ] `src/__tests__/loader.subagent.test.ts` - "Facet Lifecycle" tests
-  - **Run with**: `RUN_FACET_TESTS=true` (requires production environment)
-  - **Revisit when**: vitest-pool-workers supports facets or we find a workaround
+- [x] `e2e/facets.test.ts` - Subagent API and spawn tests (14 passing)
+  - **Run with**: `npm run test:e2e`
+  - Subagent API availability, spawn endpoint, status tracking all verified
 
-- [ ] Full subagent integration tests (spawn, track, complete)
-  - **Requires**: Both facets working AND API key for LLM calls
-  - **Run with**: `RUN_SLOW_TESTS=true RUN_FACET_TESTS=true wrangler dev`
+- [ ] `src/__tests__/loader.subagent.test.ts` - Unit tests (skipped by default)
+  - **Run with**: `RUN_FACET_TESTS=true` (requires deployed environment)
+
+- [ ] Full subagent LLM execution tests
+  - **Requires**: API key for LLM calls
+  - **Run with**: `OPENAI_API_KEY=... npm run test:e2e`
 
 ### Disabled Features
 
 - [ ] `ENABLE_SUBAGENT_API` flag in `server-without-browser.ts`
   - **Currently**: `false` (endpoints return 404)
-  - **Enable when**: Facets work reliably in production
+  - **Solution**: E2E tests will set this to `true` via environment variable
   - **Endpoints affected**: `/subagents`, `/subagents/spawn`, `/subagents/:taskId`
 
 ---

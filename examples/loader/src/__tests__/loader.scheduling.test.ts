@@ -24,7 +24,7 @@ async function agentRequest(
   options: RequestInit = {}
 ): Promise<Response> {
   const ctx = createExecutionContext();
-  const url = `http://localhost/agents/coder/test${path}`;
+  const url = `http://localhost/agents/think/test${path}`;
   const req = new Request(url, options);
   return worker.fetch(req, env as unknown as Env, ctx);
 }
