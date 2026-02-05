@@ -1,0 +1,16 @@
+{
+  "name": "dev-router",
+  "main": "dev-router.js",
+  "compatibility_date": "2025-11-01",
+  "compatibility_flags": ["enable_ctx_exports"],
+  "services": [
+    {
+      "binding": "WORKSHOP_BACKEND",
+      "service": "workshop-backend"
+    },
+    {
+      "binding": "GATEKEEPER_GOOGLE",
+      "service": "gatekeeper-google"
+    }
+  ]
+}
