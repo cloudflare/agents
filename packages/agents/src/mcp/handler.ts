@@ -75,7 +75,7 @@ export function createMcpHandler(
 
     const authContext = buildAuthContext();
 
-    // Guard for stateful usage where a pre-connected transport is passed via options.
+    // Guard for statefu usage where a pre-connected transport is passed via options.
     // If someone passes a transport that's already connected to this server, skip reconnecting.
     // Note: If a developer incorrectly uses a global server with per-request transports,
     // the MCP SDK 1.26.0+ will throw an error when trying to connect an already-connected server.
