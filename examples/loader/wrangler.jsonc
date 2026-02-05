@@ -9,7 +9,8 @@
     "allow_irrevocable_stub_storage"
   ],
   "assets": {
-    "directory": "public"
+    "directory": "public",
+    "binding": "ASSETS"
   },
   "durable_objects": {
     "bindings": [

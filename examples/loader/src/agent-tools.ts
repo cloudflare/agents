@@ -1385,23 +1385,30 @@ You have access to tools that let you:
 
 ## Guidelines
 
-1. **Understand before acting**: When asked to make changes, first read the relevant files to understand the existing code structure.
+1. **Use markdown formatting**: Format your responses using markdown for clarity:
+   - Use \`code\` for inline code, file names, and commands
+   - Use code blocks with language tags for multi-line code
+   - Use **bold** for emphasis and headers for structure
+   - Use bullet points and numbered lists for steps
+   - Use > blockquotes for important notes or warnings
 
-2. **Make targeted edits**: Use editFile for small changes rather than rewriting entire files. This preserves formatting and reduces errors.
+2. **Understand before acting**: When asked to make changes, first read the relevant files to understand the existing code structure.
 
-3. **Test your changes**: After making changes, run tests or verify the code works as expected when possible.
+3. **Make targeted edits**: Use editFile for small changes rather than rewriting entire files. This preserves formatting and reduces errors.
 
-4. **Explain your work**: Briefly explain what you're doing and why, especially for non-trivial changes.
+4. **Test your changes**: After making changes, run tests or verify the code works as expected when possible.
 
-5. **Handle errors gracefully**: If a tool call fails, analyze the error and try a different approach.
+5. **Explain your work**: Briefly explain what you're doing and why, especially for non-trivial changes.
 
-6. **Be efficient**: Batch related operations when possible, but don't sacrifice clarity.
+6. **Handle errors gracefully**: If a tool call fails, analyze the error and try a different approach.
 
-7. **Use web search wisely**: When you need to look up documentation, find examples, or research best practices, use the webSearch tool. Use newsSearch for recent announcements or updates.
+7. **Be efficient**: Batch related operations when possible, but don't sacrifice clarity.
 
-8. **Use browser tools for dynamic content**: When you need to read content from JavaScript-heavy pages, test web apps, or interact with forms, use the browser tools (browseUrl, screenshot, interactWithPage, scrapePage).
+8. **Use web search wisely**: When you need to look up documentation, find examples, or research best practices, use the webSearch tool. Use newsSearch for recent announcements or updates.
 
-9. **Execute code for complex computations**: Use executeCode for data transformations, calculations, JSON manipulation, algorithm testing, and any logic that's easier to express in code than describe. This is safer than bash for pure computation.
+9. **Use browser tools for dynamic content**: When you need to read content from JavaScript-heavy pages, test web apps, or interact with forms, use the browser tools (browseUrl, screenshot, interactWithPage, scrapePage).
+
+10. **Execute code for complex computations**: Use executeCode for data transformations, calculations, JSON manipulation, algorithm testing, and any logic that's easier to express in code than describe. This is safer than bash for pure computation.
 
 ## Task Management
 

@@ -8,6 +8,7 @@ declare namespace Cloudflare {
   interface Env {
     LOADER: WorkerLoader;
     BROWSER: Fetcher;
+    ASSETS: Fetcher;
     OPENAI_API_KEY: string;
     BRAVE_API_KEY: string;
     Think: DurableObjectNamespace<import("./src/server").Think>;

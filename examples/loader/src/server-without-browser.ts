@@ -102,6 +102,76 @@ export interface ChatMessage {
 }
 
 /**
+ * Think WebSocket message types
+ * Wrapped with __think__: 1 to allow multiplexing with other message types
+ */
+export type ThinkPayload =
+  | { type: "text_delta"; delta: string }
+  | { type: "text_done" }
+  | { type: "reasoning_delta"; delta: string }
+  | { type: "reasoning"; content: string }
+  | { type: "tool_call"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; callId: string; name: string; output: unknown }
+  | { type: "chat"; message: { role: "assistant"; content: string } }
+  | { type: "error"; error: string };
+
+export interface ThinkMessage {
+  __think__: 1;
+  payload: ThinkPayload;
+}
+
+/**
+ * Wrap a payload in the Think message envelope
+ */
+function thinkMsg(payload: ThinkPayload): string {
+  return JSON.stringify({ __think__: 1, payload } satisfies ThinkMessage);
+}
+
+/**
+ * Debug event types for internal observability
+ */
+export type ThinkDebugEvent =
+  | { event: "subagent:spawn"; id: string; task: string }
+  | {
+      event: "subagent:complete";
+      id: string;
+      success: boolean;
+      summary?: string;
+    }
+  | { event: "subagent:error"; id: string; error: string }
+  | { event: "task:created"; id: string; type: string; title: string }
+  | { event: "task:started"; id: string }
+  | { event: "task:completed"; id: string; result?: string }
+  | { event: "tool:start"; name: string; callId: string }
+  | {
+      event: "tool:end";
+      name: string;
+      callId: string;
+      durationMs: number;
+      success: boolean;
+    }
+  | { event: "state:change"; status: string }
+  | { event: "connected"; sessionId: string }
+  | { event: "message:received"; content: string };
+
+export interface ThinkDebugMessage {
+  __think_debug__: 1;
+  timestamp: number;
+  payload: ThinkDebugEvent;
+}
+
+/**
+ * Wrap a debug event
+ */
+function debugMsg(payload: ThinkDebugEvent): string {
+  return JSON.stringify({
+    __think_debug__: 1,
+    timestamp: Date.now(),
+    payload
+  } satisfies ThinkDebugMessage);
+}
+
+/**
  * Action log entry for audit trail
  */
 export interface ActionLogEntry {
@@ -202,6 +272,42 @@ export class Think extends Agent<Env, ThinkState> {
 
   // Subagent manager for parallel task execution
   private subagentManager: SubagentManager | null = null;
+
+  // AbortController for cancelling ongoing operations
+  private currentAbortController: AbortController | null = null;
+
+  /**
+   * Emit a debug event to all subscribed connections.
+   * Uses connection state to track debug subscriptions (survives hibernation).
+   */
+  private emitDebug(event: ThinkDebugEvent): void {
+    const connections = this.getConnections();
+    const msg = debugMsg(event);
+    let sentCount = 0;
+
+    for (const conn of connections) {
+      // Check if this connection has debug enabled via its state
+      const connState = conn.state as { debug?: boolean } | undefined;
+      if (connState?.debug) {
+        try {
+          conn.send(msg);
+          sentCount++;
+        } catch {
+          // Connection might be closed, ignore
+        }
+      }
+    }
+
+    if (sentCount > 0) {
+      console.log(
+        "[DEBUG SERVER] Sent",
+        event.event,
+        "to",
+        sentCount,
+        "debug connections"
+      );
+    }
+  }
 
   /**
    * Initial state for the Agent - provides defaults before any state is set
@@ -1134,6 +1240,20 @@ export class Think extends Agent<Env, ThinkState> {
           break;
         }
 
+        case "cancel":
+          // Cancel any ongoing operation
+          if (this.currentAbortController) {
+            this.currentAbortController.abort();
+            this.currentAbortController = null;
+            console.log("[Think] Cancelled ongoing operation");
+          }
+          // Reset status to idle
+          this.setState({ ...this.state, status: "idle" });
+          this.emitDebug({ event: "state:change", status: "idle" });
+          // Send cancellation confirmation
+          connection.send(thinkMsg({ type: "text_done" }));
+          break;
+
         default:
           console.warn("Unknown message type:", data.type);
       }
@@ -1146,7 +1266,21 @@ export class Think extends Agent<Env, ThinkState> {
   /**
    * Handle new WebSocket connections
    */
-  async onConnect(connection: Connection): Promise<void> {
+  async onConnect(
+    connection: Connection,
+    ctx: { request: Request }
+  ): Promise<void> {
+    // Check if client wants debug events via query param
+    const url = new URL(ctx.request.url);
+    const wantsDebug = url.searchParams.get("debug") === "1";
+
+    if (wantsDebug) {
+      // Store debug flag in connection state (survives hibernation)
+      connection.setState({ debug: true });
+      console.log("[DEBUG] Connection subscribed to debug events");
+      this.emitDebug({ event: "connected", sessionId: this.state.sessionId });
+    }
+
     // Send current state to new connection
     connection.send(
       JSON.stringify({
@@ -1166,7 +1300,19 @@ export class Think extends Agent<Env, ThinkState> {
     connection: Connection,
     content: string
   ): Promise<void> {
+    this.emitDebug({
+      event: "message:received",
+      content: content.slice(0, 100)
+    });
     this.setState({ ...this.state, status: "thinking" });
+    this.emitDebug({ event: "state:change", status: "thinking" });
+
+    // Create AbortController for this operation
+    this.currentAbortController = new AbortController();
+    const abortSignal = this.currentAbortController.signal;
+
+    // Track accumulated text outside try block so we can save partial responses on cancellation
+    let accumulatedText = "";
 
     try {
       // Load chat history
@@ -1204,6 +1350,7 @@ export class Think extends Agent<Env, ThinkState> {
         messages,
         tools,
         stopWhen: stepCountIs(MAX_TOOL_ROUNDS),
+        abortSignal,
         providerOptions: {
           openai: {
             // Enable reasoning with medium effort (options: minimal, low, medium, high)
@@ -1214,28 +1361,41 @@ export class Think extends Agent<Env, ThinkState> {
         }
       });
 
-      // Track accumulated text
-      let accumulatedText = "";
+      // Track accumulated reasoning (accumulatedText is declared outside try for cancellation handling)
+      let accumulatedReasoning = "";
 
       // Process the stream and send events to client in real-time
       for await (const event of stream.fullStream) {
         switch (event.type) {
+          case "reasoning-delta":
+            // Stream reasoning as it arrives (GPT-5 reasoning models)
+            if (event.text) {
+              accumulatedReasoning += event.text;
+              connection.send(
+                thinkMsg({ type: "reasoning_delta", delta: event.text })
+              );
+            }
+            break;
+
           case "text-delta":
             // Send text chunks as they arrive for real-time display
             accumulatedText += event.text;
             connection.send(
-              JSON.stringify({
-                type: "text_delta",
-                delta: event.text
-              })
+              thinkMsg({ type: "text_delta", delta: event.text })
             );
             break;
 
           case "tool-call":
             // Tool call is starting
             this.setState({ ...this.state, status: "executing" });
+            this.emitDebug({ event: "state:change", status: "executing" });
+            this.emitDebug({
+              event: "tool:start",
+              name: event.toolName,
+              callId: event.toolCallId
+            });
             connection.send(
-              JSON.stringify({
+              thinkMsg({
                 type: "tool_call",
                 id: event.toolCallId,
                 name: event.toolName,
@@ -1276,7 +1436,7 @@ export class Think extends Agent<Env, ThinkState> {
               });
 
               connection.send(
-                JSON.stringify({
+                thinkMsg({
                   type: "tool_result",
                   callId: event.toolCallId,
                   name: event.toolName,
@@ -1284,31 +1444,39 @@ export class Think extends Agent<Env, ThinkState> {
                 })
               );
 
+              this.emitDebug({
+                event: "tool:end",
+                name: event.toolName,
+                callId: event.toolCallId,
+                durationMs: 0, // TODO: track actual duration
+                success: !isError
+              });
+
               this.setState({ ...this.state, status: "thinking" });
+              this.emitDebug({ event: "state:change", status: "thinking" });
             }
             break;
         }
       }
 
       // Send done signal after stream completes
-      connection.send(
-        JSON.stringify({
-          type: "text_done"
-        })
-      );
+      connection.send(thinkMsg({ type: "text_done" }));
 
       // Get final result - await the promises
       const finalResponse = accumulatedText || (await stream.text) || "";
       const reasoning = await stream.reasoning;
 
-      // Send reasoning summary if available (GPT-5 reasoning models)
-      if (reasoning) {
-        connection.send(
-          JSON.stringify({
-            type: "reasoning",
-            content: reasoning
-          })
-        );
+      // Send final reasoning if we didn't stream it (fallback for some models)
+      if (!accumulatedReasoning && reasoning && reasoning.length > 0) {
+        const reasoningText = reasoning
+          .map((r) => (typeof r === "string" ? r : r.text || ""))
+          .filter(Boolean)
+          .join("\n\n");
+        if (reasoningText) {
+          connection.send(
+            thinkMsg({ type: "reasoning", content: reasoningText })
+          );
+        }
       }
 
       // Save assistant response to history
@@ -1322,7 +1490,7 @@ export class Think extends Agent<Env, ThinkState> {
 
         // Send final response to client
         connection.send(
-          JSON.stringify({
+          thinkMsg({
             type: "chat",
             message: {
               role: "assistant",
@@ -1363,16 +1531,39 @@ export class Think extends Agent<Env, ThinkState> {
         this.currentTaskId = null;
       }
     } catch (e) {
-      console.error("Agent loop error:", e);
-      const errorMessage = e instanceof Error ? e.message : String(e);
-      connection.send(
-        JSON.stringify({
-          type: "error",
-          error: `Agent error: ${errorMessage}`
-        })
-      );
+      // Check if this was a cancellation
+      if (e instanceof Error && e.name === "AbortError") {
+        console.log("[Think] Operation was cancelled");
+        const stoppedMarker = "\n\n*[Generation stopped]*";
+        connection.send(thinkMsg({ type: "text_delta", delta: stoppedMarker }));
+        connection.send(thinkMsg({ type: "text_done" }));
+
+        // Save partial response to history so context is preserved
+        if (accumulatedText.trim()) {
+          const partialResponse = accumulatedText + stoppedMarker;
+          const assistantMessage: ModelMessage = {
+            role: "assistant",
+            content: partialResponse
+          };
+          this.chatHistory.push(assistantMessage);
+          this.saveChatMessage("assistant", partialResponse);
+          console.log(
+            "[Think] Saved partial response:",
+            partialResponse.slice(0, 100) + "..."
+          );
+        }
+      } else {
+        console.error("Agent loop error:", e);
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        connection.send(
+          thinkMsg({ type: "error", error: `Agent error: ${errorMessage}` })
+        );
+      }
     } finally {
+      // Clean up AbortController
+      this.currentAbortController = null;
       this.setState({ ...this.state, status: "idle" });
+      this.emitDebug({ event: "state:change", status: "idle" });
     }
   }
 
@@ -1470,6 +1661,7 @@ export class Think extends Agent<Env, ThinkState> {
       };
     } finally {
       this.setState({ ...this.state, status: "idle" });
+      this.emitDebug({ event: "state:change", status: "idle" });
     }
   }
 
@@ -2088,6 +2280,57 @@ export default class extends WorkerEntrypoint {
       );
     }
 
+    // Truncate chat history (for editing previous messages)
+    if (subPath === "/chat/truncate" && request.method === "POST") {
+      const body = (await request.json()) as { keepUserMessages: number };
+      const keepUserMessages = body.keepUserMessages ?? 0;
+
+      // Load current history
+      this.loadChatHistory();
+
+      // Find the cutoff point - count user messages
+      let userCount = 0;
+      let cutoffIndex = 0;
+      for (let i = 0; i < this.chatHistory.length; i++) {
+        if (this.chatHistory[i].role === "user") {
+          if (userCount >= keepUserMessages) {
+            cutoffIndex = i;
+            break;
+          }
+          userCount++;
+        }
+        cutoffIndex = i + 1;
+      }
+
+      // Truncate in-memory history
+      const removedCount = this.chatHistory.length - cutoffIndex;
+      this.chatHistory = this.chatHistory.slice(0, cutoffIndex);
+
+      // Delete messages from database after the cutoff
+      // Get message IDs to delete
+      const allMessages = this.sql`
+        SELECT id, created_at FROM chat_messages 
+        WHERE session_id = ${this.state.sessionId} 
+        ORDER BY created_at ASC
+      ` as { id: number; created_at: string }[];
+
+      if (allMessages.length > cutoffIndex) {
+        const idsToDelete = allMessages.slice(cutoffIndex).map((m) => m.id);
+        for (const id of idsToDelete) {
+          this.sql`DELETE FROM chat_messages WHERE id = ${id}`;
+        }
+      }
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          removedCount,
+          remainingMessages: this.chatHistory.length
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     // Get action log
     if (subPath === "/actions" && request.method === "GET") {
       const tool = url.searchParams.get("tool") || undefined;
@@ -2309,8 +2552,6 @@ export default {
     }
 
     // Default: serve static files (TODO: Vite integration)
-    return new Response("Cloud-Native Coding Agent Runtime", {
-      headers: { "Content-Type": "text/plain" }
-    });
+    return env.ASSETS.fetch(request);
   }
 };

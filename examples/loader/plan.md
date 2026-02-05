@@ -132,7 +132,49 @@
     - [ ] Can MCP solve this elegantly?
     - [ ] What are the security implications of each approach?
   - **Dependencies**: Phase 5.13 (Extensibility Architecture) should be complete first
-- [ ] Phase 6: Chat UI
+- [ ] **Phase 5.16: User-Facing Scheduling Tool** - PLANNED
+  - **Goal**: Let users schedule reminders and recurring tasks via natural language
+  - **Examples**:
+    - "Remind me in 2 hours to check the deployment"
+    - "Every Monday at 9am, summarize my tasks"
+    - "In 30 minutes, ask me how the meeting went"
+  - **Design decisions**:
+    - [ ] Direct tool in Think vs ScheduleLoopback (lean toward direct tool - tightly coupled to callback handler)
+    - [ ] One-shot vs recurring (recurring = self-rescheduling pattern since schedule() is one-shot)
+    - [ ] Natural language parsing: Let LLM convert "in 2 hours" → `delaySeconds: 7200`
+    - [ ] Persistence: Store scheduled tasks in SQLite so users can list/cancel
+  - **Tool schema sketch**:
+    ```typescript
+    scheduleReminder: tool({
+      description: "Schedule a reminder or recurring task",
+      parameters: z.object({
+        message: z.string(),
+        delaySeconds: z.number().optional(),
+        cronExpression: z.string().optional(),
+        timezone: z.string().default("UTC")
+      }),
+      execute: async ({ message, delaySeconds, cronExpression }) => {
+        // Use this.schedule(delay, "reminder", { message, ... })
+      }
+    });
+    ```
+  - **Callback handler**: New `"reminder"` task type in `onScheduledTask()`
+  - **UI considerations**:
+    - [ ] Push via WebSocket when reminder fires (interrupt conversation?)
+    - [ ] List scheduled reminders ("What reminders do I have?")
+    - [ ] Cancel/snooze reminders
+  - **Dependencies**: Existing `schedule()` API (already used for subagent checks)
+- [x] **Phase 6: Chat UI** - COMPLETE
+  - [x] 6.1 Stop Button - Cancel ongoing generation with AbortController
+  - [x] 6.2 Retry Button - Resend last user message
+  - [x] 6.3 Message Editing - Edit previous messages, restart conversation from that point
+  - [x] 6.4 Partial Response Saving - Save stopped responses with "[Generation stopped]" marker
+  - [x] 6.5 Debug Panel - Real-time internal events (state changes, tool calls, subagents)
+    - Activated via `?debug=1` query parameter
+    - Uses connection state (survives DO hibernation)
+    - Color-coded event types
+  - [x] 6.6 Server-side Cancel Support - AbortController passed to streamText()
+  - [x] 6.7 History Truncation API - `/chat/truncate` endpoint for message editing
 - [ ] Phase 7: Code Editor
 - [ ] Phase 8: Advanced Features (Multi-Session, Multiplayer)
 
@@ -144,6 +186,7 @@
 | Async Tool Calls   | High     | ⚡ Partial     | `scheduling.ts` | Subagent recovery complete, main loop TBD     |
 | E2E Testing        | High     | ✅ Complete    | `e2e/`          | wrangler dev harness, 10 passing tests        |
 | Subagent Pattern   | Medium   | ✅ Complete    | `subagent.ts`   | With hibernation recovery, status monitoring  |
+| Chat UI            | High     | ✅ Complete    | `client.tsx`    | Stop/retry/edit, debug panel, history         |
 | Extensibility      | High     | ❌ Planned     | `server.ts`     | Three-layer: core/class/props customization   |
 | Multi-Model        | Medium   | ❌ Planned     | `server.ts`     | Smart routing: primary/fast/summarizer/vision |
 | Subagent Streaming | Low      | ❌ Designed    | `subagent.ts`   | Optional streaming from facets to parent      |
@@ -152,25 +195,29 @@
 | Tool Caching       | Low      | ❌ Not Started | -               | Cache expensive results                       |
 | Tools via Props    | Future   | ❌ Not Started | `server.ts`     | Serialization challenge, multiple approaches  |
 | Long-term Memory   | Future   | ❌ Not Started | -               | R2/KV for persistent memory                   |
+| Scheduling Tool    | Medium   | ❌ Planned     | `server.ts`     | Natural language reminders, recurring tasks   |
 
 ### Architecture Decisions Made
 
-| Decision           | Choice                | Rationale                                    |
-| ------------------ | --------------------- | -------------------------------------------- |
-| Action Logging     | SQLite, summarized    | Audit trail, debugging, future approval      |
-| Session Model      | User DO + Session DO  | Multi-tab/multi-device, future multiplayer   |
-| Message Storage    | SQLite + R2 for large | Row limit compliance, full history           |
-| Message Hierarchy  | parent_message_id     | Link subagent messages to delegating parent  |
-| Reasoning Text     | Truncated on save     | Stream full, store summary (first 500 chars) |
-| Background Tasks   | schedule() API        | Built-in, handles DO evictions, retries      |
-| Retry Strategy     | Exponential backoff   | 3 attempts: 2s, 4s, 8s delays                |
-| Task Management    | Hierarchical tasks    | Break complex work into subtasks             |
-| Subagent Pattern   | DO Facets             | **Isolated storage**, props-based data       |
-| Subagent Streaming | Opt-in via callback   | Default silent, stream when UX requires it   |
-| Context Compaction | Summarize older msgs  | Keep main agent coherent                     |
-| Extensibility      | Augment, not replace  | Core immutable, class extends, props dynamic |
-| Multi-Model        | Role-based routing    | Think decides when, users configure which    |
-| Custom Tools Props | TBD - serialization   | Props must be serializable, tools have funcs |
+| Decision            | Choice                | Rationale                                    |
+| ------------------- | --------------------- | -------------------------------------------- |
+| Action Logging      | SQLite, summarized    | Audit trail, debugging, future approval      |
+| Session Model       | User DO + Session DO  | Multi-tab/multi-device, future multiplayer   |
+| Message Storage     | SQLite + R2 for large | Row limit compliance, full history           |
+| Message Hierarchy   | parent_message_id     | Link subagent messages to delegating parent  |
+| Reasoning Text      | Truncated on save     | Stream full, store summary (first 500 chars) |
+| Background Tasks    | schedule() API        | Built-in, handles DO evictions, retries      |
+| Retry Strategy      | Exponential backoff   | 3 attempts: 2s, 4s, 8s delays                |
+| Task Management     | Hierarchical tasks    | Break complex work into subtasks             |
+| Subagent Pattern    | DO Facets             | **Isolated storage**, props-based data       |
+| Subagent Streaming  | Opt-in via callback   | Default silent, stream when UX requires it   |
+| Context Compaction  | Summarize older msgs  | Keep main agent coherent                     |
+| Extensibility       | Augment, not replace  | Core immutable, class extends, props dynamic |
+| Multi-Model         | Role-based routing    | Think decides when, users configure which    |
+| Custom Tools Props  | TBD - serialization   | Props must be serializable, tools have funcs |
+| Cancellation        | AbortController       | Standard Web API, streamText() integration   |
+| Debug Subscriptions | Connection state      | Survives DO hibernation, per-connection      |
+| Message Editing     | Truncate & resend     | Server truncates history, client re-sends    |
 
 ---
 
@@ -1225,25 +1272,30 @@ Build UI → Hit limitation → Add minimal backend support → Continue UI → 
 
 ### 6.1 Chat Interface
 
+**Status**: IN PROGRESS
+
 **Acceptance Criteria**:
 
-- [ ] Can send messages and see responses
-- [ ] Streaming responses display in real-time (text + reasoning)
-- [ ] Tool calls visible with expandable details
+- [x] Can send messages and see responses
+- [x] Streaming responses display in real-time (text + reasoning)
+- [x] Tool calls visible with expandable details
 - [ ] Subagent activity visible (spawned, running, completed)
 - [ ] History pagination for long sessions
 - [ ] Cancel in-progress operations
 
 **Tasks**:
 
-- [ ] Create ChatPanel component
-- [ ] Wire up to useAgent hook
-- [ ] Implement message streaming with deltas
-- [ ] Show tool call details (collapsible)
+- [x] Create ChatPanel component (`src/client.tsx`)
+- [x] Wire up to useAgent hook with ThinkState
+- [x] Implement message streaming with deltas
+- [x] Show tool call details (collapsible)
+- [x] Add send button and input
+- [x] Add status indicator (idle/thinking/executing)
+- [x] Add dark theme CSS styling
 - [ ] Show subagent status (inline or sidebar)
-- [ ] Add send button and input
 - [ ] Add cancel button during execution
 - [ ] Implement infinite scroll for history
+- [ ] Load existing chat history on connect
 
 ### 6.2 Message Editing & Retry
 

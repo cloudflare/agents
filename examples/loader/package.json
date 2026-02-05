@@ -6,7 +6,6 @@
   "private": true,
   "scripts": {
     "start": "vite dev",
-    "dev": "wrangler dev",
     "types": "wrangler types env.d.ts --include-runtime false",
     "deploy": "vite build && wrangler deploy",
     "test": "vitest",
@@ -20,13 +19,22 @@
     "@ai-sdk/openai": "^3.0.25",
     "@cloudflare/playwright": "^1.1.0",
     "@cloudflare/sandbox": "^0.7.0",
+    "@streamdown/code": "^1.0.1",
+    "@tailwindcss/vite": "^4.1.18",
+    "agents": "*",
     "ai": "^6.0.70",
     "just-bash": "^2.9.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "streamdown": "^2.1.0",
+    "tailwindcss": "^4.1.16",
     "yjs": "^13.6.20",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.8",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3",
     "vitest": "3.2.4",
     "wrangler": "^4.62.0"
   }

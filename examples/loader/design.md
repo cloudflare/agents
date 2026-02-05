@@ -27,7 +27,8 @@
 | Subagent Parallel  | ✅ Complete | DO Facets (isolated storage), parallel exec    |
 | Extensibility      | ❌ Planned  | Three-layer customization (core/class/props)   |
 | Multi-Model        | ❌ Planned  | Smart routing: primary/fast/summarizer/vision  |
-| UI                 | ❌ Planned  | Chat, code editor, status                      |
+| Chat UI            | ✅ Complete | Stop/retry/edit, debug panel, history          |
+| Code Editor        | ❌ Planned  | Monaco/CodeMirror with Yjs sync                |
 | Sandbox            | ❌ Planned  | Full VM for heavy workloads                    |
 
 ---

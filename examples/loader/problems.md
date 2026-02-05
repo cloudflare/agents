@@ -635,6 +635,67 @@ const result = await parentRpc.bash("npm test");
 
 ---
 
+## 14. Durable Object Hibernation Loses Instance Variables
+
+**When**: Implementing debug panel with WebSocket event streaming
+
+**Problem**: Created a `Set<Connection>` instance variable to track which WebSocket connections wanted debug events. The Set was populated correctly in `onConnect`, but was empty when `emitDebug` was called during message handling.
+
+**Symptom**:
+
+```
+[DEBUG SERVER] emitDebug called, debugConnections.size: 1 event: connected
+[DEBUG SERVER] Sending debug message to 1 connections
+[DEBUG SERVER] emitDebug called, debugConnections.size: 0 event: message:received
+```
+
+**Root Cause**:
+
+- The Agent class has `hibernate: true` by default for WebSocket connections
+- When a DO hibernates between messages, it's evicted from memory
+- On wake, the DO is re-instantiated with fresh instance variables
+- Only data in `this.ctx.storage` or connection state survives hibernation
+
+**Failed Approach**:
+
+```typescript
+// Instance variable - lost on hibernation!
+private debugConnections = new Set<Connection>();
+
+async onConnect(connection: Connection, ctx: { request: Request }) {
+  if (url.searchParams.get("debug") === "1") {
+    this.debugConnections.add(connection); // Works initially
+  }
+}
+```
+
+**Solution**: Use connection state instead of instance variables:
+
+```typescript
+// In onConnect - store debug flag in connection state
+async onConnect(connection: Connection, ctx: { request: Request }) {
+  const url = new URL(ctx.request.url);
+  if (url.searchParams.get("debug") === "1") {
+    connection.setState({ debug: true }); // Survives hibernation!
+  }
+}
+
+// In emitDebug - check each connection's state
+private emitDebug(event: ThinkDebugEvent): void {
+  const connections = this.getConnections();
+  for (const conn of connections) {
+    const connState = conn.state as { debug?: boolean } | undefined;
+    if (connState?.debug) {
+      conn.send(debugMsg(event));
+    }
+  }
+}
+```
+
+**Lesson**: With WebSocket Hibernation enabled (the default), instance variables are not reliable for tracking connection-specific state. Use `connection.setState()` / `connection.state` or `this.ctx.storage` for anything that must survive hibernation.
+
+---
+
 ## Summary
 
 | Problem                    | Category                | Impact                |
@@ -652,6 +713,7 @@ const result = await parentRpc.bash("npm test");
 | SQL tagged template        | API differences         | Build errors          |
 | E2E harness for facets     | Testing strategy        | Facets now testable   |
 | Facet isolation            | Wrong assumption        | Architecture redesign |
+| Hibernation loses vars     | WebSocket hibernation   | Debug events lost     |
 
 The biggest lessons:
 
@@ -665,3 +727,4 @@ The biggest lessons:
 8. **Know your SQL API** - Tagged templates vs raw SQL have different interfaces
 9. **E2E for runtime-specific features** - Use globalSetup to manage real server lifecycle
 10. **Test isolation assumptions empirically** - Facets are fully isolated, not lightweight children
+11. **Hibernation loses instance variables** - Use connection.setState() or ctx.storage for persistent state
