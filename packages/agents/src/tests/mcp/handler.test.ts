@@ -387,14 +387,11 @@ describe("createMcpHandler", () => {
       const response1 = await handler(createInitRequest(), env, ctx);
       expect(response1.status).toBe(200);
 
-      // Second request with same server should fail with helpful error
-      const response2 = await handler(createInitRequest(), env, ctx);
-      expect(response2.status).toBe(500);
-
-      const body = await response2.json();
-      expect(
-        (body as { error?: { message?: string } }).error?.message
-      ).toContain("already connected");
+      // Second request with same server should throw - this is a developer misconfiguration
+      // that should fail loudly rather than return a 500 that might go unnoticed
+      await expect(handler(createInitRequest(), env, ctx)).rejects.toThrow(
+        "already connected"
+      );
     });
 
     it("should work when creating new server per request", async () => {
