@@ -35,7 +35,7 @@
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.61.1"
+    "wrangler": "^4.62.0"
   },
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.31.1",

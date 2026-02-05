@@ -1,0 +1,28 @@
+{
+  "name": "@cloudflare/agents-loader-demos",
+  "author": "Sunil Pai <spai@cloudflare.com>",
+  "type": "module",
+  "keywords": [],
+  "private": true,
+  "scripts": {
+    "start": "vite dev",
+    "dev": "wrangler dev",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "deploy": "vite build && wrangler deploy",
+    "test": "vitest",
+    "test:run": "vitest run"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^3.0.25",
+    "@cloudflare/sandbox": "^0.7.0",
+    "ai": "^6.0.70",
+    "just-bash": "^2.9.1",
+    "yjs": "^13.6.20",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.8",
+    "vitest": "3.2.4",
+    "wrangler": "^4.62.0"
+  }
+}

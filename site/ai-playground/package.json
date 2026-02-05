@@ -14,8 +14,8 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.33",
     "@ai-sdk/google": "^3.0.18",
-    "@ai-sdk/openai": "^3.0.23",
-    "ai": "^6.0.64",
+    "@ai-sdk/openai": "^3.0.25",
+    "ai": "^6.0.70",
     "ai-gateway-provider": "^3.1.1",
     "downshift": "^9.2.0",
     "nanoid": "^5.1.6",

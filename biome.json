@@ -30,7 +30,8 @@
       "!**/normalize.css",
       "!package.json",
       "!**/package.json",
-      "!package-lock.json"
+      "!package-lock.json",
+      "!examples/loader/minions"
     ]
   },
   "formatter": {

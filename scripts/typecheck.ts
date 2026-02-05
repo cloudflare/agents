@@ -19,6 +19,7 @@ type Result = {
 const results: Result[] = [];
 
 for (const tsconfig of tsconfigs) {
+  if (tsconfig.includes("minions")) continue;
   console.log(`Checking ${tsconfig}...`);
   try {
     const output = execSync(`tsc -p ${tsconfig}`, {

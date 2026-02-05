@@ -29,7 +29,7 @@
   "devDependencies": {
     "@ai-sdk/anthropic": "^3.0.33",
     "@ai-sdk/google": "^3.0.18",
-    "@ai-sdk/openai": "^3.0.23",
+    "@ai-sdk/openai": "^3.0.25",
     "@ai-sdk/react": "^3.0.66",
     "@biomejs/biome": "2.3.13",
     "@changesets/changelog-github": "^0.5.2",
@@ -46,7 +46,7 @@
     "@vitejs/plugin-react": "^5.1.2",
     "@vitest/browser": "^3.2.4",
     "@vitest/runner": "^3.2.4",
-    "ai": "^6.0.64",
+    "ai": "^6.0.70",
     "autoevals": "^0.0.131",
     "concurrently": "^9.2.1",
     "evalite": "^0.19.0",
@@ -70,7 +70,7 @@
     "vitest": "3.2.4",
     "vitest-browser-react": "^1.0.1",
     "workers-ai-provider": "^3.0.4",
-    "wrangler": "^4.61.1",
+    "wrangler": "^4.62.0",
     "zod": "^4.3.6"
   },
   "workspaces": [
