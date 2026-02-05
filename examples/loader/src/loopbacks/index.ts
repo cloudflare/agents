@@ -14,6 +14,27 @@
  */
 
 export { BashLoopback, type BashLoopbackProps, type BashResult } from "./bash";
+export {
+  BraveSearchLoopback,
+  type BraveSearchLoopbackProps,
+  type WebSearchResult,
+  type NewsResult,
+  type BraveWebSearchResponse,
+  type BraveNewsSearchResponse,
+  type BraveSearchError,
+  type SearchLogEntry,
+  type FreshnessFilter
+} from "./brave-search";
+export {
+  BrowserLoopback,
+  type BrowserLoopbackProps,
+  type BrowseResult,
+  type ScreenshotResult,
+  type BrowserAction,
+  type InteractionResult,
+  type BrowserError,
+  type BrowserLogEntry
+} from "./browser";
 export { EchoLoopback, type EchoLoopbackProps } from "./echo";
 export {
   FetchLoopback,

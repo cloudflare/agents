@@ -1,7 +1,8 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "loader-demos",
-  "main": "src/server.ts",
+  "name": "loader-demos-test",
+  // Use server-without-browser.ts for tests (no BrowserLoopback, avoids @cloudflare/playwright bundling issues)
+  "main": "src/server-without-browser.ts",
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat", "experimental"],
   "assets": {
@@ -24,9 +25,7 @@
   "observability": {
     "enabled": true
   },
-  "browser": {
-    "binding": "BROWSER"
-  },
+  // Note: No browser binding for tests - it's not compatible with vitest-pool-workers
   "worker_loaders": [
     {
       "binding": "LOADER"

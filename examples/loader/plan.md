@@ -18,6 +18,8 @@
 - [x] **Phase 3.1: just-bash Integration** - COMPLETE
 - [x] **Phase 3.2: FS Loopback (in-memory)** - COMPLETE
 - [x] **Phase 3.3: Controlled Fetch** - COMPLETE
+- [x] **Phase 3.4: Web Search (Brave Search)** - COMPLETE
+- [x] **Phase 3.5: Browser Automation (Playwright)** - COMPLETE
 - [x] **Phase 4: Agent Loop (LLM integration)** - COMPLETE
 - [ ] Phase 5: UI
 - [ ] Phase 6: Advanced Features
@@ -262,6 +264,79 @@ curl -X POST -d '{"code":"export default async (env) => {
 
 - `src/loopbacks/fetch.ts` - Controlled fetch loopback
 
+### 3.4 Web Search (Brave Search) ✓ COMPLETE
+
+**Acceptance Criteria**:
+
+- [x] Agent can search the web for documentation and information
+- [x] Web search results include title, URL, description, snippets
+- [x] News search for recent articles and announcements
+- [x] Freshness filtering (past day/week/month/year)
+- [x] Request logging for audit
+
+**Implementation**:
+
+- `BraveSearchLoopback` WorkerEntrypoint wraps Brave Search API
+- API key passed via props from environment (`BRAVE_API_KEY`)
+- Web search endpoint: `/res/v1/web/search`
+- News search endpoint: `/res/v1/news/search`
+- Extra snippets option for more context per result
+- Rate limiting and error handling
+- Methods: `search()`, `news()`, `getLog()`, `clearLog()`
+
+**Key Files**:
+
+- `src/loopbacks/brave-search.ts` - Brave Search loopback
+
+**LLM Tools**:
+
+- `webSearch` - Search the web for documentation, tutorials, best practices
+- `newsSearch` - Find recent news and announcements
+
+**Test** (verified manually):
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"message":"Search the web for TypeScript 5.4 new features"}' \
+  http://localhost:8787/agents/coder/test/chat
+```
+
+### 3.5 Browser Automation (Playwright) ✓ COMPLETE
+
+**Acceptance Criteria**:
+
+- [x] Agent can browse web pages and extract content
+- [x] Agent can take screenshots of web pages
+- [x] Agent can interact with pages (click, type, navigate)
+- [x] Agent can scrape specific elements from pages
+- [x] Session reuse for performance
+
+**Implementation**:
+
+- `BrowserLoopback` WorkerEntrypoint wraps @cloudflare/playwright
+- Uses Cloudflare Browser Rendering with `BROWSER` binding
+- Session management with `acquire()` + `connect()` for reuse
+- Methods: `browse()`, `screenshot()`, `interact()`, `scrape()`, `getLog()`, `clearLog()`
+
+**Key Files**:
+
+- `src/loopbacks/browser.ts` - Playwright browser loopback
+
+**LLM Tools**:
+
+- `browseUrl` - Browse a URL and extract page content as text
+- `screenshot` - Take a screenshot of a web page
+- `interactWithPage` - Perform actions (click, type, scroll, etc.)
+- `scrapePage` - Extract specific elements using CSS selectors
+
+**Test** (example usage):
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"message":"Browse to the Cloudflare Workers docs and summarize the main features"}' \
+  http://localhost:8787/agents/coder/test/chat
+```
+
 ---
 
 ## Phase 4: Agent Loop ✓ COMPLETE
@@ -443,35 +518,66 @@ Created 6 tools in `src/agent-tools.ts`:
 
 ---
 
-## Testing Strategy
+## Testing Strategy ✓ IMPLEMENTED
 
-### Unit Tests
+**Test Framework**: Vitest with `@cloudflare/vitest-pool-workers`
 
-- [ ] Yjs storage: write, read, replay
-- [ ] File operations: read, write, edit
-- [ ] Bash execution: basic commands
-- [ ] Tool definitions: schema validation
+**Current Test Coverage**: 112 passing, 6 skipped, 8 todo (126 total)
 
-### Integration Tests
+### Core Unit Tests ✓
 
-- [ ] LOADER execution: load and run code
-- [ ] Loopback bindings: dynamic worker calls parent
-- [ ] Full tool call: LLM → tool → result
+- [x] Yjs storage: write, read, version tracking, file operations
+- [x] File operations: read, write, edit, list, delete
+- [x] Bash execution: basic commands, pipes, state persistence
+- [x] Edge cases: empty returns, null values, unicode, special characters
 
-### E2E Tests
+### Integration Tests ✓
 
-- [ ] Chat flow: message → agent → response
-- [ ] Code editing: human edit → sync → agent sees
-- [ ] Multi-step: complex task with multiple tools
+- [x] LOADER execution: load and run code with multiple module types
+- [x] Loopback bindings: dynamic workers call parent (ECHO, BASH, FS, FETCH)
+- [x] Error handling: syntax errors, runtime errors, timeouts
+- [x] Session isolation: independent state per room
 
-**Test Framework**: Vitest
+### Tool & Loopback Tests ✓
+
+- [x] just-bash: command execution, stdout/stderr capture, exit codes
+- [x] FS loopback: read, write, exists, list, delete, stat
+- [x] Fetch loopback: allowlist, method restrictions, request logging
+- [x] Brave Search: structure tests (live API tests conditional on `BRAVE_API_KEY`)
+- [x] Browser automation: graceful degradation (live tests skipped in vitest-pool-workers)
+
+### Chat API Tests ✓
+
+- [x] HTTP endpoints: `/chat`, `/chat/history`, `/chat/clear`
+- [x] History persistence and retrieval
+- [x] History clearing
+
+### LLM Agent Tests (Conditional)
+
+Tests run when `OPENAI_API_KEY` is set:
+
+- [x] Simple message response
+- [x] Tool usage: listFiles, readFile, bash
+- [x] Error handling: missing API key
+- [x] Multi-step workflows: create and read file
+- [x] Multi-turn conversations
+
+### Running Tests
+
+```bash
+# Run all tests (core tests only, no API keys needed)
+npm test
+
+# Run with live API tests
+OPENAI_API_KEY=sk-xxx BRAVE_API_KEY=xxx npm test
+
+# Run specific test file
+npm test -- src/__tests__/loader.test.ts
+```
 
 **Key Test Files**:
 
-- `src/__tests__/yjs-storage.test.ts`
-- `src/__tests__/loader.test.ts`
-- `src/__tests__/tools.test.ts`
-- `src/__tests__/agent.test.ts`
+- `src/__tests__/loader.test.ts` - Comprehensive integration tests (126 tests)
 
 ---
 

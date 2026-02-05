@@ -8,12 +8,89 @@
  * - editFile: Search and replace in files
  * - listFiles: List all files in the project
  * - fetch: Make HTTP requests (with security controls)
+ * - webSearch: Search the web using Brave Search
+ * - browseUrl: Browse web pages and extract content
+ * - screenshot: Take screenshots of web pages
+ * - interactWithPage: Perform actions on web pages
  */
 
 import { tool, jsonSchema } from "ai";
 import type { YjsStorage } from "./yjs-storage";
 import type { BashLoopback } from "./loopbacks/bash";
 import type { FetchLoopback } from "./loopbacks/fetch";
+import type { BraveSearchLoopback } from "./loopbacks/brave-search";
+
+/**
+ * Browser loopback interface (matches BrowserLoopback methods)
+ * Defined here to avoid importing @cloudflare/playwright in test environments
+ */
+export interface BrowserLoopbackInterface {
+  browse(
+    url: string,
+    options?: {
+      waitForNetworkIdle?: boolean;
+      extractLinks?: boolean;
+      maxContentLength?: number;
+      selector?: string;
+    }
+  ): Promise<
+    | {
+        url: string;
+        title: string;
+        content: string;
+        links?: Array<{ text: string; href: string }>;
+      }
+    | { error: string; code: string }
+  >;
+  screenshot(
+    url: string,
+    options?: {
+      fullPage?: boolean;
+      width?: number;
+      height?: number;
+      waitForNetworkIdle?: boolean;
+    }
+  ): Promise<
+    | {
+        url: string;
+        title: string;
+        imageBase64: string;
+        mimeType: string;
+        width: number;
+        height: number;
+      }
+    | { error: string; code: string }
+  >;
+  interact(
+    url: string,
+    actions: Array<{
+      type: "click" | "type" | "press" | "wait" | "scroll" | "select";
+      selector?: string;
+      text?: string;
+      key?: string;
+      ms?: number;
+      direction?: "up" | "down";
+      value?: string;
+    }>,
+    options?: { screenshotAfter?: boolean; maxContentLength?: number }
+  ): Promise<
+    | {
+        url: string;
+        title: string;
+        actionsPerformed: string[];
+        content: string;
+        screenshot?: string;
+      }
+    | { error: string; code: string }
+  >;
+  scrape(
+    url: string,
+    selectors: Record<string, string>
+  ): Promise<
+    | { url: string; title: string; data: Record<string, string[]> }
+    | { error: string; code: string }
+  >;
+}
 
 /**
  * Tool execution context passed from the Agent
@@ -22,6 +99,9 @@ export interface ToolContext {
   storage: YjsStorage;
   bash: BashLoopback;
   fetch: FetchLoopback;
+  braveSearch: BraveSearchLoopback;
+  /** Browser is optional - only available when BROWSER binding exists */
+  browser?: BrowserLoopbackInterface;
 }
 
 /**
@@ -256,6 +336,442 @@ Use this to fetch documentation, package info, or API data.`,
 }
 
 /**
+ * Create the webSearch tool for searching the web
+ */
+export function createWebSearchTool(ctx: ToolContext) {
+  return tool({
+    description: `Search the web using Brave Search. Use this to find current information, documentation, tutorials, API references, or research topics.
+
+Returns web results with titles, URLs, descriptions, and optional extra snippets for more context.
+
+The freshness filter helps find recent content:
+- pd: Past day (24 hours)
+- pw: Past week (7 days)  
+- pm: Past month (31 days)
+- py: Past year
+
+Examples:
+- "React useEffect best practices" - general documentation
+- "TypeScript 5.4 new features" with freshness="pm" - recent updates
+- "how to parse JSON in Cloudflare Workers" - specific platform docs`,
+    inputSchema: jsonSchema<{
+      query: string;
+      freshness?: "pd" | "pw" | "pm" | "py";
+      count?: number;
+    }>({
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The search query - be specific for better results"
+        },
+        freshness: {
+          type: "string",
+          enum: ["pd", "pw", "pm", "py"],
+          description:
+            "Filter by time: pd=past day, pw=past week, pm=past month, py=past year"
+        },
+        count: {
+          type: "number",
+          minimum: 1,
+          maximum: 10,
+          default: 5,
+          description: "Number of results to return (1-10, default: 5)"
+        }
+      },
+      required: ["query"]
+    }),
+    execute: async ({ query, freshness, count = 5 }) => {
+      const result = await ctx.braveSearch.search(query, {
+        freshness,
+        count,
+        extraSnippets: true
+      });
+
+      if ("error" in result) {
+        return { error: result.error, code: result.code };
+      }
+
+      // Format results for the LLM
+      return {
+        query: result.query,
+        totalResults: result.totalResults,
+        results: result.results.map((r) => ({
+          title: r.title,
+          url: r.url,
+          description: r.description,
+          extraSnippets: r.extraSnippets,
+          age: r.age
+        }))
+      };
+    }
+  });
+}
+
+/**
+ * Create the newsSearch tool for finding recent news
+ */
+export function createNewsSearchTool(ctx: ToolContext) {
+  return tool({
+    description: `Search for recent news articles using Brave Search. Use this to find current events, announcements, or breaking news on a topic.
+
+Returns news articles with titles, URLs, descriptions, publication age, and source information.
+
+Examples:
+- "OpenAI announcements" - recent AI news
+- "TypeScript release" - language updates
+- "Cloudflare new features" - platform news`,
+    inputSchema: jsonSchema<{
+      query: string;
+      freshness?: "pd" | "pw" | "pm" | "py";
+      count?: number;
+    }>({
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "The news search query"
+        },
+        freshness: {
+          type: "string",
+          enum: ["pd", "pw", "pm", "py"],
+          description:
+            "Filter by time: pd=past day, pw=past week, pm=past month, py=past year"
+        },
+        count: {
+          type: "number",
+          minimum: 1,
+          maximum: 10,
+          default: 5,
+          description: "Number of results to return (1-10, default: 5)"
+        }
+      },
+      required: ["query"]
+    }),
+    execute: async ({ query, freshness, count = 5 }) => {
+      const result = await ctx.braveSearch.news(query, {
+        freshness,
+        count
+      });
+
+      if ("error" in result) {
+        return { error: result.error, code: result.code };
+      }
+
+      // Format results for the LLM
+      return {
+        query: result.query,
+        results: result.results.map((r) => ({
+          title: r.title,
+          url: r.url,
+          description: r.description,
+          age: r.age,
+          source: r.source.name
+        }))
+      };
+    }
+  });
+}
+
+/**
+ * Create the browseUrl tool for reading web page content
+ */
+export function createBrowseUrlTool(ctx: ToolContext) {
+  return tool({
+    description: `Browse a URL and extract its content as text. The page is fully rendered (JavaScript executed) before extraction.
+
+Use this to:
+- Read documentation pages
+- Extract content from tutorials or articles
+- Get information from web pages that require JavaScript rendering
+
+The content is cleaned (scripts, styles, navigation removed) for readability.`,
+    inputSchema: jsonSchema<{
+      url: string;
+      selector?: string;
+      extractLinks?: boolean;
+    }>({
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          format: "uri",
+          description: "The URL to browse"
+        },
+        selector: {
+          type: "string",
+          description:
+            "Optional CSS selector to focus extraction on a specific element (e.g. 'article', '.main-content')"
+        },
+        extractLinks: {
+          type: "boolean",
+          default: false,
+          description: "Whether to extract links from the page"
+        }
+      },
+      required: ["url"]
+    }),
+    execute: async ({ url, selector, extractLinks }) => {
+      if (!ctx.browser) {
+        return {
+          error: "Browser automation is not available",
+          code: "NO_BROWSER"
+        };
+      }
+      const result = await ctx.browser.browse(url, {
+        waitForNetworkIdle: true,
+        selector,
+        extractLinks,
+        maxContentLength: 50000
+      });
+
+      if ("error" in result) {
+        return { error: result.error, code: result.code };
+      }
+
+      return {
+        url: result.url,
+        title: result.title,
+        content: result.content,
+        links: result.links
+      };
+    }
+  });
+}
+
+/**
+ * Create the screenshot tool for capturing web pages
+ */
+export function createScreenshotTool(ctx: ToolContext) {
+  return tool({
+    description: `Take a screenshot of a web page. Returns a base64-encoded PNG image.
+
+Use this to:
+- Debug UI issues
+- Document the visual state of a page
+- Capture error messages or visual problems
+- See what a web page looks like`,
+    inputSchema: jsonSchema<{
+      url: string;
+      fullPage?: boolean;
+      width?: number;
+      height?: number;
+    }>({
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          format: "uri",
+          description: "The URL to screenshot"
+        },
+        fullPage: {
+          type: "boolean",
+          default: false,
+          description: "Capture the full scrollable page (not just viewport)"
+        },
+        width: {
+          type: "number",
+          default: 1280,
+          description: "Viewport width in pixels"
+        },
+        height: {
+          type: "number",
+          default: 720,
+          description: "Viewport height in pixels"
+        }
+      },
+      required: ["url"]
+    }),
+    execute: async ({ url, fullPage, width, height }) => {
+      if (!ctx.browser) {
+        return {
+          error: "Browser automation is not available",
+          code: "NO_BROWSER"
+        };
+      }
+      const result = await ctx.browser.screenshot(url, {
+        fullPage,
+        width,
+        height,
+        waitForNetworkIdle: true
+      });
+
+      if ("error" in result) {
+        return { error: result.error, code: result.code };
+      }
+
+      return {
+        url: result.url,
+        title: result.title,
+        imageBase64: result.imageBase64,
+        mimeType: result.mimeType,
+        dimensions: `${result.width}x${result.height}`
+      };
+    }
+  });
+}
+
+/**
+ * Create the interactWithPage tool for browser automation
+ */
+export function createInteractWithPageTool(ctx: ToolContext) {
+  return tool({
+    description: `Interact with a web page by performing actions like clicking, typing, etc.
+
+Use this to:
+- Test web applications
+- Fill out and submit forms
+- Navigate through multi-step flows
+- Verify interactive features work
+
+Actions are performed in sequence. If an action fails, subsequent actions still attempt to run.`,
+    inputSchema: jsonSchema<{
+      url: string;
+      actions: Array<{
+        type: "click" | "type" | "press" | "wait" | "scroll";
+        selector?: string;
+        text?: string;
+        key?: string;
+        ms?: number;
+        direction?: "up" | "down";
+      }>;
+      screenshotAfter?: boolean;
+    }>({
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          format: "uri",
+          description: "The starting URL"
+        },
+        actions: {
+          type: "array",
+          description: "Actions to perform in sequence",
+          items: {
+            type: "object",
+            properties: {
+              type: {
+                type: "string",
+                enum: ["click", "type", "press", "wait", "scroll"],
+                description:
+                  "Action type: click (selector), type (selector + text), press (key), wait (ms), scroll (direction)"
+              },
+              selector: {
+                type: "string",
+                description: "CSS selector for click/type actions"
+              },
+              text: {
+                type: "string",
+                description: "Text to type (for type action)"
+              },
+              key: {
+                type: "string",
+                description: "Key to press (e.g. 'Enter', 'Tab', 'Escape')"
+              },
+              ms: {
+                type: "number",
+                description: "Milliseconds to wait (for wait action)"
+              },
+              direction: {
+                type: "string",
+                enum: ["up", "down"],
+                description: "Scroll direction"
+              }
+            },
+            required: ["type"]
+          }
+        },
+        screenshotAfter: {
+          type: "boolean",
+          default: false,
+          description: "Take a screenshot after all actions complete"
+        }
+      },
+      required: ["url", "actions"]
+    }),
+    execute: async ({ url, actions, screenshotAfter }) => {
+      if (!ctx.browser) {
+        return {
+          error: "Browser automation is not available",
+          code: "NO_BROWSER"
+        };
+      }
+      const result = await ctx.browser.interact(url, actions, {
+        screenshotAfter,
+        maxContentLength: 10000
+      });
+
+      if ("error" in result) {
+        return { error: result.error, code: result.code };
+      }
+
+      return {
+        url: result.url,
+        title: result.title,
+        actionsPerformed: result.actionsPerformed,
+        content: result.content,
+        screenshot: result.screenshot
+      };
+    }
+  });
+}
+
+/**
+ * Create the scrapePage tool for extracting specific elements
+ */
+export function createScrapePageTool(ctx: ToolContext) {
+  return tool({
+    description: `Scrape specific elements from a web page using CSS selectors.
+
+Use this to:
+- Extract structured data from pages
+- Get lists of items (e.g. search results, product listings)
+- Pull specific content by selector
+
+Returns arrays of text content for each selector.`,
+    inputSchema: jsonSchema<{
+      url: string;
+      selectors: Record<string, string>;
+    }>({
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          format: "uri",
+          description: "The URL to scrape"
+        },
+        selectors: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description:
+            "Object mapping names to CSS selectors, e.g. { 'titles': 'h2.title', 'prices': '.price' }"
+        }
+      },
+      required: ["url", "selectors"]
+    }),
+    execute: async ({ url, selectors }) => {
+      if (!ctx.browser) {
+        return {
+          error: "Browser automation is not available",
+          code: "NO_BROWSER"
+        };
+      }
+      const result = await ctx.browser.scrape(url, selectors);
+
+      if ("error" in result) {
+        return { error: result.error, code: result.code };
+      }
+
+      return {
+        url: result.url,
+        title: result.title,
+        data: result.data
+      };
+    }
+  });
+}
+
+/**
  * Create all tools for the agent
  */
 export function createTools(ctx: ToolContext) {
@@ -265,7 +781,13 @@ export function createTools(ctx: ToolContext) {
     writeFile: createWriteFileTool(ctx),
     editFile: createEditFileTool(ctx),
     listFiles: createListFilesTool(ctx),
-    fetch: createFetchTool(ctx)
+    fetch: createFetchTool(ctx),
+    webSearch: createWebSearchTool(ctx),
+    newsSearch: createNewsSearchTool(ctx),
+    browseUrl: createBrowseUrlTool(ctx),
+    screenshot: createScreenshotTool(ctx),
+    interactWithPage: createInteractWithPageTool(ctx),
+    scrapePage: createScrapePageTool(ctx)
   };
 }
 
@@ -277,7 +799,13 @@ export const SYSTEM_PROMPT = `You are a skilled coding assistant that helps user
 You have access to tools that let you:
 - Read and write files in the project
 - Execute bash commands
-- Fetch data from the web
+- Fetch data from specific URLs (GitHub, npm, etc.)
+- Search the web for documentation, tutorials, and current information
+- Search for recent news and announcements
+- Browse web pages and extract content (with full JavaScript rendering)
+- Take screenshots of web pages
+- Interact with web pages (click, type, navigate)
+- Scrape specific elements from pages
 
 ## Guidelines
 
@@ -292,6 +820,10 @@ You have access to tools that let you:
 5. **Handle errors gracefully**: If a tool call fails, analyze the error and try a different approach.
 
 6. **Be efficient**: Batch related operations when possible, but don't sacrifice clarity.
+
+7. **Use web search wisely**: When you need to look up documentation, find examples, or research best practices, use the webSearch tool. Use newsSearch for recent announcements or updates.
+
+8. **Use browser tools for dynamic content**: When you need to read content from JavaScript-heavy pages, test web apps, or interact with forms, use the browser tools (browseUrl, screenshot, interactWithPage, scrapePage).
 
 ## Code Style
 

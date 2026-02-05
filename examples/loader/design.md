@@ -2,21 +2,23 @@
 
 ## Implementation Status
 
-| Component         | Status      | Notes                                         |
-| ----------------- | ----------- | --------------------------------------------- |
-| Coder Agent (DO)  | ✅ Complete | Full Agent class with state, SQL, WebSocket   |
-| LOADER Execution  | ✅ Complete | Dynamic worker loading with harness           |
-| Loopback Pattern  | ✅ Complete | EchoLoopback, BashLoopback, FSLoopback        |
-| Timeouts & Errors | ✅ Complete | Configurable timeout, error categorization    |
-| Yjs Storage       | ✅ Complete | SQLite persistence, versioning, snapshots     |
-| File Operations   | ✅ Complete | read/write/edit/delete via Yjs                |
-| just-bash         | ✅ Complete | Shell commands in isolates                    |
-| In-memory FS      | ✅ Complete | Scratch space for temp files                  |
-| WebSocket Sync    | ⚡ Partial  | Binary broadcast, needs full Yjs protocol     |
-| Controlled Fetch  | ✅ Complete | URL/method allowlist, request logging         |
-| LLM Integration   | ✅ Complete | GPT-4o, 6 tools, auto tool loop, chat history |
-| UI                | ❌ Planned  | Chat, code editor, status                     |
-| Sandbox           | ❌ Planned  | Full VM for heavy workloads                   |
+| Component          | Status      | Notes                                          |
+| ------------------ | ----------- | ---------------------------------------------- |
+| Coder Agent (DO)   | ✅ Complete | Full Agent class with state, SQL, WebSocket    |
+| LOADER Execution   | ✅ Complete | Dynamic worker loading with harness            |
+| Loopback Pattern   | ✅ Complete | EchoLoopback, BashLoopback, FSLoopback         |
+| Timeouts & Errors  | ✅ Complete | Configurable timeout, error categorization     |
+| Yjs Storage        | ✅ Complete | SQLite persistence, versioning, snapshots      |
+| File Operations    | ✅ Complete | read/write/edit/delete via Yjs                 |
+| just-bash          | ✅ Complete | Shell commands in isolates                     |
+| In-memory FS       | ✅ Complete | Scratch space for temp files                   |
+| WebSocket Sync     | ⚡ Partial  | Binary broadcast, needs full Yjs protocol      |
+| Controlled Fetch   | ✅ Complete | URL/method allowlist, request logging          |
+| Web Search         | ✅ Complete | Brave Search API, web + news search            |
+| Browser Automation | ✅ Complete | Playwright, browse/screenshot/interact/scrape  |
+| LLM Integration    | ✅ Complete | GPT-4o, 12 tools, auto tool loop, chat history |
+| UI                 | ❌ Planned  | Chat, code editor, status                      |
+| Sandbox            | ❌ Planned  | Full VM for heavy workloads                    |
 
 ---
 
@@ -247,19 +249,23 @@ When the event arrives, the Agent:
 
 ### Core Tools (Phase 3)
 
-| Tool      | Implementation      | Purpose                              |
-| --------- | ------------------- | ------------------------------------ |
-| **bash**  | just-bash           | Shell commands in virtual FS         |
-| **fs**    | worker-fs-mount     | File operations (read, write, mkdir) |
-| **fetch** | Controlled loopback | HTTP requests with allowlist         |
+| Tool                 | Implementation       | Purpose                              |
+| -------------------- | -------------------- | ------------------------------------ |
+| **bash**             | just-bash            | Shell commands in virtual FS         |
+| **fs**               | worker-fs-mount      | File operations (read, write, mkdir) |
+| **fetch**            | Controlled loopback  | HTTP requests with allowlist         |
+| **webSearch**        | Brave Search API     | Search the web for docs and info     |
+| **newsSearch**       | Brave Search API     | Find recent news and announcements   |
+| **browseUrl**        | Playwright + Browser | Browse pages and extract content     |
+| **screenshot**       | Playwright + Browser | Take screenshots of web pages        |
+| **interactWithPage** | Playwright + Browser | Click, type, navigate on pages       |
+| **scrapePage**       | Playwright + Browser | Extract elements via CSS selectors   |
 
 ### Extended Tools (Future)
 
-| Tool           | Implementation         | Purpose                             |
-| -------------- | ---------------------- | ----------------------------------- |
-| **sandbox**    | Cloudflare Sandbox SDK | Full VM when isolates aren't enough |
-| **web_search** | Search API             | Find information online             |
-| **browser**    | Browser Rendering      | Web automation                      |
+| Tool        | Implementation         | Purpose                             |
+| ----------- | ---------------------- | ----------------------------------- |
+| **sandbox** | Cloudflare Sandbox SDK | Full VM when isolates aren't enough |
 
 ### Agent Tools (Phase 4)
 
@@ -424,6 +430,50 @@ modules: {
   // ...
 }
 ```
+
+## Testing Infrastructure
+
+The project uses `@cloudflare/vitest-pool-workers` for integration testing, which runs tests in an isolated Cloudflare Workers runtime.
+
+### Test Coverage
+
+| Category              | Tests   | Status                         |
+| --------------------- | ------- | ------------------------------ |
+| Core LOADER Execution | 18      | ✅                             |
+| Yjs Storage           | 8       | ✅                             |
+| Loopback Bindings     | 15      | ✅                             |
+| Error Handling        | 12      | ✅                             |
+| Edge Cases            | 15      | ✅                             |
+| Session Isolation     | 4       | ✅                             |
+| Chat API              | 5       | ✅                             |
+| Tool Definitions      | 7       | ✅                             |
+| Web Search (Brave)    | 5       | ⏳ (conditional)               |
+| Browser Automation    | 5       | ⏳ (skipped in test env)       |
+| LLM Agent             | 8       | ⏳ (conditional)               |
+| **Total**             | **126** | 112 passing, 6 skipped, 8 todo |
+
+### Running Tests
+
+```bash
+# Run core tests (no API keys needed)
+npm test
+
+# Run with live API integration tests
+OPENAI_API_KEY=sk-xxx BRAVE_API_KEY=xxx npm test
+```
+
+### Test Design Patterns
+
+- **Conditional skipping**: Tests requiring API keys use `describe.skipIf(!hasApiKey)`
+- **Graceful degradation tests**: Verify tools return informative errors when services unavailable
+- **Session isolation tests**: Verify independent state per room/agent instance
+- **Edge case coverage**: Unicode, empty content, special characters, error propagation
+
+### Known Limitations
+
+- **Browser tests**: `@cloudflare/playwright` cannot run in `vitest-pool-workers` due to Node.js dependencies
+- **Live API tests**: Require actual API keys and make real network calls
+- **Cost awareness**: LLM tests consume API tokens; use sparingly in CI
 
 ## References
 

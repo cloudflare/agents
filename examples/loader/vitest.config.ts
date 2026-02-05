@@ -16,7 +16,9 @@ export default defineWorkersConfig({
     },
     poolOptions: {
       workers: {
-        wrangler: { configPath: "./wrangler.jsonc" },
+        // Use test-specific wrangler config that uses server.ts (no BrowserLoopback)
+        // This avoids bundling @cloudflare/playwright which requires node:child_process
+        wrangler: { configPath: "./wrangler.test.jsonc" },
         // Use single worker to avoid isolation issues with SQLite DOs
         isolatedStorage: false
       }
