@@ -3,10 +3,35 @@ import type { WorkerEntrypoint } from "cloudflare:workers";
 import { YjsStorage, type SqlFunction } from "./yjs-storage";
 import { createOpenAI } from "@ai-sdk/openai";
 import { generateText, stepCountIs, type ModelMessage } from "ai";
-import { createTools, SYSTEM_PROMPT, type ToolContext } from "./agent-tools";
+import {
+  createTools,
+  SYSTEM_PROMPT,
+  type ToolContext,
+  type TaskContext,
+  type SubagentContext,
+  type SubagentResult
+} from "./agent-tools";
+import { SubagentManager, type SubagentEnv } from "./subagent";
 import type { BashLoopback } from "./loopbacks/bash";
 import type { FetchLoopback } from "./loopbacks/fetch";
 import type { BraveSearchLoopback } from "./loopbacks/brave-search";
+import {
+  type Task,
+  type TaskGraph,
+  type TaskValidationError,
+  createTaskGraph,
+  createTask,
+  addTask,
+  startTask,
+  completeTask,
+  getReadyTasks,
+  getProgress,
+  getSubtreeProgress,
+  getTaskTree,
+  deserializeGraph,
+  taskToRow,
+  rowToTask
+} from "./tasks";
 // Note: BrowserLoopback type is defined in agent-tools.ts as BrowserLoopbackInterface
 // to avoid importing @cloudflare/playwright which fails in test environments
 
@@ -18,6 +43,9 @@ export { BraveSearchLoopback } from "./loopbacks/brave-search";
 export { EchoLoopback } from "./loopbacks/echo";
 export { FetchLoopback } from "./loopbacks/fetch";
 export { FSLoopback } from "./loopbacks/fs";
+
+// Re-export Subagent for facet-based parallel execution
+export { Subagent } from "./subagent";
 
 // inline this until enable_ctx_exports is supported by default
 declare global {
@@ -55,6 +83,23 @@ export interface ChatMessage {
     result?: unknown;
   }[];
   timestamp: number;
+}
+
+/**
+ * Action log entry for audit trail
+ */
+export interface ActionLogEntry {
+  id: string;
+  sessionId: string;
+  timestamp: number;
+  tool: string;
+  action: string;
+  input?: string;
+  outputSummary?: string;
+  durationMs?: number;
+  success: boolean;
+  error?: string;
+  messageId?: string;
 }
 
 /**
@@ -119,6 +164,14 @@ export class Coder extends Agent<Env, CoderState> {
   private chatHistory: ModelMessage[] = [];
   private chatHistoryLoaded = false;
 
+  // Task management for complex multi-step work
+  private taskGraph: TaskGraph = createTaskGraph();
+  private currentTaskId: string | null = null;
+  private taskGraphLoaded = false;
+
+  // Subagent manager for parallel task execution
+  private subagentManager: SubagentManager | null = null;
+
   /**
    * Initial state for the Agent - provides defaults before any state is set
    */
@@ -165,7 +218,7 @@ export class Coder extends Agent<Env, CoderState> {
   }
 
   /**
-   * Initialize SQLite tables for chat history
+   * Initialize SQLite tables for chat history and action logging
    */
   private initChatTables(): void {
     this.sql`
@@ -182,6 +235,334 @@ export class Coder extends Agent<Env, CoderState> {
       CREATE INDEX IF NOT EXISTS idx_chat_session 
       ON chat_messages(session_id, timestamp)
     `;
+
+    // Action log table for audit trail
+    this.sql`
+      CREATE TABLE IF NOT EXISTS action_log (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        tool TEXT NOT NULL,
+        action TEXT NOT NULL,
+        input TEXT,
+        output_summary TEXT,
+        duration_ms INTEGER,
+        success INTEGER NOT NULL,
+        error TEXT,
+        message_id TEXT
+      )
+    `;
+
+    // Tasks table for task management
+    this.sql`
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        parent_id TEXT,
+        type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL,
+        dependencies TEXT NOT NULL DEFAULT '[]',
+        result TEXT,
+        error TEXT,
+        assigned_to TEXT,
+        created_at INTEGER NOT NULL,
+        started_at INTEGER,
+        completed_at INTEGER,
+        metadata TEXT
+      )
+    `;
+    this.sql`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`;
+    this.sql`CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id)`;
+    this
+      .sql`CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to)`;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_action_log_session 
+      ON action_log(session_id, timestamp)
+    `;
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_action_log_tool 
+      ON action_log(tool, timestamp)
+    `;
+  }
+
+  // ============================================================================
+  // Task Management
+  // ============================================================================
+
+  /**
+   * Load task graph from SQLite
+   */
+  private loadTaskGraph(): void {
+    if (this.taskGraphLoaded) return;
+
+    const rows = this.sql`SELECT * FROM tasks`;
+
+    if (rows.length > 0) {
+      const tasks = rows.map((row) =>
+        rowToTask(
+          row as {
+            id: string;
+            parent_id: string | null;
+            type: string;
+            title: string;
+            description: string | null;
+            status: string;
+            dependencies: string;
+            result: string | null;
+            error: string | null;
+            assigned_to: string | null;
+            created_at: number;
+            started_at: number | null;
+            completed_at: number | null;
+            metadata: string | null;
+          }
+        )
+      );
+      this.taskGraph = deserializeGraph(tasks);
+    }
+
+    this.taskGraphLoaded = true;
+  }
+
+  /**
+   * Save a task to SQLite
+   */
+  private saveTask(task: Task): void {
+    const row = taskToRow(task);
+    this.sql`
+      INSERT OR REPLACE INTO tasks (
+        id, parent_id, type, title, description, status, dependencies,
+        result, error, assigned_to, created_at, started_at, completed_at, metadata
+      ) VALUES (
+        ${row.id}, ${row.parent_id}, ${row.type}, ${row.title}, ${row.description},
+        ${row.status}, ${row.dependencies}, ${row.result}, ${row.error},
+        ${row.assigned_to}, ${row.created_at}, ${row.started_at}, ${row.completed_at},
+        ${row.metadata}
+      )
+    `;
+  }
+
+  /**
+   * Create a root task for a user message
+   */
+  private createRootTask(messageContent: string): Task {
+    this.loadTaskGraph();
+
+    const title =
+      messageContent.length > 50
+        ? messageContent.slice(0, 47) + "..."
+        : messageContent;
+
+    const task = createTask({
+      type: "code",
+      title,
+      description: messageContent
+    });
+
+    const result = addTask(this.taskGraph, task);
+    if ("type" in result && typeof result.type === "string") {
+      // Validation error - shouldn't happen for root task, but handle gracefully
+      console.error(
+        "Failed to create root task:",
+        (result as TaskValidationError).message
+      );
+      return task;
+    }
+
+    this.taskGraph = result as TaskGraph;
+    this.currentTaskId = task.id;
+    this.saveTask(task);
+
+    return task;
+  }
+
+  /**
+   * Get task context for tools
+   */
+  private getTaskContext(): TaskContext | undefined {
+    if (!this.currentTaskId) return undefined;
+
+    this.loadTaskGraph();
+
+    const currentTaskId = this.currentTaskId;
+    const self = this;
+
+    return {
+      currentTaskId,
+
+      getTaskGraph: () => self.taskGraph,
+
+      createSubtask: (input) => {
+        const task = createTask({
+          type: input.type,
+          title: input.title,
+          description: input.description,
+          dependencies: input.dependencies,
+          parentId: currentTaskId
+        });
+
+        const result = addTask(self.taskGraph, task);
+        if ("type" in result && typeof result.type === "string") {
+          return { error: (result as TaskValidationError).message };
+        }
+
+        self.taskGraph = result as TaskGraph;
+        self.saveTask(task);
+
+        return task;
+      },
+
+      completeTask: (taskId: string, result?: string) => {
+        const updated = completeTask(self.taskGraph, taskId, result);
+        if (!updated) return false;
+
+        self.taskGraph = updated;
+
+        // Save the updated task
+        const task = updated.tasks.get(taskId);
+        if (task) self.saveTask(task);
+
+        // Also save any tasks that became unblocked
+        for (const t of updated.tasks.values()) {
+          if (t.id !== taskId) {
+            const original = self.taskGraph.tasks.get(t.id);
+            if (original && original.status !== t.status) {
+              self.saveTask(t);
+            }
+          }
+        }
+
+        return true;
+      },
+
+      getReadyTasks: () => getReadyTasks(self.taskGraph),
+
+      getProgress: () => {
+        if (currentTaskId) {
+          return getSubtreeProgress(self.taskGraph, currentTaskId);
+        }
+        return getProgress(self.taskGraph);
+      },
+
+      getTaskTree: () => getTaskTree(self.taskGraph)
+    };
+  }
+
+  /**
+   * Get or initialize the SubagentManager
+   */
+  private getSubagentManager(): SubagentManager {
+    if (!this.subagentManager) {
+      const subagentEnv: SubagentEnv = {
+        OPENAI_API_KEY: this.env.OPENAI_API_KEY,
+        BRAVE_API_KEY: this.env.BRAVE_API_KEY,
+        LOADER: this.env.LOADER
+      };
+      this.subagentManager = new SubagentManager(
+        this.ctx,
+        subagentEnv,
+        this.state.sessionId
+      );
+    }
+    return this.subagentManager;
+  }
+
+  /**
+   * Get the SubagentContext for delegating tasks to parallel subagents
+   */
+  private getSubagentContext(): SubagentContext | undefined {
+    // Only provide subagent context when we have an active task context
+    if (!this.currentTaskId) return undefined;
+
+    const manager = this.getSubagentManager();
+    const self = this;
+
+    return {
+      async delegateTask(input: {
+        taskId: string;
+        title: string;
+        description: string;
+        context?: string;
+      }): Promise<{ facetName: string } | { error: string }> {
+        // Verify the task exists
+        const task = self.taskGraph.tasks.get(input.taskId);
+        if (!task) {
+          return { error: `Task ${input.taskId} not found` };
+        }
+
+        // Task must be pending or in-progress to delegate
+        if (
+          task.status === "complete" ||
+          task.status === "failed" ||
+          task.status === "cancelled"
+        ) {
+          return { error: `Task ${input.taskId} is already ${task.status}` };
+        }
+
+        try {
+          const facetName = await manager.spawnSubagent(
+            {
+              ...task,
+              title: input.title,
+              description: input.description
+            },
+            input.context
+          );
+          return { facetName };
+        } catch (error) {
+          return {
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+      },
+
+      async getSubagentStatus(taskId: string) {
+        const status = await manager.getSubagentStatus(taskId);
+        if (!status) return null;
+        return {
+          status: status.status,
+          result: status.result,
+          error: status.error
+        };
+      },
+
+      async waitForSubagents(): Promise<SubagentResult[]> {
+        // Poll until all active subagents complete
+        const results: SubagentResult[] = [];
+        const maxWait = 5 * 60 * 1000; // 5 minute timeout
+        const pollInterval = 1000; // 1 second
+        const startTime = Date.now();
+
+        while (manager.activeCount > 0 && Date.now() - startTime < maxWait) {
+          const statuses = await manager.getAllStatuses();
+
+          for (const status of statuses) {
+            if (status.status === "complete" || status.status === "failed") {
+              results.push({
+                taskId: status.taskId,
+                success: status.status === "complete",
+                result: status.result,
+                error: status.error,
+                duration:
+                  (status.completedAt || Date.now()) -
+                  (status.startedAt || Date.now())
+              });
+            }
+          }
+
+          if (manager.activeCount > 0) {
+            await new Promise((resolve) => setTimeout(resolve, pollInterval));
+          }
+        }
+
+        return results;
+      },
+
+      activeCount(): number {
+        return manager.activeCount;
+      }
+    };
   }
 
   /**
@@ -225,6 +606,166 @@ export class Coder extends Agent<Env, CoderState> {
   }
 
   /**
+   * Log an action to the action_log table for audit trail
+   */
+  logAction(entry: Omit<ActionLogEntry, "id" | "timestamp">): string {
+    const id = crypto.randomUUID();
+    const timestamp = Date.now();
+
+    this.sql`
+      INSERT INTO action_log (id, session_id, timestamp, tool, action, input, output_summary, duration_ms, success, error, message_id)
+      VALUES (${id}, ${entry.sessionId}, ${timestamp}, ${entry.tool}, ${entry.action}, ${entry.input || null}, ${entry.outputSummary || null}, ${entry.durationMs || null}, ${entry.success ? 1 : 0}, ${entry.error || null}, ${entry.messageId || null})
+    `;
+
+    return id;
+  }
+
+  /**
+   * Summarize output for action logging (avoid storing large data)
+   */
+  summarizeOutput(tool: string, _action: string, output: unknown): string {
+    // Handle null/undefined
+    if (output === null || output === undefined) {
+      return "null";
+    }
+
+    // Handle strings
+    if (typeof output === "string") {
+      if (output.length > 500) {
+        return `${output.slice(0, 500)}... (${output.length} chars)`;
+      }
+      return output;
+    }
+
+    // Handle specific tool outputs
+    if (tool === "bash") {
+      const result = output as {
+        exitCode?: number;
+        stdout?: string;
+        stderr?: string;
+      };
+      return `exit=${result.exitCode ?? "?"}, stdout=${result.stdout?.length ?? 0} chars, stderr=${result.stderr?.length ?? 0} chars`;
+    }
+
+    if (tool === "readFile") {
+      const result = output as { content?: string; lines?: number };
+      if (result.content) {
+        return `${result.lines ?? "?"} lines, ${result.content.length} chars`;
+      }
+      return JSON.stringify(output).slice(0, 200);
+    }
+
+    if (tool === "writeFile" || tool === "editFile") {
+      return "success";
+    }
+
+    if (tool === "fetch") {
+      const result = output as {
+        status?: number;
+        statusText?: string;
+        body?: string;
+      };
+      return `${result.status ?? "?"} ${result.statusText ?? ""}, ${result.body?.length ?? 0} bytes`;
+    }
+
+    if (tool === "webSearch" || tool === "newsSearch") {
+      const result = output as { results?: unknown[] };
+      if (Array.isArray(result.results)) {
+        return `${result.results.length} results`;
+      }
+      return JSON.stringify(output).slice(0, 200);
+    }
+
+    if (tool === "browseUrl") {
+      const result = output as { url?: string; title?: string };
+      return `${result.url ?? "?"} - "${result.title ?? "?"}"`;
+    }
+
+    if (tool === "executeCode") {
+      const result = output as {
+        success?: boolean;
+        output?: string;
+        error?: string;
+      };
+      if (result.success) {
+        const out = result.output || "";
+        return `success: ${out.length > 100 ? out.slice(0, 100) + "..." : out}`;
+      }
+      return `error: ${result.error?.slice(0, 200) ?? "unknown"}`;
+    }
+
+    // Default: JSON stringify with truncation
+    try {
+      const json = JSON.stringify(output);
+      return json.length > 500 ? `${json.slice(0, 500)}...` : json;
+    } catch {
+      return "[non-serializable]";
+    }
+  }
+
+  /**
+   * Get action log entries with optional filters
+   */
+  getActionLog(options?: {
+    tool?: string;
+    limit?: number;
+    since?: number;
+  }): ActionLogEntry[] {
+    const limit = options?.limit ?? 100;
+
+    let query: string;
+    const params: unknown[] = [this.state.sessionId];
+
+    if (options?.tool && options?.since) {
+      query = `
+        SELECT * FROM action_log 
+        WHERE session_id = ? AND tool = ? AND timestamp >= ?
+        ORDER BY timestamp DESC LIMIT ?
+      `;
+      params.push(options.tool, options.since, limit);
+    } else if (options?.tool) {
+      query = `
+        SELECT * FROM action_log 
+        WHERE session_id = ? AND tool = ?
+        ORDER BY timestamp DESC LIMIT ?
+      `;
+      params.push(options.tool, limit);
+    } else if (options?.since) {
+      query = `
+        SELECT * FROM action_log 
+        WHERE session_id = ? AND timestamp >= ?
+        ORDER BY timestamp DESC LIMIT ?
+      `;
+      params.push(options.since, limit);
+    } else {
+      query = `
+        SELECT * FROM action_log 
+        WHERE session_id = ?
+        ORDER BY timestamp DESC LIMIT ?
+      `;
+      params.push(limit);
+    }
+
+    // Use raw SQL execution for dynamic queries
+    const stmt = this.ctx.storage.sql.exec(query, ...params);
+    const rows = [...stmt];
+
+    return rows.map((row) => ({
+      id: row.id as string,
+      sessionId: row.session_id as string,
+      timestamp: row.timestamp as number,
+      tool: row.tool as string,
+      action: row.action as string,
+      input: row.input as string | undefined,
+      outputSummary: row.output_summary as string | undefined,
+      durationMs: row.duration_ms as number | undefined,
+      success: (row.success as number) === 1,
+      error: row.error as string | undefined,
+      messageId: row.message_id as string | undefined
+    }));
+  }
+
+  /**
    * Get OpenAI client configured with API key
    */
   private getOpenAI() {
@@ -250,7 +791,8 @@ export class Coder extends Agent<Env, CoderState> {
       }) as unknown as FetchLoopback,
       braveSearch: this.ctx.exports.BraveSearchLoopback({
         props: { sessionId, apiKey: this.env.BRAVE_API_KEY }
-      }) as unknown as BraveSearchLoopback
+      }) as unknown as BraveSearchLoopback,
+      executeCode: (code, options) => this.executeCode(code, options || {})
     };
 
     // Add browser if the binding is available
@@ -270,6 +812,18 @@ export class Coder extends Agent<Env, CoderState> {
           props: { sessionId }
         });
       }
+    }
+
+    // Add task context if we have a current task
+    const taskContext = this.getTaskContext();
+    if (taskContext) {
+      context.tasks = taskContext;
+    }
+
+    // Add subagent context for parallel task delegation
+    const subagentContext = this.getSubagentContext();
+    if (subagentContext) {
+      context.subagents = subagentContext;
     }
 
     return context;
@@ -420,7 +974,17 @@ export class Coder extends Agent<Env, CoderState> {
       this.chatHistory.push(userMessage);
       this.saveChatMessage("user", content);
 
-      // Get OpenAI client and tools
+      // Create root task for this message (orchestration-level tracking)
+      const rootTask = this.createRootTask(content);
+
+      // Mark root task as in progress
+      const startedGraph = startTask(this.taskGraph, rootTask.id);
+      if (startedGraph) {
+        this.taskGraph = startedGraph;
+        this.saveTask(this.taskGraph.tasks.get(rootTask.id)!);
+      }
+
+      // Get OpenAI client and tools (now with task context)
       const openai = this.getOpenAI();
       const toolContext = this.getToolContext();
       const tools = createTools(toolContext);
@@ -431,12 +995,20 @@ export class Coder extends Agent<Env, CoderState> {
         ...this.chatHistory.slice(-MAX_CONTEXT_MESSAGES)
       ];
 
-      // Run the agent with AI SDK v6's automatic tool loop
+      // Run the agent with GPT-5.2 reasoning model (faster + smarter than gpt-5)
       const result = await generateText({
-        model: openai("gpt-4o"),
+        model: openai("gpt-5.2"),
         messages,
         tools,
         stopWhen: stepCountIs(MAX_TOOL_ROUNDS),
+        providerOptions: {
+          openai: {
+            // Enable reasoning with medium effort (options: minimal, low, medium, high)
+            reasoningEffort: "medium",
+            // Get reasoning summaries to see the model's thought process
+            reasoningSummary: "auto"
+          }
+        },
         onStepFinish: async (step) => {
           // Report each step's tool calls and results to the client
           if (step.toolCalls && step.toolCalls.length > 0) {
@@ -454,9 +1026,38 @@ export class Coder extends Agent<Env, CoderState> {
               })
             );
 
-            // Send tool results
+            // Send tool results and log actions
             if (step.toolResults) {
               for (const tr of step.toolResults) {
+                // Log the action to the action_log
+                const isError =
+                  typeof tr.output === "object" &&
+                  tr.output !== null &&
+                  "error" in tr.output;
+                const inputStr = JSON.stringify(tr.input || {});
+                const truncatedInput =
+                  inputStr.length > 1000
+                    ? `${inputStr.slice(0, 1000)}...`
+                    : inputStr;
+
+                this.logAction({
+                  sessionId: this.state.sessionId,
+                  tool: tr.toolName,
+                  action: tr.toolName, // For now, tool name is the action
+                  input: truncatedInput,
+                  outputSummary: this.summarizeOutput(
+                    tr.toolName,
+                    tr.toolName,
+                    tr.output
+                  ),
+                  success: !isError,
+                  error: isError
+                    ? String(
+                        (tr.output as { error?: unknown }).error || "unknown"
+                      )
+                    : undefined
+                });
+
                 connection.send(
                   JSON.stringify({
                     type: "tool_result",
@@ -473,8 +1074,19 @@ export class Coder extends Agent<Env, CoderState> {
         }
       });
 
-      // Get final response text
+      // Get final response text and reasoning
       const finalResponse = result.text || "";
+      const reasoning = result.reasoning;
+
+      // Send reasoning summary if available (GPT-5 reasoning models)
+      if (reasoning) {
+        connection.send(
+          JSON.stringify({
+            type: "reasoning",
+            content: reasoning
+          })
+        );
+      }
 
       // Save assistant response to history
       if (finalResponse) {
@@ -497,13 +1109,32 @@ export class Coder extends Agent<Env, CoderState> {
         );
       }
 
-      // Log usage stats
+      // Log usage stats including reasoning tokens
       if (result.usage) {
+        const reasoningTokens =
+          (result.providerMetadata as { openai?: { reasoningTokens?: number } })
+            ?.openai?.reasoningTokens ?? 0;
         console.log(
           `Agent completed: ${result.steps.length} steps, ` +
             `${result.usage.inputTokens ?? 0} input tokens, ` +
-            `${result.usage.outputTokens ?? 0} output tokens`
+            `${result.usage.outputTokens ?? 0} output tokens` +
+            (reasoningTokens > 0 ? `, ${reasoningTokens} reasoning tokens` : "")
         );
+      }
+
+      // Complete the root task
+      if (this.currentTaskId) {
+        const completedGraph = completeTask(
+          this.taskGraph,
+          this.currentTaskId,
+          finalResponse?.slice(0, 200)
+        );
+        if (completedGraph) {
+          this.taskGraph = completedGraph;
+          const task = completedGraph.tasks.get(this.currentTaskId);
+          if (task) this.saveTask(task);
+        }
+        this.currentTaskId = null;
       }
     } catch (e) {
       console.error("Agent loop error:", e);
@@ -830,6 +1461,37 @@ export default class extends WorkerEntrypoint {
       this
         .sql`DELETE FROM chat_messages WHERE session_id = ${this.state.sessionId}`;
       this.chatHistory = [];
+      return new Response(
+        JSON.stringify({ success: true, sessionId: this.state.sessionId }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Get action log
+    if (subPath === "/actions" && request.method === "GET") {
+      const tool = url.searchParams.get("tool") || undefined;
+      const limit = url.searchParams.get("limit")
+        ? Number.parseInt(url.searchParams.get("limit") as string, 10)
+        : undefined;
+      const since = url.searchParams.get("since")
+        ? Number.parseInt(url.searchParams.get("since") as string, 10)
+        : undefined;
+
+      const actions = this.getActionLog({ tool, limit, since });
+      return new Response(
+        JSON.stringify({
+          actions,
+          sessionId: this.state.sessionId,
+          count: actions.length
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Clear action log
+    if (subPath === "/actions/clear" && request.method === "POST") {
+      this
+        .sql`DELETE FROM action_log WHERE session_id = ${this.state.sessionId}`;
       return new Response(
         JSON.stringify({ success: true, sessionId: this.state.sessionId }),
         { headers: { "Content-Type": "application/json" } }

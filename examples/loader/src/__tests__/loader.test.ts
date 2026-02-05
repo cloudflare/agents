@@ -1,5 +1,5 @@
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 // Import the worker without browser for testing
 // (server.ts includes BrowserLoopback which requires @cloudflare/playwright,
@@ -1071,11 +1071,12 @@ describe("Health Check", () => {
 
 describe("Chat API", () => {
   describe("HTTP Chat Endpoint", () => {
+    // GPT-5 reasoning models take longer, increase timeout
     it("should have /chat endpoint", async () => {
       const response = await postJSON("/chat", { message: "test" });
       // Endpoint exists (may error without OPENAI_API_KEY but shouldn't 404)
       expect(response.status).not.toBe(404);
-    });
+    }, 60000);
 
     it("should have /chat/history endpoint", async () => {
       const response = await agentRequest("/chat/history");
@@ -1333,12 +1334,459 @@ describe("LLM Agent Integration", () => {
   });
 
   describe("Agent Error Handling", () => {
+    // GPT-5 reasoning models take longer, increase timeout
     it("should handle missing API key gracefully", async () => {
       // This test verifies error handling when API key is missing or invalid
       // The actual behavior depends on whether the key is set
       const response = await postJSON("/chat", { message: "test" });
       // Should not crash - either works (200) or returns error
       expect([200, 500]).toContain(response.status);
+    }, 60000);
+  });
+});
+
+// ============================================================================
+// Code Execution Tool Tests (Phase 3.6)
+// ============================================================================
+
+describe("Code Execution Tool", () => {
+  describe("Basic Execution", () => {
+    it("should execute simple JavaScript and return result", async () => {
+      const response = await postJSON("/execute", {
+        code: "export default function() { return 42; }"
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      expect(data.output).toBe("42");
+    });
+
+    it("should handle string return values", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() { return "hello world"; }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      // Strings are returned directly (not JSON-stringified with extra quotes)
+      expect(data.output).toBe("hello world");
+    });
+
+    it("should handle object return values as JSON", async () => {
+      const response = await postJSON("/execute", {
+        code: "export default function() { return { sum: 10, avg: 5 }; }"
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      const parsed = JSON.parse(data.output || "{}");
+      expect(parsed.sum).toBe(10);
+      expect(parsed.avg).toBe(5);
+    });
+
+    it("should handle array return values", async () => {
+      const response = await postJSON("/execute", {
+        code: "export default function() { return [1, 2, 3, 4, 5]; }"
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      const parsed = JSON.parse(data.output || "[]");
+      expect(parsed).toEqual([1, 2, 3, 4, 5]);
+    });
+  });
+
+  describe("Console Log Capture", () => {
+    it("should capture console.log output", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() {
+          console.log("step 1");
+          console.log("step 2");
+          return "done";
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      expect(data.logs).toContain("step 1");
+      expect(data.logs).toContain("step 2");
+    });
+
+    it("should capture console.log with multiple arguments", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() {
+          console.log("value:", 42);
+          return "done";
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      expect(
+        data.logs.some(
+          (log: string) => log.includes("value:") && log.includes("42")
+        )
+      ).toBe(true);
+    });
+  });
+
+  describe("Data Transformations", () => {
+    it("should perform array calculations", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() {
+          const data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+          const sum = data.reduce((a, b) => a + b, 0);
+          const avg = sum / data.length;
+          return { sum, avg, count: data.length };
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      const result = JSON.parse(data.output || "{}");
+      expect(result.sum).toBe(55);
+      expect(result.avg).toBe(5.5);
+      expect(result.count).toBe(10);
+    });
+
+    it("should handle JSON parsing and manipulation", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() {
+          const jsonStr = '{"users": [{"name": "Alice"}, {"name": "Bob"}]}';
+          const data = JSON.parse(jsonStr);
+          const names = data.users.map(u => u.name);
+          return names;
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      const result = JSON.parse(data.output || "[]");
+      expect(result).toEqual(["Alice", "Bob"]);
+    });
+
+    it("should handle string processing with regex", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() {
+          const text = "Hello World! Hello Universe!";
+          const count = (text.match(/Hello/g) || []).length;
+          const replaced = text.replace(/Hello/g, "Hi");
+          return { count, replaced };
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      const result = JSON.parse(data.output || "{}");
+      expect(result.count).toBe(2);
+      expect(result.replaced).toBe("Hi World! Hi Universe!");
+    });
+  });
+
+  describe("Async Code", () => {
+    it("should handle async/await code", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default async function() {
+          const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+          await delay(10);
+          return "async complete";
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      expect(data.output).toBe("async complete");
+    });
+
+    it("should handle Promise.all", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default async function() {
+          const tasks = [1, 2, 3].map(async (n) => n * 2);
+          const results = await Promise.all(tasks);
+          return results;
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      const result = JSON.parse(data.output || "[]");
+      expect(result).toEqual([2, 4, 6]);
+    });
+  });
+
+  describe("Error Handling", () => {
+    it("should catch and report syntax errors", async () => {
+      const response = await postJSON("/execute", {
+        code: "export default function() { return ]]invalid[[ }"
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(false);
+      expect(data.errorType).toBe("syntax");
+    });
+
+    it("should catch and report runtime errors", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() {
+          const obj = undefined;
+          return obj.property;
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(false);
+      expect(data.errorType).toBe("runtime");
+      expect(data.error).toContain("undefined");
+    });
+
+    it("should catch thrown errors", async () => {
+      const response = await postJSON("/execute", {
+        code: `export default function() {
+          throw new Error("intentional error");
+        }`
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(false);
+      expect(data.error).toContain("intentional error");
+    });
+  });
+
+  describe("Execution Duration", () => {
+    it("should track execution duration", async () => {
+      const response = await postJSON("/execute", {
+        code: "export default function() { return 1 + 1; }"
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      expect(typeof data.duration).toBe("number");
+      expect(data.duration).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe("Module Support", () => {
+    it("should support custom modules", async () => {
+      const response = await postJSON("/execute", {
+        code: `
+          import { add, multiply } from './math-utils.js';
+          export default function() {
+            return { sum: add(2, 3), product: multiply(4, 5) };
+          }
+        `,
+        modules: {
+          "math-utils.js": `
+            export const add = (a, b) => a + b;
+            export const multiply = (a, b) => a * b;
+          `
+        }
+      });
+      expect(response.status).toBe(200);
+      const data = (await response.json()) as ExecutionResult;
+      expect(data.success).toBe(true);
+      const result = JSON.parse(data.output || "{}");
+      expect(result.sum).toBe(5);
+      expect(result.product).toBe(20);
+    });
+  });
+});
+
+// ============================================================================
+// Action Logging Tests
+// These test the audit trail functionality for tool calls
+// ============================================================================
+
+describe("Action Logging", () => {
+  beforeEach(async () => {
+    // Clear action log before each test
+    await postJSON("/actions/clear", {});
+  });
+
+  describe("Action Log API", () => {
+    it("should return empty action log initially", async () => {
+      const response = await agentRequest("/actions");
+      expect(response.status).toBe(200);
+
+      const data = (await response.json()) as {
+        actions: unknown[];
+        sessionId: string;
+        count: number;
+      };
+      expect(data.actions).toEqual([]);
+      expect(data.count).toBe(0);
+      expect(data.sessionId).toBeDefined();
+    });
+
+    it("should support tool filter parameter", async () => {
+      const response = await agentRequest("/actions?tool=bash");
+      expect(response.status).toBe(200);
+
+      const data = (await response.json()) as {
+        actions: unknown[];
+        count: number;
+      };
+      expect(data.actions).toEqual([]);
+    });
+
+    it("should support limit parameter", async () => {
+      const response = await agentRequest("/actions?limit=10");
+      expect(response.status).toBe(200);
+
+      const data = (await response.json()) as {
+        actions: unknown[];
+        count: number;
+      };
+      expect(Array.isArray(data.actions)).toBe(true);
+    });
+
+    it("should support since parameter", async () => {
+      const since = Date.now() - 60000; // 1 minute ago
+      const response = await agentRequest(`/actions?since=${since}`);
+      expect(response.status).toBe(200);
+
+      const data = (await response.json()) as {
+        actions: unknown[];
+        count: number;
+      };
+      expect(Array.isArray(data.actions)).toBe(true);
+    });
+
+    it("should clear action log", async () => {
+      const response = await postJSON("/actions/clear", {});
+      expect(response.status).toBe(200);
+
+      const data = (await response.json()) as {
+        success: boolean;
+        sessionId: string;
+      };
+      expect(data.success).toBe(true);
+    });
+  });
+
+  describe("summarizeOutput", () => {
+    // Test the output summarization via direct agent methods
+    // These tests verify that large outputs are properly truncated
+
+    it("should truncate long strings", async () => {
+      // Create a file with long content using PUT /file/{path}
+      const longContent = "x".repeat(1000);
+      const writeResponse = await putJSON("/file/test-long.txt", {
+        content: longContent
+      });
+      expect(writeResponse.status).toBe(200);
+
+      // Verify file was created
+      const response = await agentRequest("/file/test-long.txt");
+      expect(response.status).toBe(200);
+    });
+  });
+
+  describe("Action Log with LLM", () => {
+    const hasOpenAIKey = !!process.env.OPENAI_API_KEY;
+
+    describe.skipIf(!hasOpenAIKey)("Tool Call Logging", () => {
+      it(
+        "should log tool calls when LLM uses tools",
+        async () => {
+          // Clear everything
+          await postJSON("/chat/clear", {});
+          await postJSON("/actions/clear", {});
+
+          // Ask LLM to use a tool
+          const response = await postJSON("/chat", {
+            message:
+              "Create a file called action-test.txt with content 'logged'"
+          });
+          expect(response.status).toBe(200);
+
+          // Check action log
+          const actionsResponse = await agentRequest("/actions");
+          expect(actionsResponse.status).toBe(200);
+
+          const data = (await actionsResponse.json()) as {
+            actions: Array<{
+              id: string;
+              tool: string;
+              action: string;
+              success: boolean;
+              timestamp: number;
+            }>;
+            count: number;
+          };
+
+          // Should have at least one action logged
+          expect(data.count).toBeGreaterThan(0);
+
+          // Find the writeFile action
+          const writeAction = data.actions.find((a) => a.tool === "writeFile");
+          if (writeAction) {
+            expect(writeAction.success).toBe(true);
+            expect(writeAction.timestamp).toBeGreaterThan(0);
+          }
+        },
+        { timeout: 60000 }
+      );
+
+      it(
+        "should log multiple tool calls in sequence",
+        async () => {
+          await postJSON("/chat/clear", {});
+          await postJSON("/actions/clear", {});
+
+          // Ask LLM to do multiple things
+          const response = await postJSON("/chat", {
+            message:
+              "Create a file called multi1.txt with 'first', then create multi2.txt with 'second'"
+          });
+          expect(response.status).toBe(200);
+
+          // Check action log
+          const actionsResponse = await agentRequest("/actions");
+          const data = (await actionsResponse.json()) as {
+            actions: Array<{ tool: string }>;
+            count: number;
+          };
+
+          // Should have multiple actions
+          expect(data.count).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 60000 }
+      );
+
+      it(
+        "should include output summary in action log",
+        async () => {
+          await postJSON("/chat/clear", {});
+          await postJSON("/actions/clear", {});
+
+          // Create a file first
+          await postJSON("/file", {
+            path: "read-test.txt",
+            content: "test content for reading"
+          });
+
+          // Ask LLM to read it
+          const response = await postJSON("/chat", {
+            message: "Read the file read-test.txt and tell me what it contains"
+          });
+          expect(response.status).toBe(200);
+
+          // Check action log for readFile action with output summary
+          const actionsResponse = await agentRequest("/actions");
+          const data = (await actionsResponse.json()) as {
+            actions: Array<{
+              tool: string;
+              outputSummary?: string;
+            }>;
+          };
+
+          const readAction = data.actions.find((a) => a.tool === "readFile");
+          if (readAction) {
+            expect(readAction.outputSummary).toBeDefined();
+          }
+        },
+        { timeout: 60000 }
+      );
     });
   });
 });

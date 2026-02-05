@@ -19,6 +19,13 @@ import type { YjsStorage } from "./yjs-storage";
 import type { BashLoopback } from "./loopbacks/bash";
 import type { FetchLoopback } from "./loopbacks/fetch";
 import type { BraveSearchLoopback } from "./loopbacks/brave-search";
+import type {
+  Task,
+  TaskGraph,
+  TaskType,
+  TaskProgress,
+  TaskTreeNode
+} from "./tasks";
 
 /**
  * Browser loopback interface (matches BrowserLoopback methods)
@@ -93,6 +100,97 @@ export interface BrowserLoopbackInterface {
 }
 
 /**
+ * Result from executing JavaScript code
+ */
+export interface CodeExecutionResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+  errorType?: "syntax" | "runtime" | "timeout" | "unknown";
+  logs: string[];
+  duration: number;
+}
+
+/**
+ * Function to execute JavaScript code in a sandboxed environment
+ */
+export type ExecuteCodeFn = (
+  code: string,
+  options?: { modules?: Record<string, string>; timeoutMs?: number }
+) => Promise<CodeExecutionResult>;
+
+/**
+ * Task management context for creating/managing subtasks
+ */
+export interface TaskContext {
+  /** The current root task ID (created by orchestration for each user message) */
+  currentTaskId: string;
+  /** Get the current task graph */
+  getTaskGraph(): TaskGraph;
+  /** Create a subtask under the current task */
+  createSubtask(input: {
+    type: TaskType;
+    title: string;
+    description?: string;
+    dependencies?: string[];
+  }): Task | { error: string };
+  /** Mark a task as complete */
+  completeTask(taskId: string, result?: string): boolean;
+  /** Get tasks ready to work on */
+  getReadyTasks(): Task[];
+  /** Get progress for the current task tree */
+  getProgress(): TaskProgress;
+  /** Get the task tree for display */
+  getTaskTree(): TaskTreeNode[];
+}
+
+/**
+ * Result from a subagent execution
+ */
+export interface SubagentResult {
+  taskId: string;
+  success: boolean;
+  result?: string;
+  error?: string;
+  duration: number;
+}
+
+/**
+ * Context for subagent delegation
+ */
+export interface SubagentContext {
+  /**
+   * Delegate a task to a subagent for parallel execution.
+   * The subagent runs as a facet with its own LLM context.
+   */
+  delegateTask(input: {
+    taskId: string;
+    title: string;
+    description: string;
+    context?: string;
+  }): Promise<{ facetName: string } | { error: string }>;
+
+  /**
+   * Check if a delegated task is complete
+   */
+  getSubagentStatus(taskId: string): Promise<{
+    status: "pending" | "running" | "complete" | "failed";
+    result?: string;
+    error?: string;
+  } | null>;
+
+  /**
+   * Wait for all active subagents to complete
+   */
+  waitForSubagents(): Promise<SubagentResult[]>;
+
+  /**
+   * Get count of active subagents
+   */
+  activeCount(): number;
+}
+
+/**
  * Tool execution context passed from the Agent
  */
 export interface ToolContext {
@@ -102,6 +200,12 @@ export interface ToolContext {
   braveSearch: BraveSearchLoopback;
   /** Browser is optional - only available when BROWSER binding exists */
   browser?: BrowserLoopbackInterface;
+  /** Execute JavaScript code in a sandboxed environment */
+  executeCode: ExecuteCodeFn;
+  /** Task management - optional, only available when orchestration is enabled */
+  tasks?: TaskContext;
+  /** Subagent delegation - optional, for parallel task execution */
+  subagents?: SubagentContext;
 }
 
 /**
@@ -772,10 +876,460 @@ Returns arrays of text content for each selector.`,
 }
 
 /**
+ * Create the executeCode tool for running JavaScript in a sandbox
+ */
+export function createExecuteCodeTool(ctx: ToolContext) {
+  return tool({
+    description: `Execute JavaScript code in a sandboxed environment. Use this for:
+- Complex calculations and data transformations
+- JSON parsing and manipulation
+- String processing and formatting
+- Algorithm implementation and testing
+- Data analysis and aggregation
+- Generating structured outputs
+
+The code runs in an isolated V8 environment with:
+- Full ES2024+ JavaScript support
+- No network or filesystem access (use other tools for that)
+- 30 second timeout by default
+- console.log() outputs captured in logs
+
+Return values are JSON-stringified. For complex outputs, return an object.
+
+Example: "const data = [1,2,3,4,5]; const sum = data.reduce((a,b) => a+b, 0); return { sum, avg: sum/data.length };"`,
+    inputSchema: jsonSchema<{
+      code: string;
+      modules?: Record<string, string>;
+      timeoutMs?: number;
+    }>({
+      type: "object",
+      properties: {
+        code: {
+          type: "string",
+          description:
+            "JavaScript code to execute. The code should use 'return' to provide a result. Use console.log() for intermediate outputs."
+        },
+        modules: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description:
+            "Optional ES modules to make available. Keys are import names, values are module code. Example: { 'utils': 'export const add = (a,b) => a+b;' }"
+        },
+        timeoutMs: {
+          type: "number",
+          description:
+            "Maximum execution time in milliseconds (default: 30000, max: 120000)"
+        }
+      },
+      required: ["code"]
+    }),
+    execute: async ({ code, modules, timeoutMs }) => {
+      // Ensure timeout is within bounds
+      const timeout = Math.min(Math.max(timeoutMs || 30000, 1000), 120000);
+
+      const result = await ctx.executeCode(code, {
+        modules,
+        timeoutMs: timeout
+      });
+
+      if (result.success) {
+        return {
+          success: true,
+          output: result.output,
+          logs: result.logs,
+          duration: result.duration
+        };
+      } else {
+        return {
+          success: false,
+          error: result.error,
+          errorType: result.errorType,
+          logs: result.logs,
+          duration: result.duration
+        };
+      }
+    }
+  });
+}
+
+/**
  * Create all tools for the agent
  */
+// ============================================================================
+// Task Management Tools
+// ============================================================================
+
+/**
+ * Create the createSubtask tool for breaking down complex work
+ */
+export function createCreateSubtaskTool(ctx: ToolContext) {
+  return tool({
+    description: `Create a subtask to break down complex work into manageable pieces.
+
+Use this when you're working on something substantial that has multiple distinct steps.
+Each subtask can have dependencies on other subtasks - a task won't be "ready" until its dependencies are complete.
+
+Examples:
+- For "add authentication": create subtasks for research, backend, frontend, tests
+- For "refactor database layer": create subtasks for each module to refactor
+- For "fix bug X": create subtasks for reproduce, investigate, fix, verify
+
+Subtasks help you stay organized and let the user see progress.`,
+    inputSchema: jsonSchema<{
+      type: "explore" | "code" | "test" | "review" | "plan" | "fix";
+      title: string;
+      description?: string;
+      dependencies?: string[];
+    }>({
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          enum: ["explore", "code", "test", "review", "plan", "fix"],
+          description:
+            "Type of work: explore (research/investigate), code (implement), test (write tests), review (check work), plan (design approach), fix (bug fix)"
+        },
+        title: {
+          type: "string",
+          description: "Short, descriptive title for the subtask"
+        },
+        description: {
+          type: "string",
+          description: "Optional longer description of what needs to be done"
+        },
+        dependencies: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional array of subtask IDs that must complete before this one can start"
+        }
+      },
+      required: ["type", "title"]
+    }),
+    execute: async ({ type, title, description, dependencies }) => {
+      if (!ctx.tasks) {
+        return {
+          error: "Task management not available",
+          hint: "The orchestration layer handles task tracking automatically"
+        };
+      }
+
+      const result = ctx.tasks.createSubtask({
+        type,
+        title,
+        description,
+        dependencies
+      });
+
+      if ("error" in result) {
+        return { error: result.error };
+      }
+
+      return {
+        id: result.id,
+        title: result.title,
+        type: result.type,
+        status: result.status,
+        message: `Created subtask: ${result.title}`
+      };
+    }
+  });
+}
+
+/**
+ * Create the listTasks tool for viewing current task state
+ */
+export function createListTasksTool(ctx: ToolContext) {
+  return tool({
+    description: `List all tasks and their current status.
+
+Shows the task tree with:
+- Task ID, title, type, and status
+- Which tasks are ready to work on (all dependencies satisfied)
+- Overall progress (percentage complete)
+
+Use this to:
+- See what work remains
+- Check which tasks are blocked
+- Review progress before reporting to user`,
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {}
+    }),
+    execute: async () => {
+      if (!ctx.tasks) {
+        return {
+          tasks: [],
+          progress: { total: 0, complete: 0, percentComplete: 0 },
+          message:
+            "Task management not available - working without task tracking"
+        };
+      }
+
+      const tree = ctx.tasks.getTaskTree();
+      const progress = ctx.tasks.getProgress();
+      const ready = ctx.tasks.getReadyTasks();
+
+      // Flatten tree for display
+      const flattenTree = (
+        nodes: TaskTreeNode[],
+        result: Array<{
+          id: string;
+          title: string;
+          type: string;
+          status: string;
+          depth: number;
+          isReady: boolean;
+        }> = []
+      ) => {
+        for (const node of nodes) {
+          result.push({
+            id: node.task.id,
+            title: node.task.title,
+            type: node.task.type,
+            status: node.task.status,
+            depth: node.depth,
+            isReady: ready.some((t) => t.id === node.task.id)
+          });
+          flattenTree(node.children, result);
+        }
+        return result;
+      };
+
+      return {
+        tasks: flattenTree(tree),
+        progress: {
+          total: progress.total,
+          pending: progress.pending,
+          inProgress: progress.inProgress,
+          complete: progress.complete,
+          blocked: progress.blocked,
+          percentComplete: progress.percentComplete
+        },
+        readyCount: ready.length
+      };
+    }
+  });
+}
+
+/**
+ * Create the completeTask tool for marking work as done
+ */
+export function createCompleteTaskTool(ctx: ToolContext) {
+  return tool({
+    description: `Mark a subtask as complete.
+
+Call this after you've finished the work for a subtask. This:
+- Updates the task status to complete
+- May unblock dependent tasks that were waiting
+- Updates overall progress
+
+You can optionally include a brief result/summary of what was accomplished.`,
+    inputSchema: jsonSchema<{ taskId: string; result?: string }>({
+      type: "object",
+      properties: {
+        taskId: {
+          type: "string",
+          description: "The ID of the subtask to mark complete"
+        },
+        result: {
+          type: "string",
+          description:
+            "Optional brief summary of what was accomplished (e.g., 'Added JWT auth with refresh tokens')"
+        }
+      },
+      required: ["taskId"]
+    }),
+    execute: async ({ taskId, result }) => {
+      if (!ctx.tasks) {
+        return {
+          success: false,
+          error: "Task management not available"
+        };
+      }
+
+      const success = ctx.tasks.completeTask(taskId, result);
+
+      if (!success) {
+        return {
+          success: false,
+          error: `Could not complete task ${taskId} - task may not exist or already be complete`
+        };
+      }
+
+      const progress = ctx.tasks.getProgress();
+      const ready = ctx.tasks.getReadyTasks();
+
+      return {
+        success: true,
+        message: `Task ${taskId} marked complete`,
+        progress: {
+          complete: progress.complete,
+          total: progress.total,
+          percentComplete: progress.percentComplete
+        },
+        nowReady: ready.map((t) => ({ id: t.id, title: t.title }))
+      };
+    }
+  });
+}
+
+/**
+ * Create the delegateToSubagent tool for parallel task execution
+ */
+export function createDelegateToSubagentTool(ctx: ToolContext) {
+  return tool({
+    description: `Delegate a task to a subagent for parallel execution.
+
+Use this when you have a subtask that can be executed independently:
+- The subagent runs in parallel with your main work
+- It has its own focused LLM context
+- Good for: file operations, searches, refactoring, tests
+
+The subagent will update the task status automatically when done.
+You can check on delegated tasks with checkSubagentStatus or wait for all with waitForSubagents.
+
+IMPORTANT: Only delegate tasks that are truly independent - don't delegate tasks that depend on work you're still doing.`,
+    inputSchema: jsonSchema<{
+      taskId: string;
+      title: string;
+      description: string;
+      context?: string;
+    }>({
+      type: "object",
+      properties: {
+        taskId: {
+          type: "string",
+          description:
+            "The ID of the subtask to delegate (must be a subtask you created)"
+        },
+        title: {
+          type: "string",
+          description: "Brief title for the subagent's work"
+        },
+        description: {
+          type: "string",
+          description:
+            "Detailed description of what the subagent should do. Be specific!"
+        },
+        context: {
+          type: "string",
+          description:
+            "Optional context to help the subagent (e.g., relevant file paths, constraints)"
+        }
+      },
+      required: ["taskId", "title", "description"]
+    }),
+    execute: async ({ taskId, title, description, context }) => {
+      if (!ctx.subagents) {
+        return {
+          success: false,
+          error: "Subagent delegation not available"
+        };
+      }
+
+      const result = await ctx.subagents.delegateTask({
+        taskId,
+        title,
+        description,
+        context
+      });
+
+      if ("error" in result) {
+        return { success: false, error: result.error };
+      }
+
+      return {
+        success: true,
+        message: "Task delegated to subagent",
+        facetName: result.facetName,
+        taskId,
+        activeSubagents: ctx.subagents.activeCount()
+      };
+    }
+  });
+}
+
+/**
+ * Create the checkSubagentStatus tool
+ */
+export function createCheckSubagentStatusTool(ctx: ToolContext) {
+  return tool({
+    description: `Check the status of a delegated subagent task.
+
+Use this to see if a task you delegated is complete, still running, or failed.`,
+    inputSchema: jsonSchema<{ taskId: string }>({
+      type: "object",
+      properties: {
+        taskId: {
+          type: "string",
+          description: "The ID of the delegated task to check"
+        }
+      },
+      required: ["taskId"]
+    }),
+    execute: async ({ taskId }) => {
+      if (!ctx.subagents) {
+        return { error: "Subagent delegation not available" };
+      }
+
+      const status = await ctx.subagents.getSubagentStatus(taskId);
+
+      if (!status) {
+        return {
+          found: false,
+          message: `No subagent found for task ${taskId}`
+        };
+      }
+
+      return {
+        found: true,
+        taskId,
+        status: status.status,
+        result: status.result,
+        error: status.error
+      };
+    }
+  });
+}
+
+/**
+ * Create the waitForSubagents tool
+ */
+export function createWaitForSubagentsTool(ctx: ToolContext) {
+  return tool({
+    description: `Wait for all active subagents to complete their work.
+
+Use this when you need all delegated tasks to finish before proceeding.
+Returns the results from all completed subagents.`,
+    inputSchema: jsonSchema<Record<string, never>>({
+      type: "object",
+      properties: {}
+    }),
+    execute: async () => {
+      if (!ctx.subagents) {
+        return { error: "Subagent delegation not available" };
+      }
+
+      const results = await ctx.subagents.waitForSubagents();
+
+      return {
+        completed: results.length,
+        results: results.map((r) => ({
+          taskId: r.taskId,
+          success: r.success,
+          result: r.result?.slice(0, 200),
+          error: r.error,
+          durationMs: r.duration
+        }))
+      };
+    }
+  });
+}
+
 export function createTools(ctx: ToolContext) {
-  return {
+  // biome-ignore lint/suspicious/noExplicitAny: Tool types are complex and vary
+  const tools: Record<string, any> = {
     bash: createBashTool(ctx),
     readFile: createReadFileTool(ctx),
     writeFile: createWriteFileTool(ctx),
@@ -787,8 +1341,25 @@ export function createTools(ctx: ToolContext) {
     browseUrl: createBrowseUrlTool(ctx),
     screenshot: createScreenshotTool(ctx),
     interactWithPage: createInteractWithPageTool(ctx),
-    scrapePage: createScrapePageTool(ctx)
+    scrapePage: createScrapePageTool(ctx),
+    executeCode: createExecuteCodeTool(ctx)
   };
+
+  // Add task management tools if task context is available
+  if (ctx.tasks) {
+    tools.createSubtask = createCreateSubtaskTool(ctx);
+    tools.listTasks = createListTasksTool(ctx);
+    tools.completeTask = createCompleteTaskTool(ctx);
+  }
+
+  // Add subagent delegation tools if subagent context is available
+  if (ctx.subagents) {
+    tools.delegateToSubagent = createDelegateToSubagentTool(ctx);
+    tools.checkSubagentStatus = createCheckSubagentStatusTool(ctx);
+    tools.waitForSubagents = createWaitForSubagentsTool(ctx);
+  }
+
+  return tools;
 }
 
 /**
@@ -806,6 +1377,8 @@ You have access to tools that let you:
 - Take screenshots of web pages
 - Interact with web pages (click, type, navigate)
 - Scrape specific elements from pages
+- Execute JavaScript code in a sandboxed environment for calculations, data transformations, and testing logic
+- Create and manage subtasks for complex multi-step work (createSubtask, listTasks, completeTask)
 
 ## Guidelines
 
@@ -824,6 +1397,59 @@ You have access to tools that let you:
 7. **Use web search wisely**: When you need to look up documentation, find examples, or research best practices, use the webSearch tool. Use newsSearch for recent announcements or updates.
 
 8. **Use browser tools for dynamic content**: When you need to read content from JavaScript-heavy pages, test web apps, or interact with forms, use the browser tools (browseUrl, screenshot, interactWithPage, scrapePage).
+
+9. **Execute code for complex computations**: Use executeCode for data transformations, calculations, JSON manipulation, algorithm testing, and any logic that's easier to express in code than describe. This is safer than bash for pure computation.
+
+## Task Management
+
+For complex multi-step work, you have tools to break it down into tracked subtasks:
+
+- **createSubtask**: Create a subtask with type (explore/code/test/review/plan/fix), title, and optional dependencies
+- **listTasks**: View all tasks, their status, and overall progress
+- **completeTask**: Mark a subtask as done with an optional result summary
+
+**When to use task tools:**
+- For substantial work with 3+ distinct steps (e.g., "add authentication", "refactor the API layer")
+- When work has dependencies (frontend depends on backend being done first)
+- When the user would benefit from seeing progress on a complex request
+
+**When NOT to use task tools:**
+- Simple, quick tasks (e.g., "fix this typo", "add a comment")
+- Single-file changes
+- When you can complete the whole request in one or two tool calls
+
+**Guidelines:**
+1. Create subtasks upfront when you recognize complex work
+2. Use dependencies to model "B depends on A" relationships
+3. Call completeTask after finishing each subtask to update progress
+4. Use listTasks to check what's ready and report progress to the user
+5. Focus on one task at a time - complete it fully before moving on
+
+## Subagent Delegation (Parallel Work)
+
+For truly independent subtasks, you can delegate work to subagents that run in parallel:
+
+- **delegateToSubagent**: Assign a subtask to a subagent with its own focused LLM context
+- **checkSubagentStatus**: Check if a delegated task is complete
+- **waitForSubagents**: Wait for all delegated work to finish
+
+**When to delegate:**
+- Independent file operations (e.g., "update config in file A" while you work on file B)
+- Parallel searches or explorations
+- Tests that can run concurrently
+- Refactoring that doesn't affect files you're working on
+
+**When NOT to delegate:**
+- Tasks that depend on work you're still doing
+- Tasks that need your current context/conversation
+- Sequential work where order matters
+- Very simple tasks (overhead isn't worth it)
+
+**Guidelines:**
+1. Only delegate after creating a subtask with createSubtask
+2. Be specific in the description - the subagent has limited context
+3. Use checkSubagentStatus or waitForSubagents to get results
+4. Subagents share the file system but have isolated LLM contexts
 
 ## Code Style
 

@@ -1,4 +1,4 @@
-# Implementation Plan
+# Implementation Plan: Self-Modifying Coding Agent
 
 ## Current Status
 
@@ -20,9 +20,40 @@
 - [x] **Phase 3.3: Controlled Fetch** - COMPLETE
 - [x] **Phase 3.4: Web Search (Brave Search)** - COMPLETE
 - [x] **Phase 3.5: Browser Automation (Playwright)** - COMPLETE
-- [x] **Phase 4: Agent Loop (LLM integration)** - COMPLETE
-- [ ] Phase 5: UI
-- [ ] Phase 6: Advanced Features
+- [x] **Phase 3.6: Code Execution (LOADER sandbox)** - COMPLETE
+- [x] **Phase 4: Agent Loop (LLM integration)** - COMPLETE (GPT-5.2 with reasoning, 13 tools)
+- [ ] **Phase 5: Session & Message Architecture** - IN PROGRESS
+  - [x] 5.0 Action Logging (audit trail for all tool calls)
+  - [ ] 5.1 Message Storage Schema
+  - [ ] 5.2 Background Task Scheduling
+  - [ ] 5.3 WebSocket Streaming Protocol
+- [x] **Phase 5.4: Task Management** - COMPLETE
+  - [x] tasks.ts module with pure functions (71 tests)
+  - [x] LLM task tools (createSubtask, listTasks, completeTask)
+  - [x] Orchestration-level root task creation
+  - [x] Hybrid approach: orchestration owns lifecycle, LLM can decompose
+- [x] **Phase 5.5: Subagent Parallel Execution** - COMPLETE
+  - [x] Subagent class using DO Facets (src/subagent.ts)
+  - [x] SubagentManager for spawning/tracking facets
+  - [x] LLM delegation tools (delegateToSubagent, checkSubagentStatus, waitForSubagents)
+  - [x] Shared SQLite/Yjs storage, isolated LLM context
+- [ ] Phase 6: Chat UI
+- [ ] Phase 7: Code Editor
+- [ ] Phase 8: Advanced Features (Context Management, Memory, Multi-Session)
+
+### Architecture Decisions Made
+
+| Decision           | Choice                | Rationale                                    |
+| ------------------ | --------------------- | -------------------------------------------- |
+| Action Logging     | SQLite, summarized    | Audit trail, debugging, future approval      |
+| Session Model      | User DO + Session DO  | Multi-tab/multi-device, future multiplayer   |
+| Message Storage    | SQLite + R2 for large | Row limit compliance, full history           |
+| Reasoning Text     | Truncated on save     | Stream full, store summary (first 500 chars) |
+| Background Tasks   | schedule() API        | Built-in, handles DO evictions, retries      |
+| Retry Strategy     | Exponential backoff   | 3 attempts: 2s, 4s, 8s delays                |
+| Task Management    | Hierarchical tasks    | Break complex work into subtasks             |
+| Subagent Pattern   | Separate DOs          | Context isolation, parallel execution        |
+| Context Compaction | Summarize older msgs  | Keep main agent coherent                     |
 
 ---
 
@@ -337,6 +368,50 @@ curl -X POST -H "Content-Type: application/json" \
   http://localhost:8787/agents/coder/test/chat
 ```
 
+### 3.6 Code Execution (LOADER sandbox) ✓ COMPLETE
+
+**Acceptance Criteria**:
+
+- [x] Agent can execute arbitrary JavaScript code
+- [x] Code runs in isolated V8 environment (no network, no filesystem)
+- [x] Console.log outputs are captured
+- [x] Return values are JSON-stringified
+- [x] Timeout protection (configurable, max 120s)
+- [x] Module support for code organization
+
+**Implementation**:
+
+- `executeCode` tool uses existing LOADER infrastructure
+- Code executed in sandboxed dynamic worker with `globalOutbound: null`
+- Result includes: `success`, `output`, `error`, `errorType`, `logs`, `duration`
+- Supports optional ES modules via `modules` parameter
+- Error categorization: `syntax`, `runtime`, `timeout`, `unknown`
+
+**Key Files**:
+
+- `src/agent-tools.ts` - `createExecuteCodeTool()` and `ExecuteCodeFn` type
+- `src/server-without-browser.ts` - `executeCode()` method in Coder Agent
+
+**LLM Tool**:
+
+- `executeCode` - Run JavaScript for calculations, data transformations, testing logic
+
+**Use Cases**:
+
+1. **Complex calculations**: Math operations, statistical analysis
+2. **Data transformations**: JSON parsing, array manipulation, object restructuring
+3. **String processing**: Regex, formatting, templating
+4. **Algorithm testing**: Quick prototyping before writing to files
+5. **Code verification**: Test snippets before committing changes
+
+**Test** (example usage):
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"message":"Calculate the sum and average of [1,2,3,4,5,6,7,8,9,10]"}' \
+  http://localhost:8787/agents/coder/test/chat
+```
+
 ---
 
 ## Phase 4: Agent Loop ✓ COMPLETE
@@ -348,14 +423,18 @@ curl -X POST -H "Content-Type: application/json" \
 **Acceptance Criteria**:
 
 - [x] Can send messages to LLM and get responses
-- [ ] Streaming responses work (TODO - using generateText, not streamText)
-- [ ] Multiple model providers supported (TODO - only OpenAI currently)
+- [ ] Streaming responses work (→ Phase 5.3)
+- [ ] Multiple model providers supported (→ Phase 8)
 
 **Implementation**:
 
 - AI SDK v6 (`ai@6.0.70`) with OpenAI adapter (`@ai-sdk/openai@3.0.25`)
-- Using `gpt-4o` model for best coding performance
+- Using `gpt-5.2` model with reasoning capabilities for best coding performance
 - `generateText()` with automatic tool loop via `stopWhen: stepCountIs(N)`
+- `reasoningEffort: "medium"` for balanced speed/quality
+- `reasoningSummary: "auto"` for insight into model's thought process
+
+**Note**: Streaming will be implemented in Phase 5.3 as part of the WebSocket protocol redesign. This will switch from `generateText()` to `streamText()` and broadcast fine-grained deltas.
 
 **Key Files**:
 
@@ -371,7 +450,7 @@ curl -X POST -H "Content-Type: application/json" \
 
 **Implementation**:
 
-Created 6 tools in `src/agent-tools.ts`:
+Created 13 tools in `src/agent-tools.ts`:
 
 - `bash` - Execute shell commands via just-bash loopback
 - `readFile` - Read files from Yjs storage
@@ -379,6 +458,13 @@ Created 6 tools in `src/agent-tools.ts`:
 - `editFile` - Search-and-replace edits in files
 - `listFiles` - List all project files
 - `fetch` - Controlled HTTP requests via fetch loopback
+- `webSearch` - Search the web via Brave Search API
+- `newsSearch` - Search news via Brave Search API
+- `browseUrl` - Browse and extract content from web pages
+- `screenshot` - Take screenshots of web pages
+- `interactWithPage` - Perform actions on web pages
+- `scrapePage` - Extract elements from web pages
+- `executeCode` - Run JavaScript in sandboxed environment
 
 **Key Files**:
 
@@ -425,28 +511,434 @@ Created 6 tools in `src/agent-tools.ts`:
 
 ---
 
-## Phase 5: UI
+## Phase 5: Session & Message Architecture
+
+**Goal**: Robust session management with durable message storage and background task resilience.
+
+### 5.0 Action Logging
+
+**Acceptance Criteria**:
+
+- [ ] All tool calls logged to SQLite
+- [ ] Logs include tool, action, input, output summary, duration, success/error
+- [ ] Large outputs summarized (not stored in full)
+- [ ] Can query action log by session, tool, time range
+- [ ] Actions linked to originating chat message
+
+**Schema**:
+
+```sql
+CREATE TABLE action_log (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  tool TEXT NOT NULL,
+  action TEXT NOT NULL,
+  input TEXT,
+  output_summary TEXT,
+  duration_ms INTEGER,
+  success INTEGER NOT NULL,
+  error TEXT,
+  message_id TEXT
+);
+
+CREATE INDEX idx_action_log_session ON action_log(session_id, timestamp);
+CREATE INDEX idx_action_log_tool ON action_log(tool, timestamp);
+```
+
+**Tasks**:
+
+- [ ] Create action_log SQLite table in Agent constructor
+- [ ] Add `logAction()` helper method to Agent
+- [ ] Add `summarizeOutput()` helper for different tool types
+- [ ] Update loopback methods to log actions
+- [ ] Add HTTP endpoint to query action log
+- [ ] Add tests for action logging
+
+**Implementation**:
+
+```typescript
+interface ActionLogEntry {
+  id: string;
+  sessionId: string;
+  timestamp: number;
+  tool: string;
+  action: string;
+  input?: string;
+  outputSummary?: string;
+  durationMs?: number;
+  success: boolean;
+  error?: string;
+  messageId?: string;
+}
+
+async logAction(entry: Omit<ActionLogEntry, 'id' | 'timestamp'>): Promise<string> {
+  const id = crypto.randomUUID();
+  const timestamp = Date.now();
+
+  this.sql.exec(`
+    INSERT INTO action_log (id, session_id, timestamp, tool, action, input, output_summary, duration_ms, success, error, message_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, id, entry.sessionId, timestamp, entry.tool, entry.action,
+     entry.input, entry.outputSummary, entry.durationMs,
+     entry.success ? 1 : 0, entry.error, entry.messageId);
+
+  return id;
+}
+```
+
+**Output Summarization Examples**:
+
+| Tool        | Summary Format                                      |
+| ----------- | --------------------------------------------------- |
+| bash        | `exit=0, stdout=1234 chars, stderr=0 chars`         |
+| readFile    | `file.ts: 500 lines, 12KB`                          |
+| writeFile   | `wrote file.ts: 500 lines`                          |
+| fetch       | `200 OK, 5.2KB response`                            |
+| webSearch   | `5 results for "query..."`                          |
+| browseUrl   | `https://... - "Page Title" (1234 elements)`        |
+| executeCode | `success, returned: {...}` or `error: TypeError...` |
+
+---
+
+### 5.1 Message Storage Schema
+
+**Acceptance Criteria**:
+
+- [ ] One row per message in SQLite
+- [ ] Support for user, assistant, tool messages
+- [ ] R2 integration for large content (>50KB)
+- [ ] Reasoning truncated for storage (full during stream)
+- [ ] Token counting for context management
+
+**Schema**:
+
+```sql
+CREATE TABLE messages (
+  id TEXT PRIMARY KEY,
+  role TEXT NOT NULL,
+  content TEXT,
+  content_r2_key TEXT,
+  tool_calls JSON,
+  tool_results_summary TEXT,
+  tool_results_preview TEXT,
+  tool_results_r2_key TEXT,
+  reasoning TEXT,
+  reasoning_full_size INTEGER,
+  status TEXT DEFAULT 'pending',
+  error TEXT,
+  task_id TEXT,
+  checkpoint TEXT,
+  heartbeat_at INTEGER,
+  timestamp INTEGER NOT NULL,
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  model TEXT,
+  attempt INTEGER DEFAULT 1,
+  parent_id TEXT
+);
+```
+
+**Tasks**:
+
+- [ ] Create new message schema
+- [ ] Implement message CRUD operations
+- [ ] Add R2 storage for large content
+- [ ] Implement `summarizeToolResult()` helper
+- [ ] Implement `truncateReasoning()` helper
+- [ ] Add token counting
+
+### 5.2 Background Task Scheduling
+
+**Status**: Core module complete, server integration pending
+
+**Acceptance Criteria**:
+
+- [x] Exponential backoff calculation (scheduling.ts)
+- [x] Transient vs permanent error classification (scheduling.ts)
+- [x] Orphaned task detection (scheduling.ts)
+- [x] Recovery action determination (scheduling.ts)
+- [x] Unit tests (75 tests in scheduling.test.ts)
+- [x] Integration test structure (loader.scheduling.test.ts - slow tests separate)
+- [ ] Agent work uses schedule() API for durability
+- [ ] Survives DO evictions/restarts
+- [ ] Heartbeat checkpoints for long operations
+
+**Module**: `src/scheduling.ts`
+
+Pure functions for scheduling logic (stable, rarely changes):
+
+- `calculateBackoff(attempt)` - Exponential backoff calculation
+- `isTransientError(error)` - Classify retry-worthy errors
+- `findOrphanedMessages(messages)` - Detect stuck tasks
+- `determineRecoveryAction(message)` - Decide retry/resume/fail
+- `SCHEDULING_CONFIG` - Configurable defaults
+
+**Implementation**:
+
+```typescript
+// Enqueue durable work
+async queueChat(messageId: string, content: string) {
+  await this.schedule(0, "executeChat", {
+    messageId,
+    content,
+    attempt: 1,
+    maxAttempts: 3
+  });
+}
+
+// Executed by scheduler
+async executeChat(payload: ChatPayload) {
+  try {
+    await this.runAgentLoop(payload);
+  } catch (error) {
+    await this.handleExecutionError(payload, error);
+  }
+}
+
+// Retry with backoff
+async handleExecutionError(payload: ChatPayload, error: Error) {
+  if (isTransientError(error) && payload.attempt < payload.maxAttempts) {
+    const delay = Math.pow(2, payload.attempt); // 2s, 4s, 8s
+    await this.schedule(delay, "executeChat", {
+      ...payload,
+      attempt: payload.attempt + 1
+    });
+    this.broadcastRetrying(payload, error, delay);
+  } else {
+    await this.markFailed(payload.messageId, error);
+  }
+}
+```
+
+**Tasks**:
+
+- [x] Create scheduling.ts module with pure functions
+- [x] Add unit tests (scheduling.test.ts - 75 tests)
+- [x] Create slow integration tests (loader.scheduling.test.ts)
+- [ ] Refactor `handleChatMessage` to use schedule()
+- [ ] Implement `executeChat()` scheduled method
+- [ ] Add heartbeat for long operations
+- [ ] Add orphaned task recovery on startup (using findOrphanedMessages)
+- [ ] Add cancellation support via `cancelSchedule()`
+
+### 5.3 WebSocket Streaming Protocol
+
+**Acceptance Criteria**:
+
+- [ ] Fine-grained events (text-delta, reasoning-delta, tool-call-\*)
+- [ ] Multi-tab sync (all connected tabs see same state)
+- [ ] Reconnection with state replay
+- [ ] Background task status updates
+
+**Message Types**:
+
+```typescript
+type WSMessage =
+  | { type: "status"; status: Status }
+  | { type: "text-delta"; messageId: string; delta: string }
+  | { type: "reasoning-delta"; messageId: string; delta: string }
+  | {
+      type: "tool-call-start";
+      messageId: string;
+      callId: string;
+      tool: string;
+      input: unknown;
+    }
+  | {
+      type: "tool-call-result";
+      messageId: string;
+      callId: string;
+      output: unknown;
+      duration: number;
+    }
+  | { type: "message-complete"; message: StoredMessage }
+  | { type: "error"; error: string; messageId?: string }
+  | { type: "history"; messages: StoredMessage[] }
+  | { type: "sync"; state: AgentState }
+  | { type: "task-queued"; taskId: string }
+  | {
+      type: "task-retrying";
+      taskId: string;
+      error: string;
+      attempt: number;
+      retryIn: number;
+    }
+  | { type: "task-complete"; taskId: string }
+  | { type: "task-failed"; taskId: string; error: string; attempts: number };
+```
+
+**Tasks**:
+
+- [ ] Define TypeScript types for all message types
+- [ ] Update agent loop to use streamText instead of generateText
+- [ ] Implement delta broadcasting for text and reasoning
+- [ ] Add tool call lifecycle events
+- [ ] Implement reconnection handler with history replay
+- [ ] Add sync on connect
+
+### 5.4 Task Management
+
+**Status**: COMPLETE ✓
+
+**Goal**: Break complex work into manageable subtasks with dependency tracking.
+
+**Acceptance Criteria**:
+
+- [x] Task types and interfaces (tasks.ts)
+- [x] Task graph operations (add, complete, get ready tasks)
+- [x] Dependency resolution
+- [x] Hierarchical task decomposition
+- [x] Unit tests (71 tests)
+- [x] Integration with agent loop (root task per message)
+- [x] LLM task tools (createSubtask, listTasks, completeTask)
+- [x] SYSTEM_PROMPT updates for task-aware behavior
+- [x] Subagent parallel execution via DO Facets
+
+**Module**: `src/tasks.ts`
+
+Pure functions for task management:
+
+- `createTask()` - Create a new task
+- `completeTask()` - Mark task complete with result
+- `getReadyTasks()` - Get tasks with satisfied dependencies
+- `getTaskTree()` - Get hierarchical view
+- `validateDependencies()` - Check for cycles/missing deps
+
+**Task Schema**:
+
+```typescript
+interface Task {
+  id: string;
+  parentId?: string;
+  type: "explore" | "code" | "test" | "review" | "plan";
+  description: string;
+  status: "pending" | "in_progress" | "blocked" | "complete" | "failed";
+  dependencies: string[];
+  result?: string;
+  assignedTo?: string; // Subagent/DO id
+  createdAt: number;
+  completedAt?: number;
+  metadata?: Record<string, unknown>;
+}
+```
+
+**Configuration**:
+
+```typescript
+const TASK_CONFIG = {
+  maxDepth: 3, // Don't break down more than 3 levels
+  maxSubtasks: 10, // Max children per task
+  maxTotalTasks: 50 // Prevent runaway decomposition
+};
+```
+
+### 5.5 Context Management (Future)
+
+**Goal**: Keep agent context coherent over long sessions.
+
+**Features**:
+
+- Summarize older messages
+- Compress tool results
+- Provide focused context to subagents
+
+### 5.6 Subagent Coordination (Future)
+
+**Goal**: Spawn and coordinate multiple agents for parallel work.
+
+**Features**:
+
+- Separate DOs for isolated context
+- Parent sleeps while subagents work
+- Results aggregation via R2/KV
+- `toModelOutput` for summarization
+
+---
+
+## Phase 6: Chat UI
 
 **Goal**: Human-usable interface for interacting with the agent.
 
-### 5.1 Chat Interface
+### 6.1 Chat Interface
 
 **Acceptance Criteria**:
 
 - [ ] Can send messages and see responses
-- [ ] Streaming responses display in real-time
-- [ ] Tool calls are visible
-- [ ] Can start/stop agent
+- [ ] Streaming responses display in real-time (text + reasoning)
+- [ ] Tool calls visible with expandable details
+- [ ] History pagination for long sessions
+- [ ] Cancel in-progress operations
 
 **Tasks**:
 
 - [ ] Create ChatPanel component
 - [ ] Wire up to useAgent hook
-- [ ] Display messages with proper formatting
+- [ ] Implement message streaming with deltas
 - [ ] Show tool call details (collapsible)
 - [ ] Add send button and input
+- [ ] Add cancel button during execution
+- [ ] Implement infinite scroll for history
 
-### 5.2 Code Editor
+### 6.2 Message Editing & Retry
+
+**Acceptance Criteria**:
+
+- [ ] Can edit previous user messages
+- [ ] Editing triggers new agent response
+- [ ] Document state rolls back on edit
+- [ ] Retry after failure works correctly
+
+**Implementation Options**:
+
+1. **Fork model**: Original timeline preserved, edit creates branch
+2. **Replace model**: Edit overwrites history from that point
+
+**Tasks**:
+
+- [ ] Add edit button on user messages
+- [ ] Implement message editing with timeline branching
+- [ ] Add retry button on failed messages
+- [ ] Wire up to document state for rollback
+
+### 6.3 Attachments
+
+**Acceptance Criteria**:
+
+- [ ] Can attach files to messages
+- [ ] Images included in LLM context
+- [ ] Large files stored in R2
+- [ ] Preview thumbnails in UI
+
+**Tasks**:
+
+- [ ] Add file upload to input area
+- [ ] Store attachments in R2
+- [ ] Generate thumbnails for images
+- [ ] Update LLM context to include attachments
+
+### 6.4 Background Task Status
+
+**Acceptance Criteria**:
+
+- [ ] See status of queued tasks when offline
+- [ ] Retry indicator shows attempt count
+- [ ] Failed tasks show error and "Retry" option
+
+**Tasks**:
+
+- [ ] Create TaskStatus component
+- [ ] Wire up task-\* events from WebSocket
+- [ ] Show persistent toast/banner for background work
+- [ ] Handle reconnection to see background work status
+
+---
+
+## Phase 7: Code Editor
+
+**Goal**: Real-time collaborative code editing with the agent.
+
+### 7.1 Monaco Editor Integration
 
 **Acceptance Criteria**:
 
@@ -472,49 +964,49 @@ Created 6 tools in `src/agent-tools.ts`:
 }
 ```
 
-### 5.3 Status & Actions
+### 7.2 File Operations
 
 **Acceptance Criteria**:
 
-- [ ] Agent status visible (idle, thinking, executing)
-- [ ] Action log visible
-- [ ] Can approve/reject pending actions (future)
+- [ ] Create/rename/delete files
+- [ ] Folder support
+- [ ] Drag and drop reordering
 
 **Tasks**:
 
-- [ ] Create StatusBar component
-- [ ] Create ActionLog component
-- [ ] Wire up to Agent state
+- [ ] Add file context menu
+- [ ] Implement file CRUD via WebSocket
+- [ ] Add drag-drop support
 
 ---
 
-## Phase 6: Advanced Features (Future)
+## Phase 8: Advanced Features (Future)
 
-### 6.1 Human-in-the-Loop Approval
+### 8.1 Human-in-the-Loop Approval
 
 - [ ] Actions can require approval
 - [ ] Approval UI inline in chat
 - [ ] Timeout handling for pending approvals
 
-### 6.2 Sandbox Integration
+### 8.2 Sandbox Integration
 
 - [ ] Detect when sandbox is needed
 - [ ] Spin up sandbox for heavy operations
 - [ ] Handle sandbox lifecycle
 
-### 6.3 Skills Registry
+### 8.3 Skills Registry
 
 - [ ] Define skill format
 - [ ] Load skills on demand
 - [ ] Agent can create new skills
 - [ ] Share skills between sessions
 
-### 6.4 Persistence & Wake/Sleep
+### 8.4 Session Sharing (Multiplayer)
 
-- [ ] Save continuation on timeout
-- [ ] Resume from continuation
-- [ ] Handle webhook triggers
-- [ ] Scheduled tasks via alarms
+- [ ] User DO for session registry
+- [ ] Invite links with access control
+- [ ] Presence indicators
+- [ ] Cursor sharing in editor
 
 ---
 
@@ -631,5 +1123,55 @@ npm test -- src/__tests__/loader.test.ts
 4. **Bash Tool** - Shell command execution via just-bash
 5. **FS Tool** - Basic in-memory file system
 6. **Fetch Tool** - Controlled HTTP fetch with allowlists and logging
-7. **LLM Integration** - GPT-4o agent with 6 tools and automatic tool loop
-8. **Chat History** - SQLite-backed conversation persistence
+7. **Web Search** - Brave Search API for web and news queries
+8. **Browser Automation** - Playwright-based page browsing, screenshots, interactions
+9. **Code Execution** - LOADER-based JavaScript sandbox with module support
+10. **LLM Integration** - GPT-5.2 reasoning model with 13 tools and automatic tool loop
+11. **Chat History** - SQLite-backed conversation persistence
+12. **Architecture Design** - Session, message storage, streaming, and background task patterns
+13. **Action Logging** - Audit trail for all tool calls with output summarization
+14. **Scheduling Module** - Pure functions for backoff, error classification, recovery (75 tests)
+
+---
+
+## Upcoming Work (Phase 5)
+
+### Priority Order
+
+0. **Action Logging** (5.0) - COMPLETE ✓
+   - ✅ Create action_log SQLite table
+   - ✅ Add logAction() helper to Agent
+   - ✅ Implement output summarization per tool type
+   - ✅ Log actions in onStepFinish callback
+   - ✅ Add HTTP endpoints (/actions, /actions/clear)
+   - ✅ Add tests for action logging
+
+1. **Background Task Scheduling** (5.2) - IN PROGRESS
+   - ✅ scheduling.ts module with pure functions
+   - ✅ 75 unit tests for recovery logic (scheduling.test.ts)
+   - ✅ Slow integration test structure (loader.scheduling.test.ts)
+   - **NEXT**: Server integration:
+     - Refactor handleChatMessage to use this.schedule()
+     - Add executeChat() scheduled method
+     - Wire up orphaned task recovery using findOrphanedMessages()
+     - Add heartbeat checkpoints for long operations
+     - Fill in slow integration tests with real assertions
+
+2. **Message Storage Schema** (5.1)
+   - Create new SQLite schema for messages
+   - Implement R2 integration for large content
+   - Add token counting and truncation helpers
+
+3. **WebSocket Streaming Protocol** (5.3)
+   - Define TypeScript types for all message types
+   - Switch from generateText() to streamText()
+   - Implement delta broadcasting
+   - Add reconnection with state replay
+
+### Implementation Notes
+
+- Start with 5.0 (action logging) - simple, foundational, useful immediately
+- Then 5.2 (scheduling) since it affects the execution model
+- 5.1 (storage) can be developed in parallel with 5.2
+- 5.3 (streaming) depends on both and comes last
+- All changes should be backwards compatible with existing tests
