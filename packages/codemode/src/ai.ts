@@ -8,6 +8,7 @@ import {
 } from "zod-to-ts";
 import { getAgentByName } from "agents";
 import { env, WorkerEntrypoint } from "cloudflare:workers";
+import { openai } from "@ai-sdk/openai";
 
 function toCamelCase(str: string) {
   return str
@@ -35,12 +36,12 @@ export class CodeModeProxy extends WorkerEntrypoint<
 }
 
 export async function experimental_codemode(options: {
-  model: LanguageModel;
   tools: ToolSet;
   prompt: string;
   globalOutbound: Fetcher;
   loader: WorkerLoader;
   proxy: Fetcher<CodeModeProxy>;
+  model?: LanguageModel;
 }): Promise<{
   prompt: string;
   tools: ToolSet;
@@ -67,7 +68,7 @@ export async function experimental_codemode(options: {
     execute: async ({ functionDescription }) => {
       try {
         const response = await generateObject({
-          model: options.model,
+          model: options.model ? options.model : openai("gpt-4.1"),
           schema: z.object({
             code: z.string()
           }),

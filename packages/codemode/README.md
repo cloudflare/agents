@@ -87,6 +87,7 @@ const tools = {
 
 // Configure Code Mode
 const { prompt, tools: wrappedTools } = await codemode({
+  model: openai("gpt-4o"), // optional, defaults to openai("gpt-4.1")
   prompt: "You are a helpful assistant...",
   tools,
   globalOutbound: env.globalOutbound,
@@ -156,6 +157,7 @@ export class CodeModeAgent extends Agent<Env> {
     };
 
     const { prompt, tools: wrappedTools } = await codemode({
+      model: openai("gpt-4o"), // optional, defaults to openai("gpt-4.1")
       prompt: "You are a helpful assistant...",
       tools: allTools,
       globalOutbound: env.globalOutbound,
@@ -293,6 +295,7 @@ Wraps your tools with Code Mode, converting them into a single code-generating t
 - `globalOutbound: Fetcher` - Service binding for network access control
 - `loader: WorkerLoader` - Worker Loader binding for code execution
 - `proxy: Fetcher<CodeModeProxy>` - Proxy binding for tool execution
+- `model?: LanguageModel` - The language model to use for code generation (optional, defaults to `openai("gpt-4.1")`)
 
 **Returns:**
 
