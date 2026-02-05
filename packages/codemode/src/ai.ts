@@ -1,5 +1,4 @@
-import { generateObject, tool, type ToolSet } from "ai";
-import { openai } from "@ai-sdk/openai";
+import { generateObject, tool, type ToolSet, type LanguageModel } from "ai";
 import { z } from "zod";
 import { compile as compileJsonSchemaToTs } from "json-schema-to-typescript";
 import {
@@ -36,6 +35,7 @@ export class CodeModeProxy extends WorkerEntrypoint<
 }
 
 export async function experimental_codemode(options: {
+  model: LanguageModel;
   tools: ToolSet;
   prompt: string;
   globalOutbound: Fetcher;
@@ -67,7 +67,7 @@ export async function experimental_codemode(options: {
     execute: async ({ functionDescription }) => {
       try {
         const response = await generateObject({
-          model: openai("gpt-4.1"),
+          model: options.model,
           schema: z.object({
             code: z.string()
           }),
