@@ -294,6 +294,170 @@ export { BrowserLoopback } from "./loopbacks/browser";
 
 ---
 
+## 9. Durable Object Facets in Test Environment
+
+**When**: Implementing Phase 5.5 (Subagent Parallel Execution)
+
+**Problem**: The experimental Durable Object Facets API doesn't work correctly in `vitest-pool-workers` - the `ctx.facets.get()` call fails when passing a class directly.
+
+**Error**:
+
+```
+TypeError: Incorrect type for the 'class' field on 'StartupOptions': the provided value is not
+of type 'DurableObjectClass or LoopbackDurableObjectNamespace or LoopbackColoLocalActorNamespace'.
+```
+
+**Root Cause**:
+
+- Facets require the class to be recognized as a `DurableObjectClass`
+- In the vitest-pool-workers environment, the class is just a regular ES class
+- The runtime expects a namespace binding or internal DO class representation
+- The `experimental` compatibility flag is set, but facets have additional runtime requirements
+
+**Attempts**:
+
+1. Pass raw class to `facets.get()` - Failed with type error
+2. Export class from main module - Same error
+3. Add class to wrangler DO bindings - Would create separate DO, not facet
+
+**Solution**: Design for graceful degradation and test in production:
+
+```typescript
+// Make SubagentManager handle missing facets gracefully
+async spawnSubagent(task: Task, context?: string): Promise<string> {
+  const facetName = `subagent-${task.id}`;
+
+  // This may throw if facets aren't supported
+  const facet = this.ctx.facets.get<Subagent>(facetName, () => ({
+    class: Subagent
+  }));
+
+  // Catch errors from async execution to prevent unhandled rejections
+  facet.execute({...}).catch((error: Error) => {
+    console.error(`Subagent ${facetName} execution failed:`, error.message);
+    this.activeSubagents.delete(task.id);
+  });
+
+  return facetName;
+}
+
+// Return sensible defaults when facets aren't available
+async getSubagentStatus(taskId: string): Promise<SubagentStatus | null> {
+  if (!this.activeSubagents.has(taskId)) return null;
+
+  try {
+    const facet = this.ctx.facets.get<Subagent>(...);
+    return facet.getStatus();
+  } catch {
+    // Facets not available - return tracking info
+    const tracking = this.activeSubagents.get(taskId);
+    return tracking ? { taskId, status: "pending", startedAt: tracking.startedAt } : null;
+  }
+}
+```
+
+**Test Strategy**:
+
+1. **Unit tests (run by default)**: Test types, tracking logic, task creation
+2. **Infrastructure tests (run by default)**: Verify endpoints exist, tasks are created
+3. **Facet tests (skip by default)**: Require `RUN_FACET_TESTS=true` and production environment
+4. **LLM integration tests (skip by default)**: Require `RUN_SLOW_TESTS=true` and API key
+
+```bash
+# Regular tests (always pass)
+npm test
+
+# Test facets in production
+wrangler dev  # Then test manually or with curl
+
+# Full integration
+RUN_SLOW_TESTS=true npm test -- src/__tests__/loader.subagent.test.ts
+```
+
+**Lesson**: Experimental APIs may have different behavior in test vs production environments. Design tests to degrade gracefully and document how to run full integration tests.
+
+---
+
+## 10. TypeScript Errors with AI SDK Tool Types
+
+**When**: Implementing task management and subagent tools
+
+**Problem**: TypeScript's strict type checking conflicts with the AI SDK's generic `tool()` function return type when building a dynamic tool registry.
+
+**Error**:
+
+```
+Type 'Tool<...>' is not assignable to type 'Tool<never, never>'
+```
+
+**Root Cause**:
+
+- Each `tool()` call returns a specific generic type based on its input/output schemas
+- When collecting tools into a `Record<string, Tool>`, TypeScript can't unify the different generic parameters
+- The AI SDK's type definitions are complex and don't easily compose
+
+**Solution**: Use `any` with a biome-ignore comment:
+
+```typescript
+export function createTools(ctx: ToolContext) {
+  // biome-ignore lint/suspicious/noExplicitAny: Tool types are complex and vary
+  const tools: Record<string, any> = {
+    bash: createBashTool(ctx),
+    readFile: createReadFileTool(ctx)
+    // ...
+  };
+
+  // Conditionally add tools
+  if (ctx.tasks) {
+    tools.createSubtask = createCreateSubtaskTool(ctx);
+  }
+
+  return tools;
+}
+```
+
+**Lesson**: Sometimes strict typing gets in the way of practical code. When dealing with complex third-party types, pragmatic `any` with documentation is acceptable.
+
+---
+
+## 11. SQL Tagged Template vs exec() API
+
+**When**: Implementing task management SQLite integration
+
+**Problem**: The `this.sql` tagged template literal in Agents SDK behaves differently from raw SQL APIs.
+
+**Errors**:
+
+```
+Property 'exec' does not exist on type '...'
+Property 'toArray' does not exist on type '...'
+```
+
+**Root Cause**:
+
+- The Agents SDK provides `this.sql` as a tagged template function
+- It doesn't expose `.exec()` for DDL statements
+- Query results are already arrays, no `.toArray()` needed
+- This differs from the raw `DurableObjectState.storage.sql` API
+
+**Solution**: Adapt to the tagged template pattern:
+
+```typescript
+// DDL statements - split into individual calls
+this.sql`CREATE TABLE IF NOT EXISTS tasks (...)`;
+this.sql`CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)`;
+
+// Queries - result is already an array
+const rows = this.sql`SELECT * FROM tasks WHERE session_id = ${id}`;
+for (const row of rows) {
+  // No .toArray() needed
+}
+```
+
+**Lesson**: Different Cloudflare APIs expose SQLite differently. Check the specific API you're using, not just generic SQLite examples.
+
+---
+
 ## Summary
 
 | Problem                    | Category                | Impact               |
@@ -306,6 +470,9 @@ export { BrowserLoopback } from "./loopbacks/browser";
 | RPC type coercion          | Platform behavior       | Runtime errors       |
 | Static vs instance state   | Architecture            | State not persisting |
 | Dual entry points          | Build configuration     | Browser in prod only |
+| Facets in test env         | Experimental APIs       | Tests need prod env  |
+| AI SDK tool types          | TypeScript complexity   | Build errors         |
+| SQL tagged template        | API differences         | Build errors         |
 
 The biggest lessons:
 
@@ -314,3 +481,6 @@ The biggest lessons:
 3. **Design for graceful degradation** - Not all features work in all environments
 4. **Validate at boundaries** - RPC, API calls, user input
 5. **Use separate entry points** - When features can't work in test environments
+6. **Experimental APIs need production testing** - Facets, new features may not work in vitest
+7. **Pragmatic typing** - Sometimes `any` with documentation beats fighting TypeScript
+8. **Know your SQL API** - Tagged templates vs raw SQL have different interfaces

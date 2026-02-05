@@ -2,7 +2,7 @@ import { Agent, type Connection, routeAgentRequest } from "agents";
 import type { WorkerEntrypoint } from "cloudflare:workers";
 import { YjsStorage, type SqlFunction } from "./yjs-storage";
 import { createOpenAI } from "@ai-sdk/openai";
-import { generateText, stepCountIs, type ModelMessage } from "ai";
+import { streamText, stepCountIs, type ModelMessage } from "ai";
 import {
   createTools,
   SYSTEM_PROMPT,
@@ -111,6 +111,15 @@ const MAX_TOOL_ROUNDS = 20;
  * Maximum messages to keep in context (to manage token limits)
  */
 const MAX_CONTEXT_MESSAGES = 50;
+
+/**
+ * Feature flag for experimental subagent endpoints.
+ * Set ENABLE_SUBAGENT_API=true in environment to enable.
+ *
+ * These endpoints use Durable Object Facets which are experimental
+ * and may not work in all environments (e.g., vitest-pool-workers).
+ */
+const ENABLE_SUBAGENT_API = false; // Set to true when facets are stable
 
 /**
  * Interface for the dynamic worker entrypoint
@@ -995,8 +1004,8 @@ export class Coder extends Agent<Env, CoderState> {
         ...this.chatHistory.slice(-MAX_CONTEXT_MESSAGES)
       ];
 
-      // Run the agent with GPT-5.2 reasoning model (faster + smarter than gpt-5)
-      const result = await generateText({
+      // Run the agent with GPT-5.2 reasoning model using streaming
+      const stream = streamText({
         model: openai("gpt-5.2"),
         messages,
         tools,
@@ -1008,75 +1017,95 @@ export class Coder extends Agent<Env, CoderState> {
             // Get reasoning summaries to see the model's thought process
             reasoningSummary: "auto"
           }
-        },
-        onStepFinish: async (step) => {
-          // Report each step's tool calls and results to the client
-          if (step.toolCalls && step.toolCalls.length > 0) {
-            this.setState({ ...this.state, status: "executing" });
-
-            // Send tool calls
-            connection.send(
-              JSON.stringify({
-                type: "tool_calls",
-                calls: step.toolCalls.map((tc) => ({
-                  id: tc.toolCallId,
-                  name: tc.toolName,
-                  input: tc.input
-                }))
-              })
-            );
-
-            // Send tool results and log actions
-            if (step.toolResults) {
-              for (const tr of step.toolResults) {
-                // Log the action to the action_log
-                const isError =
-                  typeof tr.output === "object" &&
-                  tr.output !== null &&
-                  "error" in tr.output;
-                const inputStr = JSON.stringify(tr.input || {});
-                const truncatedInput =
-                  inputStr.length > 1000
-                    ? `${inputStr.slice(0, 1000)}...`
-                    : inputStr;
-
-                this.logAction({
-                  sessionId: this.state.sessionId,
-                  tool: tr.toolName,
-                  action: tr.toolName, // For now, tool name is the action
-                  input: truncatedInput,
-                  outputSummary: this.summarizeOutput(
-                    tr.toolName,
-                    tr.toolName,
-                    tr.output
-                  ),
-                  success: !isError,
-                  error: isError
-                    ? String(
-                        (tr.output as { error?: unknown }).error || "unknown"
-                      )
-                    : undefined
-                });
-
-                connection.send(
-                  JSON.stringify({
-                    type: "tool_result",
-                    callId: tr.toolCallId,
-                    name: tr.toolName,
-                    output: tr.output
-                  })
-                );
-              }
-            }
-
-            this.setState({ ...this.state, status: "thinking" });
-          }
         }
       });
 
-      // Get final response text and reasoning
-      const finalResponse = result.text || "";
-      const reasoning = result.reasoning;
+      // Track accumulated text
+      let accumulatedText = "";
+
+      // Process the stream and send events to client in real-time
+      for await (const event of stream.fullStream) {
+        switch (event.type) {
+          case "text-delta":
+            // Send text chunks as they arrive for real-time display
+            accumulatedText += event.text;
+            connection.send(
+              JSON.stringify({
+                type: "text_delta",
+                delta: event.text
+              })
+            );
+            break;
+
+          case "tool-call":
+            // Tool call is starting
+            this.setState({ ...this.state, status: "executing" });
+            connection.send(
+              JSON.stringify({
+                type: "tool_call",
+                id: event.toolCallId,
+                name: event.toolName,
+                input: event.input
+              })
+            );
+            break;
+
+          case "tool-result":
+            // Tool has completed - log and send result
+            {
+              const isError =
+                typeof event.output === "object" &&
+                event.output !== null &&
+                "error" in event.output;
+              const inputStr = JSON.stringify(event.input || {});
+              const truncatedInput =
+                inputStr.length > 1000
+                  ? `${inputStr.slice(0, 1000)}...`
+                  : inputStr;
+
+              this.logAction({
+                sessionId: this.state.sessionId,
+                tool: event.toolName,
+                action: event.toolName,
+                input: truncatedInput,
+                outputSummary: this.summarizeOutput(
+                  event.toolName,
+                  event.toolName,
+                  event.output
+                ),
+                success: !isError,
+                error: isError
+                  ? String(
+                      (event.output as { error?: unknown }).error || "unknown"
+                    )
+                  : undefined
+              });
+
+              connection.send(
+                JSON.stringify({
+                  type: "tool_result",
+                  callId: event.toolCallId,
+                  name: event.toolName,
+                  output: event.output
+                })
+              );
+
+              this.setState({ ...this.state, status: "thinking" });
+            }
+            break;
+        }
+      }
+
+      // Send done signal after stream completes
+      connection.send(
+        JSON.stringify({
+          type: "text_done"
+        })
+      );
+
+      // Get final result - await the promises
+      const finalResponse = accumulatedText || (await stream.text) || "";
+      const reasoning = await stream.reasoning;
 
       // Send reasoning summary if available (GPT-5 reasoning models)
       if (reasoning) {
@@ -1110,14 +1139,17 @@ export class Coder extends Agent<Env, CoderState> {
       }
 
       // Log usage stats including reasoning tokens
-      if (result.usage) {
+      const usage = await stream.usage;
+      const steps = await stream.steps;
+      if (usage) {
+        const providerMetadata = await stream.providerMetadata;
         const reasoningTokens =
-          (result.providerMetadata as { openai?: { reasoningTokens?: number } })
+          (providerMetadata as { openai?: { reasoningTokens?: number } })
             ?.openai?.reasoningTokens ?? 0;
         console.log(
-          `Agent completed: ${result.steps.length} steps, ` +
-            `${result.usage.inputTokens ?? 0} input tokens, ` +
-            `${result.usage.outputTokens ?? 0} output tokens` +
+          `Agent completed: ${steps.length} steps, ` +
+            `${usage.inputTokens ?? 0} input tokens, ` +
+            `${usage.outputTokens ?? 0} output tokens` +
             (reasoningTokens > 0 ? `, ${reasoningTokens} reasoning tokens` : "")
         );
       }
@@ -1552,6 +1584,103 @@ export default class extends WorkerEntrypoint {
         {
           headers: { "Content-Type": "application/json" }
         }
+      );
+    }
+
+    // ==========================================================================
+    // Subagent Test Endpoints (for integration testing)
+    // Guarded by ENABLE_SUBAGENT_API flag - experimental feature
+    // ==========================================================================
+
+    if (ENABLE_SUBAGENT_API) {
+      // Get subagent status
+      if (subPath === "/subagents" && request.method === "GET") {
+        const manager = this.getSubagentManager();
+        const statuses = await manager.getAllStatuses();
+        return new Response(
+          JSON.stringify({
+            activeCount: manager.activeCount,
+            statuses
+          }),
+          { headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // Spawn a test subagent (creates task + spawns facet)
+      if (subPath === "/subagents/spawn" && request.method === "POST") {
+        const { title, description, context } = (await request.json()) as {
+          title: string;
+          description: string;
+          context?: string;
+        };
+
+        // Create a task for the subagent
+        const task = createTask({
+          type: "code",
+          title,
+          description
+        });
+        const result = addTask(this.taskGraph, task);
+        if ("type" in result && typeof result.type === "string") {
+          return new Response(
+            JSON.stringify({ error: "Failed to create task", details: result }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        this.taskGraph = result as TaskGraph;
+        this.saveTask(task);
+
+        // Spawn the subagent
+        try {
+          const manager = this.getSubagentManager();
+          const facetName = await manager.spawnSubagent(task, context);
+          return new Response(
+            JSON.stringify({
+              success: true,
+              taskId: task.id,
+              facetName,
+              activeCount: manager.activeCount
+            }),
+            { headers: { "Content-Type": "application/json" } }
+          );
+        } catch (error) {
+          return new Response(
+            JSON.stringify({
+              error: "Failed to spawn subagent",
+              details: error instanceof Error ? error.message : String(error)
+            }),
+            { status: 500, headers: { "Content-Type": "application/json" } }
+          );
+        }
+      }
+
+      // Get status of a specific subagent
+      if (subPath.startsWith("/subagents/") && request.method === "GET") {
+        const taskId = subPath.slice("/subagents/".length);
+        const manager = this.getSubagentManager();
+        const status = await manager.getSubagentStatus(taskId);
+        if (!status) {
+          return new Response(JSON.stringify({ error: "Subagent not found" }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify(status), {
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+
+    // Get tasks (useful for debugging, not just subagents)
+    if (subPath === "/tasks" && request.method === "GET") {
+      this.loadTaskGraph();
+      const tasks = Array.from(this.taskGraph.tasks.values());
+      return new Response(
+        JSON.stringify({
+          tasks,
+          rootTasks: Array.from(this.taskGraph.rootTasks)
+        }),
+        { headers: { "Content-Type": "application/json" } }
       );
     }
 

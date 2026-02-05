@@ -376,11 +376,15 @@ export class SubagentManager {
 
   /**
    * Spawn a subagent facet to execute a task
+   *
+   * NOTE: Facets require the `experimental` compatibility flag and may not
+   * work in all environments (e.g., vitest-pool-workers). In unsupported
+   * environments, this will throw an error.
    */
   async spawnSubagent(task: Task, context?: string): Promise<string> {
     const facetName = `subagent-${task.id}`;
 
-    // Get or create the facet
+    // Get or create the facet - this may throw if facets aren't supported
     const facet = this.ctx.facets.get<Subagent>(facetName, () => ({
       class: Subagent
     }));
@@ -392,14 +396,20 @@ export class SubagentManager {
     });
 
     // Start execution (non-blocking from parent's perspective)
-    // The facet runs independently
-    facet.execute({
-      taskId: task.id,
-      title: task.title,
-      description: task.description || task.title,
-      context,
-      parentSessionId: this.sessionId
-    });
+    // The facet runs independently - catch errors to prevent unhandled rejections
+    facet
+      .execute({
+        taskId: task.id,
+        title: task.title,
+        description: task.description || task.title,
+        context,
+        parentSessionId: this.sessionId
+      })
+      .catch((error: Error) => {
+        console.error(`Subagent ${facetName} execution failed:`, error.message);
+        // Update tracking to mark as failed
+        this.activeSubagents.delete(task.id);
+      });
 
     return facetName;
   }
@@ -408,7 +418,13 @@ export class SubagentManager {
    * Check status of a subagent
    */
   async getSubagentStatus(taskId: string): Promise<SubagentStatus | null> {
+    // If we're not tracking this subagent, it doesn't exist
+    if (!this.activeSubagents.has(taskId)) {
+      return null;
+    }
+
     const facetName = `subagent-${taskId}`;
+    const tracking = this.activeSubagents.get(taskId);
 
     try {
       const facet = this.ctx.facets.get<Subagent>(facetName, () => ({
@@ -416,6 +432,14 @@ export class SubagentManager {
       }));
       return facet.getStatus();
     } catch {
+      // Facets API not available - return pending status based on tracking
+      if (tracking) {
+        return {
+          taskId,
+          status: "pending",
+          startedAt: tracking.startedAt
+        };
+      }
       return null;
     }
   }

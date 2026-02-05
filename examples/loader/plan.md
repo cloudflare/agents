@@ -32,14 +32,49 @@
   - [x] LLM task tools (createSubtask, listTasks, completeTask)
   - [x] Orchestration-level root task creation
   - [x] Hybrid approach: orchestration owns lifecycle, LLM can decompose
-- [x] **Phase 5.5: Subagent Parallel Execution** - COMPLETE
+- [x] **Phase 5.5: Subagent Parallel Execution** - COMPLETE (blocked by facets)
   - [x] Subagent class using DO Facets (src/subagent.ts)
   - [x] SubagentManager for spawning/tracking facets
   - [x] LLM delegation tools (delegateToSubagent, checkSubagentStatus, waitForSubagents)
   - [x] Shared SQLite/Yjs storage, isolated LLM context
+  - [ ] **BLOCKED**: Facets don't work in vitest-pool-workers, endpoints disabled
+- [ ] **Phase 5.6: Async Tool Calls** - PARTIAL
+  - [x] scheduling.ts module with pure functions
+  - [x] Recovery logic designed
+  - [ ] Integration with main agent loop
+  - [ ] Tools that sleep/resume across requests
+- [ ] **Phase 5.7: Context Compaction**
+  - [ ] context.ts module for message management
+  - [ ] Summarize older messages to save tokens
+  - [ ] Keep recent messages intact
+  - [ ] Configurable compaction thresholds
+- [x] **Phase 5.8: Streaming Tools** - COMPLETE
+  - [x] Switch from generateText() to streamText()
+  - [x] WebSocket streaming of partial results (text_delta, text_done)
+  - [x] Real-time tool call/result events
+- [ ] **Phase 5.9: Tool Caching**
+  - [ ] Cache expensive tool results (web search, fetch)
+  - [ ] TTL-based invalidation
+  - [ ] LRU eviction strategy
+- [ ] **Phase 5.10: Long-term Memory**
+  - [ ] R2/KV storage for persistent memory
+  - [ ] Semantic search over past conversations
+  - [ ] User preferences and learned patterns
 - [ ] Phase 6: Chat UI
 - [ ] Phase 7: Code Editor
-- [ ] Phase 8: Advanced Features (Context Management, Memory, Multi-Session)
+- [ ] Phase 8: Advanced Features (Multi-Session, Multiplayer)
+
+### Agent Architecture Features Status
+
+| Feature            | Priority | Status         | Module          | Notes                                       |
+| ------------------ | -------- | -------------- | --------------- | ------------------------------------------- |
+| Task Management    | High     | ✅ Complete    | `tasks.ts`      | 71 tests, LLM tools, hybrid orchestration   |
+| Async Tool Calls   | High     | ⚡ Partial     | `scheduling.ts` | Module exists, needs agent loop integration |
+| Subagent Pattern   | Medium   | ⚡ Blocked     | `subagent.ts`   | Implemented but facets don't work in tests  |
+| Context Compaction | Medium   | ❌ Not Started | `context.ts`    | Summarize older messages                    |
+| Streaming Tools    | Low      | ✅ Complete    | Phase 5.8       | text_delta + tool_call/result streaming     |
+| Tool Caching       | Low      | ❌ Not Started | -               | Cache expensive results                     |
+| Long-term Memory   | Future   | ❌ Not Started | -               | R2/KV for persistent memory                 |
 
 ### Architecture Decisions Made
 
@@ -52,7 +87,7 @@
 | Background Tasks   | schedule() API        | Built-in, handles DO evictions, retries      |
 | Retry Strategy     | Exponential backoff   | 3 attempts: 2s, 4s, 8s delays                |
 | Task Management    | Hierarchical tasks    | Break complex work into subtasks             |
-| Subagent Pattern   | Separate DOs          | Context isolation, parallel execution        |
+| Subagent Pattern   | DO Facets             | Shared storage, isolated LLM context         |
 | Context Compaction | Summarize older msgs  | Keep main agent coherent                     |
 
 ---
@@ -1010,11 +1045,51 @@ const TASK_CONFIG = {
 
 ---
 
+## Technical Debt & Revisit
+
+Items to revisit when dependencies stabilize or better solutions emerge.
+
+### Explicit `any` Types
+
+These workarounds were needed due to complex third-party types:
+
+- [ ] `src/agent-tools.ts` - `createTools()` uses `Record<string, any>` for tool registry
+  - **Why**: AI SDK tool types are complex generics that don't compose well
+  - **Revisit when**: AI SDK improves type exports or we find a cleaner pattern
+- [ ] `src/subagent.ts` - `SubagentEnv.LOADER` uses `any`
+  - **Why**: WorkerLoader type has complex generic parameters
+  - **Revisit when**: We need type safety for LOADER in subagents
+
+- [ ] `src/subagent.ts` - `DurableObjectFacets.get()` uses `any` for class type
+  - **Why**: Facets API is experimental and type definitions are incomplete
+  - **Revisit when**: Facets become stable with proper type definitions
+
+### Facet Tests
+
+Currently skipped because facets don't work in vitest-pool-workers:
+
+- [ ] `src/__tests__/loader.subagent.test.ts` - "Facet Lifecycle" tests
+  - **Run with**: `RUN_FACET_TESTS=true` (requires production environment)
+  - **Revisit when**: vitest-pool-workers supports facets or we find a workaround
+
+- [ ] Full subagent integration tests (spawn, track, complete)
+  - **Requires**: Both facets working AND API key for LLM calls
+  - **Run with**: `RUN_SLOW_TESTS=true RUN_FACET_TESTS=true wrangler dev`
+
+### Disabled Features
+
+- [ ] `ENABLE_SUBAGENT_API` flag in `server-without-browser.ts`
+  - **Currently**: `false` (endpoints return 404)
+  - **Enable when**: Facets work reliably in production
+  - **Endpoints affected**: `/subagents`, `/subagents/spawn`, `/subagents/:taskId`
+
+---
+
 ## Testing Strategy ✓ IMPLEMENTED
 
 **Test Framework**: Vitest with `@cloudflare/vitest-pool-workers`
 
-**Current Test Coverage**: 112 passing, 6 skipped, 8 todo (126 total)
+**Current Test Coverage**: 298 passing, 18 skipped, 22 todo (338 total)
 
 ### Core Unit Tests ✓
 

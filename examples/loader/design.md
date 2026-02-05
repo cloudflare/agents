@@ -832,36 +832,41 @@ function truncateReasoning(reasoning: string, maxLength = 3000): string {
 
 ## WebSocket Streaming Protocol
 
+The agent uses `streamText()` from the AI SDK to stream LLM responses in real-time.
+This provides a significantly better user experience as text appears character-by-character
+rather than waiting for the entire response.
+
 ### Message Types
 
 ```typescript
 type WSMessage =
-  // Status
+  // Status updates
   | { type: "status"; status: "idle" | "thinking" | "executing" }
 
-  // Streaming content
-  | { type: "text-delta"; messageId: string; delta: string }
-  | { type: "reasoning-delta"; messageId: string; delta: string }
+  // Streaming text content (sent as chunks arrive)
+  | { type: "text_delta"; delta: string }
 
-  // Tool execution
+  // Stream completion signal
+  | { type: "text_done" }
+
+  // Reasoning summary (GPT-5 models with reasoningEffort enabled)
+  | { type: "reasoning"; content: string }
+
+  // Tool execution (streaming - sent as tools are called)
+  | { type: "tool_call"; id: string; name: string; input: unknown }
+  | { type: "tool_result"; callId: string; name: string; output: unknown }
+
+  // Legacy batch format (still supported for compatibility)
   | {
-      type: "tool-call-start";
-      messageId: string;
-      callId: string;
-      tool: string;
-      input: unknown;
-    }
-  | {
-      type: "tool-call-result";
-      messageId: string;
-      callId: string;
-      output: unknown;
-      duration: number;
+      type: "tool_calls";
+      calls: Array<{ id: string; name: string; input: unknown }>;
     }
 
-  // Completion
-  | { type: "message-complete"; message: StoredMessage }
-  | { type: "error"; error: string; messageId?: string }
+  // Final complete message (sent after stream finishes)
+  | { type: "chat"; message: { role: "assistant"; content: string } }
+
+  // Errors
+  | { type: "error"; error: string }
 
   // Connection lifecycle
   | { type: "history"; messages: StoredMessage[] }
