@@ -2,31 +2,32 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 
-const server = new McpServer({
-  name: "Hello MCP Server",
-  version: "1.0.0"
-});
+const createServer = () => {
+  const server = new McpServer({
+    name: "Hello MCP Server",
+    version: "1.0.0"
+  });
 
-server.registerTool(
-  "hello",
-  {
-    description: "Returns a greeting message",
-    inputSchema: { name: z.string().optional() }
-  },
-  async ({ name }) => {
-    return {
-      content: [
-        {
-          text: `Hello, ${name ?? "World"}!`,
-          type: "text"
-        }
-      ]
-    };
-  }
-);
+  server.registerTool(
+    "hello",
+    {
+      description: "Returns a greeting message",
+      inputSchema: { name: z.string().optional() }
+    },
+    async ({ name }) => {
+      return {
+        content: [
+          {
+            text: `Hello, ${name ?? "World"}!`,
+            type: "text"
+          }
+        ]
+      };
+    }
+  );
 
-const transport = new WebStandardStreamableHTTPServerTransport();
-server.connect(transport);
+  return server;
+};
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -49,6 +50,9 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
+    const transport = new WebStandardStreamableHTTPServerTransport();
+    const server = createServer();
+    server.connect(transport);
     return withCors(await transport.handleRequest(request));
   }
 };
