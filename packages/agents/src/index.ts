@@ -32,6 +32,7 @@ import {
   isErrorRetryable,
   validateRetryOptions
 } from "./retries";
+import escapeHtml from "escape-html";
 import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type {
   WorkflowCallback,
@@ -3984,9 +3985,21 @@ export class Agent<
       return null;
     }
 
-    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
-    // This fires onServerStateChanged event which triggers broadcast
-    const result = await this.mcp.handleCallbackRequest(request);
+    let result: MCPClientOAuthResult;
+    try {
+      // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
+      // This fires onServerStateChanged event which triggers broadcast
+      result = await this.mcp.handleCallbackRequest(request);
+    } catch (err) {
+      // handleCallbackRequest throws when it can't find the in-memory connection
+      // (e.g., after hibernation). Catch here so we return a proper HTTP error
+      // response instead of letting it bubble as a raw 500.
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      const url = new URL(request.url);
+      const state = url.searchParams.get("state");
+      const serverId = state?.split(".")[1] ?? "unknown";
+      result = { serverId, authSuccess: false, authError: errorMessage };
+    }
 
     // If auth was successful, establish the connection in the background
     // (establishConnection handles retries internally using per-server retry config)
@@ -4053,7 +4066,28 @@ export class Agent<
       }
     }
 
-    // Default: redirect to base URL
+    // Default: show an error page if auth failed so the error is visible to the user.
+    // Without this, errors are silently swallowed via a redirect to the origin.
+    if (!result.authSuccess) {
+      const safeError = escapeHtml(result.authError || "Unknown error");
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>MCP Authentication Failed</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:500px;margin:80px auto;padding:0 20px;">
+  <h1 style="font-size:1.5em;">MCP Authentication Failed</h1>
+  <p style="color:#666;">${safeError}</p>
+  <a href="${escapeHtml(baseOrigin)}" style="color:#0066cc;">Return to application</a>
+</body>
+</html>`,
+        {
+          status: 400,
+          headers: { "content-type": "text/html; charset=utf-8" }
+        }
+      );
+    }
+
+    // Default success: redirect to base URL
     return Response.redirect(baseOrigin);
   }
 }

@@ -4,11 +4,31 @@ export class MyAgent extends Agent {
   onStart() {
     // Optionally configure OAuth callback. Here we use popup-closing behavior since we're opening a window on the client
     this.mcp.configureOAuthCallback({
-      customHandler: () => {
-        return new Response("<script>window.close();</script>", {
-          headers: { "content-type": "text/html" },
-          status: 200
-        });
+      customHandler: (result) => {
+        if (result.authSuccess) {
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" },
+            status: 200
+          });
+        }
+        // Show error briefly, then close the popup
+        const error = result.authError || "Unknown error";
+        return new Response(
+          `<!DOCTYPE html>
+<html>
+<head><title>Authentication Failed</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:400px;margin:80px auto;padding:0 20px;text-align:center;">
+  <h2 style="color:#c00;">Authentication Failed</h2>
+  <p style="color:#666;">${error}</p>
+  <p style="color:#999;font-size:0.85em;">This window will close automatically...</p>
+  <script>setTimeout(() => window.close(), 3000);</script>
+</body>
+</html>`,
+          {
+            headers: { "content-type": "text/html" },
+            status: 400
+          }
+        );
       }
     });
   }
