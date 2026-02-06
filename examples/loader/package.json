@@ -13,7 +13,12 @@
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "test:e2e:watch": "vitest --config vitest.e2e.config.ts",
     "test:e2e:verbose": "E2E_VERBOSE=true vitest run --config vitest.e2e.config.ts",
-    "test:e2e:slow": "E2E_INCLUDE_SLOW=true vitest run --config vitest.e2e.config.ts"
+    "test:e2e:slow": "E2E_INCLUDE_SLOW=true vitest run --config vitest.e2e.config.ts",
+    "test:browser": "playwright test",
+    "test:browser:headed": "playwright test --headed",
+    "test:browser:debug": "playwright test --debug",
+    "test:browser:ui": "playwright test --ui",
+    "test:browser:report": "playwright show-report"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.25",
@@ -33,6 +38,7 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.8",
+    "@playwright/test": "^1.58.1",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "vitest": "3.2.4",

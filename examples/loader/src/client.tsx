@@ -326,12 +326,27 @@ function App() {
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated.length - 1;
-          if (last >= 0 && updated[last].isStreaming) {
+          // If there's a streaming message, update it with the error
+          if (
+            last >= 0 &&
+            updated[last].role === "assistant" &&
+            updated[last].isStreaming
+          ) {
             updated[last] = {
               ...updated[last],
-              content: `Error: ${msg.error}`,
+              content: updated[last].content
+                ? `${updated[last].content}\n\n**Error:** ${msg.error}`
+                : `**Error:** ${msg.error}`,
               isStreaming: false
             };
+          } else {
+            // No assistant message exists yet - create one with the error
+            updated.push({
+              id: `error-${Date.now()}`,
+              role: "assistant",
+              content: `**Error:** ${msg.error}`,
+              isStreaming: false
+            });
           }
           return updated;
         });
@@ -634,6 +649,8 @@ function App() {
             </button>
             {/* Status badge */}
             <span
+              data-testid="status-badge"
+              data-status={status}
               className={`px-3 py-1 text-xs font-medium rounded-full uppercase tracking-wide ${statusStyle}`}
             >
               {status}
@@ -659,6 +676,8 @@ function App() {
           {messages.map((msg) => (
             <div
               key={msg.id}
+              data-testid={`message-${msg.role}`}
+              data-message-id={msg.id}
               className={`rounded-xl p-4 max-w-[85%] ${
                 msg.role === "user"
                   ? "bg-blue-600 text-white ml-auto"
@@ -885,6 +904,7 @@ function App() {
         >
           <input
             type="text"
+            data-testid="chat-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
@@ -911,6 +931,7 @@ function App() {
             messages.length > 0 && (
               <button
                 type="button"
+                data-testid="retry-button"
                 onClick={retryLastMessage}
                 className={`px-4 py-3 font-medium rounded-lg ${
                   dark
@@ -939,6 +960,7 @@ function App() {
           {status !== "idle" ? (
             <button
               type="button"
+              data-testid="stop-button"
               onClick={stopGeneration}
               className="px-6 py-3 font-medium rounded-lg bg-red-600 text-white hover:bg-red-500"
             >
@@ -947,6 +969,7 @@ function App() {
           ) : (
             <button
               type="button"
+              data-testid="send-button"
               onClick={sendMessage}
               disabled={!input.trim()}
               className={`px-6 py-3 font-medium rounded-lg disabled:cursor-not-allowed ${
