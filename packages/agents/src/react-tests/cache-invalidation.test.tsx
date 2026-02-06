@@ -395,7 +395,7 @@ describe("Cache invalidation on disconnect", () => {
     it("should invalidate correct cache entry when name changes before disconnect", async () => {
       const { host, protocol } = getTestWorkerHost();
       let capturedAgent: TestAgent | null = null;
-      let setNameFn: ((name: string) => void) | null = null;
+      let _setNameFn: ((name: string) => void) | null = null;
 
       // Pre-populate cache entries for both names
       const cacheKeyName1 = createCacheKey(
@@ -433,7 +433,7 @@ describe("Cache invalidation on disconnect", () => {
               capturedAgent = agent;
             }}
             onNameChange={(setName) => {
-              setNameFn = setName;
+              _setNameFn = setName;
             }}
           />
         </SuspenseWrapper>

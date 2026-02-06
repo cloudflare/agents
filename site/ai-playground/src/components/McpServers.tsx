@@ -42,7 +42,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   );
   const [showSettings, setShowSettings] = useState(false);
   const [showLocalhostWarning, setShowLocalhostWarning] = useState(false);
-  const [error, setError] = useState<string>("");
+  const [_error, setError] = useState<string>("");
   const [isConnecting, setIsConnecting] = useState(false);
   const [disconnectingServerId, setDisconnectingServerId] = useState<
     string | null
@@ -529,7 +529,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                   </button>
                 </div>
                 {server.state === "failed" && server.error && (
-                  <div className="mt-2 text-xs text-red-600 break-words">
+                  <div className="mt-2 text-xs text-red-600 wrap-break-word">
                     {server.error}
                   </div>
                 )}

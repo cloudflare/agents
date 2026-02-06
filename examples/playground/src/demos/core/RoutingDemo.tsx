@@ -6,7 +6,7 @@ import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
 import type { RoutingAgent, RoutingAgentState } from "./routing-agent";
 
-type RoutingStrategy = "per-user" | "shared" | "per-session";
+type RoutingStrategy = "per-user" | "shared" | "per-session" | "custom-path";
 
 function getStoredUserId(): string {
   if (typeof window === "undefined") return "user-1";
@@ -43,19 +43,40 @@ export function RoutingDemo() {
         return "routing-shared";
       case "per-session":
         return `routing-${getSessionId()}`;
+      case "custom-path":
+        return `routing-${userId}`;
       default:
         return "routing-demo";
     }
   };
 
   const currentAgentName = getAgentName();
+  const isCustomPath = strategy === "custom-path";
 
   const agent = useAgent<RoutingAgent, RoutingAgentState>({
     agent: "routing-agent",
-    name: currentAgentName,
+    // When using basePath, the server handles routing — name is ignored
+    name: isCustomPath ? undefined : currentAgentName,
+    // basePath bypasses the default /agents/{agent}/{name} URL construction
+    // and connects directly to this path, where the server routes to the agent.
+    // Note: basePath should NOT start with a slash (the URL already includes one).
+    basePath: isCustomPath ? `custom-routing/${currentAgentName}` : undefined,
     onOpen: () => {
-      addLog("info", "connected", `Agent: ${currentAgentName}`);
-      setAgentInstanceName(currentAgentName);
+      if (!isCustomPath) {
+        addLog("info", "connected", `Agent: ${currentAgentName}`);
+        setAgentInstanceName(currentAgentName);
+      } else {
+        addLog(
+          "info",
+          "connected",
+          `Custom path: /custom-routing/${currentAgentName}`
+        );
+      }
+    },
+    onIdentity: (name, agentType) => {
+      // When using basePath, the server sends the identity after connection
+      addLog("info", "identity", `Server resolved: ${agentType}/${name}`);
+      setAgentInstanceName(name);
     },
     onClose: () => addLog("info", "disconnected"),
     onError: () => addLog("error", "error", "Connection error"),
@@ -93,13 +114,19 @@ export function RoutingDemo() {
       id: "per-session",
       label: "Per-Session",
       description: "Each browser session gets its own agent"
+    },
+    {
+      id: "custom-path",
+      label: "Custom Path (basePath)",
+      description:
+        "Server-side routing via a custom URL path using getAgentByName"
     }
   ];
 
   return (
     <DemoWrapper
       title="Routing Strategies"
-      description="Different agent naming patterns for different use cases. The 'name' parameter determines which agent instance you connect to."
+      description="Different agent routing patterns for different use cases. Use 'name' to select an agent instance, or 'basePath' to route via a custom server-side path."
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
@@ -250,6 +277,16 @@ export function RoutingDemo() {
                 <br />
                 <span className="text-xs">
                   Each browser tab gets its own agent
+                </span>
+              </p>
+              <p>
+                <strong>Custom Path:</strong> basePath ={" "}
+                <code>/custom-routing/routing-{userId}</code>
+                <br />
+                <span className="text-xs">
+                  Server handles routing via <code>getAgentByName</code> —
+                  client uses <code>basePath</code> instead of{" "}
+                  <code>agent</code>/<code>name</code>
                 </span>
               </p>
             </div>

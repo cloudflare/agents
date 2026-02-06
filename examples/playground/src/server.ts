@@ -1,4 +1,4 @@
-import { routeAgentRequest, routeAgentEmail } from "agents";
+import { routeAgentRequest, routeAgentEmail, getAgentByName } from "agents";
 import {
   createAddressBasedEmailResolver,
   createSecureReplyEmailResolver
@@ -91,6 +91,20 @@ export default {
   },
 
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
+    const url = new URL(request.url);
+
+    // Custom basePath routing example:
+    // Routes /custom-routing/{instanceName} to a RoutingAgent instance.
+    // The server controls which agent instance handles the request,
+    // and the client connects using `basePath` instead of `agent` + `name`.
+    if (url.pathname.startsWith("/custom-routing/")) {
+      const instanceName = url.pathname.replace("/custom-routing/", "");
+      if (instanceName) {
+        const agent = await getAgentByName(env.RoutingAgent, instanceName);
+        return agent.fetch(request);
+      }
+    }
+
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
