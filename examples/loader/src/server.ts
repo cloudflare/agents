@@ -366,6 +366,7 @@ export class Think extends Agent<Env, ThinkState> {
         role TEXT NOT NULL,
         content TEXT,
         tool_calls TEXT,
+        reasoning TEXT,
         timestamp INTEGER NOT NULL
       )
     `;
@@ -373,6 +374,13 @@ export class Think extends Agent<Env, ThinkState> {
       CREATE INDEX IF NOT EXISTS idx_chat_session 
       ON chat_messages(session_id, timestamp)
     `;
+
+    // Migration: add reasoning column if it doesn't exist (for existing DBs)
+    try {
+      this.sql`ALTER TABLE chat_messages ADD COLUMN reasoning TEXT`;
+    } catch {
+      // Column already exists, ignore
+    }
 
     // Action log table for audit trail
     this.sql`
@@ -878,7 +886,7 @@ export class Think extends Agent<Env, ThinkState> {
     if (this.chatHistoryLoaded) return;
 
     const rows = this.sql`
-      SELECT role, content, tool_calls 
+      SELECT role, content, tool_calls, reasoning 
       FROM chat_messages 
       WHERE session_id = ${this.state.sessionId}
       ORDER BY timestamp ASC
@@ -897,17 +905,67 @@ export class Think extends Agent<Env, ThinkState> {
   }
 
   /**
+   * Get chat history with tool calls and reasoning for client display
+   */
+  private getChatHistoryForClient(): Array<{
+    role: string;
+    content: string;
+    toolCalls?: unknown;
+    reasoning?: string;
+  }> {
+    const rows = this.sql`
+      SELECT role, content, tool_calls, reasoning 
+      FROM chat_messages 
+      WHERE session_id = ${this.state.sessionId}
+      ORDER BY timestamp ASC
+      LIMIT ${MAX_CONTEXT_MESSAGES}
+    `;
+
+    return Array.from(rows).map((row) => {
+      const msg: {
+        role: string;
+        content: string;
+        toolCalls?: unknown;
+        reasoning?: string;
+      } = {
+        role: row.role as string,
+        content: row.content as string
+      };
+      if (row.tool_calls) {
+        try {
+          msg.toolCalls = JSON.parse(row.tool_calls as string);
+        } catch {
+          // ignore parse errors
+        }
+      }
+      if (row.reasoning) {
+        msg.reasoning = row.reasoning as string;
+      }
+      return msg;
+    });
+  }
+
+  /**
    * Save a message to chat history
    */
   private saveChatMessage(
     role: "user" | "assistant" | "system",
     content: string,
-    toolCalls?: unknown
+    options?: {
+      toolCalls?: unknown;
+      reasoning?: string;
+    }
   ): void {
-    const toolCallsJson = toolCalls ? JSON.stringify(toolCalls) : null;
+    const toolCallsJson = options?.toolCalls
+      ? JSON.stringify(options.toolCalls)
+      : null;
+    // Truncate reasoning for storage (keep first 2000 chars)
+    const reasoning = options?.reasoning
+      ? options.reasoning.slice(0, 2000)
+      : null;
     this.sql`
-      INSERT INTO chat_messages (session_id, role, content, tool_calls, timestamp)
-      VALUES (${this.state.sessionId}, ${role}, ${content}, ${toolCallsJson}, ${Date.now()})
+      INSERT INTO chat_messages (session_id, role, content, tool_calls, reasoning, timestamp)
+      VALUES (${this.state.sessionId}, ${role}, ${content}, ${toolCallsJson}, ${reasoning}, ${Date.now()})
     `;
   }
 
@@ -1308,8 +1366,15 @@ export class Think extends Agent<Env, ThinkState> {
     this.currentAbortController = new AbortController();
     const abortSignal = this.currentAbortController.signal;
 
-    // Track accumulated text outside try block so we can save partial responses on cancellation
+    // Track accumulated text/reasoning/toolcalls outside try block so we can save partial responses on cancellation
     let accumulatedText = "";
+    let accumulatedReasoning = "";
+    const accumulatedToolCalls: Array<{
+      id: string;
+      name: string;
+      input: unknown;
+      output?: unknown;
+    }> = [];
 
     try {
       // Load chat history
@@ -1358,9 +1423,6 @@ export class Think extends Agent<Env, ThinkState> {
         }
       });
 
-      // Track accumulated reasoning (accumulatedText is declared outside try for cancellation handling)
-      let accumulatedReasoning = "";
-
       // Process the stream and send events to client in real-time
       for await (const event of stream.fullStream) {
         switch (event.type) {
@@ -1383,7 +1445,12 @@ export class Think extends Agent<Env, ThinkState> {
             break;
 
           case "tool-call":
-            // Tool call is starting
+            // Tool call is starting - track for persistence
+            accumulatedToolCalls.push({
+              id: event.toolCallId,
+              name: event.toolName,
+              input: event.input
+            });
             this.setState({ ...this.state, status: "executing" });
             this.emitDebug({ event: "state:change", status: "executing" });
             this.emitDebug({
@@ -1432,6 +1499,12 @@ export class Think extends Agent<Env, ThinkState> {
                   : undefined
               });
 
+              // Track output for persistence
+              const tc = accumulatedToolCalls.find(
+                (t) => t.id === event.toolCallId
+              );
+              if (tc) tc.output = event.output;
+
               connection.send(
                 thinkMsg({
                   type: "tool_result",
@@ -1476,14 +1549,28 @@ export class Think extends Agent<Env, ThinkState> {
         }
       }
 
-      // Save assistant response to history
+      // Compute final reasoning text for storage
+      const finalReasoning =
+        accumulatedReasoning ||
+        (reasoning && reasoning.length > 0
+          ? reasoning
+              .map((r) => (typeof r === "string" ? r : r.text || ""))
+              .filter(Boolean)
+              .join("\n\n")
+          : "");
+
+      // Save assistant response to history (with tool calls and reasoning)
       if (finalResponse) {
         const assistantMessage: ModelMessage = {
           role: "assistant",
           content: finalResponse
         };
         this.chatHistory.push(assistantMessage);
-        this.saveChatMessage("assistant", finalResponse);
+        this.saveChatMessage("assistant", finalResponse, {
+          toolCalls:
+            accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
+          reasoning: finalReasoning || undefined
+        });
 
         // Send final response to client
         connection.send(
@@ -1543,7 +1630,13 @@ export class Think extends Agent<Env, ThinkState> {
             content: partialResponse
           };
           this.chatHistory.push(assistantMessage);
-          this.saveChatMessage("assistant", partialResponse);
+          this.saveChatMessage("assistant", partialResponse, {
+            toolCalls:
+              accumulatedToolCalls.length > 0
+                ? accumulatedToolCalls
+                : undefined,
+            reasoning: accumulatedReasoning || undefined
+          });
           console.log(
             "[Think] Saved partial response:",
             partialResponse.slice(0, 100) + "..."
@@ -2254,12 +2347,12 @@ export default class extends WorkerEntrypoint {
       });
     }
 
-    // Get chat history
+    // Get chat history (with tool calls and reasoning for client display)
     if (subPath === "/chat/history" && request.method === "GET") {
-      this.loadChatHistory();
+      const messages = this.getChatHistoryForClient();
       return new Response(
         JSON.stringify({
-          messages: this.chatHistory,
+          messages,
           sessionId: this.state.sessionId
         }),
         { headers: { "Content-Type": "application/json" } }

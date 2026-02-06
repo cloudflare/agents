@@ -5,22 +5,36 @@ import "./styles.css";
 // Lazy-load demos to keep bundles separate
 import ChatApp from "./client";
 
+type DemoType = "chat" | "editor" | "assistant";
+
+const DEMOS: { id: DemoType; label: string }[] = [
+  { id: "chat", label: "Chat" },
+  { id: "editor", label: "Editor" },
+  { id: "assistant", label: "Assistant" }
+];
+
 function DemoSwitcher() {
-  const [demo, setDemo] = useState<"chat" | "editor">(() => {
+  const [demo, setDemo] = useState<DemoType>(() => {
     const params = new URLSearchParams(window.location.search);
     const d = params.get("demo");
-    if (d === "editor") return "editor";
+    if (d === "editor" || d === "assistant") return d;
     return "chat";
   });
 
-  // Lazy import the editor only when needed
+  // Lazy import the editor and assistant only when needed
   const [EditorApp, setEditorApp] = useState<React.ComponentType | null>(null);
+  const [AssistantApp, setAssistantApp] = useState<React.ComponentType | null>(
+    null
+  );
 
   useEffect(() => {
     if (demo === "editor" && !EditorApp) {
       import("./editor").then((mod) => setEditorApp(() => mod.default));
     }
-  }, [demo, EditorApp]);
+    if (demo === "assistant" && !AssistantApp) {
+      import("./assistant").then((mod) => setAssistantApp(() => mod.default));
+    }
+  }, [demo, EditorApp, AssistantApp]);
 
   // Sync URL with demo state
   useEffect(() => {
@@ -36,28 +50,20 @@ function DemoSwitcher() {
         <span className="text-zinc-500 text-xs font-medium mr-2 select-none">
           Think Demos
         </span>
-        <button
-          type="button"
-          onClick={() => setDemo("chat")}
-          className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-            demo === "chat"
-              ? "bg-blue-600 text-white"
-              : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-300"
-          }`}
-        >
-          Chat
-        </button>
-        <button
-          type="button"
-          onClick={() => setDemo("editor")}
-          className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-            demo === "editor"
-              ? "bg-blue-600 text-white"
-              : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-300"
-          }`}
-        >
-          Editor
-        </button>
+        {DEMOS.map((d) => (
+          <button
+            key={d.id}
+            type="button"
+            onClick={() => setDemo(d.id)}
+            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
+              demo === d.id
+                ? "bg-blue-600 text-white"
+                : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-300"
+            }`}
+          >
+            {d.label}
+          </button>
+        ))}
       </div>
 
       {/* Demo content - offset by tab bar height */}
@@ -69,6 +75,14 @@ function DemoSwitcher() {
           ) : (
             <div className="flex items-center justify-center h-[calc(100vh-2.25rem)] bg-zinc-950 text-zinc-400">
               Loading editor...
+            </div>
+          ))}
+        {demo === "assistant" &&
+          (AssistantApp ? (
+            <AssistantApp />
+          ) : (
+            <div className="flex items-center justify-center h-[calc(100vh-2.25rem)] bg-zinc-950 text-zinc-400">
+              Loading assistant...
             </div>
           ))}
       </div>

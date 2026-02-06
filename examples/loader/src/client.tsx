@@ -159,14 +159,21 @@ function App() {
       const res = await fetch("/agents/think/dev-session/chat/history");
       if (!res.ok) return;
       const data = (await res.json()) as {
-        messages?: Array<{ role: string; content: string }>;
+        messages?: Array<{
+          role: string;
+          content: string;
+          toolCalls?: ToolCall[];
+          reasoning?: string;
+        }>;
       };
       if (data.messages && data.messages.length > 0) {
         setMessages(
           data.messages.map((msg, idx) => ({
             id: `history-${idx}`,
             role: msg.role as "user" | "assistant",
-            content: msg.content
+            content: msg.content,
+            toolCalls: msg.toolCalls,
+            reasoning: msg.reasoning
           }))
         );
       }
