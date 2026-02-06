@@ -186,7 +186,18 @@
     - Color-coded event types
   - [x] 6.6 Server-side Cancel Support - AbortController passed to streamText()
   - [x] 6.7 History Truncation API - `/chat/truncate` endpoint for message editing
-- [ ] Phase 7: Code Editor
+- [ ] **Phase 7: Vibe Coding Editor** - IN PROGRESS
+  - [x] 7.1 Demo Switcher - Route between chat and editor demos
+  - [x] 7.2 Editor Layout - Split-pane: chat | file tree + code viewer | live preview
+  - [x] 7.3 File Storage - In-memory file store in DO state, `/files` API endpoint
+  - [x] 7.4 Live Preview - `/preview/:path` endpoint serving files with MIME types, iframe preview
+  - [x] 7.5 Editor Agent Tools - `create_file`, `edit_file`, `read_file` tools for vibe coding
+  - [x] 7.6 Code Viewer - Syntax-highlighted code display with file selection
+  - [ ] 7.7 Monaco Integration - Full Monaco editor with language support
+  - [ ] 7.8 Yjs Collaborative Editing - Real-time sync between human and agent edits
+  - [ ] 7.9 Accept/Revert Changes - Proposed changes workflow (inspired by Minions)
+  - **Inspiration**: Minions (AI Gadgets) - Yjs, FileSidebar, GadgetUI sandbox
+  - **Simplifications for v1**: No Yjs (plain strings), no collab, auto-accept changes
 - [ ] Phase 8: Advanced Features (Multi-Session, Multiplayer)
 
 ### Agent Architecture Features Status
@@ -199,6 +210,7 @@
 | Browser Testing    | High     | ✅ Complete    | `browser-tests/` | Playwright, 16 UI tests (chat, history, etc.) |
 | Subagent Pattern   | Medium   | ✅ Complete    | `subagent.ts`    | With hibernation recovery, status monitoring  |
 | Chat UI            | High     | ✅ Complete    | `client.tsx`     | Stop/retry/edit, debug panel, history         |
+| Vibe Code Editor   | High     | ⚡ In Progress | `editor.tsx`     | Split-pane, file tree, preview, agent tools   |
 | Extensibility      | High     | ❌ Planned     | `server.ts`      | Three-layer: core/class/props customization   |
 | Multi-Model        | Medium   | ❌ Planned     | `server.ts`      | Smart routing: primary/fast/summarizer/vision |
 | Subagent Streaming | Low      | ❌ Designed    | `subagent.ts`    | Optional streaming from facets to parent      |

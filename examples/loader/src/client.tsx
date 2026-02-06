@@ -1,9 +1,7 @@
-import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
-import "./styles.css";
 
 // Theme management
 type Theme = "dark" | "light";
@@ -581,7 +579,7 @@ function App() {
 
   return (
     <div
-      className={`flex h-screen ${dark ? "bg-zinc-900 text-zinc-100" : "bg-white text-zinc-900"}`}
+      className={`flex h-[calc(100vh-2.25rem)] ${dark ? "bg-zinc-900 text-zinc-100" : "bg-white text-zinc-900"}`}
     >
       {/* Main chat area */}
       <div
@@ -1073,5 +1071,4 @@ function App() {
   );
 }
 
-const root = createRoot(document.getElementById("root")!);
-root.render(<App />);
+export default App;

@@ -28,6 +28,8 @@
 | Extensibility      | ❌ Planned  | Three-layer customization (core/class/props)   |
 | Multi-Model        | ❌ Planned  | Smart routing: primary/fast/summarizer/vision  |
 | Chat UI            | ✅ Complete | Stop/retry/edit, debug panel, history          |
+| Vibe Code Editor   | ⚡ Partial  | Split-pane editor with chat, files, preview    |
+| Demo Switcher      | ✅ Complete | Route between chat and editor demos            |
 | Code Editor        | ❌ Planned  | Monaco/CodeMirror with Yjs sync                |
 | Sandbox            | ❌ Planned  | Full VM for heavy workloads                    |
 
