@@ -1419,12 +1419,14 @@ export default {
       testValue: "123"
     };
 
+    const typedCtx = ctx as ExecutionContext<Record<string, unknown>>;
+
     if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-      return TestMcpAgent.serveSSE("/sse").fetch(request, env, ctx);
+      return TestMcpAgent.serveSSE("/sse").fetch(request, env, typedCtx);
     }
 
     if (url.pathname === "/mcp") {
-      return TestMcpAgent.serve("/mcp").fetch(request, env, ctx);
+      return TestMcpAgent.serve("/mcp").fetch(request, env, typedCtx);
     }
 
     if (url.pathname === "/500") {
