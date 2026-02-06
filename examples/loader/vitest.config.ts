@@ -14,13 +14,14 @@ export default defineWorkersConfig({
     sequence: {
       concurrent: false
     },
-    // Exclude e2e tests - they run separately with vitest.e2e.config.ts
-    exclude: ["e2e/**", "**/node_modules/**"],
+    // Exclude e2e and browser tests - they run separately
+    // e2e tests run with vitest.e2e.config.ts
+    // browser tests run with playwright (npm run test:browser)
+    exclude: ["e2e/**", "browser-tests/**", "**/node_modules/**"],
     poolOptions: {
       workers: {
-        // Use test-specific wrangler config that uses server.ts (no BrowserLoopback)
-        // This avoids bundling @cloudflare/playwright which requires node:child_process
-        wrangler: { configPath: "./wrangler.test.jsonc" },
+        // Use main wrangler config - @cloudflare/playwright now works with vitest-pool-workers
+        wrangler: { configPath: "./wrangler.jsonc" },
         // Use single worker to avoid isolation issues with SQLite DOs
         isolatedStorage: false
       }

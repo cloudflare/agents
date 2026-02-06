@@ -56,7 +56,7 @@
     - Reference: https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests
 - [ ] **Phase 5.6: Async Tool Calls** - PARTIAL
   - [x] scheduling.ts module with pure functions
-  - [x] Recovery logic for subagents (implemented in server-without-browser.ts)
+  - [x] Recovery logic for subagents (implemented in server.ts)
   - [x] Integration with subagent spawning (scheduleSubagentCheck, checkSubagentStatus)
   - [ ] Integration with main agent loop
   - [ ] Tools that sleep/resume across requests
@@ -94,6 +94,17 @@
   - [x] Enable ENABLE_SUBAGENT_API via --var ENABLE_SUBAGENT_API:true
   - [x] Add npm run test:e2e script
   - **Result**: 14 passing, 23 todo (facets spawn successfully!)
+- [x] **Phase 5.12b: Browser Testing with Playwright** - COMPLETE
+  - [x] Install `@playwright/test` for client-side UI testing
+  - [x] Create `playwright.config.ts` with auto-start webserver, .env loading
+  - [x] Create `browser-tests/helpers.ts` with test utilities (sendMessage, waitForIdle, etc.)
+  - [x] Create `browser-tests/smoke.test.ts` (6 tests: page load, UI visibility, theme toggle, debug panel)
+  - [x] Create `browser-tests/chat.test.ts` (10 tests: messaging, streaming, stop/retry, history persistence)
+  - [x] Add `data-testid` attributes to client.tsx for reliable selectors
+  - [x] Fix error handling in client.tsx (show errors when no streaming message exists)
+  - [x] Add npm scripts: `test:browser`, `test:browser:headed`, `test:browser:debug`
+  - [x] Exclude `browser-tests/**` from vitest (runs with Playwright only)
+  - **Result**: 16 passing tests for chat UI flows
 - [ ] **Phase 5.13: Extensibility Architecture** - PLANNED
   - [ ] Add `ThinkProps` interface for runtime customization
   - [ ] Implement `onStart(props)` to capture props
@@ -180,22 +191,23 @@
 
 ### Agent Architecture Features Status
 
-| Feature            | Priority | Status         | Module          | Notes                                         |
-| ------------------ | -------- | -------------- | --------------- | --------------------------------------------- |
-| Task Management    | High     | ✅ Complete    | `tasks.ts`      | 71 tests, LLM tools, hybrid orchestration     |
-| Async Tool Calls   | High     | ⚡ Partial     | `scheduling.ts` | Subagent recovery complete, main loop TBD     |
-| E2E Testing        | High     | ✅ Complete    | `e2e/`          | wrangler dev harness, 10 passing tests        |
-| Subagent Pattern   | Medium   | ✅ Complete    | `subagent.ts`   | With hibernation recovery, status monitoring  |
-| Chat UI            | High     | ✅ Complete    | `client.tsx`    | Stop/retry/edit, debug panel, history         |
-| Extensibility      | High     | ❌ Planned     | `server.ts`     | Three-layer: core/class/props customization   |
-| Multi-Model        | Medium   | ❌ Planned     | `server.ts`     | Smart routing: primary/fast/summarizer/vision |
-| Subagent Streaming | Low      | ❌ Designed    | `subagent.ts`   | Optional streaming from facets to parent      |
-| Context Compaction | Medium   | ❌ Not Started | `context.ts`    | Summarize older messages                      |
-| Streaming Tools    | Low      | ✅ Complete    | Phase 5.8       | text_delta + tool_call/result streaming       |
-| Tool Caching       | Low      | ❌ Not Started | -               | Cache expensive results                       |
-| Tools via Props    | Future   | ❌ Not Started | `server.ts`     | Serialization challenge, multiple approaches  |
-| Long-term Memory   | Future   | ❌ Not Started | -               | R2/KV for persistent memory                   |
-| Scheduling Tool    | Medium   | ❌ Planned     | `server.ts`     | Natural language reminders, recurring tasks   |
+| Feature            | Priority | Status         | Module           | Notes                                         |
+| ------------------ | -------- | -------------- | ---------------- | --------------------------------------------- |
+| Task Management    | High     | ✅ Complete    | `tasks.ts`       | 71 tests, LLM tools, hybrid orchestration     |
+| Async Tool Calls   | High     | ⚡ Partial     | `scheduling.ts`  | Subagent recovery complete, main loop TBD     |
+| E2E Testing        | High     | ✅ Complete    | `e2e/`           | wrangler dev harness, 14 passing tests        |
+| Browser Testing    | High     | ✅ Complete    | `browser-tests/` | Playwright, 16 UI tests (chat, history, etc.) |
+| Subagent Pattern   | Medium   | ✅ Complete    | `subagent.ts`    | With hibernation recovery, status monitoring  |
+| Chat UI            | High     | ✅ Complete    | `client.tsx`     | Stop/retry/edit, debug panel, history         |
+| Extensibility      | High     | ❌ Planned     | `server.ts`      | Three-layer: core/class/props customization   |
+| Multi-Model        | Medium   | ❌ Planned     | `server.ts`      | Smart routing: primary/fast/summarizer/vision |
+| Subagent Streaming | Low      | ❌ Designed    | `subagent.ts`    | Optional streaming from facets to parent      |
+| Context Compaction | Medium   | ❌ Not Started | `context.ts`     | Summarize older messages                      |
+| Streaming Tools    | Low      | ✅ Complete    | Phase 5.8        | text_delta + tool_call/result streaming       |
+| Tool Caching       | Low      | ❌ Not Started | -                | Cache expensive results                       |
+| Tools via Props    | Future   | ❌ Not Started | `server.ts`      | Serialization challenge, multiple approaches  |
+| Long-term Memory   | Future   | ❌ Not Started | -                | R2/KV for persistent memory                   |
+| Scheduling Tool    | Medium   | ❌ Planned     | `server.ts`      | Natural language reminders, recurring tasks   |
 
 ### Architecture Decisions Made
 
@@ -554,7 +566,7 @@ curl -X POST -H "Content-Type: application/json" \
 **Key Files**:
 
 - `src/agent-tools.ts` - `createExecuteCodeTool()` and `ExecuteCodeFn` type
-- `src/server-without-browser.ts` - `executeCode()` method in Think Agent
+- `src/server.ts` - `executeCode()` method in Think Agent
 
 **LLM Tool**:
 
@@ -1463,7 +1475,7 @@ Facets don't work in vitest-pool-workers but DO work in E2E (wrangler dev):
 
 ### Disabled Features
 
-- [ ] `ENABLE_SUBAGENT_API` flag in `server-without-browser.ts`
+- [ ] `ENABLE_SUBAGENT_API` flag in `server.ts`
   - **Currently**: `false` (endpoints return 404)
   - **Solution**: E2E tests will set this to `true` via environment variable
   - **Endpoints affected**: `/subagents`, `/subagents/spawn`, `/subagents/:taskId`

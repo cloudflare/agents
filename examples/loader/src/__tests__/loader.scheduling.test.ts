@@ -16,7 +16,7 @@
 
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it, beforeEach } from "vitest";
-import worker from "../server-without-browser";
+import worker from "../server";
 
 // Use the same request pattern as loader.test.ts
 async function agentRequest(

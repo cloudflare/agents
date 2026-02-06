@@ -86,7 +86,7 @@ export interface SubagentStatus {
 declare global {
   interface DurableObjectState {
     facets: DurableObjectFacets;
-    // Note: exports is already declared in server-without-browser.ts
+    // Note: exports is already declared in server.ts
   }
 }
 

@@ -20,7 +20,7 @@
 
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker from "../server-without-browser";
+import worker from "../server";
 import type {
   SubagentStatus,
   SubagentResult,
@@ -121,9 +121,9 @@ describe("Subagent Infrastructure", () => {
 
   describe("Subagent Module Exports", () => {
     it("should export Subagent class", async () => {
-      // The Subagent class is exported from server-without-browser.ts
+      // The Subagent class is exported from server.ts
       // This test verifies the import works
-      const { Subagent } = await import("../server-without-browser");
+      const { Subagent } = await import("../server");
       expect(Subagent).toBeDefined();
       expect(typeof Subagent).toBe("function");
     });

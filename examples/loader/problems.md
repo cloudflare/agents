@@ -257,40 +257,42 @@ export class BashLoopback extends WorkerEntrypoint<Env, Props> {
 
 ---
 
-## 8. Dual Entry Points for Browser/Test Separation
+## 8. Dual Entry Points for Browser/Test Separation [RESOLVED]
 
 **When**: Browser automation works in production but breaks tests
 
-**Error**: Tests fail because exporting `BrowserLoopback` causes `@cloudflare/playwright` to be bundled, which requires `node:child_process`.
+**Error**: Tests fail because exporting `BrowserLoopback` causes `@cloudflare/playwright` to be bundled, which requires `node:child_process` / `node:readline` / `node:inspector`.
 
 **Root Cause**: ES module exports are resolved at bundle time. Any `export { X } from "..."` statement causes the entire module tree to be included in the bundle.
 
-**Solution**: Use separate entry points for production and testing:
+**Original Solution (now obsolete)**: Use separate entry points for production and testing.
 
-```
-src/server-without-browser.ts - Base server (no browser) - used for tests
-src/server.ts                 - Re-exports base + adds BrowserLoopback
-wrangler.jsonc                - Points to server.ts (production)
-wrangler.test.jsonc           - Points to server-without-browser.ts (tests)
-vitest.config.ts              - Uses wrangler.test.jsonc
-```
+**Resolution (Feb 2026)**: Updated `@cloudflare/playwright` now works correctly with `vitest-pool-workers`. The dual entry point architecture is no longer needed.
 
-**server.ts** (production entry point):
+**Current Architecture**:
+
+- Single `server.ts` with all exports including `BrowserLoopback`
+- Single `wrangler.jsonc` pointing to `server.ts`
+- All 317 tests pass with the unified configuration
+
+**Important Note**: When consolidating, we discovered that `export * from "..."` does NOT work correctly with `this.ctx.exports` in Durable Objects. The loopbacks must be explicitly re-exported:
 
 ```typescript
-// Re-export all named exports from the base server
+// This DOES NOT work with this.ctx.exports:
 export * from "./server-without-browser";
 
-// Re-export the default export (the Worker fetch handler)
-export { default } from "./server-without-browser";
-
-// Add BrowserLoopback for production use
-export { BrowserLoopback } from "./loopbacks/browser";
+// This WORKS:
+export {
+  Think,
+  EchoLoopback,
+  BashLoopback,
+  BraveSearchLoopback,
+  FetchLoopback,
+  FSLoopback
+} from "./server-without-browser";
 ```
 
-**Key insight**: `export *` does NOT include the default export. You must explicitly re-export it with `export { default }`.
-
-**Lesson**: When a dependency is incompatible with your test environment, use separate entry points rather than trying to configure bundler exclusions.
+**Lesson**: Always use explicit named exports for classes that will be accessed via `this.ctx.exports`.
 
 ---
 

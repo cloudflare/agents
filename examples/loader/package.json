@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.25",
-    "@cloudflare/playwright": "^1.1.0",
+    "@cloudflare/playwright": "https://pkg.pr.new/cloudflare/playwright/@cloudflare/playwright@761ea89",
     "@cloudflare/sandbox": "^0.7.0",
     "@streamdown/code": "^1.0.1",
     "@tailwindcss/vite": "^4.1.18",

@@ -1,11 +1,9 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
-// Import the worker without browser for testing
-// (server.ts includes BrowserLoopback which requires @cloudflare/playwright,
-// which is incompatible with vitest-pool-workers)
-import worker from "../server-without-browser";
-import type { ExecutionResult, ThinkState } from "../server-without-browser";
+// Import the worker for testing
+import worker from "../server";
+import type { ExecutionResult, ThinkState } from "../server";
 
 // Declare the env types for cloudflare:test
 declare module "cloudflare:test" {
