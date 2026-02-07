@@ -65,8 +65,10 @@ export class RealtimeAPI {
         "cf-aig-beta": "true",
         "Content-Type": "application/json"
       },
+      // TODO: update types for aig binding workerd
+      // method is supported in ai gateway universal request
       method: "PUT"
-    });
+    } as AIGatewayUniversalRequest);
 
     if (!response.ok) {
       throw new Error(
