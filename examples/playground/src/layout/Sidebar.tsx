@@ -23,7 +23,8 @@ import {
   ChatCircle,
   Stack,
   GitMerge,
-  Shield
+  Shield,
+  Palette
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
@@ -220,19 +221,19 @@ function CategorySection({ category }: { category: NavCategory }) {
   );
 }
 
-function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
+function ModeToggle() {
+  const { mode, setMode } = useTheme();
 
-  const cycleTheme = () => {
-    if (theme === "system") setTheme("light");
-    else if (theme === "light") setTheme("dark");
-    else setTheme("system");
+  const cycleMode = () => {
+    if (mode === "system") setMode("light");
+    else if (mode === "light") setMode("dark");
+    else setMode("system");
   };
 
   const icon =
-    theme === "system" ? (
+    mode === "system" ? (
       <Monitor size={16} />
-    ) : theme === "light" ? (
+    ) : mode === "light" ? (
       <Sun size={16} />
     ) : (
       <Moon size={16} />
@@ -243,10 +244,32 @@ function ThemeToggle() {
       variant="ghost"
       size="sm"
       icon={icon}
-      onClick={cycleTheme}
-      title={`Theme: ${theme}`}
+      onClick={cycleMode}
+      title={`Mode: ${mode}`}
     >
-      <span className="text-xs capitalize">{theme}</span>
+      <span className="text-xs capitalize">{mode}</span>
+    </Button>
+  );
+}
+
+function ColorThemeToggle() {
+  const { colorTheme, setColorTheme, colorThemes } = useTheme();
+
+  const cycleColorTheme = () => {
+    const idx = colorThemes.indexOf(colorTheme);
+    const next = colorThemes[(idx + 1) % colorThemes.length];
+    setColorTheme(next);
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      icon={<Palette size={16} />}
+      onClick={cycleColorTheme}
+      title={`Color theme: ${colorTheme}`}
+    >
+      <span className="text-xs capitalize">{colorTheme}</span>
     </Button>
   );
 }
@@ -265,8 +288,9 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div className="p-4 border-t border-kumo-line space-y-3">
-        <ThemeToggle />
+      <div className="p-4 border-t border-kumo-line space-y-2">
+        <ModeToggle />
+        <ColorThemeToggle />
         <div className="text-xs text-kumo-subtle">
           <Link href="https://github.com/cloudflare/agents" variant="inline">
             GitHub

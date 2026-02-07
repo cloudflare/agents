@@ -1,0 +1,58 @@
+/*
+ * Workers Theme — inspired by workers.cloudflare.com
+ *
+ * A Cloudflare-branded theme using the iconic orange accent
+ * against clean dark navy (dark mode) and crisp white (light mode).
+ */
+
+@layer base {
+  [data-theme="workers"] {
+    /* ── Text Colors ── */
+
+    --text-color-kumo-default: light-dark(#111827, #e8eaed);
+    --text-color-kumo-inverse: light-dark(#f0f2f5, #111318);
+    --text-color-kumo-strong: light-dark(#4b5563, #9aa0ab);
+    --text-color-kumo-subtle: light-dark(#6b7280, #cbd0d8);
+    --text-color-kumo-inactive: light-dark(#9ca3af, #5c6370);
+    --text-color-kumo-brand: light-dark(#f6821f, #f6821f);
+    --text-color-kumo-link: light-dark(#e07315, #f6821f);
+    --text-color-kumo-success: light-dark(#16a34a, #34d399);
+    --text-color-kumo-danger: light-dark(#dc2626, #f87171);
+    --text-color-kumo-warning: light-dark(#b45309, #fbbf24);
+
+    /* ── Surface & State Colors ── */
+
+    --color-kumo-base: light-dark(#ffffff, #08090d);
+    --color-kumo-elevated: light-dark(#f7f8fa, #111318);
+    --color-kumo-recessed: light-dark(#eceef2, #040508);
+    --color-kumo-overlay: light-dark(#f0f2f5, #1a1d24);
+    --color-kumo-contrast: light-dark(#1a1c20, #ededef);
+    --color-kumo-control: light-dark(#ffffff, #161921);
+    --color-kumo-tint: light-dark(#f0f2f5, #1c1f28);
+    --color-kumo-interact: light-dark(#dce0e6, #2c3040);
+    --color-kumo-fill: light-dark(#e2e5eb, #1e2129);
+    --color-kumo-fill-hover: light-dark(#d1d5dc, #2c3040);
+
+    /* Brand — Cloudflare orange */
+    --color-kumo-brand: light-dark(#f6821f, #f6821f);
+    --color-kumo-brand-hover: light-dark(#e07315, #ff922b);
+
+    /* Structural */
+    --color-kumo-line: light-dark(oklch(0% 0 0 / 0.08), oklch(100% 0 0 / 0.07));
+    --color-kumo-ring: light-dark(#94a3b8, #4a5568);
+    --color-kumo-tip-shadow: light-dark(#e2e5eb, transparent);
+    --color-kumo-tip-stroke: light-dark(transparent, #1e2129);
+
+    /* Semantic — Info (blue) */
+    --color-kumo-info: light-dark(#2563eb, #3b82f6);
+    --color-kumo-info-tint: light-dark(#dbeafe, #172554);
+
+    /* Semantic — Warning (amber) */
+    --color-kumo-warning: light-dark(#d97706, #f59e0b);
+    --color-kumo-warning-tint: light-dark(#fef3c7, #451a03);
+
+    /* Semantic — Danger (red) */
+    --color-kumo-danger: light-dark(#dc2626, #ef4444);
+    --color-kumo-danger-tint: light-dark(#fee2e2, #450a0a);
+  }
+}

@@ -84,7 +84,13 @@ All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for UI compon
 - Use `@phosphor-icons/react` for icons (Kumo's icon library)
 - Use Kumo semantic color tokens (`text-kumo-default`, `bg-kumo-base`, `border-kumo-line`, etc.) instead of raw Tailwind colors
 - Use the `data-mode` attribute for dark mode — no `dark:` Tailwind variants
-- Import Kumo styles in your CSS: `@import "@cloudflare/kumo/styles/tailwind";`
+- Import Kumo styles and the Workers theme in your CSS:
+  ```css
+  @import "tailwindcss";
+  @import "@cloudflare/kumo/styles/tailwind";
+  @import "@cloudflare/agents-theme/workers";
+  ```
+- Set `data-theme="workers"` on `<html>` for the Cloudflare-branded color theme
 - See `/design/visuals.md` for detailed Kumo usage patterns and known gaps
 
 ### Dependencies
