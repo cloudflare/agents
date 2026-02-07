@@ -1,4 +1,3 @@
-/* oxlint-disable */
 export { TrashIcon } from "@phosphor-icons/react";
 
 export const SparkleIcon = () => (

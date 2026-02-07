@@ -316,7 +316,6 @@ export function useAgent<State>(
   const [awaitingQueryRefresh, setAwaitingQueryRefresh] = useState(false);
 
   // Get or create the query promise
-  // oxlint-disable-next-line
   const queryPromise = useMemo(() => {
     if (!query || typeof query !== "function") {
       return null;

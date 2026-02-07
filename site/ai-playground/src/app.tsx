@@ -147,7 +147,6 @@ const App = () => {
 
   const [agentInput, setAgentInput] = useState("");
 
-  // oxlint-disable-next-line
   useEffect(() => {
     const getModels = async () => {
       try {
@@ -350,7 +349,6 @@ const App = () => {
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
               >
-                {/* oxlint-disable-next-line */}
                 <label className="font-semibold text-sm block mb-1 text-kumo-default">
                   System Message
                 </label>
@@ -365,7 +363,6 @@ const App = () => {
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
               >
-                {/* oxlint-disable-next-line */}
                 <label className="font-semibold text-sm block mb-1 text-kumo-default">
                   Temperature
                 </label>
@@ -409,7 +406,6 @@ const App = () => {
 
                       return (
                         <li
-                          // oxlint-disable-next-line
                           key={i}
                           className="mb-3 flex items-start border-b border-b-kumo-line w-full py-2"
                         >
@@ -444,11 +440,7 @@ const App = () => {
                     if (part.type === "reasoning") {
                       if (!part.text || part.text.trim() === "") return null;
                       return (
-                        <li
-                          // oxlint-disable-next-line
-                          key={i}
-                          className="mb-3 w-full"
-                        >
+                        <li key={i} className="mb-3 w-full">
                           <ReasoningCard part={part} />
                         </li>
                       );
@@ -456,11 +448,7 @@ const App = () => {
 
                     if (isToolUIPart(part)) {
                       return (
-                        <li
-                          // oxlint-disable-next-line
-                          key={i}
-                          className="mb-3 w-full"
-                        >
+                        <li key={i} className="mb-3 w-full">
                           <ToolCallCard part={part} />
                         </li>
                       );
@@ -471,15 +459,10 @@ const App = () => {
                       part.mediaType.startsWith("image/")
                     ) {
                       return (
-                        <li
-                          // oxlint-disable-next-line
-                          key={i}
-                          className="mb-3 w-full"
-                        >
+                        <li key={i} className="mb-3 w-full">
                           <img
                             className="max-w-md mx-auto rounded-lg"
                             src={part.url}
-                            // oxlint-disable-next-line
                             alt="Image from tool call response"
                           />
                         </li>

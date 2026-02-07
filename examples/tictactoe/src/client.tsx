@@ -1,4 +1,3 @@
-/* oxlint-disable */
 import { useAgent } from "agents/react";
 import {
   ArrowsClockwiseIcon,

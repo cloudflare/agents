@@ -1,4 +1,3 @@
-/* oxlint-disable */
 import type { env } from "cloudflare:workers";
 import { Agent } from "..";
 import { useAgent } from "../react";

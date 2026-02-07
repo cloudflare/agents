@@ -1,4 +1,3 @@
-/* oxlint-disable */
 import { XIcon } from "@phosphor-icons/react";
 import ShellCommand from "./ShellCommand";
 

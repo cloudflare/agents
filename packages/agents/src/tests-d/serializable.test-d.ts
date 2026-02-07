@@ -6,7 +6,6 @@
  * This was a bug fix: previously, RPCMethod used { [key: string]: SerializableValue }
  * which didn't match interfaces with named properties.
  */
-/* oxlint-disable */
 import type { env } from "cloudflare:workers";
 import { Agent } from "..";
 import { useAgent } from "../react";

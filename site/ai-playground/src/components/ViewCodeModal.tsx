@@ -1,4 +1,3 @@
-/* oxlint-disable */
 import type { UIMessage } from "ai";
 import { Link } from "@cloudflare/kumo";
 import { XIcon } from "@phosphor-icons/react";

@@ -18,7 +18,6 @@ const ShellCommand = ({
   };
 
   return (
-    // oxlint-disable-next-line
     <div
       className="relative group"
       onMouseEnter={() => setIsHovered(true)}

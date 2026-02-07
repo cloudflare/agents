@@ -105,7 +105,6 @@ export type UserAgent = {
 export function useOpenAiGlobal<K extends keyof OpenAiGlobals>(
   key: K
 ): OpenAiGlobals[K] {
-  // oxlint-disable-next-line
   return useSyncExternalStore(
     (onChange) => {
       const handleSetGlobal = (event: SetGlobalsEvent) => {
@@ -141,6 +140,5 @@ export function useToolResponseMetadata() {
   if (typeof window.openai === "undefined") {
     return null;
   }
-  // oxlint-disable-next-line
   return useOpenAiGlobal("toolResponseMetadata");
 }
