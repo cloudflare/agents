@@ -399,17 +399,31 @@ async function main() {
         error instanceof Error
           ? error
           : new Error(typeof error === "string" ? error : String(error));
-      const errWithCode = error as { code?: string; data?: unknown };
       console.error(prefix, "Error communicating with agent:", err.message);
-      if (errWithCode.code) {
-        console.error(colorize("gray", `   Code: ${errWithCode.code}`));
+
+      // Extract optional code/data from RPC-style errors
+      const code =
+        error != null &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof (error as Record<string, unknown>).code === "string"
+          ? ((error as Record<string, unknown>).code as string)
+          : undefined;
+      const data =
+        error != null &&
+        typeof error === "object" &&
+        "data" in error &&
+        (error as Record<string, unknown>).data !== undefined
+          ? (error as Record<string, unknown>).data
+          : undefined;
+
+      if (code) {
+        console.error(colorize("gray", `   Code: ${code}`));
       }
-      if (errWithCode.data) {
-        console.error(
-          colorize("gray", `   Data: ${JSON.stringify(errWithCode.data)}`)
-        );
+      if (data) {
+        console.error(colorize("gray", `   Data: ${JSON.stringify(data)}`));
       }
-      if (!(errWithCode.code || errWithCode.data) && err.stack) {
+      if (!(code || data) && err.stack) {
         console.error(
           colorize("gray", err.stack.split("\n").slice(1, 3).join("\n"))
         );

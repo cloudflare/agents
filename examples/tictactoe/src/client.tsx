@@ -8,7 +8,7 @@ import {
   XIcon
 } from "@phosphor-icons/react";
 import { Button, Surface, Switch, Text } from "@cloudflare/kumo";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { TicTacToeState } from "./server";
 import "./styles.css";
@@ -39,6 +39,27 @@ function App() {
     prefix: "some/prefix"
   });
 
+  const handleCellClick = useCallback(
+    async (row: number, col: number) => {
+      if (state.board[row][col] !== null || state.winner) return;
+      try {
+        await agent.call("makeMove", [[row, col], state.currentPlayer]);
+      } catch (error) {
+        console.error("Error making move:", error);
+      }
+    },
+    [agent, state.board, state.winner, state.currentPlayer]
+  );
+
+  const handleNewGame = useCallback(async () => {
+    try {
+      await agent.call("clearBoard");
+      setGamesPlayed((prev) => prev + 1);
+    } catch (error) {
+      console.error("Error clearing board:", error);
+    }
+  }, [agent]);
+
   // Make random move when new game starts
   useEffect(() => {
     const isBoardEmpty = state.board.every((row) =>
@@ -54,7 +75,7 @@ function App() {
 
       return () => clearTimeout(timer);
     }
-  }, [state.board, gamesPlayed, autoPlayEnabled]);
+  }, [state.board, gamesPlayed, autoPlayEnabled, handleCellClick]);
 
   // Check for game over and start new game after delay
   useEffect(() => {
@@ -77,25 +98,7 @@ function App() {
 
       return () => clearTimeout(timer);
     }
-  }, [state.winner, state.board]);
-
-  const handleCellClick = async (row: number, col: number) => {
-    if (state.board[row][col] !== null || state.winner) return;
-    try {
-      await agent.call("makeMove", [[row, col], state.currentPlayer]);
-    } catch (error) {
-      console.error("Error making move:", error);
-    }
-  };
-
-  const handleNewGame = async () => {
-    try {
-      await agent.call("clearBoard");
-      setGamesPlayed((prev) => prev + 1);
-    } catch (error) {
-      console.error("Error clearing board:", error);
-    }
-  };
+  }, [state.winner, state.board, handleNewGame]);
 
   const renderCell = (row: number, col: number) => {
     const value = state.board[row][col];

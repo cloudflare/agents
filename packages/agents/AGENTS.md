@@ -76,7 +76,7 @@ npm run build           # runs tsx scripts/build.ts
 
 Uses **tsdown** (ESM-only, with .d.ts generation and sourcemaps). Build entry points are explicitly listed in `scripts/build.ts` — if you add a new export, add it there too.
 
-After build, Prettier formats the generated `.d.ts` files.
+After build, `oxfmt --write` formats the generated `.d.ts` files.
 
 The `check:exports` script at the repo root verifies that every `exports` entry in `package.json` has a corresponding file in `dist/`.
 

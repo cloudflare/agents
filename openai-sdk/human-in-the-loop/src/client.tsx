@@ -50,7 +50,12 @@ function ApprovalModal({
   onApprove: () => void;
   onReject: () => void;
 }) {
-  const args = JSON.parse(interruption.rawItem.arguments);
+  let args: unknown;
+  try {
+    args = JSON.parse(interruption.rawItem.arguments);
+  } catch {
+    args = { raw: interruption.rawItem.arguments };
+  }
 
   return (
     <div
@@ -250,7 +255,14 @@ function App() {
     }) {
       console.log("[Client] onStateUpdate called with serialisedRunState:");
       if (serialisedRunState) {
-        const parsedState = JSON.parse(serialisedRunState) as RunResultState;
+        let parsedState: RunResultState;
+        try {
+          parsedState = JSON.parse(serialisedRunState) as RunResultState;
+        } catch {
+          console.error("[Client] Failed to parse serialisedRunState");
+          setState(null);
+          return;
+        }
         console.log("[Client] Parsed state:", parsedState);
         setState(parsedState);
 
@@ -262,6 +274,10 @@ function App() {
             setCurrentInterruption(interruption);
             setShowApprovalModal(true);
           }
+        } else if (showApprovalModal) {
+          // Clear modal if state no longer has an interruption
+          setShowApprovalModal(false);
+          setCurrentInterruption(null);
         }
       } else {
         console.log("[Client] No serialisedRunState provided, clearing state");

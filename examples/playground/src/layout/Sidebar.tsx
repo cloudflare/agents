@@ -190,6 +190,8 @@ function CategorySection({ category }: { category: NavCategory }) {
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
+        aria-expanded={isOpen}
+        aria-controls={`nav-category-${category.label.toLowerCase().replace(/\s+/g, "-")}`}
         className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-kumo-subtle hover:text-kumo-default bg-kumo-control rounded-md transition-colors"
       >
         {isOpen ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
@@ -198,7 +200,12 @@ function CategorySection({ category }: { category: NavCategory }) {
       </button>
 
       {isOpen && (
-        <div className="ml-5 mt-1 space-y-0.5">
+        <div
+          id={`nav-category-${category.label.toLowerCase().replace(/\s+/g, "-")}`}
+          role="region"
+          aria-label={`${category.label} navigation`}
+          className="ml-5 mt-1 space-y-0.5"
+        >
           {category.items.map((item) => (
             <NavLink
               key={item.path}

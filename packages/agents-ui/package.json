@@ -9,6 +9,8 @@
     "./theme/*": "./src/theme/*"
   },
   "peerDependencies": {
+    "@cloudflare/kumo": "*",
+    "@phosphor-icons/react": "*",
     "react": ">=19"
   }
 }

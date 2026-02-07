@@ -36,8 +36,8 @@ const statusConfig: Record<
 export function ConnectionIndicator({ status }: ConnectionStatusProps) {
   const { label, dotClass, textClass } = statusConfig[status];
   return (
-    <div className="flex items-center gap-2">
-      <span className={`size-2 rounded-full ${dotClass}`} />
+    <div className="flex items-center gap-2" role="status" aria-live="polite">
+      <span className={`size-2 rounded-full ${dotClass}`} aria-hidden="true" />
       <span className={textClass}>{label}</span>
     </div>
   );

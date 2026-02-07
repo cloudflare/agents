@@ -17,7 +17,7 @@ examples/          # Self-contained demo apps (see examples/AGENTS.md)
   playground/      # Main showcase app — all SDK features in one UI (uses Kumo design system)
   mcp/             # MCP server example
   mcp-client/      # MCP client example
-  ...              # ~18 examples total
+  ...              # ~17 examples total
 
 site/              # Deployed websites
   agents/          # agents.cloudflare.com (Astro)
@@ -59,15 +59,15 @@ Node 24+ required. Uses npm workspaces (not Turborepo).
 
 Run from the repo root:
 
-| Command                 | What it does                                                              |
-| ----------------------- | ------------------------------------------------------------------------- |
-| `npm run build`         | Builds all four packages (agents, hono-agents, ai-chat, codemode)         |
-| `npm run check`         | Full CI check: sherif + export checks + prettier + biome lint + typecheck |
-| `npm run test`          | Runs tests for agents and ai-chat (vitest + vitest-pool-workers)          |
-| `npm run test:react`    | Runs Playwright-based React hook tests for agents                         |
-| `npm run typecheck`     | TypeScript type checking across the repo (custom script)                  |
-| `npm run format`        | Prettier format all files                                                 |
-| `npm run check:exports` | Verifies package.json exports match actual build output                   |
+| Command                 | What it does                                                       |
+| ----------------------- | ------------------------------------------------------------------ |
+| `npm run build`         | Builds all four packages (agents, hono-agents, ai-chat, codemode)  |
+| `npm run check`         | Full CI check: sherif + export checks + oxfmt + oxlint + typecheck |
+| `npm run test`          | Runs tests for agents and ai-chat (vitest + vitest-pool-workers)   |
+| `npm run test:react`    | Runs Playwright-based React hook tests for agents                  |
+| `npm run typecheck`     | TypeScript type checking across the repo (custom script)           |
+| `npm run format`        | Oxfmt format all files                                             |
+| `npm run check:exports` | Verifies package.json exports match actual build output            |
 
 Run an example locally:
 
@@ -85,22 +85,22 @@ npm run dev              # starts Vite dev server + Workers runtime via @cloudfl
 - `verbatimModuleSyntax: true` — use explicit `import type` for type-only imports
 - JSX: `react-jsx`
 
-### Linting — Biome
+### Linting — Oxlint
 
-Config in `biome.json`. Key rules:
+Config in `.oxlintrc.json`. Plugins: `react`, `jsx-a11y`, `typescript`, `react-hooks`. Key rules:
 
-- `noExplicitAny: "error"` — never use `any`, use `unknown` and narrow
-- `noInferrableTypes: "error"` — don't annotate types TypeScript can infer
-- `noParameterAssign: "error"` — don't reassign function parameters
-- `useSelfClosingElements: "error"` — `<Foo />` not `<Foo></Foo>`
-- Unused imports are errors
+- `no-explicit-any: "error"` — never use `any`, use `unknown` and narrow
+- `no-unused-vars: "error"` — with `varsIgnorePattern: "^_"` and `argsIgnorePattern: "^_"`
+- `correctness` category set to `"error"` — catches common mistakes
+- `jsx-a11y` rules enabled — accessibility violations are errors
+- `react-hooks/exhaustive-deps: "warn"` — warns on missing hook dependencies
 
-Biome does **not** handle formatting — Prettier does.
+Oxlint does **not** handle formatting — Oxfmt does.
 
-### Formatting — Prettier
+### Formatting — Oxfmt
 
 - Run `npm run format` or rely on lint-staged (auto-formats on commit via husky)
-- Config is default Prettier
+- Config in `.oxfmtrc.json` (`trailingComma: "none"`, `printWidth: 80`)
 
 ### Workers conventions
 
@@ -170,7 +170,7 @@ CI runs on every PR (`npm ci && npm run build && npm run check && npm run test`)
 
 - Hardcode secrets or API keys
 - Add native/FFI/C-binding dependencies
-- Use `any` — Biome will reject it
+- Use `any` — Oxlint will reject it
 - Use CommonJS or Service Worker format — ES modules only
 - Modify `node_modules/` or `dist/` directories
 - Force push to main

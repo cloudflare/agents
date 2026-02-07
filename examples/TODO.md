@@ -4,7 +4,7 @@ Tracked issues from the examples audit. See `AGENTS.md` in this folder for the c
 
 ## Missing README.md
 
-- [ ] `resumable-stream-chat/` — add README
+- [x] `resumable-stream-chat/` — add README
 - [ ] `x402/` — add README
 
 ## Add frontend + Vite plugin
@@ -40,8 +40,8 @@ Standardise on `.env` / `.env.example` (not `.dev.vars` / `.dev.vars.example`).
 
 - [ ] `github-webhook/` — rename `.dev.vars.example` to `.env.example`
 - [ ] `mcp-client/` — rename `.dev.vars.example` to `.env.example`
-- [ ] `playground/` — rename `.dev.vars.example` to `.env.example`
-- [ ] `resumable-stream-chat/` — rename `.dev.vars.example` to `.env.example`
+- [x] `playground/` — rename `.dev.vars.example` to `.env.example`
+- [x] `resumable-stream-chat/` — rename `.dev.vars.example` to `.env.example`
 - [x] `tictactoe/` — rename `.dev.vars.example` to `.env.example`
 
 ## wrangler.jsonc assets cleanup

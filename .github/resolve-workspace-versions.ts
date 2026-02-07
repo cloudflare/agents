@@ -28,7 +28,13 @@ const packageJsons: Record<string, { file: string; packageJson: PackageJson }> =
 for await (const file of await fg.glob(
   "./(packages|examples|guides)/*/package.json"
 )) {
-  const packageJson = JSON.parse(fs.readFileSync(file, "utf8")) as PackageJson;
+  let packageJson: PackageJson;
+  try {
+    packageJson = JSON.parse(fs.readFileSync(file, "utf8")) as PackageJson;
+  } catch (err) {
+    console.error(`Failed to parse ${file}:`, err);
+    continue;
+  }
   packageJsons[packageJson.name] = {
     file,
     packageJson

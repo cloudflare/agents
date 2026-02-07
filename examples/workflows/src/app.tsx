@@ -245,6 +245,7 @@ export default function App() {
             value={taskName}
             onChange={(e) => setTaskName(e.target.value)}
             placeholder="Enter task name (e.g., 'Generate Report')"
+            aria-label="Task name"
             className="flex-1"
           />
           <Button
@@ -374,6 +375,7 @@ export default function App() {
               type="button"
               className="text-kumo-inactive transition-colors hover:text-kumo-default"
               onClick={() => setToast(null)}
+              aria-label="Dismiss notification"
             >
               ×
             </button>
@@ -449,7 +451,19 @@ function WorkflowCard({
   ) => Promise<unknown>;
 }) {
   const [rejectReason, setRejectReason] = useState("");
-  const workflow = rawWorkflow as WorkflowCardData;
+
+  // Transform WorkflowItem to UI-safe types for rendering
+  const workflow: WorkflowCardData = {
+    ...rawWorkflow,
+    result:
+      rawWorkflow.result != null &&
+      typeof rawWorkflow.result === "object" &&
+      !Array.isArray(rawWorkflow.result)
+        ? (rawWorkflow.result as Record<string, unknown>)
+        : undefined,
+    progress: rawWorkflow.progress as ProgressInfo | null
+  };
+
   const percent = workflow.progress?.percent ?? 0;
   const message = workflow.progress?.message ?? "Processing...";
   const id = workflow.workflowId;
@@ -562,6 +576,7 @@ function WorkflowCard({
               value={rejectReason}
               onChange={(e) => setRejectReason(e.target.value)}
               placeholder="Reason (optional)"
+              aria-label="Rejection reason"
               className="min-w-[120px] flex-1"
             />
             <Button

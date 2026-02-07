@@ -1,4 +1,4 @@
-import { Suspense, useState, useEffect, useRef } from "react";
+import { Suspense, useCallback, useState, useEffect, useRef } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { Button, Badge, InputArea, Empty } from "@cloudflare/kumo";
@@ -40,12 +40,22 @@ function Chat() {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const handleOpen = useCallback(() => setConnectionStatus("connected"), []);
+  const handleClose = useCallback(
+    () => setConnectionStatus("disconnected"),
+    []
+  );
+  const handleError = useCallback(
+    (error: Event) => console.error("WebSocket error:", error),
+    []
+  );
+
   const agent = useAgent({
     agent: "ResumableStreamingChat",
     name: "demo",
-    onOpen: () => setConnectionStatus("connected"),
-    onClose: () => setConnectionStatus("disconnected"),
-    onError: (error) => console.error("WebSocket error:", error)
+    onOpen: handleOpen,
+    onClose: handleClose,
+    onError: handleError
   });
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
@@ -59,16 +69,20 @@ function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const send = async () => {
+  const send = useCallback(async () => {
     const text = input.trim();
     if (!text || isStreaming) return;
 
     setInput("");
-    await sendMessage({
-      role: "user",
-      parts: [{ type: "text", text }]
-    });
-  };
+    try {
+      await sendMessage({
+        role: "user",
+        parts: [{ type: "text", text }]
+      });
+    } catch (error) {
+      console.error("Failed to send message:", error);
+    }
+  }, [input, isStreaming, sendMessage]);
 
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
