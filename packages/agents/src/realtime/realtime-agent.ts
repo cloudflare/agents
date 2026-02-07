@@ -1,4 +1,4 @@
-import RealtimeKitClient from "@cloudflare/realtimekit";
+import type RealtimeKitClient from "@cloudflare/realtimekit";
 import {
   Agent,
   type AgentContext,
@@ -18,8 +18,6 @@ import { RealtimeAPI } from "./api";
 import {
   DataKind,
   RealtimeKitTransport,
-  DeepgramSTT,
-  ElevenLabsTTS,
   type RealtimePipelineComponent
 } from "./components";
 import { camelCaseToKebabCase } from "../client";
@@ -47,22 +45,23 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   implements RealtimePipelineComponent
 {
   public pipelineState: RealtimeState = "idle";
-  private api: RealtimeAPI;
+  private api?: RealtimeAPI;
   private pipeline: RealtimePipelineComponent[] = [];
   private agentUrl?: string;
   private flowId?: string;
   private token?: string;
   private agentName: string;
-  private gatewayId: string;
   /** Array of transcript entries for the current conversation */
   public transcriptHistory: TranscriptEntry[];
 
   #meeting?: RealtimeKitClient;
 
-  constructor(ctx: AgentContext, env: Env, ai: Ai, gatewayId: string) {
+  onError(error: unknown): void | Promise<void> {
+    console.error("Error in realtime agentxxx", error);
+  }
+
+  constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
-    this.gatewayId = gatewayId;
-    this.api = new RealtimeAPI(ai, gatewayId);
     // Get the agent name from the class constructor
     this.agentName = camelCaseToKebabCase(
       Object.getPrototypeOf(this).constructor.name
@@ -103,20 +102,16 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     };
   }
 
-  public setPipeline(pipeline: RealtimePipelineComponent[]) {
-    // Set gateway_id in DeepgramSTT and ElevenLabsTTS components if not already set
+  public setPipeline(
+    pipeline: RealtimePipelineComponent[],
+    ai: Ai,
+    gatewayId?: string
+  ) {
+    const gatewayIdOrDefault = gatewayId ?? ":default";
+    this.api = new RealtimeAPI(ai, gatewayIdOrDefault);
+
     for (const component of pipeline) {
-      if (component instanceof DeepgramSTT) {
-        const comp = component as any;
-        if (!comp.gatewayId) {
-          component.setGatewayId(this.gatewayId);
-        }
-      } else if (component instanceof ElevenLabsTTS) {
-        const comp = component as any;
-        if (!comp.gatewayId) {
-          component.setGatewayId(this.gatewayId);
-        }
-      }
+      component.setGatewayId?.(gatewayIdOrDefault);
     }
     this.pipeline = pipeline;
   }
@@ -189,20 +184,10 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   }
 
   /**
-   * Get transcript history formatted as a conversation string
-   * @param maxEntries Maximum number of recent entries to include (default: all)
+   * Get transcript history
    */
-  getFormattedHistory(maxEntries?: number): string {
-    const entries = maxEntries
-      ? this.transcriptHistory.slice(-maxEntries)
-      : this.transcriptHistory;
-
-    return entries
-      .map(
-        (entry) =>
-          `${entry.role === "user" ? "User" : "Assistant"}: ${entry.text}`
-      )
-      .join("\n");
+  getTranscriptHistory() {
+    return this.transcriptHistory;
   }
 
   /**
@@ -246,9 +231,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   async onRealtimeVideoFrame(
     frame: string
   ): Promise<SpeakResponse | undefined> {
-    throw new Error(
-      "received a video frame, override onRealtimeVideoFrame and return text that you want agent to speak."
-    );
+    return;
   }
 
   /**
@@ -256,9 +239,8 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * @param agentURL The URL of the agent
    */
   async init(agentURL: string, meetingId: string | null) {
-    // Validate all components
-    for (const component of this.pipeline) {
-      component.validate();
+    if (!this.api) {
+      throw new Error("setPipeline must be called before init");
     }
 
     // Validate component chain
@@ -365,6 +347,11 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * This will initialize the pipeline and start processing
    */
   async startRealtimePipeline(meetingId: string | null) {
+    if (!this.api) {
+      throw new Error(
+        "setPipeline must be called before startRealtimePipeline"
+      );
+    }
     if (this.pipelineState !== "idle") {
       throw new Error("Pipeline is already running");
     }
@@ -411,6 +398,9 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * Stop the realtime pipeline
    */
   async stopRealtimePipeline() {
+    if (!this.api) {
+      throw new Error("setPipeline must be called before stopRealtimePipeline");
+    }
     if (
       this.pipelineState !== "running" &&
       this.pipelineState !== "initializing"
@@ -463,22 +453,32 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
 
   override onRequest(request: Request): Response | Promise<Response> {
     if (isRealtimeRequest(request)) {
+      console.log("realtime request yyy");
       return this.handleRealtimeRequest(request);
     }
+    console.log("realtime request nnn");
     return super.onRequest(request);
   }
 
   private async handleRealtimeRequest(request: Request): Promise<Response> {
     const requestUrl = new URL(request.url);
-
     if (!this.agentUrl) {
       this.buildAgentUrl(requestUrl, this.name);
     }
 
+    if (requestUrl.pathname.includes("ping")) {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type"
+        }
+      });
+    }
     const path = request.url.split(
       `agents/${this.agentName}/${this.name}/realtime`
     )[1];
-    console.log("path", path.split("?")[0]);
 
     switch (path.split("?")[0]) {
       case "/rtk/produce": {
@@ -675,10 +675,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       return [REALTIME_WS_TAG];
     }
     return super.getConnectionTags(connection, ctx);
-  }
-
-  validate(): void {
-    // RealtimeAgent validation is handled by pipeline components
   }
 
   /**

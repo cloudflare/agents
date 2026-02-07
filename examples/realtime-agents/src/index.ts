@@ -1,33 +1,24 @@
 import {
-  DataKind,
   DeepgramSTT,
   ElevenLabsTTS,
   RealtimeAgent,
   RealtimeKitTransport,
-  RealtimePipelineComponent,
-  SpeakResponse
+  type RealtimeKitClient
 } from "agents/realtime";
 
 import { type AgentContext, routeAgentRequest } from "agents";
-import RealtimeKitClient from "@cloudflare/realtimekit";
 import { env } from "cloudflare:workers";
 
-const GATEWAY_ID = "aig-worker-testing";
-
-export class RealtimeVoiceAgent extends RealtimeAgent {
+export class RealtimeVoiceAgent extends RealtimeAgent<Env> {
   constructor(ctx: AgentContext, env: Env) {
-    const rtk = new RealtimeKitTransport({
-      meetingId: "bbb9e53e-c839-4c84-b0cd-b8ef18ed8da2"
-    });
+    super(ctx, env);
+    const rtk = new RealtimeKitTransport();
 
-    // The keys for Elevenlabs and Deepgram are stored inside the AIGateway BYOK.
-    // You can also pass the keys as parameters to the constructors if needed.
-    const tts = new ElevenLabsTTS();
-    const stt = new DeepgramSTT();
+    // The keys for Elevenlabs and Deepgram can also be stored inside the AI Gateway with BYOK.
+    const tts = new ElevenLabsTTS({ apiKey: env.ELEVENLABS_API_KEY });
+    const stt = new DeepgramSTT({ apiKey: env.DEEPGRAM_API_KEY });
 
-    super(ctx, env, env.AI, GATEWAY_ID);
-
-    this.setPipeline([rtk, stt, this, tts, rtk]);
+    this.setPipeline([rtk, stt, this, tts, rtk], env.AI, env.AI_GATEWAY_ID);
   }
 
   onRealtimeMeeting(meeting: RealtimeKitClient): void | Promise<void> {
@@ -36,19 +27,18 @@ export class RealtimeVoiceAgent extends RealtimeAgent {
     });
   }
 
-  async onRealtimeTranscript(text: string): Promise<SpeakResponse | undefined> {
-    // Get conversation history to provide context to the LLM
-    const history = this.getFormattedHistory(10); // Last 10 exchanges
+  async onRealtimeTranscript(text: string) {
+    const history = this.getTranscriptHistory();
 
-    // Build prompt with conversation context
-    const prompt = history
-      ? `Previous conversation:\n${history}\n\nUser: ${text}\nAssistant:`
-      : `User: ${text}\nAssistant:`;
-
-    const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-      prompt,
+    const response = await env.AI.run("@cf/openai/gpt-oss-20b", {
+      instructions:
+        "You are a helpful assistant, provide a response to the user.",
+      input: history
+        .map((h) => ({ role: h.role, content: h.text }))
+        .concat({ role: "user", content: text }),
       stream: true
     });
+
     return {
       text: response,
       canInterrupt: true

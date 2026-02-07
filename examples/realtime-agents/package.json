@@ -1,5 +1,5 @@
 {
-  "name": "realtime-agents",
+  "name": "realtime-agents-example",
   "private": true,
   "type": "module",
   "author": "Ramyak Mehra <ramyakmehra@cloudflare.com>",

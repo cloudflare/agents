@@ -1,5 +1,6 @@
 import RealtimeKitClient from "@cloudflare/realtimekit";
 import { REALTIME_AGENTS_SERVICE } from "./api";
+export type { RealtimeKitClient };
 
 export enum DataKind {
   Text = "TEXT",
@@ -7,13 +8,12 @@ export enum DataKind {
   Audio = "AUDIO"
 }
 
-export interface RealtimePipelineComponent {
+export type RealtimePipelineComponent = {
   name: string;
   input_kind(): DataKind;
   output_kind(): DataKind;
   schema(): { name: string; type: string; [K: string]: unknown };
-  validate(): void;
-}
+} & { setGatewayId?: (gatewayId: string) => void };
 
 export interface RealtimeKitMeetingConfig {
   meetingId?: string;
@@ -39,12 +39,12 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
   #authToken?: string;
   readonly filters: RealtimeKitMediaFilter[];
 
-  constructor(config: RealtimeKitMeetingConfig) {
-    this.meetingId = config.meetingId;
+  constructor(config?: RealtimeKitMeetingConfig) {
+    this.meetingId = config?.meetingId;
 
-    this.#authToken = config.authToken;
+    this.#authToken = config?.authToken;
     this.filters =
-      config.filters ??
+      config?.filters ??
       ([
         { media_kind: "audio", stream_kind: "microphone", preset_name: "*" }
       ] as const);
@@ -91,10 +91,6 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
     return DataKind.Audio;
   }
 
-  validate(): void {
-    // RealtimeKit doesn't require validation as auth is handled separately
-  }
-
   schema() {
     const schema: Record<string, unknown> = {
       name: this.name,
@@ -111,16 +107,23 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
   }
 }
 
+export type DeepgramConfig = {
+  language?: string;
+  model?: string;
+  apiKey?: string;
+};
+
 export class DeepgramSTT implements RealtimePipelineComponent {
-  constructor(
-    private gatewayId?: string,
-    private apiKey?: string,
-    private readonly config?: { language?: string; model?: string }
-  ) {
-    this.gatewayId = gatewayId;
-    this.apiKey = apiKey;
-    this.config = config;
-  }
+  private gatewayId?: string;
+
+  /**
+   * Creates a new DeepgramSTT instance for speech-to-text transcription.
+   * @param config - Optional configuration object
+   * @param config.language - Language code for transcription
+   * @param config.model - Deepgram model to use
+   * @param config.apiKey - Deepgram API key for authentication
+   */
+  constructor(private readonly config?: DeepgramConfig) {}
 
   setGatewayId(gatewayId: string): void {
     this.gatewayId = gatewayId;
@@ -138,50 +141,40 @@ export class DeepgramSTT implements RealtimePipelineComponent {
     return DataKind.Text;
   }
 
-  validate(): void {
-    if (!this.gatewayId && !this.apiKey) {
-      throw new Error(
-        "DeepgramSTT: Either gatewayId or apiKey must be provided"
-      );
-    }
-  }
-
   schema() {
-    const provider: Record<string, unknown> = {};
-
-    if (this.gatewayId) {
-      provider.gateway_id = this.gatewayId;
-    }
-    if (this.apiKey) {
-      provider.api_key = this.apiKey;
-    }
-
     return {
       name: this.name,
       type: "speech_to_text",
       provider: {
         deepgram: {
-          ...provider,
-          ...this.config
+          gateway_id: this.gatewayId,
+          model: this.config?.model,
+          language: this.config?.language,
+          api_key: this.config?.apiKey
         }
       }
     };
   }
 }
 
+type ElevenLabsConfig = {
+  model?: string;
+  voice_id?: string;
+  language_code?: string;
+  apiKey?: string;
+};
 export class ElevenLabsTTS implements RealtimePipelineComponent {
-  constructor(
-    private gatewayId?: string,
-    private apiKey?: string,
-    private readonly config?: {
-      model?: string;
-      voice_id?: string;
-      language_code?: string;
-    }
-  ) {
-    this.gatewayId = gatewayId;
-    this.apiKey = apiKey;
-  }
+  private gatewayId?: string;
+
+  /**
+   * Creates a new ElevenLabsTTS instance for text-to-speech synthesis.
+   * @param config - Optional configuration object
+   * @param config.model - ElevenLabs model to use
+   * @param config.voice_id - Voice ID for speech synthesis
+   * @param config.language_code - Language code for speech output
+   * @param config.apiKey - ElevenLabs API key for authentication
+   */
+  constructor(private readonly config?: ElevenLabsConfig) {}
 
   setGatewayId(gatewayId: string): void {
     this.gatewayId = gatewayId;
@@ -199,31 +192,17 @@ export class ElevenLabsTTS implements RealtimePipelineComponent {
     return DataKind.Audio;
   }
 
-  validate(): void {
-    if (!this.gatewayId && !this.apiKey) {
-      throw new Error(
-        "ElevenLabsTTS: Either gatewayId or apiKey must be provided"
-      );
-    }
-  }
-
   schema() {
-    const provider: Record<string, unknown> = {};
-
-    if (this.gatewayId) {
-      provider.gateway_id = this.gatewayId;
-    }
-    if (this.apiKey) {
-      provider.api_key = this.apiKey;
-    }
-
     return {
       name: this.name,
       type: "text_to_speech",
       provider: {
         elevenlabs: {
-          ...provider,
-          ...this.config
+          gateway_id: this.gatewayId,
+          api_key: this.config?.apiKey,
+          model: this.config?.model,
+          voice_id: this.config?.voice_id,
+          language_code: this.config?.language_code
         }
       }
     };
