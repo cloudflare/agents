@@ -303,7 +303,7 @@ export function SecureDemo() {
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
                         {reply.signed && (
-                          <CheckCircle
+                          <CheckCircleIcon
                             size={12}
                             className="text-kumo-success"
                           />
