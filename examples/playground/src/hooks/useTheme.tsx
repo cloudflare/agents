@@ -49,12 +49,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       const resolved = theme === "system" ? getSystemTheme() : theme;
       setResolvedTheme(resolved);
 
-      // Update the document class
-      if (resolved === "dark") {
-        document.documentElement.classList.add("dark");
-      } else {
-        document.documentElement.classList.remove("dark");
-      }
+      // Set data-mode attribute for Kumo semantic tokens
+      document.documentElement.setAttribute("data-mode", resolved);
+      // Set color-scheme for native form elements
+      document.documentElement.style.colorScheme = resolved;
     };
 
     updateResolved();

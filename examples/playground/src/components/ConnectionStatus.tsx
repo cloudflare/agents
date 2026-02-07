@@ -1,3 +1,5 @@
+import { Badge } from "@cloudflare/kumo";
+
 interface ConnectionStatusProps {
   status: "connected" | "connecting" | "disconnected";
   agentName?: string;
@@ -9,28 +11,15 @@ export function ConnectionStatus({
   agentName,
   instanceName
 }: ConnectionStatusProps) {
-  const statusClass =
-    status === "connected"
-      ? "status-connected"
-      : status === "connecting"
-        ? "status-connecting"
-        : "status-disconnected";
-
-  const statusLabel =
-    status === "connected"
-      ? "Connected"
-      : status === "connecting"
-        ? "Connecting..."
-        : "Disconnected";
-
   return (
     <div className="flex items-center gap-2 text-sm">
-      <div className={`status-dot ${statusClass}`} />
-      <span className="text-neutral-600 dark:text-neutral-400">
-        {statusLabel}
-      </span>
+      {status === "connected" && <Badge variant="primary">Connected</Badge>}
+      {status === "connecting" && <Badge variant="beta">Connecting...</Badge>}
+      {status === "disconnected" && (
+        <Badge variant="destructive">Disconnected</Badge>
+      )}
       {agentName && instanceName && status === "connected" && (
-        <span className="text-neutral-400 dark:text-neutral-500">
+        <span className="text-kumo-inactive">
           {agentName}/{instanceName}
         </span>
       )}

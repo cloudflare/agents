@@ -1,6 +1,7 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
 import { useState, useEffect } from "react";
+import { Button, Input, Surface } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -34,7 +35,6 @@ export function RoutingDemo() {
   const [connectionCount, setConnectionCount] = useState(0);
   const [agentInstanceName, setAgentInstanceName] = useState<string>("");
 
-  // Compute the agent instance name based on strategy
   const getAgentName = () => {
     switch (strategy) {
       case "per-user":
@@ -55,11 +55,7 @@ export function RoutingDemo() {
 
   const agent = useAgent<RoutingAgent, RoutingAgentState>({
     agent: "routing-agent",
-    // When using basePath, the server handles routing — name is ignored
     name: isCustomPath ? undefined : currentAgentName,
-    // basePath bypasses the default /agents/{agent}/{name} URL construction
-    // and connects directly to this path, where the server routes to the agent.
-    // Note: basePath should NOT start with a slash (the URL already includes one).
     basePath: isCustomPath ? `custom-routing/${currentAgentName}` : undefined,
     onOpen: () => {
       if (!isCustomPath) {
@@ -74,7 +70,6 @@ export function RoutingDemo() {
       }
     },
     onIdentity: (name, agentType) => {
-      // When using basePath, the server sends the identity after connection
       addLog("info", "identity", `Server resolved: ${agentType}/${name}`);
       setAgentInstanceName(name);
     },
@@ -86,7 +81,6 @@ export function RoutingDemo() {
     }
   });
 
-  // Save userId to localStorage when it changes
   useEffect(() => {
     localStorage.setItem("playground-user-id", userId);
   }, [userId]);
@@ -132,9 +126,9 @@ export function RoutingDemo() {
         {/* Controls */}
         <div className="space-y-6">
           {/* Connection Status */}
-          <div className="card p-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
+              <h3 className="font-semibold text-kumo-default">Connection</h3>
               <ConnectionStatus
                 status={
                   agent.readyState === WebSocket.OPEN
@@ -145,63 +139,68 @@ export function RoutingDemo() {
             </div>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
-                <span className="text-neutral-500 dark:text-neutral-400">
-                  Agent Instance:
-                </span>
-                <code className="bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 rounded text-xs">
+                <span className="text-kumo-subtle">Agent Instance:</span>
+                <code className="bg-kumo-control px-2 py-0.5 rounded text-xs text-kumo-default">
                   {agentInstanceName || "connecting..."}
                 </code>
               </div>
               <div className="flex justify-between">
-                <span className="text-neutral-500 dark:text-neutral-400">
-                  Counter:
+                <span className="text-kumo-subtle">Counter:</span>
+                <span className="font-bold text-lg text-kumo-default">
+                  {connectionCount}
                 </span>
-                <span className="font-bold text-lg">{connectionCount}</span>
               </div>
-              <button
-                type="button"
+              <Button
+                variant="secondary"
                 onClick={() => agent.call("increment")}
-                className="btn-secondary w-full text-sm"
+                className="w-full"
+                size="sm"
               >
                 Increment Counter
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* User Identity */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Your Identity</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">
+              Your Identity
+            </h3>
             <div className="space-y-3">
               <div>
                 <label
                   htmlFor="user-id"
-                  className="text-xs text-neutral-500 dark:text-neutral-400 block mb-1"
+                  className="text-xs text-kumo-subtle block mb-1"
                 >
                   User ID (persisted in localStorage)
                 </label>
-                <input
+                <Input
                   id="user-id"
                   type="text"
                   value={userId}
-                  onChange={(e) => setUserId(e.target.value)}
-                  className="input w-full"
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                    setUserId(e.target.value)
+                  }
+                  className="w-full"
                   placeholder="Enter a user ID"
                 />
               </div>
               <div>
-                <span className="text-xs text-neutral-500 dark:text-neutral-400 block mb-1">
+                <span className="text-xs text-kumo-subtle block mb-1">
                   Session ID (auto-generated per tab)
                 </span>
-                <code className="block bg-neutral-100 dark:bg-neutral-800 px-3 py-2 rounded text-sm">
+                <code className="block bg-kumo-control px-3 py-2 rounded text-sm text-kumo-default">
                   {getSessionId()}
                 </code>
               </div>
             </div>
-          </div>
+          </Surface>
 
           {/* Strategy Selector */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Routing Strategy</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">
+              Routing Strategy
+            </h3>
             <div className="space-y-2">
               {strategies.map((s) => (
                 <button
@@ -213,84 +212,94 @@ export function RoutingDemo() {
                   }}
                   className={`w-full text-left p-3 rounded-lg border transition-colors ${
                     strategy === s.id
-                      ? "border-black dark:border-white bg-neutral-50 dark:bg-neutral-800"
-                      : "border-neutral-200 dark:border-neutral-700 hover:border-neutral-400 dark:hover:border-neutral-500"
+                      ? "border-kumo-brand bg-kumo-elevated"
+                      : "border-kumo-line hover:border-kumo-interact"
                   }`}
                 >
                   <div className="flex items-center gap-2">
                     <div
                       className={`w-3 h-3 rounded-full border-2 ${
                         strategy === s.id
-                          ? "border-black dark:border-white bg-black dark:bg-white"
-                          : "border-neutral-300 dark:border-neutral-600"
+                          ? "border-kumo-brand bg-kumo-brand"
+                          : "border-kumo-line"
                       }`}
                     />
-                    <span className="font-medium">{s.label}</span>
+                    <span className="font-medium text-kumo-default">
+                      {s.label}
+                    </span>
                   </div>
-                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1 ml-5">
+                  <p className="text-xs text-kumo-subtle mt-1 ml-5">
                     {s.description}
                   </p>
                 </button>
               ))}
             </div>
-          </div>
+          </Surface>
 
           {/* Multi-Tab Testing */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Try It Out</h3>
-            <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">Try It Out</h3>
+            <p className="text-sm text-kumo-subtle mb-4">
               Open multiple tabs to see how different strategies affect which
               clients end up on the same agent instance.
             </p>
-            <button
-              type="button"
-              onClick={openNewTab}
-              className="btn btn-primary w-full"
-            >
+            <Button variant="primary" onClick={openNewTab} className="w-full">
               Open New Tab
-            </button>
-          </div>
+            </Button>
+          </Surface>
 
           {/* Explanation */}
-          <div className="card p-4 bg-neutral-50 dark:bg-neutral-800">
-            <h3 className="font-semibold mb-3">How It Works</h3>
-            <div className="text-sm text-neutral-600 dark:text-neutral-400 space-y-2">
+          <Surface className="p-4 rounded-lg bg-kumo-elevated">
+            <h3 className="font-semibold text-kumo-default mb-3">
+              How It Works
+            </h3>
+            <div className="text-sm text-kumo-subtle space-y-2">
               <p>
-                <strong>Per-User:</strong> Agent name ={" "}
-                <code>routing-{userId}</code>
+                <strong className="text-kumo-default">Per-User:</strong> Agent
+                name ={" "}
+                <code className="text-kumo-default">routing-{userId}</code>
                 <br />
                 <span className="text-xs">
                   Same user across tabs/devices shares an agent
                 </span>
               </p>
               <p>
-                <strong>Shared:</strong> Agent name ={" "}
-                <code>routing-shared</code>
+                <strong className="text-kumo-default">Shared:</strong> Agent
+                name = <code className="text-kumo-default">routing-shared</code>
                 <br />
                 <span className="text-xs">
                   Everyone connects to the same agent
                 </span>
               </p>
               <p>
-                <strong>Per-Session:</strong> Agent name ={" "}
-                <code>routing-{getSessionId()}</code>
+                <strong className="text-kumo-default">Per-Session:</strong>{" "}
+                Agent name ={" "}
+                <code className="text-kumo-default">
+                  routing-{getSessionId()}
+                </code>
                 <br />
                 <span className="text-xs">
                   Each browser tab gets its own agent
                 </span>
               </p>
               <p>
-                <strong>Custom Path:</strong> basePath ={" "}
-                <code>/custom-routing/routing-{userId}</code>
+                <strong className="text-kumo-default">Custom Path:</strong>{" "}
+                basePath ={" "}
+                <code className="text-kumo-default">
+                  /custom-routing/routing-{userId}
+                </code>
                 <br />
                 <span className="text-xs">
-                  Server handles routing via <code>getAgentByName</code> —
-                  client uses <code>basePath</code> instead of{" "}
-                  <code>agent</code>/<code>name</code>
+                  Server handles routing via{" "}
+                  <code className="text-kumo-default">getAgentByName</code> —
+                  client uses{" "}
+                  <code className="text-kumo-default">basePath</code> instead of{" "}
+                  <code className="text-kumo-default">agent</code>/
+                  <code className="text-kumo-default">name</code>
                 </span>
               </p>
             </div>
-          </div>
+          </Surface>
         </div>
 
         {/* Logs */}

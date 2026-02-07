@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "cronstrue": "^3.11.0",
-    "lucide-react": "^0.563.0",
     "nanoid": "^5.1.6",
     "postal-mime": "^2.7.3",
     "react-router-dom": "^7.13.0"

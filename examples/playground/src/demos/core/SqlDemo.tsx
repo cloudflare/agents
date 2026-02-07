@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState, useEffect } from "react";
+import { Button, Input, Surface, Table } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -108,9 +109,9 @@ export function SqlDemo() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <div className="card p-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
+              <h3 className="font-semibold text-kumo-default">Connection</h3>
               <ConnectionStatus
                 status={
                   agent.readyState === WebSocket.OPEN
@@ -119,22 +120,18 @@ export function SqlDemo() {
                 }
               />
             </div>
-          </div>
+          </Surface>
 
           {/* Tables */}
-          <div className="card p-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Tables</h3>
-              <button
-                type="button"
-                onClick={loadTables}
-                className="text-xs text-neutral-500 hover:text-black"
-              >
+              <h3 className="font-semibold text-kumo-default">Tables</h3>
+              <Button variant="ghost" size="xs" onClick={loadTables}>
                 Refresh
-              </button>
+              </Button>
             </div>
             {tables.length === 0 ? (
-              <p className="text-sm text-neutral-400">Loading...</p>
+              <p className="text-sm text-kumo-inactive">Loading...</p>
             ) : (
               <div className="space-y-1">
                 {tables
@@ -146,8 +143,8 @@ export function SqlDemo() {
                       onClick={() => handleSelectTable(table.name)}
                       className={`w-full text-left py-1.5 px-2 rounded text-sm transition-colors ${
                         selectedTable === table.name
-                          ? "bg-black text-white"
-                          : "hover:bg-neutral-100"
+                          ? "bg-kumo-contrast text-kumo-inverse"
+                          : "hover:bg-kumo-tint text-kumo-default"
                       }`}
                     >
                       {table.name}
@@ -155,22 +152,24 @@ export function SqlDemo() {
                   ))}
               </div>
             )}
-          </div>
+          </Surface>
 
           {/* Schema */}
           {selectedTable && schema.length > 0 && (
-            <div className="card p-4">
-              <h3 className="font-semibold mb-4">Schema: {selectedTable}</h3>
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
+              <h3 className="font-semibold text-kumo-default mb-4">
+                Schema: {selectedTable}
+              </h3>
               <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-neutral-200">
-                      <th className="text-left py-1">Column</th>
-                      <th className="text-left py-1">Type</th>
-                      <th className="text-left py-1">Nullable</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+                <Table>
+                  <Table.Header>
+                    <Table.Row>
+                      <Table.Head>Column</Table.Head>
+                      <Table.Head>Type</Table.Head>
+                      <Table.Head>Nullable</Table.Head>
+                    </Table.Row>
+                  </Table.Header>
+                  <Table.Body>
                     {schema.map((col: unknown, i) => {
                       const c = col as {
                         name: string;
@@ -178,77 +177,83 @@ export function SqlDemo() {
                         notnull: number;
                       };
                       return (
-                        <tr key={i} className="border-b border-neutral-100">
-                          <td className="py-1 font-mono">{c.name}</td>
-                          <td className="py-1">{c.type}</td>
-                          <td className="py-1">{c.notnull ? "No" : "Yes"}</td>
-                        </tr>
+                        <Table.Row key={i}>
+                          <Table.Cell className="font-mono">
+                            {c.name}
+                          </Table.Cell>
+                          <Table.Cell>{c.type}</Table.Cell>
+                          <Table.Cell>{c.notnull ? "No" : "Yes"}</Table.Cell>
+                        </Table.Row>
                       );
                     })}
-                  </tbody>
-                </table>
+                  </Table.Body>
+                </Table>
               </div>
-            </div>
+            </Surface>
           )}
 
           {/* Query */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Execute Query</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">
+              Execute Query
+            </h3>
             <textarea
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              className="input w-full h-24 font-mono text-sm"
+              className="w-full h-24 font-mono text-sm bg-kumo-control text-kumo-default ring ring-kumo-line rounded-lg px-3 py-2 focus:ring-kumo-ring focus:outline-none"
               placeholder="SELECT * FROM ..."
             />
-            <button
-              type="button"
+            <Button
+              variant="primary"
               onClick={handleExecuteQuery}
-              className="btn btn-primary mt-2 w-full"
+              className="mt-2 w-full"
             >
               Execute
-            </button>
-            <p className="text-xs text-neutral-500 mt-2">
+            </Button>
+            <p className="text-xs text-kumo-subtle mt-2">
               Only SELECT queries are allowed in the playground
             </p>
-          </div>
+          </Surface>
 
           {/* Query Result */}
           {queryResult && (
-            <div className="card p-4">
-              <h3 className="font-semibold mb-4">
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
+              <h3 className="font-semibold text-kumo-default mb-4">
                 Results ({queryResult.length} rows)
               </h3>
-              <pre className="text-xs bg-neutral-50 dark:bg-neutral-900 p-3 rounded overflow-x-auto max-h-60">
+              <pre className="text-xs bg-kumo-recessed p-3 rounded overflow-x-auto max-h-60 text-kumo-default">
                 {JSON.stringify(queryResult, null, 2)}
               </pre>
-            </div>
+            </Surface>
           )}
 
           {/* Insert Record */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Custom Data</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">
+              Custom Data
+            </h3>
             <div className="flex gap-2 mb-3">
-              <input
+              <Input
                 type="text"
                 value={newKey}
-                onChange={(e) => setNewKey(e.target.value)}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setNewKey(e.target.value)
+                }
+                className="flex-1"
                 placeholder="Key"
               />
-              <input
+              <Input
                 type="text"
                 value={newValue}
-                onChange={(e) => setNewValue(e.target.value)}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setNewValue(e.target.value)
+                }
+                className="flex-1"
                 placeholder="Value"
               />
-              <button
-                type="button"
-                onClick={handleInsertRecord}
-                className="btn btn-primary"
-              >
+              <Button variant="primary" onClick={handleInsertRecord}>
                 Insert
-              </button>
+              </Button>
             </div>
             {records.length > 0 && (
               <div className="space-y-1">
@@ -257,16 +262,18 @@ export function SqlDemo() {
                   return (
                     <div
                       key={i}
-                      className="flex justify-between py-1 px-2 bg-neutral-50 dark:bg-neutral-800 rounded text-sm"
+                      className="flex justify-between py-1 px-2 bg-kumo-elevated rounded text-sm"
                     >
-                      <span className="font-mono">{rec.key}</span>
-                      <span>{rec.value}</span>
+                      <span className="font-mono text-kumo-default">
+                        {rec.key}
+                      </span>
+                      <span className="text-kumo-subtle">{rec.value}</span>
                     </div>
                   );
                 })}
               </div>
             )}
-          </div>
+          </Surface>
         </div>
 
         {/* Logs */}

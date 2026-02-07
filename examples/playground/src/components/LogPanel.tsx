@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
-import { Trash2 } from "lucide-react";
+import { Trash } from "@phosphor-icons/react";
+import { Button, Surface, Empty } from "@cloudflare/kumo";
 
 export interface LogEntry {
   id: string;
@@ -55,30 +56,30 @@ export function LogPanel({
   };
 
   return (
-    <div className="card overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800">
-        <span className="text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+    <Surface className="overflow-hidden rounded-lg ring ring-kumo-line">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-kumo-line bg-kumo-elevated">
+        <span className="text-xs font-semibold uppercase tracking-wider text-kumo-subtle">
           Event Log
         </span>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          shape="square"
+          size="xs"
+          icon={<Trash size={14} />}
           onClick={onClear}
-          className="p-1 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors"
           title="Clear logs"
-        >
-          <Trash2 className="w-3.5 h-3.5" />
-        </button>
+        />
       </div>
 
       <div ref={scrollRef} className="overflow-y-auto" style={{ maxHeight }}>
         {logs.length === 0 ? (
-          <div className="px-3 py-4 text-xs text-neutral-400 text-center">
-            No events yet
+          <div className="py-4">
+            <Empty title="No events yet" size="sm" />
           </div>
         ) : (
           logs.map((log) => (
             <div key={log.id} className={getLogClass(log.direction)}>
-              <span className="text-neutral-400">
+              <span className="text-kumo-inactive">
                 {log.timestamp.toLocaleTimeString()}
               </span>
               <span className="mx-2 font-bold">
@@ -86,7 +87,7 @@ export function LogPanel({
               </span>
               <span className="font-semibold">{log.type}</span>
               {log.data !== undefined && (
-                <span className="ml-2 text-neutral-600 dark:text-neutral-400">
+                <span className="ml-2 text-kumo-subtle">
                   {typeof log.data === "string"
                     ? log.data
                     : JSON.stringify(log.data)}
@@ -96,6 +97,6 @@ export function LogPanel({
           ))
         )}
       </div>
-    </div>
+    </Surface>
   );
 }

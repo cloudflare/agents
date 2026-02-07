@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import { Button, Input, Surface } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -29,7 +30,6 @@ export function StreamingDemo() {
     addLog("out", "stream_start", { method, args });
 
     try {
-      // Use type assertion for dynamic streaming method calls
       await (
         agent.call as (
           m: string,
@@ -65,9 +65,9 @@ export function StreamingDemo() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <div className="card p-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
+              <h3 className="font-semibold text-kumo-default">Connection</h3>
               <ConnectionStatus
                 status={
                   agent.readyState === WebSocket.OPEN
@@ -76,110 +76,120 @@ export function StreamingDemo() {
                 }
               />
             </div>
-          </div>
+          </Surface>
 
           {/* Stream Numbers */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Stream Numbers</h3>
-            <p className="text-sm text-neutral-600 mb-3">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">
+              Stream Numbers
+            </h3>
+            <p className="text-sm text-kumo-subtle mb-3">
               Streams numbers from 1 to N synchronously
             </p>
             <div className="flex gap-2">
-              <input
+              <Input
                 type="number"
                 value={count}
-                onChange={(e) => setCount(e.target.value)}
-                className="input w-20"
-                min="1"
-                max="100"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setCount(e.target.value)
+                }
+                className="w-20"
+                min={1}
+                max={100}
               />
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => handleStream("streamNumbers", [Number(count)])}
                 disabled={isStreaming}
-                className="btn btn-primary"
               >
                 {isStreaming ? "Streaming..." : `Stream ${count} numbers`}
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Countdown */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Countdown</h3>
-            <p className="text-sm text-neutral-600 mb-3">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">Countdown</h3>
+            <p className="text-sm text-kumo-subtle mb-3">
               Streams a countdown with 500ms delays between numbers
             </p>
             <div className="flex gap-2">
-              <input
+              <Input
                 type="number"
                 value={countdown}
-                onChange={(e) => setCountdown(e.target.value)}
-                className="input w-20"
-                min="1"
-                max="20"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setCountdown(e.target.value)
+                }
+                className="w-20"
+                min={1}
+                max={20}
               />
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => handleStream("countdown", [Number(countdown)])}
                 disabled={isStreaming}
-                className="btn btn-primary"
               >
                 {isStreaming ? "Streaming..." : `Countdown from ${countdown}`}
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Stream with Error */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Stream with Error</h3>
-            <p className="text-sm text-neutral-600 mb-3">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">
+              Stream with Error
+            </h3>
+            <p className="text-sm text-kumo-subtle mb-3">
               Sends N chunks then errors (tests error handling mid-stream)
             </p>
             <div className="flex gap-2">
-              <input
+              <Input
                 type="number"
                 value={errorAfter}
-                onChange={(e) => setErrorAfter(e.target.value)}
-                className="input w-20"
-                min="1"
-                max="10"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setErrorAfter(e.target.value)
+                }
+                className="w-20"
+                min={1}
+                max={10}
               />
-              <button
-                type="button"
+              <Button
+                variant="destructive"
                 onClick={() =>
                   handleStream("streamWithError", [Number(errorAfter)])
                 }
                 disabled={isStreaming}
-                className="btn btn-danger"
               >
                 Error after {errorAfter} chunks
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Stream Output */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <h3 className="font-semibold text-kumo-default mb-4">
               Stream Output
               {isStreaming && (
-                <span className="ml-2 text-xs font-normal text-neutral-500 animate-pulse">
+                <span className="ml-2 text-xs font-normal text-kumo-subtle animate-pulse">
                   receiving...
                 </span>
               )}
             </h3>
             <div className="space-y-2">
               <div>
-                <label htmlFor="chunks" className="text-xs text-neutral-500">
+                <span className="text-xs text-kumo-subtle">
                   Chunks ({chunks.length})
-                </label>
-                <div className="bg-neutral-50 dark:bg-neutral-900 rounded p-2 max-h-40 overflow-y-auto">
+                </span>
+                <div className="bg-kumo-recessed rounded p-2 max-h-40 overflow-y-auto">
                   {chunks.length === 0 ? (
-                    <p className="text-xs text-neutral-400">No chunks yet</p>
+                    <p className="text-xs text-kumo-inactive">No chunks yet</p>
                   ) : (
                     <div className="space-y-1">
                       {chunks.map((chunk, i) => (
-                        <div key={i} className="text-xs font-mono">
+                        <div
+                          key={i}
+                          className="text-xs font-mono text-kumo-default"
+                        >
                           {JSON.stringify(chunk)}
                         </div>
                       ))}
@@ -189,19 +199,14 @@ export function StreamingDemo() {
               </div>
               {finalResult !== null && (
                 <div>
-                  <label
-                    htmlFor="finalResult"
-                    className="text-xs text-neutral-500"
-                  >
-                    Final Result
-                  </label>
-                  <pre className="text-xs bg-green-50 p-2 rounded">
+                  <span className="text-xs text-kumo-subtle">Final Result</span>
+                  <pre className="text-xs bg-green-50 p-2 rounded text-kumo-default">
                     {JSON.stringify(finalResult, null, 2)}
                   </pre>
                 </div>
               )}
             </div>
-          </div>
+          </Surface>
         </div>
 
         {/* Logs */}

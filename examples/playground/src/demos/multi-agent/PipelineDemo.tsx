@@ -1,3 +1,4 @@
+import { Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 
 export function PipelineDemo() {
@@ -8,50 +9,44 @@ export function PipelineDemo() {
     >
       <div className="max-w-3xl mx-auto space-y-8">
         {/* Diagram */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">Architecture</h3>
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <Text variant="heading3" className="mb-4">
+            Architecture
+          </Text>
           <div className="flex items-center justify-center gap-4 flex-wrap">
-            {/* Input */}
-            <div className="text-sm text-neutral-500 dark:text-neutral-400">
-              Input
-            </div>
-            <div className="w-8 h-px bg-neutral-300 dark:bg-neutral-600" />
+            <div className="text-sm text-kumo-subtle">Input</div>
+            <div className="w-8 h-px bg-kumo-line" />
 
-            {/* Stage 1 */}
-            <div className="bg-neutral-100 dark:bg-neutral-800 px-4 py-2 rounded border border-neutral-200 dark:border-neutral-700">
+            <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
               ValidatorAgent
             </div>
-            <div className="w-8 h-px bg-neutral-300 dark:bg-neutral-600" />
+            <div className="w-8 h-px bg-kumo-line" />
 
-            {/* Stage 2 */}
-            <div className="bg-neutral-100 dark:bg-neutral-800 px-4 py-2 rounded border border-neutral-200 dark:border-neutral-700">
+            <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
               TransformAgent
             </div>
-            <div className="w-8 h-px bg-neutral-300 dark:bg-neutral-600" />
+            <div className="w-8 h-px bg-kumo-line" />
 
-            {/* Stage 3 */}
-            <div className="bg-neutral-100 dark:bg-neutral-800 px-4 py-2 rounded border border-neutral-200 dark:border-neutral-700">
+            <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
               EnricherAgent
             </div>
-            <div className="w-8 h-px bg-neutral-300 dark:bg-neutral-600" />
+            <div className="w-8 h-px bg-kumo-line" />
 
-            {/* Stage 4 */}
-            <div className="bg-black dark:bg-white text-white dark:text-black px-4 py-2 rounded">
+            <div className="bg-kumo-contrast text-kumo-inverse px-4 py-2 rounded">
               StorageAgent
             </div>
-            <div className="w-8 h-px bg-neutral-300 dark:bg-neutral-600" />
+            <div className="w-8 h-px bg-kumo-line" />
 
-            {/* Output */}
-            <div className="text-sm text-neutral-500 dark:text-neutral-400">
-              Output
-            </div>
+            <div className="text-sm text-kumo-subtle">Output</div>
           </div>
-        </div>
+        </Surface>
 
         {/* Description */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">How It Works</h3>
-          <div className="space-y-4 text-neutral-600 dark:text-neutral-300">
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <Text variant="heading3" className="mb-4">
+            How It Works
+          </Text>
+          <div className="space-y-4 text-kumo-subtle">
             <p>
               The Pipeline pattern chains multiple agents together, where each
               agent performs a specific transformation and passes the result to
@@ -62,19 +57,21 @@ export function PipelineDemo() {
               <li>Each stage processes and transforms the data</li>
               <li>
                 Result is passed to the next agent via{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   getAgentByName()
                 </code>
               </li>
               <li>Final stage returns or stores the processed result</li>
             </ol>
           </div>
-        </div>
+        </Surface>
 
         {/* Code Example */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">Example Code</h3>
-          <pre className="bg-neutral-50 dark:bg-neutral-900 p-4 rounded overflow-x-auto text-sm">
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <Text variant="heading3" className="mb-4">
+            Example Code
+          </Text>
+          <pre className="bg-kumo-recessed p-4 rounded overflow-x-auto text-sm text-kumo-default">
             {`// validator-agent.ts
 async process(data: RawInput): Promise<ValidatedData> {
   // Validate the input
@@ -114,78 +111,94 @@ async process(data: TransformedData): Promise<EnrichedData> {
   return storage.store(enriched);
 }`}
           </pre>
-        </div>
+        </Surface>
 
         {/* Use Cases */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">Use Cases</h3>
-          <ul className="space-y-3 text-neutral-600 dark:text-neutral-300">
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <Text variant="heading3" className="mb-4">
+            Use Cases
+          </Text>
+          <ul className="space-y-3 text-kumo-subtle">
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>ETL Pipelines</strong> — Extract, transform, and load
-                data through stages
+                <strong className="text-kumo-default">ETL Pipelines</strong> —
+                Extract, transform, and load data through stages
               </div>
             </li>
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>Validation Chains</strong> — Multi-step validation with
-                different rules per stage
+                <strong className="text-kumo-default">Validation Chains</strong>{" "}
+                — Multi-step validation with different rules per stage
               </div>
             </li>
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>Document Processing</strong> — Parse, analyze,
-                summarize, store
+                <strong className="text-kumo-default">
+                  Document Processing
+                </strong>{" "}
+                — Parse, analyze, summarize, store
               </div>
             </li>
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>Order Processing</strong> — Validate → Reserve Inventory
-                → Charge → Ship
+                <strong className="text-kumo-default">Order Processing</strong>{" "}
+                — Validate → Reserve Inventory → Charge → Ship
               </div>
             </li>
           </ul>
-        </div>
+        </Surface>
 
         {/* Variations */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">Variations</h3>
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <Text variant="heading3" className="mb-4">
+            Variations
+          </Text>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded">
-              <h4 className="font-medium mb-2">Linear Pipeline</h4>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+            <div className="p-4 bg-kumo-elevated rounded">
+              <Text bold size="sm">
+                Linear Pipeline
+              </Text>
+              <Text variant="secondary" size="xs" className="mt-1">
                 Data flows A → B → C → D in order
-              </p>
+              </Text>
             </div>
-            <div className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded">
-              <h4 className="font-medium mb-2">Branching Pipeline</h4>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+            <div className="p-4 bg-kumo-elevated rounded">
+              <Text bold size="sm">
+                Branching Pipeline
+              </Text>
+              <Text variant="secondary" size="xs" className="mt-1">
                 Stage can route to different next stages based on data
-              </p>
+              </Text>
             </div>
-            <div className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded">
-              <h4 className="font-medium mb-2">Saga Pipeline</h4>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+            <div className="p-4 bg-kumo-elevated rounded">
+              <Text bold size="sm">
+                Saga Pipeline
+              </Text>
+              <Text variant="secondary" size="xs" className="mt-1">
                 Each stage has a compensating action for rollback
-              </p>
+              </Text>
             </div>
-            <div className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded">
-              <h4 className="font-medium mb-2">Async Pipeline</h4>
-              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+            <div className="p-4 bg-kumo-elevated rounded">
+              <Text bold size="sm">
+                Async Pipeline
+              </Text>
+              <Text variant="secondary" size="xs" className="mt-1">
                 Stages are decoupled via queues for resilience
-              </p>
+              </Text>
             </div>
           </div>
-        </div>
+        </Surface>
 
         {/* Considerations */}
-        <div className="card p-6 bg-neutral-50 dark:bg-neutral-800">
-          <h3 className="font-semibold mb-4">Considerations</h3>
-          <ul className="space-y-2 text-sm text-neutral-600 dark:text-neutral-300">
+        <Surface className="p-6 rounded-lg bg-kumo-elevated">
+          <Text variant="heading3" className="mb-4">
+            Considerations
+          </Text>
+          <ul className="space-y-2 text-sm text-kumo-subtle">
             <li>
               • Each stage is a Durable Object with its own state for tracking
               progress
@@ -199,7 +212,7 @@ async process(data: TransformedData): Promise<EnrichedData> {
             </li>
             <li>• Handle partial failures and design for idempotency</li>
           </ul>
-        </div>
+        </Surface>
       </div>
     </DemoWrapper>
   );
