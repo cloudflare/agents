@@ -135,38 +135,41 @@ export function Home() {
     <div className="h-full flex flex-col">
       <header className="p-6 border-b border-kumo-line">
         <Text variant="heading1">Agents SDK Playground</Text>
-        <Text variant="secondary" size="sm" className="mt-1">
-          Interactive demos for every feature of the Cloudflare Agents SDK
-        </Text>
+        <div className="mt-1">
+          <Text variant="secondary" size="sm">
+            Interactive demos for every feature of the Cloudflare Agents SDK
+          </Text>
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-4xl">
-          <Text variant="secondary" className="mb-8">
-            Select a feature from the sidebar to explore its capabilities. Each
-            demo includes interactive controls, real-time event logging, and
-            code examples you can copy.
-          </Text>
+          <div className="mb-8">
+            <Text variant="secondary">
+              Select a feature from the sidebar to explore its capabilities.
+              Each demo includes interactive controls, real-time event logging,
+              and code examples you can copy.
+            </Text>
+          </div>
 
           <div className="space-y-8">
             {features.map((section) => (
               <div key={section.category}>
-                <Text
-                  variant="secondary"
-                  size="xs"
-                  bold
-                  className="uppercase tracking-wider mb-3"
-                >
-                  {section.category}
-                </Text>
+                <div className="uppercase tracking-wider mb-3">
+                  <Text variant="secondary" size="xs" bold>
+                    {section.category}
+                  </Text>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {section.items.map((item) => (
                     <Link key={item.path} to={item.path} className="block">
                       <Surface className="p-4 rounded-lg ring ring-kumo-line hover:ring-kumo-interact transition-colors">
                         <Text bold>{item.name}</Text>
-                        <Text variant="secondary" size="xs" className="mt-1">
-                          {item.description}
-                        </Text>
+                        <div className="mt-1">
+                          <Text variant="secondary" size="xs">
+                            {item.description}
+                          </Text>
+                        </div>
                       </Surface>
                     </Link>
                   ))}

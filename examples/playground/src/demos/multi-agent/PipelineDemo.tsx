@@ -1,4 +1,4 @@
-import { Surface, Text } from "@cloudflare/kumo";
+import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 
 export function PipelineDemo() {
@@ -10,9 +10,9 @@ export function PipelineDemo() {
       <div className="max-w-3xl mx-auto space-y-8">
         {/* Diagram */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Architecture
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Architecture</Text>
+          </div>
           <div className="flex items-center justify-center gap-4 flex-wrap">
             <div className="text-sm text-kumo-subtle">Input</div>
             <div className="w-8 h-px bg-kumo-line" />
@@ -43,9 +43,9 @@ export function PipelineDemo() {
 
         {/* Description */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            How It Works
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">How It Works</Text>
+          </div>
           <div className="space-y-4 text-kumo-subtle">
             <p>
               The Pipeline pattern chains multiple agents together, where each
@@ -68,11 +68,12 @@ export function PipelineDemo() {
 
         {/* Code Example */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Example Code
-          </Text>
-          <pre className="bg-kumo-recessed p-4 rounded overflow-x-auto text-sm text-kumo-default">
-            {`// validator-agent.ts
+          <div className="mb-4">
+            <Text variant="heading3">Example Code</Text>
+          </div>
+          <CodeBlock
+            lang="ts"
+            code={`// validator-agent.ts
 async process(data: RawInput): Promise<ValidatedData> {
   // Validate the input
   const validated = this.validate(data);
@@ -110,14 +111,14 @@ async process(data: TransformedData): Promise<EnrichedData> {
   );
   return storage.store(enriched);
 }`}
-          </pre>
+          />
         </Surface>
 
         {/* Use Cases */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Use Cases
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Use Cases</Text>
+          </div>
           <ul className="space-y-3 text-kumo-subtle">
             <li className="flex gap-3">
               <span className="text-kumo-inactive">•</span>
@@ -154,50 +155,58 @@ async process(data: TransformedData): Promise<EnrichedData> {
 
         {/* Variations */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Variations
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Variations</Text>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Linear Pipeline
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Data flows A → B → C → D in order
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Data flows A → B → C → D in order
+                </Text>
+              </div>
             </div>
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Branching Pipeline
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Stage can route to different next stages based on data
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Stage can route to different next stages based on data
+                </Text>
+              </div>
             </div>
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Saga Pipeline
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Each stage has a compensating action for rollback
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Each stage has a compensating action for rollback
+                </Text>
+              </div>
             </div>
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Async Pipeline
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Stages are decoupled via queues for resilience
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Stages are decoupled via queues for resilience
+                </Text>
+              </div>
             </div>
           </div>
         </Surface>
 
         {/* Considerations */}
         <Surface className="p-6 rounded-lg bg-kumo-elevated">
-          <Text variant="heading3" className="mb-4">
-            Considerations
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Considerations</Text>
+          </div>
           <ul className="space-y-2 text-sm text-kumo-subtle">
             <li>
               • Each stage is a Durable Object with its own state for tracking

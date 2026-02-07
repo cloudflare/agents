@@ -9,15 +9,17 @@ export function McpServerDemo() {
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            What is MCP?
-          </Text>
-          <Text variant="secondary" size="sm" className="mb-4">
-            The Model Context Protocol (MCP) is an open standard for connecting
-            AI assistants to external data sources and tools. Your agent can
-            become an MCP server, allowing any MCP-compatible AI (like Claude,
-            Cursor, or custom apps) to use its capabilities.
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">What is MCP?</Text>
+          </div>
+          <div className="mb-4">
+            <Text variant="secondary" size="sm">
+              The Model Context Protocol (MCP) is an open standard for
+              connecting AI assistants to external data sources and tools. Your
+              agent can become an MCP server, allowing any MCP-compatible AI
+              (like Claude, Cursor, or custom apps) to use its capabilities.
+            </Text>
+          </div>
 
           <div className="grid grid-cols-3 gap-4 mt-6">
             <div className="text-center p-4 bg-kumo-elevated rounded">
@@ -25,35 +27,41 @@ export function McpServerDemo() {
               <Text bold size="sm">
                 Tools
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Functions the AI can call
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Functions the AI can call
+                </Text>
+              </div>
             </div>
             <div className="text-center p-4 bg-kumo-elevated rounded">
               <div className="text-2xl mb-2">📄</div>
               <Text bold size="sm">
                 Resources
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Data the AI can read
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Data the AI can read
+                </Text>
+              </div>
             </div>
             <div className="text-center p-4 bg-kumo-elevated rounded">
               <div className="text-2xl mb-2">💬</div>
               <Text bold size="sm">
                 Prompts
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Pre-built prompt templates
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Pre-built prompt templates
+                </Text>
+              </div>
             </div>
           </div>
         </Surface>
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            How It Works
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">How It Works</Text>
+          </div>
           <ol className="space-y-3 text-sm text-kumo-subtle">
             {[
               ["Extend ", "McpAgent", " instead of ", "Agent"],

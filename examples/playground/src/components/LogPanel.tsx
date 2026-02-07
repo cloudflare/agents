@@ -37,6 +37,8 @@ export function LogPanel({
         return "log-entry log-entry-out";
       case "error":
         return "log-entry log-entry-error";
+      case "info":
+        return "log-entry log-entry-info";
       default:
         return "log-entry";
     }
@@ -52,6 +54,19 @@ export function LogPanel({
         return "✕";
       default:
         return "•";
+    }
+  };
+
+  const getDirectionColor = (direction: LogEntry["direction"]) => {
+    switch (direction) {
+      case "in":
+        return "text-green-600";
+      case "out":
+        return "text-kumo-info";
+      case "error":
+        return "text-kumo-danger";
+      default:
+        return "text-kumo-subtle";
     }
   };
 
@@ -82,10 +97,14 @@ export function LogPanel({
               <span className="text-kumo-inactive">
                 {log.timestamp.toLocaleTimeString()}
               </span>
-              <span className="mx-2 font-bold">
+              <span
+                className={`mx-2 font-bold ${getDirectionColor(log.direction)}`}
+              >
                 {getDirectionLabel(log.direction)}
               </span>
-              <span className="font-semibold">{log.type}</span>
+              <span className="font-semibold text-kumo-default">
+                {log.type}
+              </span>
               {log.data !== undefined && (
                 <span className="ml-2 text-kumo-subtle">
                   {typeof log.data === "string"

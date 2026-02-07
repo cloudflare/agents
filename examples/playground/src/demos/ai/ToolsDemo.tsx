@@ -9,9 +9,9 @@ export function ToolsDemo() {
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            How Client-Side Tools Work
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">How Client-Side Tools Work</Text>
+          </div>
 
           <div className="space-y-4 text-sm text-kumo-subtle">
             <p>
@@ -63,9 +63,9 @@ export function ToolsDemo() {
         </Surface>
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Example Flow
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Example Flow</Text>
+          </div>
 
           <div className="space-y-3">
             <div className="flex items-start gap-3">
@@ -102,9 +102,9 @@ export function ToolsDemo() {
                   Client shows confirmation dialog
                 </Text>
                 <div className="mt-2 p-3 bg-kumo-elevated rounded border border-kumo-line">
-                  <Text size="sm" className="mb-2">
-                    Send email to bob@example.com?
-                  </Text>
+                  <div className="mb-2">
+                    <Text size="sm">Send email to bob@example.com?</Text>
+                  </div>
                   <div className="flex gap-2">
                     <Button variant="primary" size="xs">
                       Confirm

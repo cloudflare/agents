@@ -189,14 +189,8 @@ export function ChatRoomsDemo() {
         <div className="space-y-6">
           {/* Username */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <label
-              htmlFor="username-input"
-              className="text-xs text-kumo-subtle block mb-1"
-            >
-              Your Username
-            </label>
             <Input
-              id="username-input"
+              label="Your Username"
               type="text"
               value={username}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -374,7 +368,7 @@ export function ChatRoomsDemo() {
                 {members.map((member) => (
                   <Badge
                     key={member}
-                    variant={member === username ? "primary" : "neutral"}
+                    variant={member === username ? "primary" : "outline"}
                   >
                     {member}
                   </Badge>

@@ -37,21 +37,21 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
 
   const statusVariant: Record<
     string,
-    "beta" | "primary" | "positive" | "destructive" | "neutral"
+    "beta" | "primary" | "destructive" | "outline" | "secondary"
   > = {
     queued: "beta",
     running: "primary",
-    complete: "positive",
+    complete: "primary",
     errored: "destructive",
     waiting: "beta"
   };
 
   const statusIcons: Record<string, React.ReactNode> = {
     queued: <Circle size={14} />,
-    running: <Loader size="xs" />,
+    running: <Loader size="sm" />,
     complete: <Check size={14} />,
     errored: <X size={14} />,
-    waiting: <Loader size="xs" />
+    waiting: <Loader size="sm" />
   };
 
   return (
@@ -63,7 +63,7 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
             ID: {workflow.workflowId.slice(0, 8)}...
           </p>
         </div>
-        <Badge variant={statusVariant[workflow.status] || "neutral"}>
+        <Badge variant={statusVariant[workflow.status] || "outline"}>
           <span className="flex items-center gap-1">
             {statusIcons[workflow.status] || statusIcons.queued}
             {workflow.status}
@@ -221,24 +221,16 @@ export function WorkflowBasicDemo() {
               Start Workflow
             </h3>
             <div className="space-y-4">
-              <div>
-                <label
-                  htmlFor="workflow-name"
-                  className="text-xs text-kumo-subtle block mb-1"
-                >
-                  Workflow Name
-                </label>
-                <Input
-                  id="workflow-name"
-                  type="text"
-                  value={workflowName}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                    setWorkflowName(e.target.value)
-                  }
-                  className="w-full"
-                  placeholder="Enter workflow name"
-                />
-              </div>
+              <Input
+                label="Workflow Name"
+                type="text"
+                value={workflowName}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setWorkflowName(e.target.value)
+                }
+                className="w-full"
+                placeholder="Enter workflow name"
+              />
               <div>
                 <label
                   htmlFor="step-count"

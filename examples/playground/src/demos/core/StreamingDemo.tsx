@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface } from "@cloudflare/kumo";
+import { Button, Input, Surface, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -200,9 +200,10 @@ export function StreamingDemo() {
               {finalResult !== null && (
                 <div>
                   <span className="text-xs text-kumo-subtle">Final Result</span>
-                  <pre className="text-xs bg-green-50 p-2 rounded text-kumo-default">
-                    {JSON.stringify(finalResult, null, 2)}
-                  </pre>
+                  <CodeBlock
+                    code={JSON.stringify(finalResult, null, 2)}
+                    lang="jsonc"
+                  />
                 </div>
               )}
             </div>

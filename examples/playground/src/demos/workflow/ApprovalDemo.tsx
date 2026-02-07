@@ -9,7 +9,7 @@ import {
   WarningCircle,
   ArrowsClockwise
 } from "@phosphor-icons/react";
-import { Button, Input, Surface, Empty } from "@cloudflare/kumo";
+import { Button, Input, InputArea, Surface, Empty } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -279,39 +279,24 @@ export function WorkflowApprovalDemo() {
               Submit Request
             </h3>
             <div className="space-y-3">
-              <div>
-                <label
-                  htmlFor="request-title"
-                  className="text-xs text-kumo-subtle block mb-1"
-                >
-                  Title
-                </label>
-                <Input
-                  id="request-title"
-                  type="text"
-                  value={title}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                    setTitle(e.target.value)
-                  }
-                  className="w-full"
-                  placeholder="What needs approval?"
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="request-description"
-                  className="text-xs text-kumo-subtle block mb-1"
-                >
-                  Description
-                </label>
-                <textarea
-                  id="request-description"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="w-full h-20 resize-none bg-kumo-control text-kumo-default ring ring-kumo-line rounded-lg px-3 py-2 text-sm focus:ring-kumo-ring focus:outline-none"
-                  placeholder="Provide details..."
-                />
-              </div>
+              <Input
+                label="Title"
+                type="text"
+                value={title}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setTitle(e.target.value)
+                }
+                className="w-full"
+                placeholder="What needs approval?"
+              />
+              <InputArea
+                label="Description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full"
+                rows={3}
+                placeholder="Provide details..."
+              />
               <Button
                 variant="primary"
                 onClick={handleSubmitRequest}

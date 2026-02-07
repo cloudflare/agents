@@ -1,14 +1,13 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import {
-  Envelope,
   Shield,
   PaperPlaneTilt,
   Tray,
   Lock,
   CheckCircle
 } from "@phosphor-icons/react";
-import { Button, Surface, Badge, Checkbox } from "@cloudflare/kumo";
+import { Button, Surface, Badge, Switch, Tabs, Empty } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
 import { useLogs } from "../../hooks";
@@ -137,15 +136,11 @@ export function SecureDemo() {
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <h3 className="font-semibold text-kumo-default mb-3">Settings</h3>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <Checkbox
-                checked={state.autoReplyEnabled}
-                onChange={handleToggleAutoReply}
-              />
-              <span className="text-sm text-kumo-default">
-                Auto-reply with signed headers
-              </span>
-            </label>
+            <Switch
+              label="Auto-reply with signed headers"
+              checked={state.autoReplyEnabled}
+              onCheckedChange={handleToggleAutoReply}
+            />
             <p className="text-xs text-kumo-subtle mt-2">
               When enabled, incoming emails receive a signed reply that can be
               securely routed back.
@@ -214,40 +209,35 @@ export function SecureDemo() {
         <div className="space-y-6">
           <Surface className="overflow-hidden rounded-lg ring ring-kumo-line">
             {/* Tabs */}
-            <div className="flex border-b border-kumo-line">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("inbox");
-                  setSelectedEmail(null);
-                  setSelectedReply(null);
-                }}
-                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
-                  activeTab === "inbox"
-                    ? "bg-kumo-control border-b-2 border-kumo-brand"
-                    : "hover:bg-kumo-tint"
-                } text-kumo-default`}
-              >
-                <Tray size={16} />
-                Inbox ({state.inbox.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab("outbox");
-                  setSelectedEmail(null);
-                  setSelectedReply(null);
-                }}
-                className={`flex-1 px-4 py-3 text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
-                  activeTab === "outbox"
-                    ? "bg-kumo-control border-b-2 border-kumo-brand"
-                    : "hover:bg-kumo-tint"
-                } text-kumo-default`}
-              >
-                <PaperPlaneTilt size={16} />
-                Outbox ({state.outbox.length})
-              </button>
-            </div>
+            <Tabs
+              variant="segmented"
+              value={activeTab}
+              onValueChange={(value) => {
+                setActiveTab(value as TabType);
+                setSelectedEmail(null);
+                setSelectedReply(null);
+              }}
+              tabs={[
+                {
+                  value: "inbox",
+                  label: (
+                    <span className="flex items-center gap-2">
+                      <Tray size={16} /> Inbox ({state.inbox.length})
+                    </span>
+                  )
+                },
+                {
+                  value: "outbox",
+                  label: (
+                    <span className="flex items-center gap-2">
+                      <PaperPlaneTilt size={16} /> Outbox ({state.outbox.length}
+                      )
+                    </span>
+                  )
+                }
+              ]}
+              className="m-2"
+            />
 
             {/* Email List */}
             <div className="max-h-64 overflow-y-auto">
@@ -332,13 +322,14 @@ export function SecureDemo() {
             {/* Clear button */}
             {(state.inbox.length > 0 || state.outbox.length > 0) && (
               <div className="p-2 border-t border-kumo-line">
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="xs"
                   onClick={handleClearEmails}
-                  className="text-xs text-kumo-danger hover:underline"
+                  className="text-kumo-danger"
                 >
                   Clear all emails
-                </button>
+                </Button>
               </div>
             )}
           </Surface>
@@ -350,7 +341,7 @@ export function SecureDemo() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     {selectedEmail.isSecureReply && (
-                      <Badge variant="positive">
+                      <Badge variant="primary">
                         <span className="flex items-center gap-1">
                           <Lock size={12} />
                           Secure Reply
@@ -361,13 +352,14 @@ export function SecureDemo() {
                       {selectedEmail.subject}
                     </h3>
                   </div>
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    shape="square"
+                    size="xs"
                     onClick={() => setSelectedEmail(null)}
-                    className="text-kumo-inactive hover:text-kumo-default"
                   >
                     ×
-                  </button>
+                  </Button>
                 </div>
                 <div className="text-xs text-kumo-subtle mt-1">
                   <div>From: {selectedEmail.from}</div>
@@ -390,7 +382,7 @@ export function SecureDemo() {
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     {selectedReply.signed && (
-                      <Badge variant="positive">
+                      <Badge variant="primary">
                         <span className="flex items-center gap-1">
                           <CheckCircle size={12} />
                           Signed
@@ -401,13 +393,14 @@ export function SecureDemo() {
                       {selectedReply.subject}
                     </h3>
                   </div>
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    shape="square"
+                    size="xs"
                     onClick={() => setSelectedReply(null)}
-                    className="text-kumo-inactive hover:text-kumo-default"
                   >
                     ×
-                  </button>
+                  </Button>
                 </div>
                 <div className="text-xs text-kumo-subtle mt-1">
                   <div>To: {selectedReply.to}</div>

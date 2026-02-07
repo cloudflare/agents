@@ -9,61 +9,72 @@ export function ChatDemo() {
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            AIChatAgent
-          </Text>
-          <Text variant="secondary" size="sm" className="mb-4">
-            The{" "}
-            <code className="bg-kumo-control px-1 rounded text-kumo-default">
-              AIChatAgent
-            </code>{" "}
-            extends the base Agent with chat-specific features: message
-            persistence, stream resumption, and AI SDK integration.
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">AIChatAgent</Text>
+          </div>
+          <div className="mb-4">
+            <Text variant="secondary" size="sm">
+              The{" "}
+              <code className="bg-kumo-control px-1 rounded text-kumo-default">
+                AIChatAgent
+              </code>{" "}
+              extends the base Agent with chat-specific features: message
+              persistence, stream resumption, and AI SDK integration.
+            </Text>
+          </div>
 
           <div className="grid grid-cols-2 gap-4 mt-6">
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Message Persistence
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Messages saved to SQLite automatically. Survives reconnections.
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Messages saved to SQLite automatically. Survives
+                  reconnections.
+                </Text>
+              </div>
             </div>
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Stream Resumption
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                If connection drops mid-stream, client can resume from last
-                chunk.
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  If connection drops mid-stream, client can resume from last
+                  chunk.
+                </Text>
+              </div>
             </div>
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Tool Execution
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Server-side and client-side tool support with confirmation
-                flows.
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Server-side and client-side tool support with confirmation
+                  flows.
+                </Text>
+              </div>
             </div>
             <div className="p-4 bg-kumo-elevated rounded">
               <Text bold size="sm">
                 Multi-turn Context
               </Text>
-              <Text variant="secondary" size="xs" className="mt-1">
-                Full conversation history available via{" "}
-                <code className="text-kumo-default">this.messages</code>.
-              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Full conversation history available via{" "}
+                  <code className="text-kumo-default">this.messages</code>.
+                </Text>
+              </div>
             </div>
           </div>
         </Surface>
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Setup Requirements
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Setup Requirements</Text>
+          </div>
           <ol className="space-y-2 text-sm text-kumo-subtle list-decimal list-inside">
             <li>
               Install{" "}
@@ -94,9 +105,9 @@ export function ChatDemo() {
         </Surface>
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            useAgentChat Hook
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">useAgentChat Hook</Text>
+          </div>
           <div className="space-y-2 text-sm">
             {[
               { prop: "messages", desc: "Array of chat messages with parts" },

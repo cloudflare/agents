@@ -1,4 +1,4 @@
-import { Surface, Text } from "@cloudflare/kumo";
+import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 
 export function McpClientDemo() {
@@ -9,15 +9,17 @@ export function McpClientDemo() {
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Connecting to External MCP Servers
-          </Text>
-          <Text variant="secondary" size="sm" className="mb-4">
-            Your agent can connect to external MCP servers to access their
-            tools, resources, and prompts. This allows your agent to leverage
-            capabilities from other services while maintaining a unified
-            interface.
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Connecting to External MCP Servers</Text>
+          </div>
+          <div className="mb-4">
+            <Text variant="secondary" size="sm">
+              Your agent can connect to external MCP servers to access their
+              tools, resources, and prompts. This allows your agent to leverage
+              capabilities from other services while maintaining a unified
+              interface.
+            </Text>
+          </div>
 
           <div className="space-y-3 mt-6">
             {[
@@ -42,20 +44,23 @@ export function McpClientDemo() {
                 <Text bold size="sm">
                   {method}
                 </Text>
-                <Text variant="secondary" size="xs" className="mt-1">
-                  {desc}
-                </Text>
+                <div className="mt-1">
+                  <Text variant="secondary" size="xs">
+                    {desc}
+                  </Text>
+                </div>
               </div>
             ))}
           </div>
         </Surface>
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Connection Options
-          </Text>
-          <pre className="text-xs bg-kumo-recessed p-4 rounded overflow-x-auto text-kumo-default">
-            {`await this.addMcpServer("server-name", "https://...", {
+          <div className="mb-4">
+            <Text variant="heading3">Connection Options</Text>
+          </div>
+          <CodeBlock
+            lang="ts"
+            code={`await this.addMcpServer("server-name", "https://...", {
   // Transport type
   transport: "sse" | "streamable-http" | "auto",
   
@@ -64,7 +69,7 @@ export function McpClientDemo() {
     "Authorization": "Bearer token"
   }
 });`}
-          </pre>
+          />
         </Surface>
 
         <Surface className="p-4 rounded-lg bg-kumo-elevated">

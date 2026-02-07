@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface } from "@cloudflare/kumo";
+import { Button, Input, Surface, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -241,9 +241,7 @@ export function CallableDemo() {
               <h3 className="font-semibold text-kumo-default mb-2">
                 Last Result
               </h3>
-              <pre className="text-xs bg-kumo-recessed p-3 rounded overflow-x-auto text-kumo-default">
-                {lastResult}
-              </pre>
+              <CodeBlock code={lastResult} lang="jsonc" />
             </Surface>
           )}
         </div>

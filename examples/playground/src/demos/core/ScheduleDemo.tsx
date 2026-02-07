@@ -240,13 +240,14 @@ export function ScheduleDemo() {
                             : schedule.type}
                       </div>
                     </div>
-                    <button
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="xs"
                       onClick={() => handleCancel(schedule.id)}
-                      className="text-xs text-kumo-danger hover:underline"
+                      className="text-kumo-danger"
                     >
                       Cancel
-                    </button>
+                    </Button>
                   </div>
                 ))}
               </div>

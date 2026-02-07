@@ -1,4 +1,4 @@
-import { Surface, Text } from "@cloudflare/kumo";
+import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 
 const FLOW_DESCRIPTION = `
@@ -20,14 +20,16 @@ export function McpOAuthDemo() {
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            OAuth Authentication Flow
-          </Text>
-          <Text variant="secondary" size="sm" className="mb-4">
-            Some MCP servers require OAuth authentication. The Agents SDK
-            handles the OAuth flow, token storage, and automatic reconnection
-            with saved tokens.
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">OAuth Authentication Flow</Text>
+          </div>
+          <div className="mb-4">
+            <Text variant="secondary" size="sm">
+              Some MCP servers require OAuth authentication. The Agents SDK
+              handles the OAuth flow, token storage, and automatic reconnection
+              with saved tokens.
+            </Text>
+          </div>
 
           <div className="space-y-2 mt-6">
             {FLOW_DESCRIPTION.trim()
@@ -41,9 +43,9 @@ export function McpOAuthDemo() {
         </Surface>
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Server States
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Server States</Text>
+          </div>
           <div className="space-y-2">
             {[
               {
@@ -72,11 +74,12 @@ export function McpOAuthDemo() {
         </Surface>
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Client-Side Handling
-          </Text>
-          <pre className="text-xs bg-kumo-recessed p-4 rounded overflow-x-auto text-kumo-default">
-            {`// Check if OAuth is needed
+          <div className="mb-4">
+            <Text variant="heading3">Client-Side Handling</Text>
+          </div>
+          <CodeBlock
+            lang="ts"
+            code={`// Check if OAuth is needed
 const result = await agent.call("connectWithOAuth", [url]);
 
 if (result.needsAuth) {
@@ -100,7 +103,7 @@ const agent = useAgent({
     }
   }
 });`}
-          </pre>
+          />
         </Surface>
 
         <Surface className="p-4 rounded-lg bg-kumo-elevated">

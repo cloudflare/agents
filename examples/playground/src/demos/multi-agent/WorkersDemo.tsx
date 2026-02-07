@@ -1,4 +1,4 @@
-import { Surface, Text } from "@cloudflare/kumo";
+import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 
 export function WorkersDemo() {
@@ -10,9 +10,9 @@ export function WorkersDemo() {
       <div className="max-w-3xl mx-auto space-y-8">
         {/* Diagram */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Architecture
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Architecture</Text>
+          </div>
           <div className="flex flex-col items-center">
             {/* Manager */}
             <div className="bg-kumo-contrast text-kumo-inverse px-6 py-3 rounded-lg font-medium">
@@ -53,9 +53,9 @@ export function WorkersDemo() {
 
         {/* Description */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            How It Works
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">How It Works</Text>
+          </div>
           <div className="space-y-4 text-kumo-subtle">
             <p>
               The Workers pattern uses a central{" "}
@@ -80,11 +80,12 @@ export function WorkersDemo() {
 
         {/* Code Example */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Example Code
-          </Text>
-          <pre className="bg-kumo-recessed p-4 rounded overflow-x-auto text-sm text-kumo-default">
-            {`// manager-agent.ts
+          <div className="mb-4">
+            <Text variant="heading3">Example Code</Text>
+          </div>
+          <CodeBlock
+            lang="ts"
+            code={`// manager-agent.ts
 @callable()
 async processItems(items: string[]) {
   const chunkSize = Math.ceil(items.length / 4);
@@ -108,14 +109,14 @@ async processItems(items: string[]) {
   // Aggregate results
   return results.flat();
 }`}
-          </pre>
+          />
         </Surface>
 
         {/* Use Cases */}
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <Text variant="heading3" className="mb-4">
-            Use Cases
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Use Cases</Text>
+          </div>
           <ul className="space-y-3 text-kumo-subtle">
             <li className="flex gap-3">
               <span className="text-kumo-inactive">•</span>
@@ -152,9 +153,9 @@ async processItems(items: string[]) {
 
         {/* Considerations */}
         <Surface className="p-6 rounded-lg bg-kumo-elevated">
-          <Text variant="heading3" className="mb-4">
-            Considerations
-          </Text>
+          <div className="mb-4">
+            <Text variant="heading3">Considerations</Text>
+          </div>
           <ul className="space-y-2 text-sm text-kumo-subtle">
             <li>
               • Workers are Durable Objects — each has isolated state and

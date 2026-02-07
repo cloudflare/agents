@@ -1,7 +1,7 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import { Envelope, Tray, Clock, Hash } from "@phosphor-icons/react";
-import { Surface, Text, Empty } from "@cloudflare/kumo";
+import { Button, Surface, Empty } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
 import { useLogs } from "../../hooks";
@@ -201,13 +201,14 @@ export function ReceiveDemo() {
                   <h3 className="font-semibold text-kumo-default">
                     {selectedEmail.subject}
                   </h3>
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    shape="square"
+                    size="xs"
                     onClick={() => setSelectedEmail(null)}
-                    className="text-kumo-inactive hover:text-kumo-default"
                   >
                     ×
-                  </button>
+                  </Button>
                 </div>
                 <div className="text-xs text-kumo-subtle mt-1 space-y-0.5">
                   <div>From: {selectedEmail.from}</div>

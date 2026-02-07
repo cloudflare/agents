@@ -1,15 +1,15 @@
-@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 
 /* Playground-specific: log entry styles (no Kumo equivalent) */
 @layer components {
   .log-entry {
-    @apply px-3 py-1.5 text-xs font-mono border-b border-kumo-fill last:border-0;
+    @apply px-3 py-1.5 text-xs font-mono text-kumo-default border-b border-kumo-fill last:border-0;
   }
 
   .log-entry-in {
-    @apply bg-green-50;
+    @apply bg-green-500/10;
   }
 
   .log-entry-out {
@@ -18,5 +18,9 @@
 
   .log-entry-error {
     @apply bg-kumo-danger-tint text-kumo-danger;
+  }
+
+  .log-entry-info {
+    @apply bg-kumo-base;
   }
 }

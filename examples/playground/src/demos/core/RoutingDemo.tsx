@@ -167,24 +167,16 @@ export function RoutingDemo() {
               Your Identity
             </h3>
             <div className="space-y-3">
-              <div>
-                <label
-                  htmlFor="user-id"
-                  className="text-xs text-kumo-subtle block mb-1"
-                >
-                  User ID (persisted in localStorage)
-                </label>
-                <Input
-                  id="user-id"
-                  type="text"
-                  value={userId}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                    setUserId(e.target.value)
-                  }
-                  className="w-full"
-                  placeholder="Enter a user ID"
-                />
-              </div>
+              <Input
+                label="User ID (persisted in localStorage)"
+                type="text"
+                value={userId}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setUserId(e.target.value)
+                }
+                className="w-full"
+                placeholder="Enter a user ID"
+              />
               <div>
                 <span className="text-xs text-kumo-subtle block mb-1">
                   Session ID (auto-generated per tab)

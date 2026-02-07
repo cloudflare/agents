@@ -1,6 +1,13 @@
 import { useAgent } from "agents/react";
 import { useState, useEffect } from "react";
-import { Button, Input, Surface, Table } from "@cloudflare/kumo";
+import {
+  Button,
+  Input,
+  InputArea,
+  Surface,
+  Table,
+  CodeBlock
+} from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -197,10 +204,10 @@ export function SqlDemo() {
             <h3 className="font-semibold text-kumo-default mb-4">
               Execute Query
             </h3>
-            <textarea
+            <InputArea
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              className="w-full h-24 font-mono text-sm bg-kumo-control text-kumo-default ring ring-kumo-line rounded-lg px-3 py-2 focus:ring-kumo-ring focus:outline-none"
+              className="w-full h-24 font-mono"
               placeholder="SELECT * FROM ..."
             />
             <Button
@@ -221,9 +228,12 @@ export function SqlDemo() {
               <h3 className="font-semibold text-kumo-default mb-4">
                 Results ({queryResult.length} rows)
               </h3>
-              <pre className="text-xs bg-kumo-recessed p-3 rounded overflow-x-auto max-h-60 text-kumo-default">
-                {JSON.stringify(queryResult, null, 2)}
-              </pre>
+              <div className="max-h-60 overflow-y-auto">
+                <CodeBlock
+                  code={JSON.stringify(queryResult, null, 2)}
+                  lang="jsonc"
+                />
+              </div>
             </Surface>
           )}
 

@@ -1,5 +1,6 @@
 import "./styles.css";
 import { createRoot } from "react-dom/client";
+import { forwardRef } from "react";
 import {
   BrowserRouter,
   Routes,
@@ -7,8 +8,21 @@ import {
   Navigate,
   Link as RouterLink
 } from "react-router-dom";
-import { LinkProvider } from "@cloudflare/kumo";
+import { LinkProvider, type LinkComponentProps } from "@cloudflare/kumo";
 import { ThemeProvider } from "./hooks/useTheme";
+
+/**
+ * Adapter between Kumo's LinkProvider (to?: string) and React Router's Link (to: To).
+ * Falls back to a plain <a> when `to` is not provided.
+ */
+const AppLink = forwardRef<HTMLAnchorElement, LinkComponentProps>(
+  ({ to, ...props }, ref) => {
+    if (to) {
+      return <RouterLink ref={ref} to={to} {...props} />;
+    }
+    return <a ref={ref} {...props} />;
+  }
+);
 import { Layout } from "./layout";
 import { Home } from "./pages/Home";
 
@@ -48,7 +62,7 @@ import {
 function App() {
   return (
     <ThemeProvider>
-      <LinkProvider component={RouterLink}>
+      <LinkProvider component={AppLink}>
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Layout />}>

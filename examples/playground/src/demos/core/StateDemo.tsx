@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface } from "@cloudflare/kumo";
+import { Button, Input, Surface, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -192,13 +192,14 @@ export function StateDemo() {
                     className="flex items-center justify-between py-1 px-2 bg-kumo-elevated rounded"
                   >
                     <span className="text-sm text-kumo-default">{item}</span>
-                    <button
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="xs"
                       onClick={() => handleRemoveItem(i)}
-                      className="text-xs text-kumo-danger hover:underline"
+                      className="text-kumo-danger"
                     >
                       Remove
-                    </button>
+                    </Button>
                   </li>
                 ))}
               </ul>
@@ -215,9 +216,7 @@ export function StateDemo() {
                 Reset
               </Button>
             </div>
-            <pre className="text-xs bg-kumo-recessed p-3 rounded overflow-x-auto text-kumo-default">
-              {JSON.stringify(state, null, 2)}
-            </pre>
+            <CodeBlock code={JSON.stringify(state, null, 2)} lang="jsonc" />
             {state.lastUpdated && (
               <p className="text-xs text-kumo-inactive mt-2">
                 Last updated: {new Date(state.lastUpdated).toLocaleString()}

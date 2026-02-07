@@ -1,7 +1,7 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
 import { useState, useEffect } from "react";
-import { Button, Surface, Badge, Empty } from "@cloudflare/kumo";
+import { Button, Surface, Empty } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -168,13 +168,14 @@ export function SupervisorDemo() {
                 Child Agents ({children.length})
               </h3>
               {children.length > 0 && (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="xs"
                   onClick={handleClearAll}
-                  className="text-xs text-kumo-danger hover:underline"
+                  className="text-kumo-danger"
                 >
                   Clear All
-                </button>
+                </Button>
               )}
             </div>
 
@@ -189,13 +190,15 @@ export function SupervisorDemo() {
                       <code className="text-xs text-kumo-subtle">
                         {child.id}
                       </code>
-                      <button
-                        type="button"
+                      <Button
+                        variant="ghost"
+                        shape="square"
+                        size="xs"
                         onClick={() => handleRemoveChild(child.id)}
-                        className="text-xs text-kumo-danger hover:underline"
+                        className="text-kumo-danger"
                       >
                         ×
-                      </button>
+                      </Button>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="text-2xl font-bold text-kumo-default">
