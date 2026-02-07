@@ -1,50 +1,11 @@
 /** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
 /** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
-import {
-  GithubLogoIcon,
-  SunIcon,
-  MoonIcon,
-  MonitorIcon
-} from "@phosphor-icons/react";
+import { GithubLogoIcon } from "@phosphor-icons/react";
 import { Button } from "@cloudflare/kumo";
-import { useTheme } from "../hooks/useTheme";
+import { ModeToggle } from "@cloudflare/agents-ui";
 
 interface HeaderProps {
   onSetCodeVisible: (visible: boolean) => void;
-}
-
-function ModeToggle() {
-  const { mode, setMode } = useTheme();
-
-  const cycle = () => {
-    const modes = ["system", "light", "dark"] as const;
-    const idx = modes.indexOf(mode);
-    setMode(modes[(idx + 1) % modes.length]);
-  };
-
-  const icon =
-    mode === "light" ? (
-      <SunIcon size={16} />
-    ) : mode === "dark" ? (
-      <MoonIcon size={16} />
-    ) : (
-      <MonitorIcon size={16} />
-    );
-
-  const label =
-    mode === "light" ? "Light" : mode === "dark" ? "Dark" : "System";
-
-  return (
-    <Button
-      variant="secondary"
-      size="sm"
-      icon={icon}
-      onClick={cycle}
-      title={`Theme: ${label}`}
-    >
-      <span className="text-xs">{label}</span>
-    </Button>
-  );
 }
 
 const Header = ({ onSetCodeVisible }: HeaderProps) => {

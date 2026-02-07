@@ -1,6 +1,0 @@
-{
-  "name": "@cloudflare/agents-theme",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Shared Kumo color themes for Agents SDK examples"
-}

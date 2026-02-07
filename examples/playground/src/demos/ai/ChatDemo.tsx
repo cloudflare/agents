@@ -127,7 +127,7 @@ export function ChatDemo() {
                 key={prop}
                 className="flex gap-3 py-2 px-3 bg-kumo-elevated rounded"
               >
-                <code className="text-xs font-mono flex-shrink-0 text-kumo-default">
+                <code className="text-xs font-mono shrink-0 text-kumo-default">
                   {prop}
                 </code>
                 <span className="text-kumo-subtle text-xs">{desc}</span>

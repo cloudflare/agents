@@ -88,8 +88,10 @@ All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for UI compon
   ```css
   @import "tailwindcss";
   @import "@cloudflare/kumo/styles/tailwind";
-  @import "@cloudflare/agents-theme/workers";
+  @import "@cloudflare/agents-ui/theme/workers.css";
   ```
+- Use shared components from `@cloudflare/agents-ui` (`ConnectionIndicator`, `ModeToggle`, `PoweredByAgents`) and hooks from `@cloudflare/agents-ui/hooks` (`ThemeProvider`, `useTheme`)
+- Every example should include `<PoweredByAgents />` as a footer attribution
 - Set `data-theme="workers"` on `<html>` for the Cloudflare-branded color theme
 - See `/design/visuals.md` for detailed Kumo usage patterns and known gaps
 
@@ -114,8 +116,7 @@ See `TODO.md` in this folder for the full checklist.
 
 - Several examples are worker-only and need a frontend added: `email-agent/`, `mcp-elicitation/`, `mcp-server/`, `mcp-worker/`, `mcp-worker-authenticated/`, `x402/`, `x402-mcp/`
 - `cross-domain/` has a `vite.config.ts` but does not use `@cloudflare/vite-plugin`
-- `resumable-stream-chat/` and `x402/` are missing README.md
+- `x402/` is missing README.md
 - `x402/` and `x402-mcp/` use `worker-configuration.d.ts` instead of `env.d.ts`
 - `codemode/` uses `.env.example` instead of `.dev.vars.example`
 - Some full-stack examples set `assets.directory: "public"` — not needed with the Vite plugin
-- `resumable-stream-chat/` sets `assets.directory: "dist"` with a binding — non-standard pattern

@@ -399,7 +399,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                   </button>
                 </div>
                 {server.state === "failed" && server.error && (
-                  <div className="mt-2 text-xs text-kumo-danger break-words">
+                  <div className="mt-2 text-xs text-kumo-danger wrap-break-word">
                     {server.error}
                   </div>
                 )}

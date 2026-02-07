@@ -74,7 +74,7 @@ export function McpServerDemo() {
               ["Deploy - the agent automatically handles MCP protocol"]
             ].map((parts, i) => (
               <li key={i} className="flex gap-3">
-                <span className="w-6 h-6 rounded-full bg-kumo-contrast text-kumo-inverse flex items-center justify-center text-xs flex-shrink-0">
+                <span className="w-6 h-6 rounded-full bg-kumo-contrast text-kumo-inverse flex items-center justify-center text-xs shrink-0">
                   {i + 1}
                 </span>
                 <span>

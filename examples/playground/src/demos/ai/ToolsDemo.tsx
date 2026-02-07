@@ -69,7 +69,7 @@ export function ToolsDemo() {
 
           <div className="space-y-3">
             <div className="flex items-start gap-3">
-              <div className="w-6 h-6 rounded-full bg-kumo-contrast text-kumo-inverse flex items-center justify-center text-xs flex-shrink-0">
+              <div className="w-6 h-6 rounded-full bg-kumo-contrast text-kumo-inverse flex items-center justify-center text-xs shrink-0">
                 1
               </div>
               <div>
@@ -80,7 +80,7 @@ export function ToolsDemo() {
             </div>
 
             <div className="flex items-start gap-3">
-              <div className="w-6 h-6 rounded-full bg-kumo-fill flex items-center justify-center text-xs flex-shrink-0 text-kumo-default">
+              <div className="w-6 h-6 rounded-full bg-kumo-fill flex items-center justify-center text-xs shrink-0 text-kumo-default">
                 2
               </div>
               <div>
@@ -94,7 +94,7 @@ export function ToolsDemo() {
             </div>
 
             <div className="flex items-start gap-3">
-              <div className="w-6 h-6 rounded-full bg-kumo-fill flex items-center justify-center text-xs flex-shrink-0 text-kumo-default">
+              <div className="w-6 h-6 rounded-full bg-kumo-fill flex items-center justify-center text-xs shrink-0 text-kumo-default">
                 3
               </div>
               <div>
@@ -118,7 +118,7 @@ export function ToolsDemo() {
             </div>
 
             <div className="flex items-start gap-3">
-              <div className="w-6 h-6 rounded-full bg-kumo-fill flex items-center justify-center text-xs flex-shrink-0 text-kumo-default">
+              <div className="w-6 h-6 rounded-full bg-kumo-fill flex items-center justify-center text-xs shrink-0 text-kumo-default">
                 4
               </div>
               <div>
@@ -133,7 +133,7 @@ export function ToolsDemo() {
             </div>
 
             <div className="flex items-start gap-3">
-              <div className="w-6 h-6 rounded-full bg-green-500 text-white flex items-center justify-center text-xs flex-shrink-0">
+              <div className="w-6 h-6 rounded-full bg-green-500 text-white flex items-center justify-center text-xs shrink-0">
                 5
               </div>
               <div>

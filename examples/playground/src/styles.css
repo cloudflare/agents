@@ -2,7 +2,7 @@
 @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
-@import "@cloudflare/agents-theme/workers";
+@import "@cloudflare/agents-ui/theme/workers.css";
 
 /* Playground-specific: log entry styles (no Kumo equivalent) */
 @layer components {
