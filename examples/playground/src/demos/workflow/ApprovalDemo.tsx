@@ -9,7 +9,14 @@ import {
   WarningCircle,
   ArrowsClockwise
 } from "@phosphor-icons/react";
-import { Button, Input, InputArea, Surface, Empty } from "@cloudflare/kumo";
+import {
+  Button,
+  Input,
+  InputArea,
+  Surface,
+  Empty,
+  Text
+} from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -59,7 +66,7 @@ function ApprovalCard({
       <div className="flex items-start justify-between mb-2">
         <div className="flex items-center gap-2">
           {statusIcons[request.status]}
-          <h4 className="font-medium text-kumo-default">{request.title}</h4>
+          <Text bold>{request.title}</Text>
         </div>
         <span className="text-xs text-kumo-subtle">
           {timeAgo(request.createdAt)}
@@ -75,7 +82,6 @@ function ApprovalCard({
               <Button
                 variant="primary"
                 onClick={() => onApprove(request.id)}
-                className="flex-1"
                 icon={<CheckCircle size={16} />}
               >
                 Approve
@@ -83,7 +89,6 @@ function ApprovalCard({
               <Button
                 variant="destructive"
                 onClick={() => setShowRejectForm(true)}
-                className="flex-1"
                 icon={<XCircle size={16} />}
               >
                 Reject
@@ -92,6 +97,7 @@ function ApprovalCard({
           ) : (
             <div className="space-y-2">
               <Input
+                aria-label="Rejection reason"
                 type="text"
                 value={rejectReason}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -108,7 +114,6 @@ function ApprovalCard({
                     setShowRejectForm(false);
                     setRejectReason("");
                   }}
-                  className="flex-1"
                 >
                   Confirm Reject
                 </Button>
@@ -118,7 +123,6 @@ function ApprovalCard({
                     setShowRejectForm(false);
                     setRejectReason("");
                   }}
-                  className="flex-1"
                 >
                   Cancel
                 </Button>
@@ -257,27 +261,21 @@ export function WorkflowApprovalDemo() {
     <DemoWrapper
       title="Approval Workflow"
       description="Human-in-the-loop workflow patterns using waitForApproval(). Workflows pause until approved or rejected."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Panel - Create Request */}
         <div className="space-y-6">
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
+            <div className="mb-4">
+              <Text variant="heading3">Submit Request</Text>
             </div>
-          </Surface>
-
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Submit Request
-            </h3>
             <div className="space-y-3">
               <Input
                 label="Title"
@@ -311,9 +309,11 @@ export function WorkflowApprovalDemo() {
 
           {/* Quick Presets */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-3 text-sm">
-              Quick Presets
-            </h3>
+            <div className="mb-3">
+              <Text bold size="sm">
+                Quick Presets
+              </Text>
+            </div>
             <div className="space-y-2">
               {presetRequests.map((preset) => (
                 <button
@@ -332,9 +332,9 @@ export function WorkflowApprovalDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <h3 className="font-semibold text-kumo-default mb-2">
-              How it Works
-            </h3>
+            <div className="mb-2">
+              <Text variant="heading3">How it Works</Text>
+            </div>
             <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
                 1.{" "}
@@ -373,9 +373,9 @@ export function WorkflowApprovalDemo() {
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <WarningCircle size={16} className="text-kumo-warning" />
-                <h3 className="font-semibold text-kumo-default">
+                <Text variant="heading3">
                   Pending Approval ({pendingRequests.length})
-                </h3>
+                </Text>
               </div>
               <Button
                 variant="ghost"
@@ -407,9 +407,9 @@ export function WorkflowApprovalDemo() {
           {/* History */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-kumo-default">
+              <Text variant="heading3">
                 History ({resolvedRequests.length})
-              </h3>
+              </Text>
               {resolvedRequests.length > 0 && (
                 <Button
                   variant="ghost"

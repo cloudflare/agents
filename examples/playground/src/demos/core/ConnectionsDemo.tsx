@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface, Empty } from "@cloudflare/kumo";
+import { Button, Input, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -77,28 +77,22 @@ export function ConnectionsDemo() {
     <DemoWrapper
       title="Connections"
       description="Manage WebSocket connections, track clients, and broadcast messages to all connected clients."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </Surface>
-
           {/* Connection Count */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Connected Clients
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Connected Clients</Text>
+            </div>
             <div className="text-4xl font-bold text-kumo-default mb-4">
               {connectionCount}
             </div>
@@ -112,14 +106,15 @@ export function ConnectionsDemo() {
 
           {/* Broadcast */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Broadcast Message
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Broadcast Message</Text>
+            </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Send a message to all connected clients (including yourself)
             </p>
             <div className="flex gap-2">
               <Input
+                aria-label="Broadcast message"
                 type="text"
                 value={broadcastMessage}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -139,9 +134,9 @@ export function ConnectionsDemo() {
 
           {/* Received Messages */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Received Broadcasts
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Received Broadcasts</Text>
+            </div>
             {receivedMessages.length === 0 ? (
               <Empty title="No messages received yet" size="sm" />
             ) : (
@@ -163,7 +158,9 @@ export function ConnectionsDemo() {
 
           {/* Tips */}
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <h3 className="font-semibold text-kumo-default mb-2">Try this:</h3>
+            <div className="mb-2">
+              <Text variant="heading3">Try this:</Text>
+            </div>
             <ol className="text-sm text-kumo-subtle space-y-1 list-decimal list-inside">
               <li>Open this page in another browser tab</li>
               <li>Watch the connection count update</li>

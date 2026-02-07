@@ -6,7 +6,8 @@ import {
   InputArea,
   Surface,
   Table,
-  CodeBlock
+  CodeBlock,
+  Text
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
@@ -112,27 +113,21 @@ export function SqlDemo() {
     <DemoWrapper
       title="SQL Queries"
       description="Each agent has its own SQLite database. Use the sql template literal for type-safe queries."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </Surface>
-
           {/* Tables */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Tables</h3>
+              <Text variant="heading3">Tables</Text>
               <Button variant="ghost" size="xs" onClick={loadTables}>
                 Refresh
               </Button>
@@ -164,9 +159,9 @@ export function SqlDemo() {
           {/* Schema */}
           {selectedTable && schema.length > 0 && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
-              <h3 className="font-semibold text-kumo-default mb-4">
-                Schema: {selectedTable}
-              </h3>
+              <div className="mb-4">
+                <Text variant="heading3">Schema: {selectedTable}</Text>
+              </div>
               <div className="overflow-x-auto">
                 <Table>
                   <Table.Header>
@@ -201,10 +196,11 @@ export function SqlDemo() {
 
           {/* Query */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Execute Query
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Execute Query</Text>
+            </div>
             <InputArea
+              aria-label="SQL query"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               className="w-full h-24 font-mono"
@@ -225,9 +221,11 @@ export function SqlDemo() {
           {/* Query Result */}
           {queryResult && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
-              <h3 className="font-semibold text-kumo-default mb-4">
-                Results ({queryResult.length} rows)
-              </h3>
+              <div className="mb-4">
+                <Text variant="heading3">
+                  Results ({queryResult.length} rows)
+                </Text>
+              </div>
               <div className="max-h-60 overflow-y-auto">
                 <CodeBlock
                   code={JSON.stringify(queryResult, null, 2)}
@@ -239,11 +237,12 @@ export function SqlDemo() {
 
           {/* Insert Record */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Custom Data
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Custom Data</Text>
+            </div>
             <div className="flex gap-2 mb-3">
               <Input
+                aria-label="Record key"
                 type="text"
                 value={newKey}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -253,6 +252,7 @@ export function SqlDemo() {
                 placeholder="Key"
               />
               <Input
+                aria-label="Record value"
                 type="text"
                 value={newValue}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>

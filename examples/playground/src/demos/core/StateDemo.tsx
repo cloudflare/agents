@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface, CodeBlock } from "@cloudflare/kumo";
+import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -105,46 +105,33 @@ export function StateDemo() {
     <DemoWrapper
       title="State Management"
       description="Real-time state synchronization between server and clients. State persists across reconnections."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </Surface>
-
           {/* Counter Controls */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Counter: {state.counter}
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Counter: {state.counter}</Text>
+            </div>
             <div className="flex gap-2 mb-4">
-              <Button
-                variant="secondary"
-                onClick={handleDecrement}
-                className="flex-1"
-              >
+              <Button variant="secondary" onClick={handleDecrement}>
                 -1
               </Button>
-              <Button
-                variant="primary"
-                onClick={handleIncrement}
-                className="flex-1"
-              >
+              <Button variant="primary" onClick={handleIncrement}>
                 +1
               </Button>
             </div>
             <div className="flex gap-2">
               <Input
+                aria-label="Custom counter value"
                 type="number"
                 value={customValue}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -164,11 +151,12 @@ export function StateDemo() {
 
           {/* Items List */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Items ({state.items.length})
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Items ({state.items.length})</Text>
+            </div>
             <div className="flex gap-2 mb-4">
               <Input
+                aria-label="New item"
                 type="text"
                 value={newItem}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -211,7 +199,7 @@ export function StateDemo() {
           {/* State Display */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="font-semibold text-kumo-default">Current State</h3>
+              <Text variant="heading3">Current State</Text>
               <Button variant="destructive" size="xs" onClick={handleReset}>
                 Reset
               </Button>

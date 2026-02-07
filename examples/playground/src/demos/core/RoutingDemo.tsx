@@ -1,7 +1,7 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
 import { useState, useEffect } from "react";
-import { Button, Input, Surface } from "@cloudflare/kumo";
+import { Button, Input, Surface, Text, Radio } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -121,22 +121,19 @@ export function RoutingDemo() {
     <DemoWrapper
       title="Routing Strategies"
       description="Different agent routing patterns for different use cases. Use 'name' to select an agent instance, or 'basePath' to route via a custom server-side path."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
           {/* Connection Status */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-kumo-subtle">Agent Instance:</span>
@@ -154,7 +151,6 @@ export function RoutingDemo() {
                 variant="secondary"
                 onClick={() => agent.call("increment")}
                 className="w-full"
-                size="sm"
               >
                 Increment Counter
               </Button>
@@ -163,9 +159,9 @@ export function RoutingDemo() {
 
           {/* User Identity */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Your Identity
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Your Identity</Text>
+            </div>
             <div className="space-y-3">
               <Input
                 label="User ID (persisted in localStorage)"
@@ -190,47 +186,32 @@ export function RoutingDemo() {
 
           {/* Strategy Selector */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Routing Strategy
-            </h3>
-            <div className="space-y-2">
-              {strategies.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  onClick={() => {
-                    setStrategy(s.id);
-                    addLog("out", "strategy_change", s.id);
-                  }}
-                  className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                    strategy === s.id
-                      ? "border-kumo-brand bg-kumo-elevated"
-                      : "border-kumo-line hover:border-kumo-interact"
-                  }`}
-                >
-                  <div className="flex items-center gap-2">
-                    <div
-                      className={`w-3 h-3 rounded-full border-2 ${
-                        strategy === s.id
-                          ? "border-kumo-brand bg-kumo-brand"
-                          : "border-kumo-line"
-                      }`}
-                    />
-                    <span className="font-medium text-kumo-default">
-                      {s.label}
-                    </span>
-                  </div>
-                  <p className="text-xs text-kumo-subtle mt-1 ml-5">
-                    {s.description}
-                  </p>
-                </button>
-              ))}
+            <div className="mb-4">
+              <Text variant="heading3">Routing Strategy</Text>
             </div>
+            <Radio.Group
+              legend="Routing Strategy"
+              value={strategy}
+              onValueChange={(value: string) => {
+                setStrategy(value as RoutingStrategy);
+                addLog("out", "strategy_change", value);
+              }}
+            >
+              {strategies.map((s) => (
+                <Radio.Item
+                  key={s.id}
+                  label={`${s.label} — ${s.description}`}
+                  value={s.id}
+                />
+              ))}
+            </Radio.Group>
           </Surface>
 
           {/* Multi-Tab Testing */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">Try It Out</h3>
+            <div className="mb-4">
+              <Text variant="heading3">Try It Out</Text>
+            </div>
             <p className="text-sm text-kumo-subtle mb-4">
               Open multiple tabs to see how different strategies affect which
               clients end up on the same agent instance.
@@ -242,9 +223,9 @@ export function RoutingDemo() {
 
           {/* Explanation */}
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <h3 className="font-semibold text-kumo-default mb-3">
-              How It Works
-            </h3>
+            <div className="mb-3">
+              <Text variant="heading3">How It Works</Text>
+            </div>
             <div className="text-sm text-kumo-subtle space-y-2">
               <p>
                 <strong className="text-kumo-default">Per-User:</strong> Agent

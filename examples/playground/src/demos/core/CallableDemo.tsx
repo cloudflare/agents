@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface, CodeBlock } from "@cloudflare/kumo";
+import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -60,30 +60,25 @@ export function CallableDemo() {
     <DemoWrapper
       title="Callable Methods"
       description="Expose agent methods as RPC endpoints using the @callable decorator."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </Surface>
-
           {/* Math Operations */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Math Operations
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Math Operations</Text>
+            </div>
             <div className="flex gap-2 mb-3">
               <Input
+                aria-label="Argument A"
                 type="number"
                 value={argA}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -92,6 +87,7 @@ export function CallableDemo() {
                 className="w-20"
               />
               <Input
+                aria-label="Argument B"
                 type="number"
                 value={argB}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -120,9 +116,12 @@ export function CallableDemo() {
 
           {/* Echo */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">Echo</h3>
+            <div className="mb-4">
+              <Text variant="heading3">Echo</Text>
+            </div>
             <div className="flex gap-2">
               <Input
+                aria-label="Echo message"
                 type="text"
                 value={echoMessage}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -141,11 +140,12 @@ export function CallableDemo() {
 
           {/* Async Operation */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Async Operation
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Async Operation</Text>
+            </div>
             <div className="flex gap-2">
               <Input
+                aria-label="Delay in milliseconds"
                 type="number"
                 value={delayMs}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -168,11 +168,12 @@ export function CallableDemo() {
 
           {/* Error Handling */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Error Handling
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Error Handling</Text>
+            </div>
             <div className="flex gap-2">
               <Input
+                aria-label="Error message"
                 type="text"
                 value={errorMessage}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -193,9 +194,9 @@ export function CallableDemo() {
 
           {/* Utility */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Utility Methods
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Utility Methods</Text>
+            </div>
             <div className="flex gap-2 flex-wrap">
               <Button
                 variant="secondary"
@@ -212,9 +213,9 @@ export function CallableDemo() {
           {/* Available Methods */}
           {methods.length > 0 && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
-              <h3 className="font-semibold text-kumo-default mb-4">
-                Available Methods
-              </h3>
+              <div className="mb-4">
+                <Text variant="heading3">Available Methods</Text>
+              </div>
               <div className="space-y-1 text-sm">
                 {methods.map((m) => (
                   <div
@@ -238,9 +239,9 @@ export function CallableDemo() {
           {/* Last Result */}
           {lastResult && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
-              <h3 className="font-semibold text-kumo-default mb-2">
-                Last Result
-              </h3>
+              <div className="mb-2">
+                <Text variant="heading3">Last Result</Text>
+              </div>
               <CodeBlock code={lastResult} lang="jsonc" />
             </Surface>
           )}

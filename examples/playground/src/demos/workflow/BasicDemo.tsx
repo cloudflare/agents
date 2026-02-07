@@ -9,7 +9,15 @@ import {
   ArrowsClockwise
 } from "@phosphor-icons/react";
 import { Loader } from "@cloudflare/kumo";
-import { Button, Input, Surface, Badge, Empty } from "@cloudflare/kumo";
+import {
+  Button,
+  Input,
+  Surface,
+  Badge,
+  Empty,
+  Text,
+  Meter
+} from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -18,19 +26,6 @@ import type {
   BasicWorkflowState,
   WorkflowWithProgress
 } from "./basic-workflow-agent";
-
-function ProgressBar({ current, total }: { current: number; total: number }) {
-  const percentage = total > 0 ? (current / total) * 100 : 0;
-
-  return (
-    <div className="w-full bg-kumo-fill rounded-full h-2">
-      <div
-        className="bg-kumo-contrast h-2 rounded-full transition-all duration-500"
-        style={{ width: `${percentage}%` }}
-      />
-    </div>
-  );
-}
 
 function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
   const name = workflow.name || workflow.workflowName;
@@ -58,7 +53,7 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
     <Surface className="p-4 rounded-lg ring ring-kumo-line">
       <div className="flex items-center justify-between mb-3">
         <div>
-          <h4 className="font-medium text-kumo-default">{name}</h4>
+          <Text bold>{name}</Text>
           <p className="text-xs text-kumo-subtle">
             ID: {workflow.workflowId.slice(0, 8)}...
           </p>
@@ -80,9 +75,11 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
               {workflow.progress.step} / {workflow.progress.total}
             </span>
           </div>
-          <ProgressBar
-            current={workflow.progress.step}
-            total={workflow.progress.total}
+          <Meter
+            label="Progress"
+            value={workflow.progress.step}
+            max={workflow.progress.total}
+            showValue={false}
           />
         </div>
       )}
@@ -199,27 +196,21 @@ export function WorkflowBasicDemo() {
     <DemoWrapper
       title="Multi-Step Workflows"
       description="Start real Cloudflare Workflows with multiple durable steps. Progress is reported back to the agent in real-time."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Panel - Controls */}
         <div className="space-y-6">
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
+            <div className="mb-4">
+              <Text variant="heading3">Start Workflow</Text>
             </div>
-          </Surface>
-
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Start Workflow
-            </h3>
             <div className="space-y-4">
               <Input
                 label="Workflow Name"
@@ -265,9 +256,9 @@ export function WorkflowBasicDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <h3 className="font-semibold text-kumo-default mb-2">
-              How it Works
-            </h3>
+            <div className="mb-2">
+              <Text variant="heading3">How it Works</Text>
+            </div>
             <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
                 1.{" "}
@@ -304,9 +295,7 @@ export function WorkflowBasicDemo() {
           {/* Active Workflows */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-kumo-default">
-                Active ({activeWorkflows.length})
-              </h3>
+              <Text variant="heading3">Active ({activeWorkflows.length})</Text>
               <Button
                 variant="ghost"
                 size="xs"
@@ -332,9 +321,9 @@ export function WorkflowBasicDemo() {
           {/* Completed Workflows */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-kumo-default">
+              <Text variant="heading3">
                 History ({completedWorkflows.length})
-              </h3>
+              </Text>
               {completedWorkflows.length > 0 && (
                 <Button
                   variant="ghost"

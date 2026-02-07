@@ -133,7 +133,7 @@ export function ToolsDemo() {
             </div>
 
             <div className="flex items-start gap-3">
-              <div className="w-6 h-6 rounded-full bg-green-600 text-kumo-inverse flex items-center justify-center text-xs flex-shrink-0">
+              <div className="w-6 h-6 rounded-full bg-green-500 text-white flex items-center justify-center text-xs flex-shrink-0">
                 5
               </div>
               <div>

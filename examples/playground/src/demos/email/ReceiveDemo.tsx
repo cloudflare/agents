@@ -1,7 +1,7 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import { Envelope, Tray, Clock, Hash } from "@phosphor-icons/react";
-import { Button, Surface, Empty } from "@cloudflare/kumo";
+import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
 import { useLogs } from "../../hooks";
@@ -51,6 +51,13 @@ export function ReceiveDemo() {
     <DemoWrapper
       title="Receive Emails"
       description="Receive real emails via Cloudflare Email Routing. Emails sent to this agent are stored and displayed."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <LocalDevBanner />
 
@@ -58,16 +65,6 @@ export function ReceiveDemo() {
         {/* Left Panel - Info & Stats */}
         <div className="space-y-6">
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
             <div className="text-xs text-kumo-subtle">
               Instance:{" "}
               <code className="bg-kumo-control px-1 rounded text-kumo-default">
@@ -77,7 +74,9 @@ export function ReceiveDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">Stats</h3>
+            <div className="mb-4">
+              <Text variant="heading3">Stats</Text>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 bg-kumo-elevated rounded">
                 <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
@@ -107,9 +106,9 @@ export function ReceiveDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <h3 className="font-semibold text-kumo-default mb-3">
-              Setup Instructions
-            </h3>
+            <div className="mb-3">
+              <Text variant="heading3">Setup Instructions</Text>
+            </div>
             <ol className="text-sm text-kumo-subtle space-y-2">
               <li>
                 <strong className="text-kumo-default">1.</strong> Deploy this
@@ -133,9 +132,11 @@ export function ReceiveDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-2 text-sm">
-              Address Format
-            </h3>
+            <div className="mb-2">
+              <Text bold size="sm">
+                Address Format
+              </Text>
+            </div>
             <div className="text-xs text-kumo-subtle space-y-1">
               <div>
                 <code className="bg-kumo-control px-1 rounded text-kumo-default">
@@ -152,7 +153,7 @@ export function ReceiveDemo() {
           <Surface className="overflow-hidden rounded-lg ring ring-kumo-line">
             <div className="px-4 py-3 border-b border-kumo-line flex items-center gap-2">
               <Envelope size={16} />
-              <h3 className="font-semibold text-kumo-default">Inbox</h3>
+              <Text variant="heading3">Inbox</Text>
               <span className="text-xs text-kumo-subtle">
                 ({state.emails.length})
               </span>
@@ -198,9 +199,7 @@ export function ReceiveDemo() {
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="font-semibold text-kumo-default">
-                    {selectedEmail.subject}
-                  </h3>
+                  <Text variant="heading3">{selectedEmail.subject}</Text>
                   <Button
                     variant="ghost"
                     shape="square"

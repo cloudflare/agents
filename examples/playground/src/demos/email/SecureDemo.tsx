@@ -7,7 +7,15 @@ import {
   Lock,
   CheckCircle
 } from "@phosphor-icons/react";
-import { Button, Surface, Badge, Switch, Tabs, Empty } from "@cloudflare/kumo";
+import {
+  Button,
+  Surface,
+  Badge,
+  Switch,
+  Tabs,
+  Empty,
+  Text
+} from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
 import { useLogs } from "../../hooks";
@@ -85,6 +93,13 @@ export function SecureDemo() {
     <DemoWrapper
       title="Secure Email Replies"
       description="Receive emails and send signed replies. Replies include cryptographic headers for secure routing back to this agent."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <LocalDevBanner />
 
@@ -92,16 +107,6 @@ export function SecureDemo() {
         {/* Left Panel - Info & Settings */}
         <div className="space-y-6">
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
             <div className="text-xs text-kumo-subtle">
               Instance:{" "}
               <code className="bg-kumo-control px-1 rounded text-kumo-default">
@@ -111,7 +116,9 @@ export function SecureDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">Stats</h3>
+            <div className="mb-4">
+              <Text variant="heading3">Stats</Text>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 bg-kumo-elevated rounded">
                 <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
@@ -135,7 +142,9 @@ export function SecureDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-3">Settings</h3>
+            <div className="mb-3">
+              <Text variant="heading3">Settings</Text>
+            </div>
             <Switch
               label="Auto-reply with signed headers"
               checked={state.autoReplyEnabled}
@@ -150,9 +159,7 @@ export function SecureDemo() {
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
             <div className="flex items-center gap-2 mb-3">
               <Shield size={16} />
-              <h3 className="font-semibold text-kumo-default">
-                How Secure Replies Work
-              </h3>
+              <Text variant="heading3">How Secure Replies Work</Text>
             </div>
             <ol className="text-sm text-kumo-subtle space-y-2">
               <li>
@@ -193,9 +200,11 @@ export function SecureDemo() {
           </Surface>
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-2 text-sm">
-              Production Setup
-            </h3>
+            <div className="mb-2">
+              <Text bold size="sm">
+                Production Setup
+              </Text>
+            </div>
             <div className="text-xs text-kumo-subtle space-y-1">
               <div>Set a secure secret:</div>
               <code className="block bg-kumo-control px-2 py-1 rounded mt-1 text-kumo-default">
@@ -348,9 +357,7 @@ export function SecureDemo() {
                         </span>
                       </Badge>
                     )}
-                    <h3 className="font-semibold text-kumo-default">
-                      {selectedEmail.subject}
-                    </h3>
+                    <Text variant="heading3">{selectedEmail.subject}</Text>
                   </div>
                   <Button
                     variant="ghost"
@@ -389,9 +396,7 @@ export function SecureDemo() {
                         </span>
                       </Badge>
                     )}
-                    <h3 className="font-semibold text-kumo-default">
-                      {selectedReply.subject}
-                    </h3>
+                    <Text variant="heading3">{selectedReply.subject}</Text>
                   </div>
                   <Button
                     variant="ghost"
@@ -413,7 +418,7 @@ export function SecureDemo() {
                 {selectedReply.body}
               </div>
               {selectedReply.signed && (
-                <div className="mt-3 p-2 bg-green-50 rounded text-xs text-kumo-success">
+                <div className="mt-3 p-2 bg-green-500/10 rounded text-xs text-kumo-success">
                   This reply includes signed X-Agent-* headers for secure
                   routing.
                 </div>

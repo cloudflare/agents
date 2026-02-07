@@ -1,7 +1,7 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
 import { useState, useEffect } from "react";
-import { Button, Surface, Empty } from "@cloudflare/kumo";
+import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -108,23 +108,19 @@ export function SupervisorDemo() {
     <DemoWrapper
       title="Supervisor Pattern"
       description="A supervisor agent manages multiple child agents using getAgentByName for Durable Object RPC."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
           {/* Connection & Stats */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Supervisor</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-
             {/* Stats Bar */}
             <div className="flex gap-4 text-sm mb-4">
               <div className="flex-1 bg-kumo-control rounded p-3 text-center">
@@ -143,17 +139,12 @@ export function SupervisorDemo() {
 
             {/* Actions */}
             <div className="flex gap-2">
-              <Button
-                variant="primary"
-                onClick={handleCreateChild}
-                className="flex-1"
-              >
+              <Button variant="primary" onClick={handleCreateChild}>
                 + Create Child
               </Button>
               <Button
                 variant="secondary"
                 onClick={handleIncrementAll}
-                className="flex-1"
                 disabled={children.length === 0}
               >
                 +1 to All
@@ -164,9 +155,7 @@ export function SupervisorDemo() {
           {/* Children Grid */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">
-                Child Agents ({children.length})
-              </h3>
+              <Text variant="heading3">Child Agents ({children.length})</Text>
               {children.length > 0 && (
                 <Button
                   variant="ghost"
@@ -230,9 +219,9 @@ export function SupervisorDemo() {
 
           {/* How it Works */}
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <h3 className="font-semibold text-kumo-default mb-2">
-              How it Works
-            </h3>
+            <div className="mb-2">
+              <Text variant="heading3">How it Works</Text>
+            </div>
             <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
                 • The{" "}

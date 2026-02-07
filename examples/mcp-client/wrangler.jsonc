@@ -1,7 +1,7 @@
 {
   "name": "mcp-client",
   "main": "src/server.ts",
-  "compatibility_date": "2025-03-14",
+  "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
 
   "assets": {

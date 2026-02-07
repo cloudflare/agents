@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface, CodeBlock } from "@cloudflare/kumo";
+import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -61,33 +61,28 @@ export function StreamingDemo() {
     <DemoWrapper
       title="Streaming RPC"
       description="Stream data from the agent to the client in real-time using @callable({ streaming: true })."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </Surface>
-
           {/* Stream Numbers */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Stream Numbers
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Stream Numbers</Text>
+            </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Streams numbers from 1 to N synchronously
             </p>
             <div className="flex gap-2">
               <Input
+                aria-label="Number count"
                 type="number"
                 value={count}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -109,12 +104,15 @@ export function StreamingDemo() {
 
           {/* Countdown */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">Countdown</h3>
+            <div className="mb-4">
+              <Text variant="heading3">Countdown</Text>
+            </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Streams a countdown with 500ms delays between numbers
             </p>
             <div className="flex gap-2">
               <Input
+                aria-label="Countdown start"
                 type="number"
                 value={countdown}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -136,14 +134,15 @@ export function StreamingDemo() {
 
           {/* Stream with Error */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Stream with Error
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Stream with Error</Text>
+            </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Sends N chunks then errors (tests error handling mid-stream)
             </p>
             <div className="flex gap-2">
               <Input
+                aria-label="Error after N items"
                 type="number"
                 value={errorAfter}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -167,35 +166,29 @@ export function StreamingDemo() {
 
           {/* Stream Output */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Stream Output
-              {isStreaming && (
-                <span className="ml-2 text-xs font-normal text-kumo-subtle animate-pulse">
-                  receiving...
-                </span>
-              )}
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">
+                Stream Output
+                {isStreaming && (
+                  <span className="ml-2 text-xs font-normal text-kumo-subtle animate-pulse">
+                    receiving...
+                  </span>
+                )}
+              </Text>
+            </div>
             <div className="space-y-2">
               <div>
                 <span className="text-xs text-kumo-subtle">
                   Chunks ({chunks.length})
                 </span>
-                <div className="bg-kumo-recessed rounded p-2 max-h-40 overflow-y-auto">
-                  {chunks.length === 0 ? (
-                    <p className="text-xs text-kumo-inactive">No chunks yet</p>
-                  ) : (
-                    <div className="space-y-1">
-                      {chunks.map((chunk, i) => (
-                        <div
-                          key={i}
-                          className="text-xs font-mono text-kumo-default"
-                        >
-                          {JSON.stringify(chunk)}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                {chunks.length === 0 ? (
+                  <p className="text-xs text-kumo-inactive">No chunks yet</p>
+                ) : (
+                  <CodeBlock
+                    code={chunks.map((c) => JSON.stringify(c)).join("\n")}
+                    lang="jsonc"
+                  />
+                )}
               </div>
               {finalResult !== null && (
                 <div>

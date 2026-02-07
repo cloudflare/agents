@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Trash } from "@phosphor-icons/react";
-import { Button, Surface, Empty } from "@cloudflare/kumo";
+import { Button, Surface } from "@cloudflare/kumo";
 
 export interface LogEntry {
   id: string;
@@ -60,7 +60,7 @@ export function LogPanel({
   const getDirectionColor = (direction: LogEntry["direction"]) => {
     switch (direction) {
       case "in":
-        return "text-green-600";
+        return "text-kumo-success";
       case "out":
         return "text-kumo-info";
       case "error":
@@ -88,8 +88,8 @@ export function LogPanel({
 
       <div ref={scrollRef} className="overflow-y-auto" style={{ maxHeight }}>
         {logs.length === 0 ? (
-          <div className="py-4">
-            <Empty title="No events yet" size="sm" />
+          <div className="px-3 py-3 text-xs text-kumo-inactive">
+            Waiting for events…
           </div>
         ) : (
           logs.map((log) => (

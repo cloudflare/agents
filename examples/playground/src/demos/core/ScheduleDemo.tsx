@@ -1,7 +1,7 @@
 import { useAgent } from "agents/react";
 import type { Schedule } from "agents";
 import { useState, useEffect } from "react";
-import { Button, Input, Surface } from "@cloudflare/kumo";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -108,34 +108,29 @@ export function ScheduleDemo() {
     <DemoWrapper
       title="Scheduling"
       description="Schedule one-time tasks, recurring intervals, and cron-based jobs. Schedules persist across restarts."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </Surface>
-
           {/* One-time Task */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              One-time Task
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">One-time Task</Text>
+            </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Schedule a task to run after a delay
             </p>
             <div className="space-y-2">
               <div className="flex gap-2">
                 <Input
+                  aria-label="Delay in seconds"
                   type="number"
                   value={delaySeconds}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -149,6 +144,7 @@ export function ScheduleDemo() {
                 </span>
               </div>
               <Input
+                aria-label="Task message"
                 type="text"
                 value={message}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -169,15 +165,16 @@ export function ScheduleDemo() {
 
           {/* Recurring Task */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <h3 className="font-semibold text-kumo-default mb-4">
-              Recurring Task
-            </h3>
+            <div className="mb-4">
+              <Text variant="heading3">Recurring Task</Text>
+            </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Schedule a task to repeat at an interval
             </p>
             <div className="space-y-2">
               <div className="flex gap-2">
                 <Input
+                  aria-label="Interval in seconds"
                   type="number"
                   value={intervalSeconds}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -191,6 +188,7 @@ export function ScheduleDemo() {
                 </span>
               </div>
               <Input
+                aria-label="Recurring task label"
                 type="text"
                 value={intervalLabel}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -212,9 +210,9 @@ export function ScheduleDemo() {
           {/* Active Schedules */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">
+              <Text variant="heading3">
                 Active Schedules ({schedules.length})
-              </h3>
+              </Text>
               <Button variant="ghost" size="xs" onClick={refreshSchedules}>
                 Refresh
               </Button>

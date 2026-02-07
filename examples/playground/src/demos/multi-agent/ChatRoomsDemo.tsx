@@ -1,7 +1,7 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
 import { useState, useEffect, useRef } from "react";
-import { Button, Input, Surface, Empty, Badge } from "@cloudflare/kumo";
+import { Button, Input, Surface, Empty, Badge, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -183,6 +183,13 @@ export function ChatRoomsDemo() {
     <DemoWrapper
       title="Chat Rooms"
       description="Multi-agent chat with a Lobby managing multiple Room agents. Users can create and join rooms."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            lobby.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Lobby & Room List */}
@@ -203,20 +210,10 @@ export function ChatRoomsDemo() {
 
           {/* Lobby Connection */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-kumo-default">Lobby</h3>
-              <ConnectionStatus
-                status={
-                  lobby.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-
             {/* Create Room */}
             <div className="flex gap-2 mb-4">
               <Input
+                aria-label="Room name"
                 type="text"
                 value={newRoomName}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -262,9 +259,9 @@ export function ChatRoomsDemo() {
 
           {/* How it Works */}
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <h3 className="font-semibold text-kumo-default mb-2">
-              How it Works
-            </h3>
+            <div className="mb-2">
+              <Text variant="heading3">How it Works</Text>
+            </div>
             <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
                 •{" "}
@@ -294,9 +291,7 @@ export function ChatRoomsDemo() {
                 {/* Room Header */}
                 <div className="flex items-center justify-between mb-4 pb-3 border-b border-kumo-line">
                   <div>
-                    <h3 className="font-semibold text-kumo-default">
-                      {currentRoom}
-                    </h3>
+                    <Text variant="heading3">{currentRoom}</Text>
                     <span className="text-xs text-kumo-subtle">
                       {members.length} members
                     </span>
@@ -337,6 +332,7 @@ export function ChatRoomsDemo() {
                 {/* Input */}
                 <div className="flex gap-2">
                   <Input
+                    aria-label="Chat message"
                     type="text"
                     value={newMessage}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -363,7 +359,9 @@ export function ChatRoomsDemo() {
           {/* Members */}
           {currentRoom && members.length > 0 && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
-              <h3 className="font-semibold text-kumo-default mb-2">Members</h3>
+              <div className="mb-2">
+                <Text variant="heading3">Members</Text>
+              </div>
               <div className="flex flex-wrap gap-2">
                 {members.map((member) => (
                   <Badge

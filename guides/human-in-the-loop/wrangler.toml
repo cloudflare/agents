@@ -1,6 +1,6 @@
 name = "human-in-the-loop"
 main = "./src/server.ts"
-compatibility_date = "2025-02-21"
+compatibility_date = "2026-01-28"
 compatibility_flags = [
     "nodejs_compat"
   ]
