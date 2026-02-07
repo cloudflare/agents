@@ -1,11 +1,11 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import {
-  Shield,
-  PaperPlaneTilt,
-  Tray,
-  Lock,
-  CheckCircle
+  ShieldIcon,
+  PaperPlaneTiltIcon,
+  TrayIcon,
+  LockIcon,
+  CheckCircleIcon
 } from "@phosphor-icons/react";
 import {
   Button,
@@ -122,7 +122,7 @@ export function SecureDemo() {
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 bg-kumo-elevated rounded">
                 <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
-                  <Tray size={12} />
+                  <TrayIcon size={12} />
                   Received
                 </div>
                 <div className="text-2xl font-semibold text-kumo-default">
@@ -131,7 +131,7 @@ export function SecureDemo() {
               </div>
               <div className="p-3 bg-kumo-elevated rounded">
                 <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
-                  <PaperPlaneTilt size={12} />
+                  <PaperPlaneTiltIcon size={12} />
                   Replies
                 </div>
                 <div className="text-2xl font-semibold text-kumo-default">
@@ -158,7 +158,7 @@ export function SecureDemo() {
 
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
             <div className="flex items-center gap-2 mb-3">
-              <Shield size={16} />
+              <ShieldIcon size={16} />
               <Text variant="heading3">How Secure Replies Work</Text>
             </div>
             <ol className="text-sm text-kumo-subtle space-y-2">
@@ -231,7 +231,7 @@ export function SecureDemo() {
                   value: "inbox",
                   label: (
                     <span className="flex items-center gap-2">
-                      <Tray size={16} /> Inbox ({state.inbox.length})
+                      <TrayIcon size={16} /> Inbox ({state.inbox.length})
                     </span>
                   )
                 },
@@ -239,8 +239,8 @@ export function SecureDemo() {
                   value: "outbox",
                   label: (
                     <span className="flex items-center gap-2">
-                      <PaperPlaneTilt size={16} /> Outbox ({state.outbox.length}
-                      )
+                      <PaperPlaneTiltIcon size={16} /> Outbox (
+                      {state.outbox.length})
                     </span>
                   )
                 }
@@ -267,7 +267,7 @@ export function SecureDemo() {
                       <div className="flex items-center justify-between mb-1">
                         <div className="flex items-center gap-2">
                           {email.isSecureReply && (
-                            <Lock size={12} className="text-kumo-success" />
+                            <LockIcon size={12} className="text-kumo-success" />
                           )}
                           <span className="text-sm font-medium truncate text-kumo-default">
                             {email.from}
@@ -352,7 +352,7 @@ export function SecureDemo() {
                     {selectedEmail.isSecureReply && (
                       <Badge variant="primary">
                         <span className="flex items-center gap-1">
-                          <Lock size={12} />
+                          <LockIcon size={12} />
                           Secure Reply
                         </span>
                       </Badge>
@@ -391,7 +391,7 @@ export function SecureDemo() {
                     {selectedReply.signed && (
                       <Badge variant="primary">
                         <span className="flex items-center gap-1">
-                          <CheckCircle size={12} />
+                          <CheckCircleIcon size={12} />
                           Signed
                         </span>
                       </Badge>

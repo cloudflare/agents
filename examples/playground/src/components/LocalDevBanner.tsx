@@ -1,4 +1,4 @@
-import { Warning } from "@phosphor-icons/react";
+import { WarningIcon } from "@phosphor-icons/react";
 import { Banner } from "@cloudflare/kumo";
 
 /**
@@ -18,7 +18,7 @@ export function LocalDevBanner() {
   if (!isLocal) return null;
 
   return (
-    <Banner variant="error" icon={<Warning size={16} />}>
+    <Banner variant="error" icon={<WarningIcon size={16} />}>
       <strong>Local Development:</strong> Email routing requires deployment to
       Cloudflare. This demo won't receive real emails locally.
     </Banner>

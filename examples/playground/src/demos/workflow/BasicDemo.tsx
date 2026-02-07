@@ -1,12 +1,12 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import {
-  Check,
-  Circle,
-  X,
-  Play,
-  Trash,
-  ArrowsClockwise
+  CheckIcon,
+  CircleIcon,
+  XIcon,
+  PlayIcon,
+  TrashIcon,
+  ArrowsClockwiseIcon
 } from "@phosphor-icons/react";
 import { Loader } from "@cloudflare/kumo";
 import {
@@ -42,10 +42,10 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
   };
 
   const statusIcons: Record<string, React.ReactNode> = {
-    queued: <Circle size={14} />,
+    queued: <CircleIcon size={14} />,
     running: <Loader size="sm" />,
-    complete: <Check size={14} />,
-    errored: <X size={14} />,
+    complete: <CheckIcon size={14} />,
+    errored: <XIcon size={14} />,
     waiting: <Loader size="sm" />
   };
 
@@ -248,7 +248,7 @@ export function WorkflowBasicDemo() {
                 onClick={handleStartWorkflow}
                 disabled={isStarting || !workflowName.trim()}
                 className="w-full"
-                icon={<Play size={16} />}
+                icon={<PlayIcon size={16} />}
               >
                 {isStarting ? "Starting..." : "Start Workflow"}
               </Button>
@@ -300,7 +300,7 @@ export function WorkflowBasicDemo() {
                 variant="ghost"
                 size="xs"
                 onClick={refreshWorkflows}
-                icon={<ArrowsClockwise size={12} />}
+                icon={<ArrowsClockwiseIcon size={12} />}
               >
                 Refresh
               </Button>
@@ -329,7 +329,7 @@ export function WorkflowBasicDemo() {
                   variant="ghost"
                   size="xs"
                   onClick={handleClearWorkflows}
-                  icon={<Trash size={12} />}
+                  icon={<TrashIcon size={12} />}
                   className="text-kumo-danger"
                 >
                   Clear

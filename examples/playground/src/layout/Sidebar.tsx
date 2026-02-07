@@ -1,30 +1,30 @@
 import {
-  CaretDown,
-  CaretRight,
-  Cube,
-  ChatDots,
-  HardDrives,
-  GitBranch,
-  Envelope,
-  Database,
-  Lightning,
-  Clock,
-  Users,
-  Cpu,
-  Wrench,
-  Key,
-  PlayCircle,
-  CheckCircle,
-  Sun,
-  Moon,
-  Monitor,
-  Signpost,
-  TreeStructure,
-  ChatCircle,
-  Stack,
-  GitMerge,
-  Shield,
-  Palette
+  CaretDownIcon,
+  CaretRightIcon,
+  CubeIcon,
+  ChatDotsIcon,
+  HardDrivesIcon,
+  GitBranchIcon,
+  EnvelopeIcon,
+  DatabaseIcon,
+  LightningIcon,
+  ClockIcon,
+  UsersIcon,
+  CpuIcon,
+  WrenchIcon,
+  KeyIcon,
+  PlayCircleIcon,
+  CheckCircleIcon,
+  SunIcon,
+  MoonIcon,
+  MonitorIcon,
+  SignpostIcon,
+  TreeStructureIcon,
+  ChatCircleIcon,
+  StackIcon,
+  GitMergeIcon,
+  ShieldIcon,
+  PaletteIcon
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
@@ -46,137 +46,137 @@ interface NavCategory {
 const navigation: NavCategory[] = [
   {
     label: "Core",
-    icon: <Cube size={16} />,
+    icon: <CubeIcon size={16} />,
     items: [
       {
         label: "State",
         path: "/core/state",
-        icon: <Database size={16} />
+        icon: <DatabaseIcon size={16} />
       },
       {
         label: "Callable",
         path: "/core/callable",
-        icon: <Lightning size={16} />
+        icon: <LightningIcon size={16} />
       },
       {
         label: "Streaming",
         path: "/core/streaming",
-        icon: <PlayCircle size={16} />
+        icon: <PlayCircleIcon size={16} />
       },
       {
         label: "Schedule",
         path: "/core/schedule",
-        icon: <Clock size={16} />
+        icon: <ClockIcon size={16} />
       },
       {
         label: "Connections",
         path: "/core/connections",
-        icon: <Users size={16} />
+        icon: <UsersIcon size={16} />
       },
       {
         label: "SQL",
         path: "/core/sql",
-        icon: <Database size={16} />
+        icon: <DatabaseIcon size={16} />
       },
       {
         label: "Routing",
         path: "/core/routing",
-        icon: <Signpost size={16} />
+        icon: <SignpostIcon size={16} />
       }
     ]
   },
   {
     label: "AI",
-    icon: <Cpu size={16} />,
+    icon: <CpuIcon size={16} />,
     items: [
       {
         label: "Chat",
         path: "/ai/chat",
-        icon: <ChatDots size={16} />
+        icon: <ChatDotsIcon size={16} />
       },
       {
         label: "Tools",
         path: "/ai/tools",
-        icon: <Wrench size={16} />
+        icon: <WrenchIcon size={16} />
       }
     ]
   },
   {
     label: "MCP",
-    icon: <HardDrives size={16} />,
+    icon: <HardDrivesIcon size={16} />,
     items: [
       {
         label: "Server",
         path: "/mcp/server",
-        icon: <HardDrives size={16} />
+        icon: <HardDrivesIcon size={16} />
       },
       {
         label: "Client",
         path: "/mcp/client",
-        icon: <Cpu size={16} />
+        icon: <CpuIcon size={16} />
       },
       {
         label: "OAuth",
         path: "/mcp/oauth",
-        icon: <Key size={16} />
+        icon: <KeyIcon size={16} />
       }
     ]
   },
   {
     label: "Workflows",
-    icon: <GitBranch size={16} />,
+    icon: <GitBranchIcon size={16} />,
     items: [
       {
         label: "Basic",
         path: "/workflow/basic",
-        icon: <PlayCircle size={16} />
+        icon: <PlayCircleIcon size={16} />
       },
       {
         label: "Approval",
         path: "/workflow/approval",
-        icon: <CheckCircle size={16} />
+        icon: <CheckCircleIcon size={16} />
       }
     ]
   },
   {
     label: "Multi-Agent",
-    icon: <TreeStructure size={16} />,
+    icon: <TreeStructureIcon size={16} />,
     items: [
       {
         label: "Supervisor",
         path: "/multi-agent/supervisor",
-        icon: <Users size={16} />
+        icon: <UsersIcon size={16} />
       },
       {
         label: "Chat Rooms",
         path: "/multi-agent/rooms",
-        icon: <ChatCircle size={16} />
+        icon: <ChatCircleIcon size={16} />
       },
       {
         label: "Workers",
         path: "/multi-agent/workers",
-        icon: <Stack size={16} />
+        icon: <StackIcon size={16} />
       },
       {
         label: "Pipeline",
         path: "/multi-agent/pipeline",
-        icon: <GitMerge size={16} />
+        icon: <GitMergeIcon size={16} />
       }
     ]
   },
   {
     label: "Email",
-    icon: <Envelope size={16} />,
+    icon: <EnvelopeIcon size={16} />,
     items: [
       {
         label: "Receive",
         path: "/email/receive",
-        icon: <Envelope size={16} />
+        icon: <EnvelopeIcon size={16} />
       },
       {
         label: "Secure Replies",
         path: "/email/secure",
-        icon: <Shield size={16} />
+        icon: <ShieldIcon size={16} />
       }
     ]
   }
@@ -192,7 +192,7 @@ function CategorySection({ category }: { category: NavCategory }) {
         onClick={() => setIsOpen(!isOpen)}
         className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-kumo-subtle hover:text-kumo-default bg-kumo-control rounded-md transition-colors"
       >
-        {isOpen ? <CaretDown size={12} /> : <CaretRight size={12} />}
+        {isOpen ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
         {category.icon}
         {category.label}
       </button>
@@ -232,11 +232,11 @@ function ModeToggle() {
 
   const icon =
     mode === "system" ? (
-      <Monitor size={16} />
+      <MonitorIcon size={16} />
     ) : mode === "light" ? (
-      <Sun size={16} />
+      <SunIcon size={16} />
     ) : (
-      <Moon size={16} />
+      <MoonIcon size={16} />
     );
 
   return (
@@ -265,7 +265,7 @@ function ColorThemeToggle() {
     <Button
       variant="ghost"
       size="sm"
-      icon={<Palette size={16} />}
+      icon={<PaletteIcon size={16} />}
       onClick={cycleColorTheme}
       title={`Color theme: ${colorTheme}`}
     >

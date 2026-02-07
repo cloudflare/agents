@@ -7,9 +7,9 @@ The playground (and eventually all examples) uses [Kumo](https://kumo-ui.com/), 
 ### Setup
 
 - **Package**: `@cloudflare/kumo` (installed at monorepo root as a devDependency)
-- **Icons**: `@phosphor-icons/react` (Kumo's peer icon library, also at root)
+- **Icons**: `@phosphor-icons/react` v2 (Kumo's peer icon library, also at root). Always use the `*Icon` suffixed exports (e.g. `TrashIcon`, `ShieldIcon`) — the bare names (`Trash`, `Shield`) are deprecated.
 - **Theme**: `@cloudflare/agents-theme` (private workspace package at `packages/agents-theme/`)
-- **Tailwind v4**: Kumo ships its own Tailwind plugin; imported in `styles.css`:
+- **Tailwind v4**: Requires `@tailwindcss/vite` in `vite.config.ts` (alongside `@vitejs/plugin-react` and `@cloudflare/vite-plugin`). Kumo ships its own Tailwind plugin; imported in `styles.css`:
   ```css
   @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
   @import "tailwindcss";

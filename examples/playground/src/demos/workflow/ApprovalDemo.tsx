@@ -1,13 +1,13 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import {
-  Clock,
-  CheckCircle,
-  XCircle,
-  PaperPlaneTilt,
-  Trash,
-  WarningCircle,
-  ArrowsClockwise
+  ClockIcon,
+  CheckCircleIcon,
+  XCircleIcon,
+  PaperPlaneTiltIcon,
+  TrashIcon,
+  WarningCircleIcon,
+  ArrowsClockwiseIcon
 } from "@phosphor-icons/react";
 import {
   Button,
@@ -39,9 +39,9 @@ function ApprovalCard({
   const [showRejectForm, setShowRejectForm] = useState(false);
 
   const statusIcons = {
-    pending: <Clock size={20} className="text-kumo-warning" />,
-    approved: <CheckCircle size={20} className="text-kumo-success" />,
-    rejected: <XCircle size={20} className="text-kumo-danger" />
+    pending: <ClockIcon size={20} className="text-kumo-warning" />,
+    approved: <CheckCircleIcon size={20} className="text-kumo-success" />,
+    rejected: <XCircleIcon size={20} className="text-kumo-danger" />
   };
 
   const statusBorder = {
@@ -82,14 +82,14 @@ function ApprovalCard({
               <Button
                 variant="primary"
                 onClick={() => onApprove(request.id)}
-                icon={<CheckCircle size={16} />}
+                icon={<CheckCircleIcon size={16} />}
               >
                 Approve
               </Button>
               <Button
                 variant="destructive"
                 onClick={() => setShowRejectForm(true)}
-                icon={<XCircle size={16} />}
+                icon={<XCircleIcon size={16} />}
               >
                 Reject
               </Button>
@@ -300,7 +300,7 @@ export function WorkflowApprovalDemo() {
                 onClick={handleSubmitRequest}
                 disabled={isSubmitting || !title.trim() || !description.trim()}
                 className="w-full"
-                icon={<PaperPlaneTilt size={16} />}
+                icon={<PaperPlaneTiltIcon size={16} />}
               >
                 {isSubmitting ? "Submitting..." : "Submit Request"}
               </Button>
@@ -372,7 +372,7 @@ export function WorkflowApprovalDemo() {
           <div>
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
-                <WarningCircle size={16} className="text-kumo-warning" />
+                <WarningCircleIcon size={16} className="text-kumo-warning" />
                 <Text variant="heading3">
                   Pending Approval ({pendingRequests.length})
                 </Text>
@@ -381,7 +381,7 @@ export function WorkflowApprovalDemo() {
                 variant="ghost"
                 size="xs"
                 onClick={refreshRequests}
-                icon={<ArrowsClockwise size={12} />}
+                icon={<ArrowsClockwiseIcon size={12} />}
               >
                 Refresh
               </Button>
@@ -415,7 +415,7 @@ export function WorkflowApprovalDemo() {
                   variant="ghost"
                   size="xs"
                   onClick={handleClearApprovals}
-                  icon={<Trash size={12} />}
+                  icon={<TrashIcon size={12} />}
                   className="text-kumo-danger"
                 >
                   Clear

@@ -1,6 +1,11 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Envelope, Tray, Clock, Hash } from "@phosphor-icons/react";
+import {
+  EnvelopeIcon,
+  TrayIcon,
+  ClockIcon,
+  HashIcon
+} from "@phosphor-icons/react";
 import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
@@ -80,7 +85,7 @@ export function ReceiveDemo() {
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 bg-kumo-elevated rounded">
                 <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
-                  <Tray size={12} />
+                  <TrayIcon size={12} />
                   Inbox
                 </div>
                 <div className="text-2xl font-semibold text-kumo-default">
@@ -89,7 +94,7 @@ export function ReceiveDemo() {
               </div>
               <div className="p-3 bg-kumo-elevated rounded">
                 <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
-                  <Hash size={12} />
+                  <HashIcon size={12} />
                   Total
                 </div>
                 <div className="text-2xl font-semibold text-kumo-default">
@@ -99,7 +104,7 @@ export function ReceiveDemo() {
             </div>
             {state.lastReceivedAt && (
               <div className="mt-3 text-xs text-kumo-subtle flex items-center gap-1">
-                <Clock size={12} />
+                <ClockIcon size={12} />
                 Last: {new Date(state.lastReceivedAt).toLocaleString()}
               </div>
             )}
@@ -152,7 +157,7 @@ export function ReceiveDemo() {
         <div className="space-y-6">
           <Surface className="overflow-hidden rounded-lg ring ring-kumo-line">
             <div className="px-4 py-3 border-b border-kumo-line flex items-center gap-2">
-              <Envelope size={16} />
+              <EnvelopeIcon size={16} />
               <Text variant="heading3">Inbox</Text>
               <span className="text-xs text-kumo-subtle">
                 ({state.emails.length})

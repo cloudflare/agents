@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Trash } from "@phosphor-icons/react";
+import { TrashIcon } from "@phosphor-icons/react";
 import { Button, Surface } from "@cloudflare/kumo";
 
 export interface LogEntry {
@@ -80,7 +80,7 @@ export function LogPanel({
           variant="ghost"
           shape="square"
           size="xs"
-          icon={<Trash size={14} />}
+          icon={<TrashIcon size={14} />}
           onClick={onClear}
           title="Clear logs"
         />

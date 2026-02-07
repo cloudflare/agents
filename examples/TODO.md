@@ -42,7 +42,7 @@ Standardise on `.env` / `.env.example` (not `.dev.vars` / `.dev.vars.example`).
 - [ ] `mcp-client/` — rename `.dev.vars.example` to `.env.example`
 - [ ] `playground/` — rename `.dev.vars.example` to `.env.example`
 - [ ] `resumable-stream-chat/` — rename `.dev.vars.example` to `.env.example`
-- [ ] `tictactoe/` — rename `.dev.vars.example` to `.env.example`
+- [x] `tictactoe/` — rename `.dev.vars.example` to `.env.example`
 
 ## wrangler.jsonc assets cleanup
 
@@ -50,7 +50,7 @@ Remove unnecessary `"directory"` from assets — the Vite plugin handles the bui
 
 - [ ] `codemode/wrangler.jsonc` — remove `"directory": "public"` from assets
 - [ ] `github-webhook/wrangler.jsonc` — remove `"directory": "public"` from assets
-- [ ] `tictactoe/wrangler.jsonc` — remove `"directory": "public"` from assets
+- [x] `tictactoe/wrangler.jsonc` — remove `"directory": "public"` from assets
 - [ ] `workflows/wrangler.jsonc` — remove `"directory": "public"` from assets
 - [ ] `resumable-stream-chat/wrangler.jsonc` — remove `"directory": "dist"` and `"binding": "ASSETS"`, align with standard pattern
 
@@ -60,5 +60,5 @@ Check which full-stack examples with client-side routing are missing `"not_found
 
 - [ ] `codemode/` — audit whether it needs SPA fallback
 - [ ] `github-webhook/` — audit whether it needs SPA fallback
-- [ ] `tictactoe/` — audit whether it needs SPA fallback
+- [x] `tictactoe/` — no client-side routing, not needed
 - [ ] `workflows/` — audit whether it needs SPA fallback
