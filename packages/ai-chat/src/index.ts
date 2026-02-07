@@ -876,9 +876,9 @@ export class AIChatAgent<
    * @returns Response to send to the client or undefined
    */
   async onChatMessage(
-    // oxlint-disable-next-line
+    // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
     onFinish: StreamTextOnFinishCallback<ToolSet>,
-    // oxlint-disable-next-line
+    // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
     options?: OnChatMessageOptions
   ): Promise<Response | undefined> {
     throw new Error(

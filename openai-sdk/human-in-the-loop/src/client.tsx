@@ -4,7 +4,7 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { AgentState, MyAgent } from "./server";
 
-// oxlint-disable-next-line
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK generic Agent type
 type AppState = RunResult<unknown, Agent<unknown, any>> | null;
 
 // Types for the agent state structure
@@ -131,7 +131,7 @@ function ApprovalModal({
 }
 
 // Component to display agent state
-// oxlint-disable-next-line
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- untyped agent state props
 function AgentStateDisplay({ state }: any) {
   const hasInterruption = state.currentStep?.type === "next_step_interruption";
   const firstInterruption = hasInterruption
@@ -243,7 +243,7 @@ function App() {
         setState(parsedState);
 
         // Check for interruptions - access the state property correctly
-        // oxlint-disable-next-line
+        // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic state shape from agent
         const agentState = parsedState as any;
         if (agentState?.currentStep?.type === "next_step_interruption") {
           const interruption = agentState.currentStep.data?.interruptions[0];
@@ -344,7 +344,7 @@ function App() {
         </button>
       </div>
 
-      {/* oxlint-disable-next-line */}
+      {/* oxlint-disable-next-line @typescript-eslint/no-explicit-any -- passing untyped state */}
       {state && <AgentStateDisplay state={state as any} />}
 
       {showApprovalModal && currentInterruption && (

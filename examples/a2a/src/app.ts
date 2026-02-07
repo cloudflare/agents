@@ -55,7 +55,7 @@ export class A2AHonoApp {
 
         // Check if it's an AsyncGenerator (stream)
         if (
-          // oxlint-disable-next-line
+          // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- checking for async iterator protocol
           typeof (rpcResponseOrStream as any)?.[Symbol.asyncIterator] ===
           "function"
         ) {

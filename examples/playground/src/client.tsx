@@ -20,6 +20,7 @@ const AppLink = forwardRef<HTMLAnchorElement, LinkComponentProps>(
     if (to) {
       return <RouterLink ref={ref} to={to} {...props} />;
     }
+    // oxlint-disable-next-line jsx-a11y/anchor-has-content -- content comes from spread props
     return <a ref={ref} {...props} />;
   }
 );

@@ -349,10 +349,14 @@ const App = () => {
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
               >
-                <label className="font-semibold text-sm block mb-1 text-kumo-default">
+                <label
+                  htmlFor="system-message"
+                  className="font-semibold text-sm block mb-1 text-kumo-default"
+                >
                   System Message
                 </label>
                 <TextareaAutosize
+                  id="system-message"
                   className="w-full p-2 border border-kumo-line rounded-md resize-none bg-kumo-base text-kumo-default hover:bg-kumo-tint focus:outline-none focus:ring-1 focus:ring-kumo-ring"
                   minRows={4}
                   value={params.system}
@@ -363,11 +367,15 @@ const App = () => {
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
               >
-                <label className="font-semibold text-sm block mb-1 text-kumo-default">
+                <label
+                  htmlFor="temperature"
+                  className="font-semibold text-sm block mb-1 text-kumo-default"
+                >
                   Temperature
                 </label>
                 <div className="flex items-center p-2 border border-kumo-line rounded-md">
                   <input
+                    id="temperature"
                     className="w-full appearance-none cursor-pointer bg-ai rounded-full h-2 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_#901475]"
                     type="range"
                     min={0}
@@ -463,7 +471,7 @@ const App = () => {
                           <img
                             className="max-w-md mx-auto rounded-lg"
                             src={part.url}
-                            alt="Image from tool call response"
+                            alt="Tool call response"
                           />
                         </li>
                       );

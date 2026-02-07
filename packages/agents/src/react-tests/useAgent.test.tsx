@@ -10,7 +10,7 @@ import { useAgent, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
 // Simplified type for test assertions - avoids complex generic inference issues
-// oxlint-disable-next-line
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- tests don't need strict agent typing
 type TestAgent = ReturnType<typeof useAgent<any>>;
 
 // Clean up after each test

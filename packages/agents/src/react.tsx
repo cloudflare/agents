@@ -61,7 +61,7 @@ function deleteCacheEntry(key: string): void {
 function createStubProxy<T = Record<string, Method>>(
   call: (method: string, args: unknown[]) => unknown
 ): T {
-  // oxlint-disable-next-line
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- proxy needs any for dynamic method access
   return new Proxy<any>(
     {},
     {
@@ -181,7 +181,7 @@ type OptionalParametersMethod<T extends RPCMethod> =
   AllOptional<Parameters<T>> extends true ? T : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
-// oxlint-disable-next-line
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic agent type constraint
 type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
 
 type OptionalAgentMethods<T> = {
@@ -198,7 +198,7 @@ type RequiredAgentMethods<T> = Omit<
 >;
 
 type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
-  // oxlint-disable-next-line
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic promise return type
   ReturnType<AgentMethods<T>[K]> extends Promise<any>
     ? ReturnType<AgentMethods<T>[K]>
     : Promise<ReturnType<AgentMethods<T>[K]>>;

@@ -34,7 +34,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
     serialisedRunState: null
   };
 
-  // oxlint-disable-next-line
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK type compatibility
   result: RunResult<unknown, Agent<unknown, any>> | null = null;
   agent = new Agent({
     instructions: "You are a helpful assistant",

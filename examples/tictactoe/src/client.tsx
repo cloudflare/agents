@@ -100,6 +100,7 @@ function App() {
   const renderCell = (row: number, col: number) => {
     const value = state.board[row][col];
     return (
+      // oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- game board cell
       <div
         className={`cell ${value ? "played" : ""}`}
         onClick={() => handleCellClick(row, col)}

@@ -11,16 +11,19 @@ const LocalhostWarningModal = ({
   if (!visible) return null;
 
   return (
+    // oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- modal backdrop dismiss
     <div
       onClick={handleHide}
       className="fixed inset-0 bg-kumo-base/50 backdrop-blur-sm z-20 flex md:items-center md:justify-center items-end md:p-16"
     >
+      {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- stop propagation */}
       <div
         onClick={(e) => e.stopPropagation()}
         className="bg-kumo-base shadow-xl rounded-lg md:max-w-2xl w-full p-6 ring ring-kumo-line"
       >
         <h2 className="font-semibold text-xl flex items-center text-kumo-default">
           Localhost is not allowed
+          {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- close button */}
           <div
             onClick={handleHide}
             className="ml-auto text-kumo-secondary cursor-pointer hover:text-kumo-default"

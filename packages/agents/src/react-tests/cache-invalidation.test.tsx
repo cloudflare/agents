@@ -14,7 +14,7 @@ import { getTestWorkerHost } from "./test-config";
 // Helper to generate cache keys the same way useAgent does internally
 const createCacheKey = _testUtils.createCacheKey;
 
-// oxlint-disable-next-line
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- tests don't need strict agent typing
 type TestAgent = ReturnType<typeof useAgent<any>>;
 
 afterEach(() => {

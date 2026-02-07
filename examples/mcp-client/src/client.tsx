@@ -108,7 +108,7 @@ function App() {
           method: "POST"
         }
       );
-      // oxlint-disable-next-line
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- untyped API response
       const data = (await response.json()) as { tools: any[]; error?: string };
 
       if (data.error) {

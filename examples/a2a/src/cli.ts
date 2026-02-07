@@ -392,7 +392,7 @@ async function main() {
       console.log(
         colorize("dim", "--- End of response stream for this input ---")
       );
-      // oxlint-disable-next-line
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- error needs message property
     } catch (error: any) {
       const timestamp = new Date().toLocaleTimeString();
       const prefix = colorize("red", `\n${agentName} [${timestamp}] ERROR:`);

@@ -64,8 +64,8 @@ function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
 
   if (part.type.startsWith("tool-")) {
     const toolName = part.type.replace("tool-", "");
-    // oxlint-disable-next-line
-    const toolPart = part as any; // Type assertion for tool parts
+    // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- type assertion for tool parts
+    const toolPart = part as any;
     return (
       <div className="part-block tool-block">
         <div className="part-header">

@@ -148,8 +148,7 @@ export class SqlError extends Error {
 export function callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
-    // oxlint-disable-next-line
-    context: ClassMethodDecoratorContext
+    _context: ClassMethodDecoratorContext
   ) {
     if (!callableMetadata.has(target)) {
       callableMetadata.set(target, metadata);
@@ -349,7 +348,7 @@ export function getCurrentAgent<
  * @returns A wrapped method that runs within the agent context
  */
 
-// oxlint-disable-next-line
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
 function withAgentContext<T extends (...args: any[]) => any>(
   method: T
 ): (
@@ -990,7 +989,7 @@ export class Agent<
    *
    * IMPORTANT: This hook must be synchronous.
    */
-  // oxlint-disable-next-line
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   validateStateChange(nextState: State, source: Connection | "server") {
     // override this to validate state updates
   }
@@ -1000,7 +999,7 @@ export class Agent<
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
-  // oxlint-disable-next-line
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
@@ -1154,11 +1153,11 @@ export class Agent<
 
         // Now, methodName is confirmed to be a custom method/function
         // Wrap the custom method with context
+        /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
         const wrappedFunction = withAgentContext(
-          // oxlint-disable-next-line
           this[methodName as keyof this] as (...args: any[]) => any
-          // oxlint-disable-next-line
         ) as any;
+        /* oxlint-enable @typescript-eslint/no-explicit-any */
 
         // if the method is callable, copy the metadata from the original method
         if (this._isCallable(methodName)) {
