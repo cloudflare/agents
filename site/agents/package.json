@@ -19,8 +19,8 @@
     "@use-it/interval": "^1.0.0",
     "astro": "^5.17.1",
     "clsx": "^2.1.1",
-    "effect": "^3.19.15",
-    "framer-motion": "^12.29.2",
+    "effect": "^3.19.16",
+    "framer-motion": "^12.33.0",
     "gsap": "^3.14.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -31,11 +31,11 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@tailwindcss/vite": "^4",
-    "@types/node": "^25.1.0",
-    "@types/react": "^19.2.10",
+    "@types/node": "^25.2.1",
+    "@types/react": "^19.2.13",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.61.1"
+    "wrangler": "^4.63.0"
   },
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.31.1",
