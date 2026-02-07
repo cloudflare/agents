@@ -1,5 +1,12 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import {
+  EnvelopeIcon,
+  TrayIcon,
+  ClockIcon,
+  HashIcon
+} from "@phosphor-icons/react";
+import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
 import { useLogs } from "../../hooks";
@@ -8,13 +15,11 @@ import type {
   ReceiveEmailState,
   ParsedEmail
 } from "./receive-email-agent";
-import { Mail, Inbox, Clock, Hash } from "lucide-react";
 
 export function ReceiveDemo() {
   const { logs, addLog, clearLogs } = useLogs();
   const [selectedEmail, setSelectedEmail] = useState<ParsedEmail | null>(null);
 
-  // Local state synced from agent
   const [state, setState] = useState<ReceiveEmailState>({
     emails: [],
     totalReceived: 0
@@ -51,106 +56,110 @@ export function ReceiveDemo() {
     <DemoWrapper
       title="Receive Emails"
       description="Receive real emails via Cloudflare Email Routing. Emails sent to this agent are stored and displayed."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <LocalDevBanner />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-4">
         {/* Left Panel - Info & Stats */}
         <div className="space-y-6">
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-            <div className="text-xs text-neutral-500 dark:text-neutral-400">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="text-xs text-kumo-subtle">
               Instance:{" "}
-              <code className="bg-neutral-100 dark:bg-neutral-800 px-1 rounded">
+              <code className="bg-kumo-control px-1 rounded text-kumo-default">
                 demo
               </code>
             </div>
-          </div>
+          </Surface>
 
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Stats</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Stats</Text>
+            </div>
             <div className="grid grid-cols-2 gap-3">
-              <div className="p-3 bg-neutral-50 dark:bg-neutral-800 rounded">
-                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400 text-xs mb-1">
-                  <Inbox className="w-3 h-3" />
+              <div className="p-3 bg-kumo-elevated rounded">
+                <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
+                  <TrayIcon size={12} />
                   Inbox
                 </div>
-                <div className="text-2xl font-semibold">
+                <div className="text-2xl font-semibold text-kumo-default">
                   {state.emails.length}
                 </div>
               </div>
-              <div className="p-3 bg-neutral-50 dark:bg-neutral-800 rounded">
-                <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400 text-xs mb-1">
-                  <Hash className="w-3 h-3" />
+              <div className="p-3 bg-kumo-elevated rounded">
+                <div className="flex items-center gap-2 text-kumo-subtle text-xs mb-1">
+                  <HashIcon size={12} />
                   Total
                 </div>
-                <div className="text-2xl font-semibold">
+                <div className="text-2xl font-semibold text-kumo-default">
                   {state.totalReceived}
                 </div>
               </div>
             </div>
             {state.lastReceivedAt && (
-              <div className="mt-3 text-xs text-neutral-500 dark:text-neutral-400 flex items-center gap-1">
-                <Clock className="w-3 h-3" />
+              <div className="mt-3 text-xs text-kumo-subtle flex items-center gap-1">
+                <ClockIcon size={12} />
                 Last: {new Date(state.lastReceivedAt).toLocaleString()}
               </div>
             )}
-          </div>
+          </Surface>
 
-          <div className="card p-4 bg-neutral-50 dark:bg-neutral-800">
-            <h3 className="font-semibold mb-3">Setup Instructions</h3>
-            <ol className="text-sm text-neutral-600 dark:text-neutral-300 space-y-2">
+          <Surface className="p-4 rounded-lg bg-kumo-elevated">
+            <div className="mb-3">
+              <Text variant="heading3">Setup Instructions</Text>
+            </div>
+            <ol className="text-sm text-kumo-subtle space-y-2">
               <li>
-                <strong>1.</strong> Deploy this playground to Cloudflare
+                <strong className="text-kumo-default">1.</strong> Deploy this
+                playground to Cloudflare
               </li>
               <li>
-                <strong>2.</strong> Go to Cloudflare Dashboard → Email → Email
-                Routing
+                <strong className="text-kumo-default">2.</strong> Go to
+                Cloudflare Dashboard → Email → Email Routing
               </li>
               <li>
-                <strong>3.</strong> Add a catch-all or specific rule routing to
-                this Worker
+                <strong className="text-kumo-default">3.</strong> Add a
+                catch-all or specific rule routing to this Worker
               </li>
               <li>
-                <strong>4.</strong> Send email to:{" "}
-                <code className="bg-neutral-200 dark:bg-neutral-700 px-1 rounded text-xs">
+                <strong className="text-kumo-default">4.</strong> Send email to:{" "}
+                <code className="bg-kumo-control px-1 rounded text-xs text-kumo-default">
                   receive+demo@yourdomain.com
                 </code>
               </li>
             </ol>
-          </div>
+          </Surface>
 
-          <div className="card p-4">
-            <h3 className="font-semibold mb-2 text-sm">Address Format</h3>
-            <div className="text-xs text-neutral-600 dark:text-neutral-400 space-y-1">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-2">
+              <Text bold size="sm">
+                Address Format
+              </Text>
+            </div>
+            <div className="text-xs text-kumo-subtle space-y-1">
               <div>
-                <code className="bg-neutral-100 dark:bg-neutral-700 px-1 rounded">
+                <code className="bg-kumo-control px-1 rounded text-kumo-default">
                   receive+id@domain
                 </code>
               </div>
-              <div className="text-neutral-500">
-                Routes to ReceiveEmailAgent with instance "id"
-              </div>
+              <div>Routes to ReceiveEmailAgent with instance "id"</div>
             </div>
-          </div>
+          </Surface>
         </div>
 
         {/* Center Panel - Inbox */}
         <div className="space-y-6">
-          <div className="card overflow-hidden">
-            <div className="px-4 py-3 border-b border-neutral-200 dark:border-neutral-700 flex items-center gap-2">
-              <Mail className="w-4 h-4" />
-              <h3 className="font-semibold">Inbox</h3>
-              <span className="text-xs text-neutral-500 dark:text-neutral-400">
+          <Surface className="overflow-hidden rounded-lg ring ring-kumo-line">
+            <div className="px-4 py-3 border-b border-kumo-line flex items-center gap-2">
+              <EnvelopeIcon size={16} />
+              <Text variant="heading3">Inbox</Text>
+              <span className="text-xs text-kumo-subtle">
                 ({state.emails.length})
               </span>
             </div>
@@ -162,52 +171,50 @@ export function ReceiveDemo() {
                     key={email.id}
                     type="button"
                     onClick={() => setSelectedEmail(email)}
-                    className={`w-full text-left p-3 border-b border-neutral-100 dark:border-neutral-700 last:border-0 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors ${
-                      selectedEmail?.id === email.id
-                        ? "bg-neutral-100 dark:bg-neutral-800"
-                        : ""
+                    className={`w-full text-left p-3 border-b border-kumo-fill last:border-0 hover:bg-kumo-tint transition-colors ${
+                      selectedEmail?.id === email.id ? "bg-kumo-control" : ""
                     }`}
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm font-medium truncate">
+                      <span className="text-sm font-medium truncate text-kumo-default">
                         {email.from}
                       </span>
-                      <span className="text-xs text-neutral-400">
+                      <span className="text-xs text-kumo-inactive">
                         {new Date(email.timestamp).toLocaleTimeString()}
                       </span>
                     </div>
-                    <p className="text-sm text-neutral-600 dark:text-neutral-400 truncate">
+                    <p className="text-sm text-kumo-subtle truncate">
                       {email.subject}
                     </p>
                   </button>
                 ))
               ) : (
-                <div className="p-8 text-center text-neutral-400 text-sm">
-                  <Mail className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  No emails received yet
-                  <p className="text-xs mt-1">
+                <div className="py-8">
+                  <Empty title="No emails received yet" size="sm" />
+                  <p className="text-xs text-kumo-inactive text-center mt-1">
                     Send an email to see it appear here
                   </p>
                 </div>
               )}
             </div>
-          </div>
+          </Surface>
 
           {/* Email Detail */}
           {selectedEmail && (
-            <div className="card p-4">
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="font-semibold">{selectedEmail.subject}</h3>
-                  <button
-                    type="button"
+                  <Text variant="heading3">{selectedEmail.subject}</Text>
+                  <Button
+                    variant="ghost"
+                    shape="square"
+                    size="xs"
                     onClick={() => setSelectedEmail(null)}
-                    className="text-neutral-400 hover:text-neutral-600"
                   >
                     ×
-                  </button>
+                  </Button>
                 </div>
-                <div className="text-xs text-neutral-500 dark:text-neutral-400 mt-1 space-y-0.5">
+                <div className="text-xs text-kumo-subtle mt-1 space-y-0.5">
                   <div>From: {selectedEmail.from}</div>
                   <div>To: {selectedEmail.to}</div>
                   <div>
@@ -221,21 +228,21 @@ export function ReceiveDemo() {
                 </div>
               </div>
 
-              <div className="bg-neutral-50 dark:bg-neutral-900 rounded p-3 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto">
+              <div className="bg-kumo-recessed rounded p-3 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto text-kumo-default">
                 {selectedEmail.text || selectedEmail.html || "(No content)"}
               </div>
 
               {selectedEmail.headers &&
                 Object.keys(selectedEmail.headers).length > 0 && (
                   <details className="mt-3">
-                    <summary className="text-xs text-neutral-500 cursor-pointer">
+                    <summary className="text-xs text-kumo-subtle cursor-pointer">
                       Headers ({Object.keys(selectedEmail.headers).length})
                     </summary>
-                    <div className="mt-2 text-xs font-mono bg-neutral-50 dark:bg-neutral-900 rounded p-2 max-h-32 overflow-y-auto">
+                    <div className="mt-2 text-xs font-mono bg-kumo-recessed rounded p-2 max-h-32 overflow-y-auto text-kumo-default">
                       {Object.entries(selectedEmail.headers).map(
                         ([key, value]) => (
                           <div key={key} className="truncate">
-                            <span className="text-neutral-500">{key}:</span>{" "}
+                            <span className="text-kumo-subtle">{key}:</span>{" "}
                             {value}
                           </div>
                         )
@@ -243,7 +250,7 @@ export function ReceiveDemo() {
                     </div>
                   </details>
                 )}
-            </div>
+            </Surface>
           )}
         </div>
 

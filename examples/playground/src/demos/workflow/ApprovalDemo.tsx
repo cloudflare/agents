@@ -1,5 +1,22 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import {
+  ClockIcon,
+  CheckCircleIcon,
+  XCircleIcon,
+  PaperPlaneTiltIcon,
+  TrashIcon,
+  WarningCircleIcon,
+  ArrowsClockwiseIcon
+} from "@phosphor-icons/react";
+import {
+  Button,
+  Input,
+  InputArea,
+  Surface,
+  Empty,
+  Text
+} from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -8,15 +25,6 @@ import type {
   ApprovalAgentState,
   ApprovalRequest
 } from "./approval-agent";
-import {
-  Clock,
-  CheckCircle,
-  XCircle,
-  Send,
-  Trash2,
-  AlertCircle,
-  RefreshCw
-} from "lucide-react";
 
 function ApprovalCard({
   request,
@@ -31,15 +39,15 @@ function ApprovalCard({
   const [showRejectForm, setShowRejectForm] = useState(false);
 
   const statusIcons = {
-    pending: <Clock className="w-5 h-5 text-yellow-500" />,
-    approved: <CheckCircle className="w-5 h-5 text-green-500" />,
-    rejected: <XCircle className="w-5 h-5 text-red-500" />
+    pending: <ClockIcon size={20} className="text-kumo-warning" />,
+    approved: <CheckCircleIcon size={20} className="text-kumo-success" />,
+    rejected: <XCircleIcon size={20} className="text-kumo-danger" />
   };
 
-  const statusBg = {
-    pending: "border-l-4 border-l-yellow-500",
+  const statusBorder = {
+    pending: "border-l-4 border-l-kumo-warning",
     approved: "border-l-4 border-l-green-500",
-    rejected: "border-l-4 border-l-red-500"
+    rejected: "border-l-4 border-l-kumo-danger"
   };
 
   const timeAgo = (date: string) => {
@@ -52,73 +60,72 @@ function ApprovalCard({
   };
 
   return (
-    <div className={`card p-4 ${statusBg[request.status]}`}>
+    <Surface
+      className={`p-4 rounded-lg ring ring-kumo-line ${statusBorder[request.status]}`}
+    >
       <div className="flex items-start justify-between mb-2">
         <div className="flex items-center gap-2">
           {statusIcons[request.status]}
-          <h4 className="font-medium">{request.title}</h4>
+          <Text bold>{request.title}</Text>
         </div>
-        <span className="text-xs text-neutral-500 dark:text-neutral-400">
+        <span className="text-xs text-kumo-subtle">
           {timeAgo(request.createdAt)}
         </span>
       </div>
 
-      <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-3">
-        {request.description}
-      </p>
+      <p className="text-sm text-kumo-subtle mb-3">{request.description}</p>
 
       {request.status === "pending" && (
         <div className="space-y-2">
           {!showRejectForm ? (
             <div className="flex gap-2">
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => onApprove(request.id)}
-                className="btn btn-primary flex-1 flex items-center justify-center gap-1"
+                icon={<CheckCircleIcon size={16} />}
               >
-                <CheckCircle className="w-4 h-4" />
                 Approve
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="destructive"
                 onClick={() => setShowRejectForm(true)}
-                className="btn flex-1 flex items-center justify-center gap-1 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-200 hover:bg-red-200 dark:hover:bg-red-800"
+                icon={<XCircleIcon size={16} />}
               >
-                <XCircle className="w-4 h-4" />
                 Reject
-              </button>
+              </Button>
             </div>
           ) : (
             <div className="space-y-2">
-              <input
+              <Input
+                aria-label="Rejection reason"
                 type="text"
                 value={rejectReason}
-                onChange={(e) => setRejectReason(e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setRejectReason(e.target.value)
+                }
                 placeholder="Reason for rejection (optional)"
-                className="input w-full text-sm"
+                className="w-full"
               />
               <div className="flex gap-2">
-                <button
-                  type="button"
+                <Button
+                  variant="destructive"
                   onClick={() => {
                     onReject(request.id, rejectReason || undefined);
                     setShowRejectForm(false);
                     setRejectReason("");
                   }}
-                  className="btn flex-1 bg-red-600 text-white hover:bg-red-700"
                 >
                   Confirm Reject
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  variant="secondary"
                   onClick={() => {
                     setShowRejectForm(false);
                     setRejectReason("");
                   }}
-                  className="btn flex-1"
                 >
                   Cancel
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -126,7 +133,7 @@ function ApprovalCard({
       )}
 
       {request.status !== "pending" && request.resolvedAt && (
-        <div className="text-xs text-neutral-500 dark:text-neutral-400 border-t border-neutral-100 dark:border-neutral-700 pt-2 mt-2">
+        <div className="text-xs text-kumo-subtle border-t border-kumo-fill pt-2 mt-2">
           <div>
             {request.status === "approved" ? "Approved" : "Rejected"} at{" "}
             {new Date(request.resolvedAt).toLocaleTimeString()}
@@ -134,7 +141,7 @@ function ApprovalCard({
           {request.reason && <div>Reason: {request.reason}</div>}
         </div>
       )}
-    </div>
+    </Surface>
   );
 }
 
@@ -149,7 +156,6 @@ export function WorkflowApprovalDemo() {
     agent: "approval-agent",
     name: "demo",
     onStateUpdate: () => {
-      // State is empty, but we refresh on any update
       refreshRequests();
     },
     onOpen: () => {
@@ -163,7 +169,6 @@ export function WorkflowApprovalDemo() {
         const data = JSON.parse(message.data as string);
         if (data.type) {
           addLog("in", data.type, data);
-          // Refresh on approval events
           if (data.type.startsWith("approval_")) {
             refreshRequests();
           }
@@ -176,7 +181,6 @@ export function WorkflowApprovalDemo() {
 
   const refreshRequests = async () => {
     try {
-      // Type assertion needed - SDK type inference has issues with array return types
       const list = await (
         agent.call as (m: string) => Promise<ApprovalRequest[]>
       )("listRequests");
@@ -257,72 +261,59 @@ export function WorkflowApprovalDemo() {
     <DemoWrapper
       title="Approval Workflow"
       description="Human-in-the-loop workflow patterns using waitForApproval(). Workflows pause until approved or rejected."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left Panel - Create Request */}
         <div className="space-y-6">
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Submit Request</Text>
             </div>
-          </div>
-
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Submit Request</h3>
             <div className="space-y-3">
-              <div>
-                <label
-                  htmlFor="request-title"
-                  className="text-xs text-neutral-500 dark:text-neutral-400 block mb-1"
-                >
-                  Title
-                </label>
-                <input
-                  id="request-title"
-                  type="text"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  className="input w-full"
-                  placeholder="What needs approval?"
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="request-description"
-                  className="text-xs text-neutral-500 dark:text-neutral-400 block mb-1"
-                >
-                  Description
-                </label>
-                <textarea
-                  id="request-description"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  className="input w-full h-20 resize-none"
-                  placeholder="Provide details..."
-                />
-              </div>
-              <button
-                type="button"
+              <Input
+                label="Title"
+                type="text"
+                value={title}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setTitle(e.target.value)
+                }
+                className="w-full"
+                placeholder="What needs approval?"
+              />
+              <InputArea
+                label="Description"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full"
+                rows={3}
+                placeholder="Provide details..."
+              />
+              <Button
+                variant="primary"
                 onClick={handleSubmitRequest}
                 disabled={isSubmitting || !title.trim() || !description.trim()}
-                className="btn btn-primary w-full flex items-center justify-center gap-2"
+                className="w-full"
+                icon={<PaperPlaneTiltIcon size={16} />}
               >
-                <Send className="w-4 h-4" />
                 {isSubmitting ? "Submitting..." : "Submit Request"}
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Quick Presets */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-3 text-sm">Quick Presets</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-3">
+              <Text bold size="sm">
+                Quick Presets
+              </Text>
+            </div>
             <div className="space-y-2">
               {presetRequests.map((preset) => (
                 <button
@@ -332,27 +323,29 @@ export function WorkflowApprovalDemo() {
                     setTitle(preset.title);
                     setDescription(preset.description);
                   }}
-                  className="w-full text-left p-2 text-xs bg-neutral-50 dark:bg-neutral-800 hover:bg-neutral-100 dark:hover:bg-neutral-700 rounded transition-colors"
+                  className="w-full text-left p-2 text-xs bg-kumo-elevated hover:bg-kumo-tint rounded transition-colors text-kumo-default"
                 >
                   {preset.title}
                 </button>
               ))}
             </div>
-          </div>
+          </Surface>
 
-          <div className="card p-4 bg-neutral-50 dark:bg-neutral-800">
-            <h3 className="font-semibold mb-2">How it Works</h3>
-            <ul className="text-sm text-neutral-600 dark:text-neutral-300 space-y-1">
+          <Surface className="p-4 rounded-lg bg-kumo-elevated">
+            <div className="mb-2">
+              <Text variant="heading3">How it Works</Text>
+            </div>
+            <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
                 1.{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   runWorkflow()
                 </code>{" "}
                 starts an ApprovalWorkflow
               </li>
               <li>
                 2.{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   waitForApproval()
                 </code>{" "}
                 pauses the workflow
@@ -360,17 +353,17 @@ export function WorkflowApprovalDemo() {
               <li>3. Human clicks Approve or Reject</li>
               <li>
                 4.{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   approveWorkflow()
                 </code>{" "}
                 or{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   rejectWorkflow()
                 </code>{" "}
                 resumes it
               </li>
             </ul>
-          </div>
+          </Surface>
         </div>
 
         {/* Center Panel - Approval Queue */}
@@ -379,19 +372,19 @@ export function WorkflowApprovalDemo() {
           <div>
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-yellow-500" />
-                <h3 className="font-semibold">
+                <WarningCircleIcon size={16} className="text-kumo-warning" />
+                <Text variant="heading3">
                   Pending Approval ({pendingRequests.length})
-                </h3>
+                </Text>
               </div>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="xs"
                 onClick={refreshRequests}
-                className="text-xs text-neutral-500 hover:text-neutral-700 flex items-center gap-1"
+                icon={<ArrowsClockwiseIcon size={12} />}
               >
-                <RefreshCw className="w-3 h-3" />
                 Refresh
-              </button>
+              </Button>
             </div>
             {pendingRequests.length > 0 ? (
               <div className="space-y-3">
@@ -405,27 +398,28 @@ export function WorkflowApprovalDemo() {
                 ))}
               </div>
             ) : (
-              <div className="card p-6 text-center text-neutral-400 text-sm">
-                No pending approvals
-              </div>
+              <Surface className="p-6 rounded-lg ring ring-kumo-line">
+                <Empty title="No pending approvals" size="sm" />
+              </Surface>
             )}
           </div>
 
           {/* History */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold">
+              <Text variant="heading3">
                 History ({resolvedRequests.length})
-              </h3>
+              </Text>
               {resolvedRequests.length > 0 && (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="xs"
                   onClick={handleClearApprovals}
-                  className="text-xs text-red-600 hover:text-red-800 flex items-center gap-1"
+                  icon={<TrashIcon size={12} />}
+                  className="text-kumo-danger"
                 >
-                  <Trash2 className="w-3 h-3" />
                   Clear
-                </button>
+                </Button>
               )}
             </div>
             {resolvedRequests.length > 0 ? (
@@ -440,9 +434,9 @@ export function WorkflowApprovalDemo() {
                 ))}
               </div>
             ) : (
-              <div className="card p-6 text-center text-neutral-400 text-sm">
-                No resolved requests
-              </div>
+              <Surface className="p-6 rounded-lg ring ring-kumo-line">
+                <Empty title="No resolved requests" size="sm" />
+              </Surface>
             )}
           </div>
         </div>

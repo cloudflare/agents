@@ -399,7 +399,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.authError).toBe("User denied access");
     });
 
-    it("should throw error for callback without code or error", async () => {
+    it("should fail connection for callback without code or error", async () => {
       const serverId = "server1";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -429,9 +429,9 @@ describe("MCPClientManager OAuth Integration", () => {
       const state = stateStorage.createState(serverId);
       const callbackRequest = new Request(`${callbackUrl}?state=${state}`);
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("Unauthorized: no code provided");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("Unauthorized: no code provided");
     });
 
     it("should throw error for callback without state", async () => {
@@ -496,7 +496,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.serverId).toBe(serverId);
     });
 
-    it("should error when callback received for connection in failed state", async () => {
+    it("should fail connection when callback received for connection in failed state", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -532,9 +532,9 @@ describe("MCPClientManager OAuth Integration", () => {
         `${callbackUrl}?code=test&state=${state}`
       );
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow(
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe(
         'Failed to authenticate: the client is in "failed" state, expected "authenticating"'
       );
     });
@@ -813,6 +813,9 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.authSuccess).toBe(false);
       expect(result.serverId).toBe(serverId);
       expect(result.authError).toBe("User denied access");
+      // Verify error is stored on connection for UI display
+      expect(connection.connectionState).toBe("failed");
+      expect(connection.connectionError).toBe("User denied access");
     });
 
     it("should handle OAuth error without description", async () => {
@@ -851,6 +854,96 @@ describe("MCPClientManager OAuth Integration", () => {
 
       expect(result.authSuccess).toBe(false);
       expect(result.authError).toBe("server_error");
+    });
+
+    it("should escape XSS payloads in error_description", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId] = connection;
+
+      const state = stateStorage.createState(serverId);
+      const xssPayload = "</script><img src=x onerror=alert(1)>";
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=access_denied&error_description=${encodeURIComponent(xssPayload)}&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      // Verify XSS payload is escaped
+      expect(result.authError).toBe(
+        "&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;"
+      );
+      expect(connection.connectionError).toBe(
+        "&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;"
+      );
+      // Should not contain raw script tag
+      expect(result.authError).not.toContain("<script>");
+      expect(result.authError).not.toContain("</script>");
+    });
+
+    it("should escape XSS payloads in error parameter when description is absent", async () => {
+      const serverId = "test-server";
+      const callbackUrl = "http://localhost:3000/callback";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: callbackUrl,
+        client_id: "test-client-id",
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockAuthProvider = createMockAuthProvider(stateStorage);
+      const connection = new MCPClientConnection(
+        new URL("http://test.com"),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "auto", authProvider: mockAuthProvider },
+          client: {}
+        }
+      );
+      connection.connectionState = "authenticating";
+      manager.mcpConnections[serverId] = connection;
+
+      const state = stateStorage.createState(serverId);
+      const xssPayload = "<script>alert('xss')</script>";
+      const callbackRequest = new Request(
+        `${callbackUrl}?error=${encodeURIComponent(xssPayload)}&state=${state}`
+      );
+      const result = await manager.handleCallbackRequest(callbackRequest);
+
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe(
+        "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
+      );
+      expect(connection.connectionError).toBe(
+        "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
+      );
     });
 
     it("should handle token exchange failure", async () => {

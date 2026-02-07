@@ -10,5 +10,16 @@
     "start": "vite dev"
   },
   "type": "module",
-  "version": "0.0.0"
+  "version": "0.0.0",
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.1.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.1.18"
+  }
 }

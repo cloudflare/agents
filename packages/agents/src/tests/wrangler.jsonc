@@ -1,5 +1,5 @@
 {
-  "compatibility_date": "2025-04-17",
+  "compatibility_date": "2026-01-28",
   "compatibility_flags": [
     "nodejs_compat",
     // adding these flags since the vitest runner needs them

@@ -354,10 +354,12 @@ export function useAgentChat<
   onToolCallRef.current = onToolCall;
 
   const agentUrl = new URL(
-    `${// @ts-expect-error we're using a protected _url property that includes query params
-    ((agent._url as string | null) || agent._pkurl)
-      ?.replace("ws://", "http://")
-      .replace("wss://", "https://")}`
+    `${
+      // @ts-expect-error we're using a protected _url property that includes query params
+      ((agent._url as string | null) || agent._pkurl)
+        ?.replace("ws://", "http://")
+        .replace("wss://", "https://")
+    }`
   );
 
   agentUrl.searchParams.delete("_pk");
@@ -835,6 +837,20 @@ export function useAgentChat<
     [autoContinueAfterToolResult]
   );
 
+  // Helper function to send tool approval to server
+  const sendToolApprovalToServer = useCallback(
+    (toolCallId: string, approved: boolean) => {
+      agentRef.current.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_APPROVAL,
+          toolCallId,
+          approved
+        })
+      );
+    },
+    []
+  );
+
   // Effect for new onToolCall callback pattern (v6 style)
   // This fires when there are tool calls that need client-side handling
   useEffect(() => {
@@ -1279,6 +1295,45 @@ export function useAgentChat<
       // If autoContinueAfterToolResult is true, server handles continuation
     };
 
+  // Wrapper that sends tool approval to server before updating local state.
+  // This prevents duplicate messages by ensuring server updates the message
+  // in place with the existing ID, rather than relying on ID resolution
+  // when sendMessage() is called later.
+  const addToolApprovalResponseAndNotifyServer: typeof useChatHelpers.addToolApprovalResponse =
+    (args) => {
+      const { id: approvalId, approved } = args;
+
+      // Find the toolCallId from the approval ID
+      // The approval ID is stored on the tool part's approval.id field
+      let toolCallId: string | undefined;
+      for (const msg of messagesRef.current) {
+        for (const part of msg.parts) {
+          if (
+            "toolCallId" in part &&
+            "approval" in part &&
+            (part.approval as { id?: string })?.id === approvalId
+          ) {
+            toolCallId = part.toolCallId as string;
+            break;
+          }
+        }
+        if (toolCallId) break;
+      }
+
+      if (toolCallId) {
+        // Send approval to server first (server updates message in place)
+        sendToolApprovalToServer(toolCallId, approved);
+      } else {
+        console.warn(
+          `[useAgentChat] addToolApprovalResponse: Could not find toolCallId for approval ID "${approvalId}". ` +
+            "Server will not be notified, which may cause duplicate messages."
+        );
+      }
+
+      // Call AI SDK's addToolApprovalResponse for local state update
+      useChatHelpers.addToolApprovalResponse(args);
+    };
+
   // Fix for issue #728: Merge client-side tool results with messages
   // so tool parts show output-available immediately after execution
   const messagesWithToolResults = useMemo(() => {
@@ -1382,6 +1437,12 @@ export function useAgentChat<
      * @deprecated Use `addToolOutput` instead.
      */
     addToolResult: addToolResultAndSendMessage,
+    /**
+     * Respond to a tool approval request. Use this for tools with `needsApproval`.
+     * This wrapper notifies the server before updating local state, preventing
+     * duplicate messages when sendMessage() is called afterward.
+     */
+    addToolApprovalResponse: addToolApprovalResponseAndNotifyServer,
     clearHistory: () => {
       useChatHelpers.setMessages([]);
       setClientToolResults(new Map());

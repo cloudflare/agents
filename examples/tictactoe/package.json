@@ -10,5 +10,9 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "type": "module",
-  "version": "0.0.0"
+  "version": "0.0.0",
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "agents": "*"
+  }
 }

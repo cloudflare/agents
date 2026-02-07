@@ -1,6 +1,7 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
 import { useState, useEffect, useRef } from "react";
+import { Button, Input, Surface, Empty, Badge, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -18,7 +19,6 @@ export function ChatRoomsDemo() {
   const [newRoomName, setNewRoomName] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Lobby connection for room list
   const lobby = useAgent<LobbyAgent, LobbyState>({
     agent: "lobby-agent",
     name: "main",
@@ -44,7 +44,6 @@ export function ChatRoomsDemo() {
     }
   });
 
-  // Room connection (only when in a room)
   const room = useAgent<RoomAgent, RoomState>({
     agent: "room-agent",
     name: currentRoom || "unused",
@@ -133,7 +132,6 @@ export function ChatRoomsDemo() {
 
   const handleJoinRoom = async (roomId: string) => {
     if (currentRoom) {
-      // Leave current room first
       try {
         await room.call("leave", [username]);
       } catch {
@@ -171,12 +169,10 @@ export function ChatRoomsDemo() {
     }
   };
 
-  // Auto-scroll messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Refresh rooms on lobby connect
   useEffect(() => {
     if (lobby.readyState === WebSocket.OPEN) {
       refreshRooms();
@@ -187,57 +183,48 @@ export function ChatRoomsDemo() {
     <DemoWrapper
       title="Chat Rooms"
       description="Multi-agent chat with a Lobby managing multiple Room agents. Users can create and join rooms."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            lobby.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Lobby & Room List */}
         <div className="space-y-6">
           {/* Username */}
-          <div className="card p-4">
-            <label
-              htmlFor="username-input"
-              className="text-xs text-neutral-500 dark:text-neutral-400 block mb-1"
-            >
-              Your Username
-            </label>
-            <input
-              id="username-input"
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <Input
+              label="Your Username"
               type="text"
               value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="input w-full"
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                setUsername(e.target.value)
+              }
+              className="w-full"
               placeholder="Enter username"
             />
-          </div>
+          </Surface>
 
           {/* Lobby Connection */}
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Lobby</h3>
-              <ConnectionStatus
-                status={
-                  lobby.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             {/* Create Room */}
             <div className="flex gap-2 mb-4">
-              <input
+              <Input
+                aria-label="Room name"
                 type="text"
                 value={newRoomName}
-                onChange={(e) => setNewRoomName(e.target.value)}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setNewRoomName(e.target.value)
+                }
+                className="flex-1"
                 placeholder="Room name (optional)"
               />
-              <button
-                type="button"
-                onClick={handleCreateRoom}
-                className="btn btn-primary"
-              >
+              <Button variant="primary" onClick={handleCreateRoom}>
                 Create
-              </button>
+              </Button>
             </div>
 
             {/* Room List */}
@@ -250,40 +237,42 @@ export function ChatRoomsDemo() {
                     onClick={() => handleJoinRoom(r.roomId)}
                     className={`w-full text-left px-3 py-2 rounded border transition-colors ${
                       currentRoom === r.roomId
-                        ? "border-black dark:border-white bg-neutral-100 dark:bg-neutral-800"
-                        : "border-neutral-200 dark:border-neutral-700 hover:border-neutral-400 dark:hover:border-neutral-500"
+                        ? "border-kumo-brand bg-kumo-elevated"
+                        : "border-kumo-line hover:border-kumo-interact"
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="font-medium">{r.roomId}</span>
-                      <span className="text-xs text-neutral-500 dark:text-neutral-400">
+                      <span className="font-medium text-kumo-default">
+                        {r.roomId}
+                      </span>
+                      <span className="text-xs text-kumo-subtle">
                         {r.memberCount} online
                       </span>
                     </div>
                   </button>
                 ))
               ) : (
-                <p className="text-sm text-neutral-400 text-center py-4">
-                  No rooms yet. Create one!
-                </p>
+                <Empty title="No rooms yet. Create one!" size="sm" />
               )}
             </div>
-          </div>
+          </Surface>
 
           {/* How it Works */}
-          <div className="card p-4 bg-neutral-50 dark:bg-neutral-800">
-            <h3 className="font-semibold mb-2">How it Works</h3>
-            <ul className="text-sm text-neutral-600 dark:text-neutral-300 space-y-1">
+          <Surface className="p-4 rounded-lg bg-kumo-elevated">
+            <div className="mb-2">
+              <Text variant="heading3">How it Works</Text>
+            </div>
+            <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
                 •{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   LobbyAgent
                 </code>{" "}
                 tracks all rooms
               </li>
               <li>
                 • Each room is a{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   RoomAgent
                 </code>{" "}
                 instance
@@ -291,29 +280,29 @@ export function ChatRoomsDemo() {
               <li>• Rooms notify Lobby of member changes</li>
               <li>• Messages are broadcast to room members</li>
             </ul>
-          </div>
+          </Surface>
         </div>
 
         {/* Chat Area */}
         <div className="lg:col-span-1 space-y-6">
-          <div className="card p-4 h-[500px] flex flex-col">
+          <Surface className="p-4 h-[500px] flex flex-col rounded-lg ring ring-kumo-line">
             {currentRoom ? (
               <>
                 {/* Room Header */}
-                <div className="flex items-center justify-between mb-4 pb-3 border-b border-neutral-200 dark:border-neutral-700">
+                <div className="flex items-center justify-between mb-4 pb-3 border-b border-kumo-line">
                   <div>
-                    <h3 className="font-semibold">{currentRoom}</h3>
-                    <span className="text-xs text-neutral-500 dark:text-neutral-400">
+                    <Text variant="heading3">{currentRoom}</Text>
+                    <span className="text-xs text-kumo-subtle">
                       {members.length} members
                     </span>
                   </div>
-                  <button
-                    type="button"
+                  <Button
+                    variant="secondary"
+                    size="sm"
                     onClick={handleLeaveRoom}
-                    className="btn btn-secondary text-sm"
                   >
                     Leave
-                  </button>
+                  </Button>
                 </div>
 
                 {/* Messages */}
@@ -324,8 +313,8 @@ export function ChatRoomsDemo() {
                         key={msg.id}
                         className={`p-2 rounded ${
                           msg.userId === username
-                            ? "bg-black dark:bg-white text-white dark:text-black ml-8"
-                            : "bg-neutral-100 dark:bg-neutral-800 mr-8"
+                            ? "bg-kumo-contrast text-kumo-inverse ml-8"
+                            : "bg-kumo-control text-kumo-default mr-8"
                         }`}
                       >
                         <div className="text-xs opacity-70 mb-1">
@@ -335,58 +324,55 @@ export function ChatRoomsDemo() {
                       </div>
                     ))
                   ) : (
-                    <p className="text-sm text-neutral-400 text-center py-8">
-                      No messages yet
-                    </p>
+                    <Empty title="No messages yet" size="sm" />
                   )}
                   <div ref={messagesEndRef} />
                 </div>
 
                 {/* Input */}
                 <div className="flex gap-2">
-                  <input
+                  <Input
+                    aria-label="Chat message"
                     type="text"
                     value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleSendMessage()}
-                    className="input flex-1"
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                      setNewMessage(e.target.value)
+                    }
+                    onKeyDown={(e: React.KeyboardEvent) =>
+                      e.key === "Enter" && handleSendMessage()
+                    }
+                    className="flex-1"
                     placeholder="Type a message..."
                   />
-                  <button
-                    type="button"
-                    onClick={handleSendMessage}
-                    className="btn btn-primary"
-                  >
+                  <Button variant="primary" onClick={handleSendMessage}>
                     Send
-                  </button>
+                  </Button>
                 </div>
               </>
             ) : (
-              <div className="flex-1 flex items-center justify-center text-neutral-400">
+              <div className="flex-1 flex items-center justify-center text-kumo-inactive">
                 Select a room to start chatting
               </div>
             )}
-          </div>
+          </Surface>
 
           {/* Members */}
           {currentRoom && members.length > 0 && (
-            <div className="card p-4">
-              <h3 className="font-semibold mb-2">Members</h3>
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
+              <div className="mb-2">
+                <Text variant="heading3">Members</Text>
+              </div>
               <div className="flex flex-wrap gap-2">
                 {members.map((member) => (
-                  <span
+                  <Badge
                     key={member}
-                    className={`text-xs px-2 py-1 rounded ${
-                      member === username
-                        ? "bg-black dark:bg-white text-white dark:text-black"
-                        : "bg-neutral-100 dark:bg-neutral-800"
-                    }`}
+                    variant={member === username ? "primary" : "outline"}
                   >
                     {member}
-                  </span>
+                  </Badge>
                 ))}
               </div>
-            </div>
+            </Surface>
           )}
         </div>
 

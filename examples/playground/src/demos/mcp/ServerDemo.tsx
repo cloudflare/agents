@@ -1,3 +1,4 @@
+import { Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 
 export function McpServerDemo() {
@@ -7,97 +8,100 @@ export function McpServerDemo() {
       description="Create MCP (Model Context Protocol) servers with tools, resources, and prompts."
     >
       <div className="max-w-3xl space-y-6">
-        <div className="card p-6">
-          <h3 className="font-semibold text-lg mb-4">What is MCP?</h3>
-          <p className="text-sm text-neutral-600 dark:text-neutral-400 mb-4">
-            The Model Context Protocol (MCP) is an open standard for connecting
-            AI assistants to external data sources and tools. Your agent can
-            become an MCP server, allowing any MCP-compatible AI (like Claude,
-            Cursor, or custom apps) to use its capabilities.
-          </p>
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <div className="mb-4">
+            <Text variant="heading3">What is MCP?</Text>
+          </div>
+          <div className="mb-4">
+            <Text variant="secondary" size="sm">
+              The Model Context Protocol (MCP) is an open standard for
+              connecting AI assistants to external data sources and tools. Your
+              agent can become an MCP server, allowing any MCP-compatible AI
+              (like Claude, Cursor, or custom apps) to use its capabilities.
+            </Text>
+          </div>
 
           <div className="grid grid-cols-3 gap-4 mt-6">
-            <div className="text-center p-4 bg-neutral-50 dark:bg-neutral-800 rounded">
+            <div className="text-center p-4 bg-kumo-elevated rounded">
               <div className="text-2xl mb-2">🔧</div>
-              <h4 className="font-medium">Tools</h4>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                Functions the AI can call
-              </p>
+              <Text bold size="sm">
+                Tools
+              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Functions the AI can call
+                </Text>
+              </div>
             </div>
-            <div className="text-center p-4 bg-neutral-50 dark:bg-neutral-800 rounded">
+            <div className="text-center p-4 bg-kumo-elevated rounded">
               <div className="text-2xl mb-2">📄</div>
-              <h4 className="font-medium">Resources</h4>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                Data the AI can read
-              </p>
+              <Text bold size="sm">
+                Resources
+              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Data the AI can read
+                </Text>
+              </div>
             </div>
-            <div className="text-center p-4 bg-neutral-50 dark:bg-neutral-800 rounded">
+            <div className="text-center p-4 bg-kumo-elevated rounded">
               <div className="text-2xl mb-2">💬</div>
-              <h4 className="font-medium">Prompts</h4>
-              <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                Pre-built prompt templates
-              </p>
+              <Text bold size="sm">
+                Prompts
+              </Text>
+              <div className="mt-1">
+                <Text variant="secondary" size="xs">
+                  Pre-built prompt templates
+                </Text>
+              </div>
             </div>
           </div>
-        </div>
+        </Surface>
 
-        <div className="card p-6">
-          <h3 className="font-semibold text-lg mb-4">How It Works</h3>
-          <ol className="space-y-3 text-sm text-neutral-600 dark:text-neutral-400">
-            <li className="flex gap-3">
-              <span className="w-6 h-6 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center text-xs flex-shrink-0">
-                1
-              </span>
-              <span>
-                Extend{" "}
-                <code className="bg-neutral-100 dark:bg-neutral-700 px-1 rounded">
-                  McpAgent
-                </code>{" "}
-                instead of{" "}
-                <code className="bg-neutral-100 dark:bg-neutral-700 px-1 rounded">
-                  Agent
-                </code>
-              </span>
-            </li>
-            <li className="flex gap-3">
-              <span className="w-6 h-6 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center text-xs flex-shrink-0">
-                2
-              </span>
-              <span>
-                Create an{" "}
-                <code className="bg-neutral-100 dark:bg-neutral-700 px-1 rounded">
-                  McpServer
-                </code>{" "}
-                instance with name and version
-              </span>
-            </li>
-            <li className="flex gap-3">
-              <span className="w-6 h-6 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center text-xs flex-shrink-0">
-                3
-              </span>
-              <span>
-                Register tools, resources, and prompts in the{" "}
-                <code className="bg-neutral-100 dark:bg-neutral-700 px-1 rounded">
-                  init()
-                </code>{" "}
-                method
-              </span>
-            </li>
-            <li className="flex gap-3">
-              <span className="w-6 h-6 rounded-full bg-black dark:bg-white text-white dark:text-black flex items-center justify-center text-xs flex-shrink-0">
-                4
-              </span>
-              <span>Deploy - the agent automatically handles MCP protocol</span>
-            </li>
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <div className="mb-4">
+            <Text variant="heading3">How It Works</Text>
+          </div>
+          <ol className="space-y-3 text-sm text-kumo-subtle">
+            {[
+              ["Extend ", "McpAgent", " instead of ", "Agent"],
+              ["Create an ", "McpServer", " instance with name and version"],
+              [
+                "Register tools, resources, and prompts in the ",
+                "init()",
+                " method"
+              ],
+              ["Deploy - the agent automatically handles MCP protocol"]
+            ].map((parts, i) => (
+              <li key={i} className="flex gap-3">
+                <span className="w-6 h-6 rounded-full bg-kumo-contrast text-kumo-inverse flex items-center justify-center text-xs shrink-0">
+                  {i + 1}
+                </span>
+                <span>
+                  {parts.map((part, j) =>
+                    j % 2 === 1 ? (
+                      <code
+                        key={j}
+                        className="bg-kumo-control px-1 rounded text-kumo-default"
+                      >
+                        {part}
+                      </code>
+                    ) : (
+                      <span key={j}>{part}</span>
+                    )
+                  )}
+                </span>
+              </li>
+            ))}
           </ol>
-        </div>
+        </Surface>
 
-        <div className="card p-4 bg-neutral-50 dark:bg-neutral-800">
-          <p className="text-sm text-neutral-600 dark:text-neutral-400">
-            <strong>See also:</strong> The MCP Client demo shows how to connect
-            your agent to external MCP servers.
-          </p>
-        </div>
+        <Surface className="p-4 rounded-lg bg-kumo-elevated">
+          <Text variant="secondary" size="sm">
+            <strong className="text-kumo-default">See also:</strong> The MCP
+            Client demo shows how to connect your agent to external MCP servers.
+          </Text>
+        </Surface>
       </div>
     </DemoWrapper>
   );

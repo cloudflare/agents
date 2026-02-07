@@ -26,12 +26,17 @@ export class ResumableStreamingChat extends AIChatAgent {
   async onChatMessage() {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
-        const result = streamText({
-          model: openai("gpt-4o"),
-          messages: await convertToModelMessages(this.messages)
-        });
+        try {
+          const result = streamText({
+            model: openai("gpt-4o"),
+            messages: await convertToModelMessages(this.messages)
+          });
 
-        writer.merge(result.toUIMessageStream());
+          writer.merge(result.toUIMessageStream());
+        } catch (error) {
+          console.error("Stream error:", error);
+          throw error;
+        }
       }
     });
     return createUIMessageStreamResponse({ stream });

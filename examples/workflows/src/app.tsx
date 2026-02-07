@@ -1,5 +1,12 @@
 import { useAgent } from "agents/react";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Button, Input, Badge, Text, Empty } from "@cloudflare/kumo";
+import {
+  ConnectionIndicator,
+  ModeToggle,
+  PoweredByAgents
+} from "@cloudflare/agents-ui";
+import type { ConnectionStatus } from "@cloudflare/agents-ui";
 import type {
   TaskAgent,
   WorkflowItem,
@@ -39,374 +46,394 @@ type Toast = {
   type: "error" | "info";
 };
 
+/** Format the "not supported in local dev" message, or fall back to a generic one. */
+function localDevMessage(err: unknown, fallback: string): string {
+  if (
+    err instanceof Error &&
+    err.message.includes("not supported in local development")
+  ) {
+    return `${fallback.replace("Failed to ", "")} is not supported in local dev. Deploy to Cloudflare to use this feature.`;
+  }
+  return fallback;
+}
+
 export default function App() {
   const [taskName, setTaskName] = useState("");
   const [pagination, setPagination] =
     useState<PaginationState>(initialPagination);
-  const [connected, setConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] =
+    useState<ConnectionStatus>("connecting");
   const [toast, setToast] = useState<Toast | null>(null);
   const [loading, setLoading] = useState(false);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showToast = (message: string, type: Toast["type"] = "error") => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 5000);
-  };
+  const connected = connectionStatus === "connected";
+
+  const showToast = useCallback(
+    (message: string, type: Toast["type"] = "error") => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      setToast({ message, type });
+      toastTimer.current = setTimeout(() => setToast(null), 5000);
+    },
+    []
+  );
 
   // Handle real-time updates from server
-  const handleMessage = useCallback((message: MessageEvent) => {
-    try {
-      const data = JSON.parse(message.data);
+  const handleMessage = useCallback(
+    (message: MessageEvent) => {
+      try {
+        const data = JSON.parse(message.data);
 
-      if (data?.type === "warning" && data?.message) {
-        showToast(data.message, "error");
-        return;
-      }
+        if (data?.type === "warning" && data?.message) {
+          showToast(data.message, "error");
+          return;
+        }
 
-      if (data?.type === "workflows:cleared") {
-        // Refresh the list after bulk clear
-        setPagination((prev) => ({
-          ...prev,
-          workflows: prev.workflows.filter(
-            (w) => w.status !== "complete" && w.status !== "errored"
-          ),
-          total: prev.total - (data.count || 0)
-        }));
-        return;
-      }
-
-      // Handle workflow updates
-      const update = data as WorkflowUpdate;
-      if (update?.type === "workflow:added") {
-        // Only add if not already in list (caller adds directly from return value)
-        setPagination((prev) => {
-          const exists = prev.workflows.some(
-            (w) => w.workflowId === update.workflow.workflowId
-          );
-          if (exists) return prev;
-          return {
+        if (data?.type === "workflows:cleared") {
+          setPagination((prev) => ({
             ...prev,
-            workflows: [update.workflow, ...prev.workflows],
-            total: prev.total + 1
-          };
-        });
-      } else if (update?.type === "workflow:updated") {
-        setPagination((prev) => ({
-          ...prev,
-          workflows: prev.workflows.map((w) =>
-            w.workflowId === update.workflowId ? { ...w, ...update.updates } : w
-          )
-        }));
-      } else if (update?.type === "workflow:removed") {
-        setPagination((prev) => ({
-          ...prev,
-          workflows: prev.workflows.filter(
-            (w) => w.workflowId !== update.workflowId
-          ),
-          total: Math.max(0, prev.total - 1)
-        }));
+            workflows: prev.workflows.filter(
+              (w) => w.status !== "complete" && w.status !== "errored"
+            ),
+            total: prev.total - (data.count || 0)
+          }));
+          return;
+        }
+
+        const update = data as WorkflowUpdate;
+        if (update?.type === "workflow:added") {
+          setPagination((prev) => {
+            const exists = prev.workflows.some(
+              (w) => w.workflowId === update.workflow.workflowId
+            );
+            if (exists) return prev;
+            return {
+              ...prev,
+              workflows: [update.workflow, ...prev.workflows],
+              total: prev.total + 1
+            };
+          });
+        } else if (update?.type === "workflow:updated") {
+          setPagination((prev) => ({
+            ...prev,
+            workflows: prev.workflows.map((w) =>
+              w.workflowId === update.workflowId
+                ? { ...w, ...update.updates }
+                : w
+            )
+          }));
+        } else if (update?.type === "workflow:removed") {
+          setPagination((prev) => ({
+            ...prev,
+            workflows: prev.workflows.filter(
+              (w) => w.workflowId !== update.workflowId
+            ),
+            total: Math.max(0, prev.total - 1)
+          }));
+        }
+      } catch {
+        // Ignore non-JSON messages
       }
-    } catch {
-      // Ignore non-JSON messages
-    }
-  }, []);
+    },
+    [showToast]
+  );
 
   const agent = useAgent<TaskAgent, Record<string, never>>({
     agent: "TaskAgent",
     onMessage: handleMessage,
-    onOpen: () => setConnected(true),
-    onClose: () => setConnected(false)
+    onOpen: () => setConnectionStatus("connected"),
+    onClose: () => setConnectionStatus("disconnected")
   });
+
+  /** Wrapper around agent.call with try/catch and local-dev error handling. */
+  const callAgent = useCallback(
+    async (method: string, args: unknown[], errorLabel?: string) => {
+      try {
+        // @ts-expect-error - callable method typing
+        return await agent.call(method, args);
+      } catch (err) {
+        if (errorLabel) {
+          showToast(localDevMessage(err, errorLabel));
+        } else {
+          console.error(`Failed to call ${method}:`, err);
+        }
+      }
+    },
+    [agent, showToast]
+  );
 
   // Fetch initial page on connect
   useEffect(() => {
     if (!connected) return;
 
     const fetchInitial = async () => {
-      try {
-        // @ts-expect-error - callable method typing
-        const page = (await agent.call("listWorkflows", [])) as WorkflowPage;
+      const page = (await callAgent("listWorkflows", [])) as
+        | WorkflowPage
+        | undefined;
+      if (page) {
         setPagination({
           workflows: page.workflows,
           total: page.total,
           nextCursor: page.nextCursor
         });
-      } catch (err) {
-        console.error("Failed to load workflows:", err);
       }
     };
 
     fetchInitial();
-  }, [connected]);
+  }, [connected, callAgent]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!taskName.trim()) return;
-
-    try {
-      // @ts-expect-error - callable method typing
-      await agent.call("submitTask", [taskName]);
-      // Workflow will be added via broadcast message
-      setTaskName("");
-    } catch (err) {
-      console.error("Failed to submit task:", err);
-    }
+    await callAgent("submitTask", [taskName]);
+    setTaskName("");
   };
 
   const handleLoadMore = async () => {
     if (!pagination.nextCursor || loading) return;
     setLoading(true);
     try {
-      // @ts-expect-error - callable method typing
-      const page = (await agent.call("listWorkflows", [
+      const page = (await callAgent("listWorkflows", [
         pagination.nextCursor,
         5
-      ])) as WorkflowPage;
-
-      // Check for duplicates
-      const existingIds = new Set(
-        pagination.workflows.map((w) => w.workflowId)
-      );
-      const duplicates = page.workflows.filter((w) =>
-        existingIds.has(w.workflowId)
-      );
-      if (duplicates.length > 0) {
-        showToast(
-          `Pagination bug: ${duplicates.length} duplicate workflow(s)`,
-          "error"
+      ])) as WorkflowPage | undefined;
+      if (page) {
+        // Silently deduplicate in case of pagination overlap
+        const existingIds = new Set(
+          pagination.workflows.map((w) => w.workflowId)
         );
+        const newWorkflows = page.workflows.filter(
+          (w) => !existingIds.has(w.workflowId)
+        );
+        setPagination((prev) => ({
+          workflows: [...prev.workflows, ...newWorkflows],
+          total: page.total,
+          nextCursor: page.nextCursor
+        }));
       }
-
-      setPagination((prev) => ({
-        workflows: [...prev.workflows, ...page.workflows],
-        total: page.total,
-        nextCursor: page.nextCursor
-      }));
-    } catch (err) {
-      console.error("Failed to load more:", err);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleApprove = async (workflowId: string) => {
-    try {
-      await agent.call("approve", [workflowId, "Approved via UI"]);
-    } catch (err) {
-      console.error("Failed to approve:", err);
-    }
-  };
-
-  const handleReject = async (workflowId: string, reason: string) => {
-    try {
-      await agent.call("reject", [workflowId, reason || "Rejected via UI"]);
-    } catch (err) {
-      console.error("Failed to reject:", err);
-    }
-  };
-
-  const handleDismiss = async (workflowId: string) => {
-    try {
-      await agent.call("dismissWorkflow", [workflowId]);
-    } catch (err) {
-      console.error("Failed to dismiss:", err);
-    }
-  };
-
-  const handleTerminate = async (workflowId: string) => {
-    try {
-      await agent.call("terminate", [workflowId]);
-    } catch (err) {
-      const message =
-        err instanceof Error &&
-        err.message.includes("not supported in local development")
-          ? "Terminate is not supported in local dev. Deploy to Cloudflare to use this feature."
-          : "Failed to terminate workflow";
-      showToast(message);
-    }
-  };
-
-  const handlePause = async (workflowId: string) => {
-    try {
-      await agent.call("pause", [workflowId]);
-    } catch (err) {
-      const message =
-        err instanceof Error &&
-        err.message.includes("not supported in local development")
-          ? "Pause is not supported in local dev. Deploy to Cloudflare to use this feature."
-          : "Failed to pause workflow";
-      showToast(message);
-    }
-  };
-
-  const handleResume = async (workflowId: string) => {
-    try {
-      await agent.call("resume", [workflowId]);
-    } catch (err) {
-      const message =
-        err instanceof Error &&
-        err.message.includes("not supported in local development")
-          ? "Resume is not supported in local dev. Deploy to Cloudflare to use this feature."
-          : "Failed to resume workflow";
-      showToast(message);
-    }
-  };
-
-  const handleRestart = async (workflowId: string) => {
-    try {
-      await agent.call("restart", [workflowId]);
-    } catch (err) {
-      const message =
-        err instanceof Error &&
-        err.message.includes("not supported in local development")
-          ? "Restart is not supported in local dev. Deploy to Cloudflare to use this feature."
-          : "Failed to restart workflow";
-      showToast(message);
-    }
-  };
-
-  const handleClearCompleted = async () => {
-    try {
-      await agent.call("clearCompleted", []);
-    } catch (err) {
-      console.error("Failed to clear:", err);
-    }
-  };
+  const handleClearCompleted = () => callAgent("clearCompleted", []);
 
   const hasCompletedWorkflows = pagination.workflows.some(
     (w) => w.status === "complete" || w.status === "errored"
   );
 
   return (
-    <div className="container">
-      <header>
-        <h1>Workflow Demo</h1>
-        <p className="subtitle">
-          Multiple Concurrent Workflows with Human-in-the-Loop Approval
-        </p>
-      </header>
+    <div className="min-h-screen bg-kumo-elevated">
+      <div className="mx-auto max-w-2xl px-5 py-10">
+        {/* Header */}
+        <header className="mb-10 flex items-start justify-between">
+          <div>
+            <Text variant="heading1">Workflow Demo</Text>
+            <p className="mt-1 text-kumo-inactive">
+              Multiple Concurrent Workflows with Human-in-the-Loop Approval
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <ConnectionIndicator status={connectionStatus} />
+            <ModeToggle />
+          </div>
+        </header>
 
-      {/* Connection status */}
-      <div
-        className={`connection-status ${connected ? "connected" : "disconnected"}`}
-      >
-        {connected ? "Connected" : "Connecting..."}
-      </div>
+        {/* Task submission form */}
+        <form onSubmit={handleSubmit} className="mb-8 flex items-center gap-4">
+          <Input
+            value={taskName}
+            onChange={(e) => setTaskName(e.target.value)}
+            placeholder="Enter task name (e.g., 'Generate Report')"
+            aria-label="Task name"
+            className="flex-1"
+          />
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={!taskName.trim()}
+            className="shrink-0"
+          >
+            Start Task
+          </Button>
+        </form>
 
-      {/* Task submission form - always visible */}
-      <form onSubmit={handleSubmit} className="task-form">
-        <input
-          type="text"
-          value={taskName}
-          onChange={(e) => setTaskName(e.target.value)}
-          placeholder="Enter task name (e.g., 'Generate Report')"
-          className="task-input"
-        />
-        <button
-          type="submit"
-          className="btn btn-primary"
-          disabled={!taskName.trim()}
-        >
-          Start Task
-        </button>
-      </form>
+        {/* Workflow list header */}
+        {pagination.workflows.length > 0 && (
+          <div className="mb-4 flex items-center justify-between">
+            <Text variant="heading3">
+              Workflows ({pagination.workflows.length}
+              {pagination.total > pagination.workflows.length &&
+                ` of ${pagination.total}`}
+              )
+            </Text>
+            {hasCompletedWorkflows && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={handleClearCompleted}
+              >
+                Clear Completed
+              </Button>
+            )}
+          </div>
+        )}
 
-      {/* Workflow list header */}
-      {pagination.workflows.length > 0 && (
-        <div className="workflow-list-header">
-          <h2>
-            Workflows ({pagination.workflows.length}
-            {pagination.total > pagination.workflows.length &&
-              ` of ${pagination.total}`}
-            )
-          </h2>
-          {hasCompletedWorkflows && (
+        {/* Workflow list */}
+        <div className="flex flex-col gap-3">
+          {pagination.workflows.map((workflow) => (
+            <WorkflowCard
+              key={workflow.workflowId}
+              workflow={workflow}
+              callAgent={callAgent}
+            />
+          ))}
+        </div>
+
+        {/* Load more button */}
+        {pagination.nextCursor && (
+          <div className="mt-4 border-t border-kumo-line pt-5 text-center">
+            <Button
+              variant="secondary"
+              onClick={handleLoadMore}
+              loading={loading}
+            >
+              Load More ({pagination.total - pagination.workflows.length}{" "}
+              remaining)
+            </Button>
+          </div>
+        )}
+
+        {/* Empty state */}
+        {pagination.workflows.length === 0 && (
+          <Empty
+            title="No workflows yet"
+            description="Start a task above to begin!"
+          />
+        )}
+
+        {/* Feature list */}
+        <footer className="mt-12 border-t border-kumo-line pt-6">
+          <h4 className="mb-3 font-medium text-kumo-inactive">
+            This demo shows:
+          </h4>
+          <ul className="list-inside list-disc space-y-1 text-kumo-inactive">
+            <li>
+              Multiple concurrent workflows with{" "}
+              <code className="rounded bg-kumo-tint px-1.5 py-0.5 text-kumo-brand">
+                runWorkflow()
+              </code>
+            </li>
+            <li>
+              Paginated workflow list via{" "}
+              <code className="rounded bg-kumo-tint px-1.5 py-0.5 text-kumo-brand">
+                getWorkflows()
+              </code>
+            </li>
+            <li>
+              Typed progress reporting with{" "}
+              <code className="rounded bg-kumo-tint px-1.5 py-0.5 text-kumo-brand">
+                reportProgress()
+              </code>
+            </li>
+            <li>
+              Human-in-the-loop with{" "}
+              <code className="rounded bg-kumo-tint px-1.5 py-0.5 text-kumo-brand">
+                waitForApproval()
+              </code>
+            </li>
+            <li>
+              Per-workflow approve/reject via{" "}
+              <code className="rounded bg-kumo-tint px-1.5 py-0.5 text-kumo-brand">
+                approveWorkflow()
+              </code>
+            </li>
+            <li>
+              Workflow termination via{" "}
+              <code className="rounded bg-kumo-tint px-1.5 py-0.5 text-kumo-brand">
+                terminateWorkflow()
+              </code>
+            </li>
+          </ul>
+
+          <div className="mt-8 flex justify-center">
+            <PoweredByAgents />
+          </div>
+        </footer>
+
+        {/* Toast notification */}
+        {toast && (
+          <div
+            className={`animate-toast-in fixed bottom-6 right-6 z-50 flex max-w-sm items-center gap-3 rounded-lg border bg-kumo-base p-4 shadow-lg ${
+              toast.type === "error"
+                ? "border-l-4 border-l-kumo-brand border-kumo-line"
+                : "border-l-4 border-l-kumo-secondary border-kumo-line"
+            }`}
+          >
+            <span className="flex-1 text-kumo-default">{toast.message}</span>
             <button
               type="button"
-              onClick={handleClearCompleted}
-              className="btn btn-small btn-secondary"
+              className="text-kumo-inactive transition-colors hover:text-kumo-default"
+              onClick={() => setToast(null)}
+              aria-label="Dismiss notification"
             >
-              Clear Completed
+              ×
             </button>
-          )}
-        </div>
-      )}
-
-      {/* Workflow list */}
-      <div className="workflow-list">
-        {pagination.workflows.map((workflow) => (
-          <WorkflowCard
-            key={workflow.workflowId}
-            workflow={workflow}
-            onApprove={handleApprove}
-            onReject={handleReject}
-            onDismiss={handleDismiss}
-            onTerminate={handleTerminate}
-            onPause={handlePause}
-            onResume={handleResume}
-            onRestart={handleRestart}
-          />
-        ))}
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
 
-      {/* Load more button */}
-      {pagination.nextCursor && (
-        <div className="load-more-section">
-          <button
-            type="button"
-            onClick={handleLoadMore}
-            className="btn btn-secondary"
-          >
-            Load More ({pagination.total - pagination.workflows.length}{" "}
-            remaining)
-          </button>
-        </div>
-      )}
+// Status badge variant mapping
+const statusBadgeConfig: Record<
+  WorkflowItem["status"],
+  { label: string; variant: React.ComponentProps<typeof Badge>["variant"] }
+> = {
+  queued: { label: "Queued", variant: "secondary" },
+  running: { label: "Running", variant: "primary" },
+  waiting: { label: "Awaiting Approval", variant: "beta" },
+  complete: { label: "Complete", variant: "outline" },
+  errored: { label: "Error", variant: "destructive" },
+  paused: { label: "Paused", variant: "secondary" }
+};
 
-      {/* Empty state */}
-      {pagination.workflows.length === 0 && (
-        <div className="empty-state">
-          <p>No workflows yet. Start a task above to begin!</p>
-        </div>
-      )}
+function StatusBadge({ status }: { status: WorkflowItem["status"] }) {
+  const { label, variant } = statusBadgeConfig[status];
+  return <Badge variant={variant}>{label}</Badge>;
+}
 
-      {/* Feature list */}
-      <footer className="features">
-        <h4>This demo shows:</h4>
-        <ul>
-          <li>
-            Multiple concurrent workflows with <code>runWorkflow()</code>
-          </li>
-          <li>
-            Paginated workflow list via <code>getWorkflows()</code>
-          </li>
-          <li>
-            Typed progress reporting with <code>reportProgress()</code>
-          </li>
-          <li>
-            Human-in-the-loop with <code>waitForApproval()</code>
-          </li>
-          <li>
-            Per-workflow approve/reject via <code>approveWorkflow()</code>
-          </li>
-          <li>
-            Workflow termination via <code>terminateWorkflow()</code>
-          </li>
-        </ul>
-      </footer>
-
-      {/* Toast notification */}
-      {toast && (
-        <div className={`toast toast-${toast.type}`}>
-          <span className="toast-message">{toast.message}</span>
-          <button
-            type="button"
-            className="toast-close"
-            onClick={() => setToast(null)}
-          >
-            ×
-          </button>
-        </div>
-      )}
+/** Restart + Dismiss buttons used for both completed and errored workflows. */
+function WorkflowEndActions({
+  workflowId,
+  callAgent
+}: {
+  workflowId: string;
+  callAgent: (
+    method: string,
+    args: unknown[],
+    errorLabel?: string
+  ) => Promise<unknown>;
+}) {
+  return (
+    <div className="flex gap-2">
+      <Button
+        size="sm"
+        variant="primary"
+        onClick={() =>
+          callAgent("restart", [workflowId], "Failed to restart workflow")
+        }
+      >
+        Restart
+      </Button>
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => callAgent("dismissWorkflow", [workflowId])}
+      >
+        Dismiss
+      </Button>
     </div>
   );
 }
@@ -414,193 +441,174 @@ export default function App() {
 // Workflow card component
 function WorkflowCard({
   workflow: rawWorkflow,
-  onApprove,
-  onReject,
-  onDismiss,
-  onTerminate,
-  onPause,
-  onResume,
-  onRestart
+  callAgent
 }: {
   workflow: WorkflowItem;
-  onApprove: (id: string) => void;
-  onReject: (id: string, reason: string) => void;
-  onDismiss: (id: string) => void;
-  onTerminate: (id: string) => void;
-  onPause: (id: string) => void;
-  onResume: (id: string) => void;
-  onRestart: (id: string) => void;
+  callAgent: (
+    method: string,
+    args: unknown[],
+    errorLabel?: string
+  ) => Promise<unknown>;
 }) {
   const [rejectReason, setRejectReason] = useState("");
-  // Cast to UI-safe type for rendering
-  const workflow = rawWorkflow as WorkflowCardData;
+
+  // Transform WorkflowItem to UI-safe types for rendering
+  const workflow: WorkflowCardData = {
+    ...rawWorkflow,
+    result:
+      rawWorkflow.result != null &&
+      typeof rawWorkflow.result === "object" &&
+      !Array.isArray(rawWorkflow.result)
+        ? (rawWorkflow.result as Record<string, unknown>)
+        : undefined,
+    progress: rawWorkflow.progress as ProgressInfo | null
+  };
+
   const percent = workflow.progress?.percent ?? 0;
   const message = workflow.progress?.message ?? "Processing...";
+  const id = workflow.workflowId;
+
+  const borderClass =
+    workflow.status === "waiting"
+      ? "border-kumo-brand/40"
+      : workflow.status === "complete"
+        ? "border-green-500/30"
+        : workflow.status === "errored"
+          ? "border-red-500/30"
+          : "border-kumo-line";
 
   return (
-    <div className={`workflow-card status-${workflow.status}`}>
+    <div
+      className={`rounded-xl border bg-kumo-base p-5 transition-colors hover:border-kumo-interact ${borderClass}`}
+    >
       {/* Header with task name and status */}
-      <div className="workflow-header">
-        <div className="workflow-title">
-          <span className="task-name">{workflow.taskName}</span>
-          <span className="workflow-id">{workflow.workflowId.slice(0, 8)}</span>
+      <div className="mb-3 flex items-start justify-between">
+        <div className="flex flex-col gap-0.5">
+          <span className="font-semibold text-kumo-default">
+            {workflow.taskName}
+          </span>
+          <span className="font-mono text-xs text-kumo-inactive">
+            {id.slice(0, 8)}
+          </span>
         </div>
         <StatusBadge status={workflow.status} />
       </div>
 
-      {/* Progress bar for running/waiting workflows */}
+      {/* Progress bar for running/waiting/queued workflows */}
       {(workflow.status === "running" ||
         workflow.status === "waiting" ||
         workflow.status === "queued") && (
-        <div className="workflow-progress">
-          <div className="progress-bar-container">
+        <div className="mb-3">
+          <div className="mb-2 h-1 overflow-hidden rounded-full bg-kumo-tint">
             <div
-              className={`progress-bar ${workflow.waitingForApproval ? "waiting" : ""}`}
+              className={`h-full rounded-full bg-kumo-brand transition-all duration-300 ease-out ${
+                workflow.waitingForApproval ? "animate-pulse-glow" : ""
+              }`}
               style={{ width: `${percent * 100}%` }}
             />
           </div>
-          <div className="progress-text">
-            {Math.round(percent * 100)}% - {message}
-          </div>
+          <span className="text-sm text-kumo-inactive">
+            {Math.round(percent * 100)}% – {message}
+          </span>
         </div>
       )}
 
-      {/* Action buttons for running/queued workflows (not waiting for approval) */}
+      {/* Action buttons for running/queued workflows */}
       {(workflow.status === "running" || workflow.status === "queued") &&
         !workflow.waitingForApproval && (
-          <div className="workflow-actions">
-            <button
-              type="button"
-              onClick={() => onPause(workflow.workflowId)}
-              className="btn btn-secondary btn-small"
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() =>
+                callAgent("pause", [id], "Failed to pause workflow")
+              }
             >
               Pause
-            </button>
-            <button
-              type="button"
-              onClick={() => onTerminate(workflow.workflowId)}
-              className="btn btn-danger btn-small"
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() =>
+                callAgent("terminate", [id], "Failed to terminate workflow")
+              }
             >
               Terminate
-            </button>
+            </Button>
           </div>
         )}
 
       {/* Resume button for paused workflows */}
       {workflow.status === "paused" && (
-        <div className="workflow-actions">
-          <button
-            type="button"
-            onClick={() => onResume(workflow.workflowId)}
-            className="btn btn-primary btn-small"
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="primary"
+            onClick={() =>
+              callAgent("resume", [id], "Failed to resume workflow")
+            }
           >
             Resume
-          </button>
-          <button
-            type="button"
-            onClick={() => onTerminate(workflow.workflowId)}
-            className="btn btn-danger btn-small"
+          </Button>
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() =>
+              callAgent("terminate", [id], "Failed to terminate workflow")
+            }
           >
             Terminate
-          </button>
+          </Button>
         </div>
       )}
 
       {/* Approval buttons */}
       {workflow.waitingForApproval && (
-        <div className="approval-actions">
-          <button
-            type="button"
-            onClick={() => onApprove(workflow.workflowId)}
-            className="btn btn-success btn-small"
+        <div className="flex flex-wrap items-stretch gap-3 border-t border-kumo-line pt-3">
+          <Button
+            variant="primary"
+            onClick={() => callAgent("approve", [id, "Approved via UI"])}
           >
             Approve
-          </button>
-          <div className="reject-group">
-            <input
-              type="text"
+          </Button>
+          <div className="flex flex-1 items-stretch gap-2">
+            <Input
               value={rejectReason}
               onChange={(e) => setRejectReason(e.target.value)}
               placeholder="Reason (optional)"
-              className="reject-input"
+              aria-label="Rejection reason"
+              className="min-w-[120px] flex-1"
             />
-            <button
-              type="button"
+            <Button
+              variant="destructive"
               onClick={() => {
-                onReject(workflow.workflowId, rejectReason);
+                callAgent("reject", [id, rejectReason || "Rejected via UI"]);
                 setRejectReason("");
               }}
-              className="btn btn-danger btn-small"
             >
               Reject
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
       {/* Completed result */}
       {workflow.status === "complete" && workflow.result && (
-        <div className="workflow-result">
-          <pre className="result-data">
+        <div className="border-t border-kumo-line pt-3">
+          <pre className="mb-3 max-h-[150px] overflow-auto rounded-lg border border-kumo-line bg-kumo-elevated p-3 font-mono text-sm text-kumo-inactive">
             {JSON.stringify(workflow.result, null, 2)}
           </pre>
-          <div className="workflow-actions">
-            <button
-              type="button"
-              onClick={() => onRestart(workflow.workflowId)}
-              className="btn btn-primary btn-small"
-            >
-              Restart
-            </button>
-            <button
-              type="button"
-              onClick={() => onDismiss(workflow.workflowId)}
-              className="btn btn-secondary btn-small"
-            >
-              Dismiss
-            </button>
-          </div>
+          <WorkflowEndActions workflowId={id} callAgent={callAgent} />
         </div>
       )}
 
       {/* Error display */}
       {workflow.status === "errored" && (
-        <div className="workflow-error">
-          <p className="error-message">{workflow.error?.message}</p>
-          <div className="workflow-actions">
-            <button
-              type="button"
-              onClick={() => onRestart(workflow.workflowId)}
-              className="btn btn-primary btn-small"
-            >
-              Restart
-            </button>
-            <button
-              type="button"
-              onClick={() => onDismiss(workflow.workflowId)}
-              className="btn btn-secondary btn-small"
-            >
-              Dismiss
-            </button>
-          </div>
+        <div className="border-t border-kumo-line pt-3">
+          <p className="mb-3 text-kumo-danger">{workflow.error?.message}</p>
+          <WorkflowEndActions workflowId={id} callAgent={callAgent} />
         </div>
       )}
     </div>
-  );
-}
-
-// Status badge component
-function StatusBadge({ status }: { status: WorkflowItem["status"] }) {
-  const labels: Record<WorkflowItem["status"], string> = {
-    queued: "Queued",
-    running: "Running",
-    waiting: "Awaiting Approval",
-    complete: "Complete",
-    errored: "Error",
-    paused: "Paused"
-  };
-
-  return (
-    <span className={`status-badge badge-${status}`}>{labels[status]}</span>
   );
 }

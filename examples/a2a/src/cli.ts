@@ -392,26 +392,40 @@ async function main() {
       console.log(
         colorize("dim", "--- End of response stream for this input ---")
       );
-      // biome-ignore lint/suspicious/noExplicitAny: comes direct from the google samples
-    } catch (error: any) {
+    } catch (error: unknown) {
       const timestamp = new Date().toLocaleTimeString();
       const prefix = colorize("red", `\n${agentName} [${timestamp}] ERROR:`);
-      console.error(
-        prefix,
-        "Error communicating with agent:",
-        error.message || error
-      );
-      if (error.code) {
-        console.error(colorize("gray", `   Code: ${error.code}`));
+      const err =
+        error instanceof Error
+          ? error
+          : new Error(typeof error === "string" ? error : String(error));
+      console.error(prefix, "Error communicating with agent:", err.message);
+
+      // Extract optional code/data from RPC-style errors
+      const code =
+        error != null &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof (error as Record<string, unknown>).code === "string"
+          ? ((error as Record<string, unknown>).code as string)
+          : undefined;
+      const data =
+        error != null &&
+        typeof error === "object" &&
+        "data" in error &&
+        (error as Record<string, unknown>).data !== undefined
+          ? (error as Record<string, unknown>).data
+          : undefined;
+
+      if (code) {
+        console.error(colorize("gray", `   Code: ${code}`));
       }
-      if (error.data) {
-        console.error(
-          colorize("gray", `   Data: ${JSON.stringify(error.data)}`)
-        );
+      if (data) {
+        console.error(colorize("gray", `   Data: ${JSON.stringify(data)}`));
       }
-      if (!(error.code || error.data) && error.stack) {
+      if (!(code || data) && err.stack) {
         console.error(
-          colorize("gray", error.stack.split("\n").slice(1, 3).join("\n"))
+          colorize("gray", err.stack.split("\n").slice(1, 3).join("\n"))
         );
       }
     } finally {

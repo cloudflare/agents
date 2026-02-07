@@ -1,6 +1,7 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
 import { useState, useEffect } from "react";
+import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -97,7 +98,6 @@ export function SupervisorDemo() {
     }
   };
 
-  // Auto-refresh on connect
   useEffect(() => {
     if (agent.readyState === WebSocket.OPEN) {
       refreshStats();
@@ -108,73 +108,63 @@ export function SupervisorDemo() {
     <DemoWrapper
       title="Supervisor Pattern"
       description="A supervisor agent manages multiple child agents using getAgentByName for Durable Object RPC."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
           {/* Connection & Stats */}
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Supervisor</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             {/* Stats Bar */}
             <div className="flex gap-4 text-sm mb-4">
-              <div className="flex-1 bg-neutral-100 dark:bg-neutral-800 rounded p-3 text-center">
-                <div className="text-2xl font-bold">{stats.totalChildren}</div>
-                <div className="text-neutral-500 dark:text-neutral-400 text-xs">
-                  Children
+              <div className="flex-1 bg-kumo-control rounded p-3 text-center">
+                <div className="text-2xl font-bold text-kumo-default">
+                  {stats.totalChildren}
                 </div>
+                <div className="text-kumo-subtle text-xs">Children</div>
               </div>
-              <div className="flex-1 bg-neutral-100 dark:bg-neutral-800 rounded p-3 text-center">
-                <div className="text-2xl font-bold">{stats.totalCounter}</div>
-                <div className="text-neutral-500 dark:text-neutral-400 text-xs">
-                  Total Counter
+              <div className="flex-1 bg-kumo-control rounded p-3 text-center">
+                <div className="text-2xl font-bold text-kumo-default">
+                  {stats.totalCounter}
                 </div>
+                <div className="text-kumo-subtle text-xs">Total Counter</div>
               </div>
             </div>
 
             {/* Actions */}
             <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={handleCreateChild}
-                className="btn btn-primary flex-1"
-              >
+              <Button variant="primary" onClick={handleCreateChild}>
                 + Create Child
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="secondary"
                 onClick={handleIncrementAll}
-                className="btn btn-secondary flex-1"
                 disabled={children.length === 0}
               >
                 +1 to All
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Children Grid */}
-          <div className="card p-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">
-                Child Agents ({children.length})
-              </h3>
+              <Text variant="heading3">Child Agents ({children.length})</Text>
               {children.length > 0 && (
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
+                  size="xs"
                   onClick={handleClearAll}
-                  className="text-xs text-red-600 hover:text-red-800"
+                  className="text-kumo-danger"
                 >
                   Clear All
-                </button>
+                </Button>
               )}
             </div>
 
@@ -183,34 +173,36 @@ export function SupervisorDemo() {
                 {children.map((child) => (
                   <div
                     key={child.id}
-                    className="border border-neutral-200 dark:border-neutral-700 rounded p-3"
+                    className="border border-kumo-line rounded p-3"
                   >
                     <div className="flex items-center justify-between mb-2">
-                      <code className="text-xs text-neutral-500 dark:text-neutral-400">
+                      <code className="text-xs text-kumo-subtle">
                         {child.id}
                       </code>
-                      <button
-                        type="button"
+                      <Button
+                        variant="ghost"
+                        shape="square"
+                        size="xs"
                         onClick={() => handleRemoveChild(child.id)}
-                        className="text-xs text-red-600 hover:text-red-800"
+                        className="text-kumo-danger"
                       >
                         ×
-                      </button>
+                      </Button>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-2xl font-bold">
+                      <span className="text-2xl font-bold text-kumo-default">
                         {child.state.counter}
                       </span>
-                      <button
-                        type="button"
+                      <Button
+                        variant="secondary"
+                        size="xs"
                         onClick={() => handleIncrementChild(child.id)}
-                        className="btn btn-secondary text-sm py-1 px-3"
                       >
                         +1
-                      </button>
+                      </Button>
                     </div>
                     {child.state.createdAt && (
-                      <div className="text-xs text-neutral-400 mt-2">
+                      <div className="text-xs text-kumo-inactive mt-2">
                         {new Date(child.state.createdAt).toLocaleTimeString()}
                       </div>
                     )}
@@ -218,24 +210,26 @@ export function SupervisorDemo() {
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-neutral-400 text-center py-8">
-                No children yet. Click "Create Child" to spawn a new child
-                agent.
-              </p>
+              <Empty
+                title='No children yet. Click "Create Child" to spawn a new child agent.'
+                size="sm"
+              />
             )}
-          </div>
+          </Surface>
 
           {/* How it Works */}
-          <div className="card p-4 bg-neutral-50 dark:bg-neutral-800">
-            <h3 className="font-semibold mb-2">How it Works</h3>
-            <ul className="text-sm text-neutral-600 dark:text-neutral-300 space-y-1">
+          <Surface className="p-4 rounded-lg bg-kumo-elevated">
+            <div className="mb-2">
+              <Text variant="heading3">How it Works</Text>
+            </div>
+            <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
                 • The{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   SupervisorAgent
                 </code>{" "}
                 creates child agents using{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   getAgentByName()
                 </code>
               </li>
@@ -249,7 +243,7 @@ export function SupervisorDemo() {
                 • Children are tracked by ID and can be managed individually
               </li>
             </ul>
-          </div>
+          </Surface>
         </div>
 
         {/* Logs */}

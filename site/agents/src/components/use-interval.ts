@@ -1,4 +1,4 @@
-/** 
+/**
  
 https://github.com/donavon/use-interval
 

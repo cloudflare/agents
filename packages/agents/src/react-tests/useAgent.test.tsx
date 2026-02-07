@@ -10,7 +10,7 @@ import { useAgent, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
 // Simplified type for test assertions - avoids complex generic inference issues
-// biome-ignore lint/suspicious/noExplicitAny: Tests don't need strict typing for agent object
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- tests don't need strict agent typing
 type TestAgent = ReturnType<typeof useAgent<any>>;
 
 // Clean up after each test
@@ -473,6 +473,87 @@ describe("useAgent hook", () => {
 
       expect(queryFn).toHaveBeenCalled();
       expect(capturedAgent!.identified).toBe(true);
+    });
+  });
+
+  describe("basePath routing", () => {
+    it("should connect and receive identity via basePath", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onIdentity = vi.fn();
+      let capturedAgent: TestAgent | null = null;
+
+      const instanceName = `basepath-hook-${Date.now()}`;
+
+      const { container } = render(
+        <SuspenseWrapper>
+          <TestAgentComponent
+            options={{
+              agent: "TestStateAgent",
+              name: instanceName,
+              host,
+              protocol,
+              basePath: `custom-state/${instanceName}`,
+              onIdentity
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          const status = container.querySelector(
+            '[data-testid="agent-status"]'
+          );
+          expect(status?.textContent).toBe("connected");
+        },
+        { timeout: 10000 }
+      );
+
+      expect(capturedAgent).not.toBeNull();
+      expect(capturedAgent!.identified).toBe(true);
+      // Server should send back the correct identity
+      expect(onIdentity).toHaveBeenCalledWith(instanceName, "test-state-agent");
+    });
+
+    it("should connect via server-determined basePath routing", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onIdentity = vi.fn();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = render(
+        <SuspenseWrapper>
+          <TestAgentComponent
+            options={{
+              agent: "TestStateAgent",
+              host,
+              protocol,
+              basePath: "user",
+              onIdentity
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          const status = container.querySelector(
+            '[data-testid="agent-status"]'
+          );
+          expect(status?.textContent).toBe("connected");
+        },
+        { timeout: 10000 }
+      );
+
+      expect(capturedAgent).not.toBeNull();
+      expect(capturedAgent!.identified).toBe(true);
+      // Server routes /user to "auth-user" instance
+      expect(onIdentity).toHaveBeenCalledWith("auth-user", "test-state-agent");
     });
   });
 

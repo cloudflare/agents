@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { Text, Surface } from "@cloudflare/kumo";
 
 const features = [
   {
@@ -132,38 +133,44 @@ const features = [
 export function Home() {
   return (
     <div className="h-full flex flex-col">
-      <header className="p-6 border-b border-neutral-200 dark:border-neutral-700">
-        <h1 className="text-2xl font-bold">Agents SDK Playground</h1>
-        <p className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
-          Interactive demos for every feature of the Cloudflare Agents SDK
-        </p>
+      <header className="p-6 border-b border-kumo-line">
+        <Text variant="heading1">Agents SDK Playground</Text>
+        <div className="mt-1">
+          <Text variant="secondary" size="sm">
+            Interactive demos for every feature of the Cloudflare Agents SDK
+          </Text>
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-4xl">
-          <p className="text-neutral-600 dark:text-neutral-400 mb-8">
-            Select a feature from the sidebar to explore its capabilities. Each
-            demo includes interactive controls, real-time event logging, and
-            code examples you can copy.
-          </p>
+          <div className="mb-8">
+            <Text variant="secondary">
+              Select a feature from the sidebar to explore its capabilities.
+              Each demo includes interactive controls, real-time event logging,
+              and code examples you can copy.
+            </Text>
+          </div>
 
           <div className="space-y-8">
             {features.map((section) => (
               <div key={section.category}>
-                <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400 mb-3">
-                  {section.category}
-                </h2>
+                <div className="uppercase tracking-wider mb-3">
+                  <Text variant="secondary" size="xs" bold>
+                    {section.category}
+                  </Text>
+                </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
                   {section.items.map((item) => (
-                    <Link
-                      key={item.path}
-                      to={item.path}
-                      className="card p-4 hover:border-neutral-400 dark:hover:border-neutral-500 transition-colors"
-                    >
-                      <h3 className="font-medium">{item.name}</h3>
-                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                        {item.description}
-                      </p>
+                    <Link key={item.path} to={item.path} className="block">
+                      <Surface className="p-4 rounded-lg ring ring-kumo-line hover:ring-kumo-interact transition-colors">
+                        <Text bold>{item.name}</Text>
+                        <div className="mt-1">
+                          <Text variant="secondary" size="xs">
+                            {item.description}
+                          </Text>
+                        </div>
+                      </Surface>
                     </Link>
                   ))}
                 </div>

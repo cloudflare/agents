@@ -1,26 +1,14 @@
 import { Agent, routeAgentRequest } from "agents";
-import type { MCPClientOAuthResult } from "agents/mcp";
 
 export class MyAgent extends Agent {
   onStart() {
     // Optionally configure OAuth callback. Here we use popup-closing behavior since we're opening a window on the client
     this.mcp.configureOAuthCallback({
-      customHandler: (result: MCPClientOAuthResult) => {
-        if (result.authSuccess) {
-          return new Response("<script>window.close();</script>", {
-            headers: { "content-type": "text/html" },
-            status: 200
-          });
-        } else {
-          const safeError = JSON.stringify(result.authError || "Unknown error");
-          return new Response(
-            `<script>alert('Authentication failed: ' + ${safeError}); window.close();</script>`,
-            {
-              headers: { "content-type": "text/html" },
-              status: 200
-            }
-          );
-        }
+      customHandler: () => {
+        return new Response("<script>window.close();</script>", {
+          headers: { "content-type": "text/html" },
+          status: 200
+        });
       }
     });
   }

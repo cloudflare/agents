@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -104,131 +105,112 @@ export function StateDemo() {
     <DemoWrapper
       title="State Management"
       description="Real-time state synchronization between server and clients. State persists across reconnections."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </div>
-
           {/* Counter Controls */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Counter: {state.counter}</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Counter: {state.counter}</Text>
+            </div>
             <div className="flex gap-2 mb-4">
-              <button
-                type="button"
-                onClick={handleDecrement}
-                className="btn btn-secondary flex-1"
-              >
+              <Button variant="secondary" onClick={handleDecrement}>
                 -1
-              </button>
-              <button
-                type="button"
-                onClick={handleIncrement}
-                className="btn btn-primary flex-1"
-              >
+              </Button>
+              <Button variant="primary" onClick={handleIncrement}>
                 +1
-              </button>
+              </Button>
             </div>
             <div className="flex gap-2">
-              <input
+              <Input
+                aria-label="Custom counter value"
                 type="number"
                 value={customValue}
-                onChange={(e) => setCustomValue(e.target.value)}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setCustomValue(e.target.value)
+                }
+                className="flex-1"
                 placeholder="Custom value"
               />
-              <button
-                type="button"
-                onClick={handleSetCounter}
-                className="btn btn-secondary"
-              >
+              <Button variant="secondary" onClick={handleSetCounter}>
                 Set (Server)
-              </button>
-              <button
-                type="button"
-                onClick={handleClientSetState}
-                className="btn btn-secondary"
-              >
+              </Button>
+              <Button variant="secondary" onClick={handleClientSetState}>
                 Set (Client)
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Items List */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Items ({state.items.length})</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Items ({state.items.length})</Text>
+            </div>
             <div className="flex gap-2 mb-4">
-              <input
+              <Input
+                aria-label="New item"
                 type="text"
                 value={newItem}
-                onChange={(e) => setNewItem(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleAddItem()}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setNewItem(e.target.value)
+                }
+                onKeyDown={(e: React.KeyboardEvent) =>
+                  e.key === "Enter" && handleAddItem()
+                }
+                className="flex-1"
                 placeholder="New item"
               />
-              <button
-                type="button"
-                onClick={handleAddItem}
-                className="btn btn-primary"
-              >
+              <Button variant="primary" onClick={handleAddItem}>
                 Add
-              </button>
+              </Button>
             </div>
             {state.items.length > 0 ? (
               <ul className="space-y-1">
                 {state.items.map((item: string, i: number) => (
                   <li
                     key={i}
-                    className="flex items-center justify-between py-1 px-2 bg-neutral-50 dark:bg-neutral-800 rounded"
+                    className="flex items-center justify-between py-1 px-2 bg-kumo-elevated rounded"
                   >
-                    <span className="text-sm">{item}</span>
-                    <button
-                      type="button"
+                    <span className="text-sm text-kumo-default">{item}</span>
+                    <Button
+                      variant="ghost"
+                      size="xs"
                       onClick={() => handleRemoveItem(i)}
-                      className="text-xs text-red-600 hover:text-red-800"
+                      className="text-kumo-danger"
                     >
                       Remove
-                    </button>
+                    </Button>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="text-sm text-neutral-400">No items</p>
+              <p className="text-sm text-kumo-inactive">No items</p>
             )}
-          </div>
+          </Surface>
 
           {/* State Display */}
-          <div className="card p-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="font-semibold">Current State</h3>
-              <button
-                type="button"
-                onClick={handleReset}
-                className="btn btn-danger text-xs py-1 px-2"
-              >
+              <Text variant="heading3">Current State</Text>
+              <Button variant="destructive" size="xs" onClick={handleReset}>
                 Reset
-              </button>
+              </Button>
             </div>
-            <pre className="text-xs bg-neutral-50 dark:bg-neutral-900 p-3 rounded overflow-x-auto">
-              {JSON.stringify(state, null, 2)}
-            </pre>
+            <CodeBlock code={JSON.stringify(state, null, 2)} lang="jsonc" />
             {state.lastUpdated && (
-              <p className="text-xs text-neutral-400 mt-2">
+              <p className="text-xs text-kumo-inactive mt-2">
                 Last updated: {new Date(state.lastUpdated).toLocaleString()}
               </p>
             )}
-          </div>
+          </Surface>
         </div>
 
         {/* Logs */}

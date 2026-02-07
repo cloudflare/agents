@@ -127,11 +127,15 @@ export class TaskAgent extends Agent<Env, AgentState> {
       uiState: { ...metadata.uiState, ...uiState }
     };
 
-    this.sql`
-      UPDATE cf_agents_workflows 
-      SET metadata = ${JSON.stringify(updatedMetadata)}
-      WHERE workflow_id = ${workflowId}
-    `;
+    try {
+      this.sql`
+        UPDATE cf_agents_workflows 
+        SET metadata = ${JSON.stringify(updatedMetadata)}
+        WHERE workflow_id = ${workflowId}
+      `;
+    } catch (err) {
+      console.error(`Failed to update UI state for ${workflowId}:`, err);
+    }
   }
 
   /**
@@ -144,11 +148,15 @@ export class TaskAgent extends Agent<Env, AgentState> {
     const metadata = (workflow.metadata as WorkflowMetadata) || {};
     const { uiState: _, ...rest } = metadata;
 
-    this.sql`
-      UPDATE cf_agents_workflows 
-      SET metadata = ${JSON.stringify(rest)}
-      WHERE workflow_id = ${workflowId}
-    `;
+    try {
+      this.sql`
+        UPDATE cf_agents_workflows 
+        SET metadata = ${JSON.stringify(rest)}
+        WHERE workflow_id = ${workflowId}
+      `;
+    } catch (err) {
+      console.error(`Failed to clear UI state for ${workflowId}:`, err);
+    }
   }
 
   /**
@@ -166,26 +174,18 @@ export class TaskAgent extends Agent<Env, AgentState> {
     waitingForApproval: boolean
   ): WorkflowItem["status"] {
     if (waitingForApproval) return "waiting";
-    switch (status) {
-      case "queued":
-        return "queued";
-      case "running":
-        return "running";
-      case "waiting":
-        return "waiting";
-      case "paused":
-        return "paused";
-      case "complete":
-        return "complete";
-      case "errored":
-      case "terminated":
-        return "errored";
-      default:
-        console.warn(
-          `Unknown workflow status: ${status}, defaulting to running`
-        );
-        return "running";
-    }
+
+    const known: Record<string, UIStatus> = {
+      queued: "queued",
+      running: "running",
+      waiting: "waiting",
+      paused: "paused",
+      complete: "complete",
+      errored: "errored",
+      terminated: "errored"
+    };
+
+    return known[status] ?? "running";
   }
 
   /**

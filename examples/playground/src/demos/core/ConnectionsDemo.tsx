@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import { Button, Input, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -40,7 +41,7 @@ export function ConnectionsDemo() {
               ...prev,
               { message: data.message, timestamp: data.timestamp }
             ].slice(-10)
-          ); // Keep last 10
+          );
         }
       } catch {
         // Not JSON
@@ -76,98 +77,97 @@ export function ConnectionsDemo() {
     <DemoWrapper
       title="Connections"
       description="Manage WebSocket connections, track clients, and broadcast messages to all connected clients."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </div>
-
           {/* Connection Count */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Connected Clients</h3>
-            <div className="text-4xl font-bold mb-4">{connectionCount}</div>
-            <p className="text-sm text-neutral-600 mb-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Connected Clients</Text>
+            </div>
+            <div className="text-4xl font-bold text-kumo-default mb-4">
+              {connectionCount}
+            </div>
+            <p className="text-sm text-kumo-subtle mb-4">
               Open multiple tabs to see the count update in real-time
             </p>
-            <button
-              type="button"
-              onClick={openNewTab}
-              className="btn btn-secondary"
-            >
+            <Button variant="secondary" onClick={openNewTab}>
               Open New Tab
-            </button>
-          </div>
+            </Button>
+          </Surface>
 
           {/* Broadcast */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Broadcast Message</h3>
-            <p className="text-sm text-neutral-600 mb-3">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Broadcast Message</Text>
+            </div>
+            <p className="text-sm text-kumo-subtle mb-3">
               Send a message to all connected clients (including yourself)
             </p>
             <div className="flex gap-2">
-              <input
+              <Input
+                aria-label="Broadcast message"
                 type="text"
                 value={broadcastMessage}
-                onChange={(e) => setBroadcastMessage(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleBroadcast()}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setBroadcastMessage(e.target.value)
+                }
+                onKeyDown={(e: React.KeyboardEvent) =>
+                  e.key === "Enter" && handleBroadcast()
+                }
+                className="flex-1"
                 placeholder="Message to broadcast"
               />
-              <button
-                type="button"
-                onClick={handleBroadcast}
-                className="btn btn-primary"
-              >
+              <Button variant="primary" onClick={handleBroadcast}>
                 Broadcast
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Received Messages */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Received Broadcasts</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Received Broadcasts</Text>
+            </div>
             {receivedMessages.length === 0 ? (
-              <p className="text-sm text-neutral-400">
-                No messages received yet
-              </p>
+              <Empty title="No messages received yet" size="sm" />
             ) : (
               <div className="space-y-2 max-h-60 overflow-y-auto">
                 {receivedMessages.map((msg, i) => (
                   <div
                     key={i}
-                    className="py-2 px-3 bg-neutral-50 dark:bg-neutral-800 rounded text-sm"
+                    className="py-2 px-3 bg-kumo-elevated rounded text-sm"
                   >
-                    <div>{msg.message}</div>
-                    <div className="text-xs text-neutral-400">
+                    <div className="text-kumo-default">{msg.message}</div>
+                    <div className="text-xs text-kumo-inactive">
                       {new Date(msg.timestamp).toLocaleTimeString()}
                     </div>
                   </div>
                 ))}
               </div>
             )}
-          </div>
+          </Surface>
 
           {/* Tips */}
-          <div className="card p-4 bg-neutral-50 dark:bg-neutral-800">
-            <h3 className="font-semibold mb-2">Try this:</h3>
-            <ol className="text-sm text-neutral-600 space-y-1 list-decimal list-inside">
+          <Surface className="p-4 rounded-lg bg-kumo-elevated">
+            <div className="mb-2">
+              <Text variant="heading3">Try this:</Text>
+            </div>
+            <ol className="text-sm text-kumo-subtle space-y-1 list-decimal list-inside">
               <li>Open this page in another browser tab</li>
               <li>Watch the connection count update</li>
               <li>Send a broadcast message from one tab</li>
               <li>See it appear in all tabs</li>
             </ol>
-          </div>
+          </Surface>
         </div>
 
         {/* Logs */}

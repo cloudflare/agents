@@ -1,122 +1,27 @@
+@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "@cloudflare/agents-ui/theme/workers.css";
 
-/* Enable dark mode via class */
-@custom-variant dark (&:where(.dark, .dark *));
-
-/* Base styles */
-@layer base {
-  body {
-    font-family:
-      ui-sans-serif,
-      system-ui,
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      Roboto,
-      "Helvetica Neue",
-      Arial,
-      sans-serif;
-  }
-
-  /* Scrollbar styling */
-  ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-
-  ::-webkit-scrollbar-track {
-    background: #f5f5f5;
-  }
-
-  .dark ::-webkit-scrollbar-track {
-    background: #262626;
-  }
-
-  ::-webkit-scrollbar-thumb {
-    background: #d4d4d4;
-    border-radius: 4px;
-  }
-
-  .dark ::-webkit-scrollbar-thumb {
-    background: #525252;
-  }
-
-  ::-webkit-scrollbar-thumb:hover {
-    background: #a3a3a3;
-  }
-
-  .dark ::-webkit-scrollbar-thumb:hover {
-    background: #737373;
-  }
-}
-
-/* Component utilities */
+/* Playground-specific: log entry styles (no Kumo equivalent) */
 @layer components {
-  .sidebar-item {
-    @apply flex items-center gap-2 px-3 py-2 text-sm text-neutral-600 dark:text-neutral-400 rounded-md transition-colors hover:bg-neutral-100 dark:hover:bg-neutral-800 hover:text-black dark:hover:text-white;
-  }
-
-  .sidebar-item-active {
-    @apply bg-neutral-100 dark:bg-neutral-800 text-black dark:text-white font-medium;
-  }
-
-  .btn {
-    @apply px-4 py-2 text-sm font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
-  }
-
-  .btn-primary {
-    @apply bg-black dark:bg-white text-white dark:text-black hover:bg-neutral-800 dark:hover:bg-neutral-200;
-  }
-
-  .btn-secondary {
-    @apply bg-neutral-100 dark:bg-neutral-800 text-black dark:text-white hover:bg-neutral-200 dark:hover:bg-neutral-700 border border-neutral-200 dark:border-neutral-700;
-  }
-
-  .btn-danger {
-    @apply bg-red-600 text-white hover:bg-red-700;
-  }
-
-  .input {
-    @apply px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-black dark:text-white rounded-md focus:outline-none focus:ring-2 focus:ring-black dark:focus:ring-white focus:border-transparent;
-  }
-
-  .card {
-    @apply bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-lg;
-  }
-
-  .code-block {
-    @apply bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-md p-4 font-mono text-sm overflow-x-auto;
-  }
-
   .log-entry {
-    @apply px-3 py-1.5 text-xs font-mono border-b border-neutral-100 dark:border-neutral-700 last:border-0;
+    @apply px-3 py-1.5 text-xs font-mono text-kumo-default border-b border-kumo-fill last:border-0;
   }
 
   .log-entry-in {
-    @apply bg-green-50 dark:bg-green-900/20;
+    @apply bg-green-500/10;
   }
 
   .log-entry-out {
-    @apply bg-blue-50 dark:bg-blue-900/20;
+    @apply bg-kumo-info-tint;
   }
 
   .log-entry-error {
-    @apply bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400;
+    @apply bg-kumo-danger-tint text-kumo-danger;
   }
 
-  .status-dot {
-    @apply w-2 h-2 rounded-full;
-  }
-
-  .status-connected {
-    @apply bg-green-500;
-  }
-
-  .status-connecting {
-    @apply bg-yellow-500 animate-pulse;
-  }
-
-  .status-disconnected {
-    @apply bg-red-500;
+  .log-entry-info {
+    @apply bg-kumo-base;
   }
 }

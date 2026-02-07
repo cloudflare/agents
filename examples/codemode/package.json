@@ -8,5 +8,9 @@
     "start": "vite dev",
     "types": "wrangler types env.d.ts --include-runtime false",
     "deploy": "vite build && wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/codemode": "*",
+    "agents": "*"
   }
 }

@@ -132,6 +132,7 @@ export class Codemode extends Agent<Env, State> {
     this.tools = allTools;
 
     const { prompt, tools: wrappedTools } = await codemode({
+      model,
       prompt: `You are a helpful assistant that can do various tasks... 
 
 ${getSchedulePrompt({ date: new Date() })}

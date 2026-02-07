@@ -1,7 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "agents-playground",
-  "compatibility_date": "2025-01-29",
+  "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
   "durable_objects": {

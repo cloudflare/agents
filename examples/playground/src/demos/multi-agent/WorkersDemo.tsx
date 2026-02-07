@@ -1,3 +1,4 @@
+import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 
 export function WorkersDemo() {
@@ -8,60 +9,66 @@ export function WorkersDemo() {
     >
       <div className="max-w-3xl mx-auto space-y-8">
         {/* Diagram */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">Architecture</h3>
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <div className="mb-4">
+            <Text variant="heading3">Architecture</Text>
+          </div>
           <div className="flex flex-col items-center">
             {/* Manager */}
-            <div className="bg-black dark:bg-white text-white dark:text-black px-6 py-3 rounded-lg font-medium">
+            <div className="bg-kumo-contrast text-kumo-inverse px-6 py-3 rounded-lg font-medium">
               ManagerAgent
             </div>
 
             {/* Lines */}
             <div className="flex items-center gap-8 my-4">
-              <div className="w-px h-8 bg-neutral-300 dark:bg-neutral-600" />
-              <div className="w-px h-8 bg-neutral-300 dark:bg-neutral-600" />
-              <div className="w-px h-8 bg-neutral-300 dark:bg-neutral-600" />
+              <div className="w-px h-8 bg-kumo-line" />
+              <div className="w-px h-8 bg-kumo-line" />
+              <div className="w-px h-8 bg-kumo-line" />
             </div>
 
             {/* Fork */}
-            <div className="w-64 h-px bg-neutral-300 dark:bg-neutral-600" />
+            <div className="w-64 h-px bg-kumo-line" />
 
             {/* More lines */}
             <div className="flex items-center gap-8 my-4">
-              <div className="w-px h-8 bg-neutral-300 dark:bg-neutral-600" />
-              <div className="w-px h-8 bg-neutral-300 dark:bg-neutral-600" />
-              <div className="w-px h-8 bg-neutral-300 dark:bg-neutral-600" />
+              <div className="w-px h-8 bg-kumo-line" />
+              <div className="w-px h-8 bg-kumo-line" />
+              <div className="w-px h-8 bg-kumo-line" />
             </div>
 
             {/* Workers */}
             <div className="flex gap-4">
-              <div className="bg-neutral-100 dark:bg-neutral-800 px-4 py-2 rounded border border-neutral-200 dark:border-neutral-700">
+              <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
                 Worker 1
               </div>
-              <div className="bg-neutral-100 dark:bg-neutral-800 px-4 py-2 rounded border border-neutral-200 dark:border-neutral-700">
+              <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
                 Worker 2
               </div>
-              <div className="bg-neutral-100 dark:bg-neutral-800 px-4 py-2 rounded border border-neutral-200 dark:border-neutral-700">
+              <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
                 Worker N
               </div>
             </div>
           </div>
-        </div>
+        </Surface>
 
         {/* Description */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">How It Works</h3>
-          <div className="space-y-4 text-neutral-600 dark:text-neutral-300">
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <div className="mb-4">
+            <Text variant="heading3">How It Works</Text>
+          </div>
+          <div className="space-y-4 text-kumo-subtle">
             <p>
-              The Workers pattern uses a central <strong>ManagerAgent</strong>{" "}
-              that distributes tasks across multiple{" "}
-              <strong>WorkerAgent</strong> instances for parallel processing.
+              The Workers pattern uses a central{" "}
+              <strong className="text-kumo-default">ManagerAgent</strong> that
+              distributes tasks across multiple{" "}
+              <strong className="text-kumo-default">WorkerAgent</strong>{" "}
+              instances for parallel processing.
             </p>
             <ol className="list-decimal list-inside space-y-2">
               <li>Manager receives a batch of work items</li>
               <li>
                 Manager spawns N worker agents using{" "}
-                <code className="text-xs bg-neutral-200 dark:bg-neutral-700 px-1 rounded">
+                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
                   getAgentByName()
                 </code>
               </li>
@@ -69,13 +76,16 @@ export function WorkersDemo() {
               <li>Manager aggregates results from all workers</li>
             </ol>
           </div>
-        </div>
+        </Surface>
 
         {/* Code Example */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">Example Code</h3>
-          <pre className="bg-neutral-50 dark:bg-neutral-900 p-4 rounded overflow-x-auto text-sm">
-            {`// manager-agent.ts
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <div className="mb-4">
+            <Text variant="heading3">Example Code</Text>
+          </div>
+          <CodeBlock
+            lang="ts"
+            code={`// manager-agent.ts
 @callable()
 async processItems(items: string[]) {
   const chunkSize = Math.ceil(items.length / 4);
@@ -99,48 +109,54 @@ async processItems(items: string[]) {
   // Aggregate results
   return results.flat();
 }`}
-          </pre>
-        </div>
+          />
+        </Surface>
 
         {/* Use Cases */}
-        <div className="card p-6">
-          <h3 className="font-semibold mb-4">Use Cases</h3>
-          <ul className="space-y-3 text-neutral-600 dark:text-neutral-300">
+        <Surface className="p-6 rounded-lg ring ring-kumo-line">
+          <div className="mb-4">
+            <Text variant="heading3">Use Cases</Text>
+          </div>
+          <ul className="space-y-3 text-kumo-subtle">
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>Batch Processing</strong> — Process large datasets by
-                splitting work across workers
+                <strong className="text-kumo-default">Batch Processing</strong>{" "}
+                — Process large datasets by splitting work across workers
               </div>
             </li>
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>Parallel API Calls</strong> — Fan out requests to
-                external APIs without blocking
+                <strong className="text-kumo-default">
+                  Parallel API Calls
+                </strong>{" "}
+                — Fan out requests to external APIs without blocking
               </div>
             </li>
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>Map-Reduce</strong> — Distribute computation and
-                aggregate results
+                <strong className="text-kumo-default">Map-Reduce</strong> —
+                Distribute computation and aggregate results
               </div>
             </li>
             <li className="flex gap-3">
-              <span className="text-neutral-400">•</span>
+              <span className="text-kumo-inactive">•</span>
               <div>
-                <strong>Image Processing</strong> — Process multiple images
-                concurrently
+                <strong className="text-kumo-default">Image Processing</strong>{" "}
+                — Process multiple images concurrently
               </div>
             </li>
           </ul>
-        </div>
+        </Surface>
 
         {/* Considerations */}
-        <div className="card p-6 bg-neutral-50 dark:bg-neutral-800">
-          <h3 className="font-semibold mb-4">Considerations</h3>
-          <ul className="space-y-2 text-sm text-neutral-600 dark:text-neutral-300">
+        <Surface className="p-6 rounded-lg bg-kumo-elevated">
+          <div className="mb-4">
+            <Text variant="heading3">Considerations</Text>
+          </div>
+          <ul className="space-y-2 text-sm text-kumo-subtle">
             <li>
               • Workers are Durable Objects — each has isolated state and
               single-threaded execution
@@ -155,7 +171,7 @@ async processItems(items: string[]) {
               agents
             </li>
           </ul>
-        </div>
+        </Surface>
       </div>
     </DemoWrapper>
   );

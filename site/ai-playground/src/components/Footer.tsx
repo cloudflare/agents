@@ -1,6 +1,8 @@
+import { Link } from "@cloudflare/kumo";
+
 const Footer = () => {
   return (
-    <div className="hidden md:block text-center text-gray-400 text-xs">
+    <div className="hidden md:block text-center text-kumo-inactive text-xs">
       <div className="md:flex items-start justify-center mb-4">
         This playground is powered by
         <svg
@@ -22,77 +24,65 @@ const Footer = () => {
           />
           <path
             d="M34.4131 7.55713H35.614V10.8572H37.7165V11.9135H34.4131V7.55713Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M38.9624 9.74654V9.73373C38.9624 8.4822 39.9658 7.46753 41.3038 7.46753C42.6417 7.46753 43.6324 8.4694 43.6324 9.72093V9.73373C43.6324 10.9853 42.629 11.9999 41.291 11.9999C39.9531 11.9999 38.9624 10.9981 38.9624 9.74654ZM42.406 9.74654V9.73373C42.406 9.10637 41.9536 8.55582 41.291 8.55582C40.6348 8.55582 40.1952 9.09036 40.1952 9.72093V9.73373C40.1952 10.3611 40.6476 10.9116 41.3038 10.9116C41.9664 10.9116 42.406 10.3771 42.406 9.74654Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M45.104 10.0026V7.55713H46.3241V9.98018C46.3241 10.6075 46.6394 10.9084 47.1236 10.9084C47.6078 10.9084 47.9232 10.6235 47.9232 10.0122V7.56033H49.1432V9.97697C49.1432 11.3854 48.3437 11.9999 47.1109 11.9999C45.8781 11.9935 45.104 11.3661 45.104 10.0026Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M50.9844 7.55713H52.6568C54.205 7.55713 55.1033 8.45337 55.1033 9.7113V9.72411C55.1033 10.982 54.1922 11.9167 52.6313 11.9167H50.9844V7.55713ZM52.6759 10.8444C53.3958 10.8444 53.8705 10.4475 53.8705 9.74331V9.73051C53.8705 9.03272 53.3927 8.62942 52.6759 8.62942H52.1853V10.8444H52.6759Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M56.8491 7.55713H60.3213V8.61341H58.0532V9.35601H60.1047V10.3579H58.0532V11.9135H56.8491V7.55713Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M61.9937 7.55713H63.1946V10.8572H65.2939V11.9135H61.9937V7.55713Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M68.4377 7.52515H69.5972L71.4448 11.9135H70.1547L69.8393 11.1357H68.1669L67.8579 11.9135H66.5933L68.4377 7.52515ZM69.4889 10.1947L69.0047 8.95593L68.5141 10.1947H69.4889Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M72.9897 7.55713H75.0412C75.7038 7.55713 76.1625 7.73318 76.4524 8.03085C76.7073 8.28052 76.8379 8.61661 76.8379 9.04553V9.05833C76.8379 9.72411 76.4843 10.1658 75.9459 10.3963L76.9812 11.9167H75.5923L74.7195 10.5979H74.1907V11.9167H72.9897V7.55713ZM74.9839 9.64729C75.3916 9.64729 75.6274 9.44883 75.6274 9.13195V9.11915C75.6274 8.77665 75.3789 8.60381 74.9775 8.60381H74.1907V9.65049H74.9839V9.64729Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M78.5708 7.55713H82.0589V8.5846H79.7622V9.24398H81.8423V10.1946H79.7622V10.886H82.0908V11.9135H78.5708V7.55713Z"
-            fill="black"
+            fill="currentColor"
           />
           <path
             d="M31.782 10.2587C31.6132 10.6396 31.2596 10.9116 30.7881 10.9116C30.1319 10.9116 29.6796 10.3643 29.6796 9.73373V9.72093C29.6796 9.09356 30.1192 8.55582 30.7754 8.55582C31.2692 8.55582 31.6482 8.8631 31.8075 9.27921H33.0753C32.8715 8.24214 31.9668 7.46753 30.7881 7.46753C29.4502 7.46753 28.4468 8.4822 28.4468 9.73373V9.74654C28.4468 10.9981 29.4375 11.9999 30.7754 11.9999C31.919 11.9999 32.8141 11.2541 33.0499 10.2555H31.782V10.2587Z"
-            fill="black"
+            fill="currentColor"
           />
         </svg>
       </div>
       <div>
         Use of the Workers AI LLM Playground is subject to the{" "}
-        <a
-          className="underline"
-          href="https://www.cloudflare.com/website-terms/"
-        >
+        <Link href="https://www.cloudflare.com/website-terms/">
           Cloudflare Website and Online Services Terms of Use
-        </a>{" "}
+        </Link>{" "}
         and{" "}
-        <a
-          className="underline"
-          href="https://www.cloudflare.com/privacypolicy/"
-        >
+        <Link href="https://www.cloudflare.com/privacypolicy/">
           Privacy Policy
-        </a>
+        </Link>
         . This site uses only strictly necessary cookies pursuant to our{" "}
-        <a
-          className="underline"
-          href="https://www.cloudflare.com/cookie-policy/"
-        >
+        <Link href="https://www.cloudflare.com/cookie-policy/">
           Cookie Policy
-        </a>
+        </Link>
         . The models featured in the Workers AI LLM Playground may be subject to
         additional third-party license terms and restrictions, as further
         detailed in the{" "}
-        <a
-          className="underline"
-          href="https://developers.cloudflare.com/workers-ai/"
-        >
+        <Link href="https://developers.cloudflare.com/workers-ai/">
           developer documentation
-        </a>
+        </Link>
         . The output generated by the Workers AI LLM Playground has not been
         verified by Cloudflare for accuracy and does not represent Cloudflare's
         views.

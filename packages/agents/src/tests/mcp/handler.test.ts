@@ -357,6 +357,74 @@ describe("createMcpHandler", () => {
     });
   });
 
+  describe("Server Connection Guard", () => {
+    it("should throw when trying to reuse a connected McpServer across requests", async () => {
+      // This tests the CVE fix - reusing a global server instance should fail
+      const server = createTestServer();
+      const handler = createMcpHandler(server);
+
+      const ctx = createExecutionContext();
+      const createInitRequest = () =>
+        new Request("http://example.com/mcp", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-03-26"
+            }
+          })
+        });
+
+      // First request connects the server - should succeed
+      const response1 = await handler(createInitRequest(), env, ctx);
+      expect(response1.status).toBe(200);
+
+      // Second request with same server should throw - this is a developer misconfiguration
+      // that should fail loudly rather than return a 500 that might go unnoticed
+      await expect(handler(createInitRequest(), env, ctx)).rejects.toThrow(
+        "already connected"
+      );
+    });
+
+    it("should work when creating new server per request", async () => {
+      const ctx = createExecutionContext();
+      const createInitRequest = () =>
+        new Request("http://example.com/mcp", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json, text/event-stream"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-03-26"
+            }
+          })
+        });
+
+      // Simulate correct pattern: new server per request
+      for (let i = 0; i < 3; i++) {
+        const server = createTestServer();
+        const handler = createMcpHandler(server);
+        const response = await handler(createInitRequest(), env, ctx);
+        expect(response.status).toBe(200);
+      }
+    });
+  });
+
   describe("Error Handling", () => {
     it("should return 500 error when transport throws", async () => {
       const server = createTestServer();

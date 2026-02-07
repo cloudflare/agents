@@ -1,5 +1,4 @@
-import { generateObject, tool, type ToolSet } from "ai";
-import { openai } from "@ai-sdk/openai";
+import { generateObject, tool, type ToolSet, type LanguageModel } from "ai";
 import { z } from "zod";
 import { compile as compileJsonSchemaToTs } from "json-schema-to-typescript";
 import {
@@ -9,6 +8,7 @@ import {
 } from "zod-to-ts";
 import { getAgentByName } from "agents";
 import { env, WorkerEntrypoint } from "cloudflare:workers";
+import { openai } from "@ai-sdk/openai";
 
 function toCamelCase(str: string) {
   return str
@@ -41,6 +41,7 @@ export async function experimental_codemode(options: {
   globalOutbound: Fetcher;
   loader: WorkerLoader;
   proxy: Fetcher<CodeModeProxy>;
+  model?: LanguageModel;
 }): Promise<{
   prompt: string;
   tools: ToolSet;
@@ -67,7 +68,7 @@ export async function experimental_codemode(options: {
     execute: async ({ functionDescription }) => {
       try {
         const response = await generateObject({
-          model: openai("gpt-4.1"),
+          model: options.model ? options.model : openai("gpt-4.1"),
           schema: z.object({
             code: z.string()
           }),

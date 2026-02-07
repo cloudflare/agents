@@ -70,8 +70,12 @@ async function main() {
 
   // Find all package.json files in packages directory
   const packageJsonFiles: string[] = [];
+  const SKIP_PACKAGES = new Set(["@cloudflare/agents-ui"]);
+
   for await (const file of await fg.glob("packages/*/package.json")) {
     if (file.includes("node_modules")) continue;
+    const pkg = JSON.parse(readFileSync(file, "utf-8"));
+    if (SKIP_PACKAGES.has(pkg.name)) continue;
     packageJsonFiles.push(file);
   }
 

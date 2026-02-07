@@ -1,7 +1,6 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import type { MCPClientOAuthResult } from "agents/mcp";
 import {
   convertToModelMessages,
   createUIMessageStream,
@@ -66,23 +65,12 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
   };
 
   onStart() {
-    // Configure OAuth callback to close popup window after authentication
     this.mcp.configureOAuthCallback({
-      customHandler: (result: MCPClientOAuthResult) => {
-        if (result.authSuccess) {
-          return new Response("<script>window.close();</script>", {
-            headers: { "content-type": "text/html" },
-            status: 200
-          });
-        }
-        const safeError = JSON.stringify(result.authError || "Unknown error");
-        return new Response(
-          `<script>alert('Authentication failed: ' + ${safeError}); window.close();</script>`,
-          {
-            headers: { "content-type": "text/html" },
-            status: 200
-          }
-        );
+      customHandler: () => {
+        return new Response("<script>window.close();</script>", {
+          headers: { "content-type": "text/html" },
+          status: 200
+        });
       }
     });
   }

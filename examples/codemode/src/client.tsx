@@ -6,6 +6,31 @@ import { useState, useEffect, useRef } from "react";
 import type { Codemode } from "./server";
 import type { MCPServersState } from "agents";
 
+/**
+ * The AI SDK exports ToolUIPart, but it's generic over tool definitions.
+ * Since this component accesses codemode-specific fields (functionDescription,
+ * code) that aren't on the generic type, we define a local interface instead.
+ * Fields mirror UIToolInvocation from the AI SDK (toolCallId, state, input,
+ * output, errorText) with codemode-specific input/output shapes.
+ */
+interface ToolPart {
+  type: string;
+  toolCallId?: string;
+  state?: string;
+  errorText?: string;
+  input?: { functionDescription?: string; [key: string]: unknown };
+  output?: { code?: string; result?: string; [key: string]: unknown };
+}
+
+/** Runtime check: returns the part as a ToolPart if it's a tool-* type, or null. */
+function asToolPart(part: UIMessage["parts"][0]): ToolPart | null {
+  if (!part.type.startsWith("tool-")) return null;
+  // The AI SDK's ToolUIPart has the same fields (toolCallId, state, input,
+  // output, errorText) but its generic type is incompatible with our local
+  // ToolPart. A runtime coercion is safe here because we only read known fields.
+  return part as unknown as ToolPart;
+}
+
 // Component to render different types of message parts
 function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
   if (part.type === "text") {
@@ -62,10 +87,9 @@ function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
     );
   }
 
-  if (part.type.startsWith("tool-")) {
-    const toolName = part.type.replace("tool-", "");
-    // biome-ignore lint/suspicious/noExplicitAny: it's fine, fix later
-    const toolPart = part as any; // Type assertion for tool parts
+  const toolPart = asToolPart(part);
+  if (toolPart) {
+    const toolName = toolPart.type.replace("tool-", "");
     return (
       <div className="part-block tool-block">
         <div className="part-header">
@@ -117,6 +141,7 @@ function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
                         type="button"
                         className="copy-button"
                         onClick={() =>
+                          toolPart.output?.code &&
                           navigator.clipboard.writeText(toolPart.output.code)
                         }
                         title="Copy code"

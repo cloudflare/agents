@@ -69,6 +69,7 @@ function App() {
         placeholder: {
           auth_url: null,
           capabilities: null,
+          error: null,
           instructions: null,
           name: serverName,
           server_url: serverUrl,
@@ -107,8 +108,10 @@ function App() {
           method: "POST"
         }
       );
-      // biome-ignore lint/suspicious/noExplicitAny: just a demo
-      const data = (await response.json()) as { tools: any[]; error?: string };
+      const data = (await response.json()) as {
+        tools: unknown[];
+        error?: string;
+      };
 
       if (data.error) {
         throw new Error(data.error);

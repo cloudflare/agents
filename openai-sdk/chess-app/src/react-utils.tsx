@@ -105,7 +105,6 @@ export type UserAgent = {
 export function useOpenAiGlobal<K extends keyof OpenAiGlobals>(
   key: K
 ): OpenAiGlobals[K] {
-  // biome-ignore lint/correctness/useHookAtTopLevel: expected for openai apps
   return useSyncExternalStore(
     (onChange) => {
       const handleSetGlobal = (event: SetGlobalsEvent) => {
@@ -141,6 +140,5 @@ export function useToolResponseMetadata() {
   if (typeof window.openai === "undefined") {
     return null;
   }
-  // biome-ignore lint/correctness/useHookAtTopLevel: expected for openai apps
   return useOpenAiGlobal("toolResponseMetadata");
 }

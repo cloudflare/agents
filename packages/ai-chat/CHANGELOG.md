@@ -1,5 +1,16 @@
 # @cloudflare/ai-chat
 
+## 0.0.6
+
+### Patch Changes
+
+- [#829](https://github.com/cloudflare/agents/pull/829) [`83f137f`](https://github.com/cloudflare/agents/commit/83f137f7046aeafc3b480b5aa4518f6290b14406) Thanks [@Muhammad-Bin-Ali](https://github.com/Muhammad-Bin-Ali)! - Fix duplicate assistant messages when using needsApproval tools
+
+  When calling `addToolApprovalResponse`, the original assistant message is now updated in place instead of creating a duplicate with a new ID.
+
+- Updated dependencies [[`68916bf`](https://github.com/cloudflare/agents/commit/68916bfa08358d4bb5d61aff37acd8dc4ffc950e), [`3f490d0`](https://github.com/cloudflare/agents/commit/3f490d045844e4884db741afbb66ca1fe65d4093)]:
+  - agents@0.3.10
+
 ## 0.0.5
 
 ### Patch Changes

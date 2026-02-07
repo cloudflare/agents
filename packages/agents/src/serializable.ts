@@ -108,7 +108,7 @@ type AllSerializableValues<A> = A extends [infer First, ...infer Rest]
     : false
   : true; // no params means serializable by default
 
-// biome-ignore lint: suspicious/noExplicitAny
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable type
 export type Method = (...args: any[]) => any;
 
 // Helper to check if a type is exactly unknown

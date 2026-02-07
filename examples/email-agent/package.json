@@ -13,6 +13,7 @@
     "test-email": "tsx test-mail.ts"
   },
   "dependencies": {
+    "agents": "*",
     "postal-mime": "^2.7.3"
   },
   "keywords": [],

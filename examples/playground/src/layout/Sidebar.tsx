@@ -1,32 +1,34 @@
 import {
-  ChevronDown,
-  ChevronRight,
-  Box,
-  MessageSquare,
-  Server,
-  GitBranch,
-  Mail,
-  Database,
-  Zap,
-  Clock,
-  Users,
-  Cpu,
-  Wrench,
-  Key,
-  PlayCircle,
-  CheckCircle,
-  Sun,
-  Moon,
-  Monitor,
-  Route,
-  Network,
-  MessageCircle,
-  Layers,
-  GitMerge,
-  Shield
-} from "lucide-react";
+  CaretDownIcon,
+  CaretRightIcon,
+  CubeIcon,
+  ChatDotsIcon,
+  HardDrivesIcon,
+  GitBranchIcon,
+  EnvelopeIcon,
+  DatabaseIcon,
+  LightningIcon,
+  ClockIcon,
+  UsersIcon,
+  CpuIcon,
+  WrenchIcon,
+  KeyIcon,
+  PlayCircleIcon,
+  CheckCircleIcon,
+  SunIcon,
+  MoonIcon,
+  MonitorIcon,
+  SignpostIcon,
+  TreeStructureIcon,
+  ChatCircleIcon,
+  StackIcon,
+  GitMergeIcon,
+  ShieldIcon,
+  PaletteIcon
+} from "@phosphor-icons/react";
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
+import { Button, Link } from "@cloudflare/kumo";
 import { useTheme } from "../hooks/useTheme";
 
 interface NavItem {
@@ -44,133 +46,137 @@ interface NavCategory {
 const navigation: NavCategory[] = [
   {
     label: "Core",
-    icon: <Box className="w-4 h-4" />,
+    icon: <CubeIcon size={16} />,
     items: [
       {
         label: "State",
         path: "/core/state",
-        icon: <Database className="w-4 h-4" />
+        icon: <DatabaseIcon size={16} />
       },
       {
         label: "Callable",
         path: "/core/callable",
-        icon: <Zap className="w-4 h-4" />
+        icon: <LightningIcon size={16} />
       },
       {
         label: "Streaming",
         path: "/core/streaming",
-        icon: <PlayCircle className="w-4 h-4" />
+        icon: <PlayCircleIcon size={16} />
       },
       {
         label: "Schedule",
         path: "/core/schedule",
-        icon: <Clock className="w-4 h-4" />
+        icon: <ClockIcon size={16} />
       },
       {
         label: "Connections",
         path: "/core/connections",
-        icon: <Users className="w-4 h-4" />
+        icon: <UsersIcon size={16} />
       },
       {
         label: "SQL",
         path: "/core/sql",
-        icon: <Database className="w-4 h-4" />
+        icon: <DatabaseIcon size={16} />
       },
       {
         label: "Routing",
         path: "/core/routing",
-        icon: <Route className="w-4 h-4" />
+        icon: <SignpostIcon size={16} />
       }
     ]
   },
   {
     label: "AI",
-    icon: <Cpu className="w-4 h-4" />,
+    icon: <CpuIcon size={16} />,
     items: [
       {
         label: "Chat",
         path: "/ai/chat",
-        icon: <MessageSquare className="w-4 h-4" />
+        icon: <ChatDotsIcon size={16} />
       },
       {
         label: "Tools",
         path: "/ai/tools",
-        icon: <Wrench className="w-4 h-4" />
+        icon: <WrenchIcon size={16} />
       }
     ]
   },
   {
     label: "MCP",
-    icon: <Server className="w-4 h-4" />,
+    icon: <HardDrivesIcon size={16} />,
     items: [
       {
         label: "Server",
         path: "/mcp/server",
-        icon: <Server className="w-4 h-4" />
+        icon: <HardDrivesIcon size={16} />
       },
       {
         label: "Client",
         path: "/mcp/client",
-        icon: <Cpu className="w-4 h-4" />
+        icon: <CpuIcon size={16} />
       },
-      { label: "OAuth", path: "/mcp/oauth", icon: <Key className="w-4 h-4" /> }
+      {
+        label: "OAuth",
+        path: "/mcp/oauth",
+        icon: <KeyIcon size={16} />
+      }
     ]
   },
   {
     label: "Workflows",
-    icon: <GitBranch className="w-4 h-4" />,
+    icon: <GitBranchIcon size={16} />,
     items: [
       {
         label: "Basic",
         path: "/workflow/basic",
-        icon: <PlayCircle className="w-4 h-4" />
+        icon: <PlayCircleIcon size={16} />
       },
       {
         label: "Approval",
         path: "/workflow/approval",
-        icon: <CheckCircle className="w-4 h-4" />
+        icon: <CheckCircleIcon size={16} />
       }
     ]
   },
   {
     label: "Multi-Agent",
-    icon: <Network className="w-4 h-4" />,
+    icon: <TreeStructureIcon size={16} />,
     items: [
       {
         label: "Supervisor",
         path: "/multi-agent/supervisor",
-        icon: <Users className="w-4 h-4" />
+        icon: <UsersIcon size={16} />
       },
       {
         label: "Chat Rooms",
         path: "/multi-agent/rooms",
-        icon: <MessageCircle className="w-4 h-4" />
+        icon: <ChatCircleIcon size={16} />
       },
       {
         label: "Workers",
         path: "/multi-agent/workers",
-        icon: <Layers className="w-4 h-4" />
+        icon: <StackIcon size={16} />
       },
       {
         label: "Pipeline",
         path: "/multi-agent/pipeline",
-        icon: <GitMerge className="w-4 h-4" />
+        icon: <GitMergeIcon size={16} />
       }
     ]
   },
   {
     label: "Email",
-    icon: <Mail className="w-4 h-4" />,
+    icon: <EnvelopeIcon size={16} />,
     items: [
       {
         label: "Receive",
         path: "/email/receive",
-        icon: <Mail className="w-4 h-4" />
+        icon: <EnvelopeIcon size={16} />
       },
       {
         label: "Secure Replies",
         path: "/email/secure",
-        icon: <Shield className="w-4 h-4" />
+        icon: <ShieldIcon size={16} />
       }
     ]
   }
@@ -184,25 +190,32 @@ function CategorySection({ category }: { category: NavCategory }) {
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-neutral-500 dark:text-neutral-400 hover:text-black dark:hover:text-white bg-neutral-100 dark:bg-neutral-800 rounded-md transition-colors"
+        aria-expanded={isOpen}
+        aria-controls={`nav-category-${category.label.toLowerCase().replace(/\s+/g, "-")}`}
+        className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-kumo-subtle hover:text-kumo-default bg-kumo-control rounded-md transition-colors"
       >
-        {isOpen ? (
-          <ChevronDown className="w-3 h-3" />
-        ) : (
-          <ChevronRight className="w-3 h-3" />
-        )}
+        {isOpen ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
         {category.icon}
         {category.label}
       </button>
 
       {isOpen && (
-        <div className="ml-5 mt-1 space-y-0.5">
+        <div
+          id={`nav-category-${category.label.toLowerCase().replace(/\s+/g, "-")}`}
+          role="region"
+          aria-label={`${category.label} navigation`}
+          className="ml-5 mt-1 space-y-0.5"
+        >
           {category.items.map((item) => (
             <NavLink
               key={item.path}
               to={item.path}
               className={({ isActive }) =>
-                `sidebar-item ${isActive ? "sidebar-item-active" : ""}`
+                `flex items-center gap-2 px-3 py-2 text-sm rounded-md transition-colors ${
+                  isActive
+                    ? "bg-kumo-control text-kumo-default font-medium"
+                    : "text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default"
+                }`
               }
             >
               {item.icon}
@@ -215,38 +228,65 @@ function CategorySection({ category }: { category: NavCategory }) {
   );
 }
 
-function ThemeToggle() {
-  const { theme, setTheme } = useTheme();
+function ModeToggle() {
+  const { mode, setMode } = useTheme();
 
-  const cycleTheme = () => {
-    if (theme === "system") setTheme("light");
-    else if (theme === "light") setTheme("dark");
-    else setTheme("system");
+  const cycleMode = () => {
+    if (mode === "system") setMode("light");
+    else if (mode === "light") setMode("dark");
+    else setMode("system");
+  };
+
+  const icon =
+    mode === "system" ? (
+      <MonitorIcon size={16} />
+    ) : mode === "light" ? (
+      <SunIcon size={16} />
+    ) : (
+      <MoonIcon size={16} />
+    );
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      icon={icon}
+      onClick={cycleMode}
+      title={`Mode: ${mode}`}
+    >
+      <span className="text-xs capitalize">{mode}</span>
+    </Button>
+  );
+}
+
+function ColorThemeToggle() {
+  const { colorTheme, setColorTheme, colorThemes } = useTheme();
+
+  const cycleColorTheme = () => {
+    const idx = colorThemes.indexOf(colorTheme);
+    const next = colorThemes[(idx + 1) % colorThemes.length];
+    setColorTheme(next);
   };
 
   return (
-    <button
-      type="button"
-      onClick={cycleTheme}
-      className="flex items-center gap-2 p-2 rounded-md hover:bg-neutral-200 dark:hover:bg-neutral-700 transition-colors"
-      title={`Theme: ${theme}`}
+    <Button
+      variant="ghost"
+      size="sm"
+      icon={<PaletteIcon size={16} />}
+      onClick={cycleColorTheme}
+      title={`Color theme: ${colorTheme}`}
     >
-      {theme === "system" && <Monitor className="w-4 h-4" />}
-      {theme === "light" && <Sun className="w-4 h-4" />}
-      {theme === "dark" && <Moon className="w-4 h-4" />}
-      <span className="text-xs capitalize">{theme}</span>
-    </button>
+      <span className="text-xs capitalize">{colorTheme}</span>
+    </Button>
   );
 }
 
 export function Sidebar() {
   return (
-    <aside className="w-56 h-full border-r border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 flex flex-col">
-      <div className="p-4 border-b border-neutral-200 dark:border-neutral-700">
-        <h1 className="font-bold text-lg">Agents SDK</h1>
-        <p className="text-xs text-neutral-500 dark:text-neutral-400">
-          Playground
-        </p>
+    <aside className="w-56 h-full border-r border-kumo-line bg-kumo-base flex flex-col">
+      <div className="p-4 border-b border-kumo-line">
+        <h1 className="font-bold text-lg text-kumo-default">Agents SDK</h1>
+        <p className="text-xs text-kumo-subtle">Playground</p>
       </div>
 
       <nav className="flex-1 overflow-y-auto p-2">
@@ -255,26 +295,20 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div className="p-4 border-t border-neutral-200 dark:border-neutral-700 space-y-3">
-        <ThemeToggle />
-        <div className="text-xs text-neutral-500 dark:text-neutral-400">
-          <a
-            href="https://github.com/cloudflare/agents"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-black dark:hover:text-white transition-colors"
-          >
+      <div className="p-4 border-t border-kumo-line space-y-2">
+        <ModeToggle />
+        <ColorThemeToggle />
+        <div className="text-xs text-kumo-subtle">
+          <Link href="https://github.com/cloudflare/agents" variant="inline">
             GitHub
-          </a>
+          </Link>
           {" · "}
-          <a
+          <Link
             href="https://developers.cloudflare.com/agents"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-black dark:hover:text-white transition-colors"
+            variant="inline"
           >
             Docs
-          </a>
+          </Link>
         </div>
       </div>
     </aside>

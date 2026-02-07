@@ -1,6 +1,7 @@
 import { useAgent } from "agents/react";
 import type { Schedule } from "agents";
 import { useState, useEffect } from "react";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -107,121 +108,129 @@ export function ScheduleDemo() {
     <DemoWrapper
       title="Scheduling"
       description="Schedule one-time tasks, recurring intervals, and cron-based jobs. Schedules persist across restarts."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </div>
-
           {/* One-time Task */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">One-time Task</h3>
-            <p className="text-sm text-neutral-600 mb-3">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">One-time Task</Text>
+            </div>
+            <p className="text-sm text-kumo-subtle mb-3">
               Schedule a task to run after a delay
             </p>
             <div className="space-y-2">
               <div className="flex gap-2">
-                <input
+                <Input
+                  aria-label="Delay in seconds"
                   type="number"
                   value={delaySeconds}
-                  onChange={(e) => setDelaySeconds(e.target.value)}
-                  className="input w-20"
-                  min="1"
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                    setDelaySeconds(e.target.value)
+                  }
+                  className="w-20"
+                  min={1}
                 />
-                <span className="text-sm text-neutral-500 self-center">
+                <span className="text-sm text-kumo-subtle self-center">
                   seconds
                 </span>
               </div>
-              <input
+              <Input
+                aria-label="Task message"
                 type="text"
                 value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                className="input w-full"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setMessage(e.target.value)
+                }
+                className="w-full"
                 placeholder="Message"
               />
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={handleScheduleTask}
-                className="btn btn-primary w-full"
+                className="w-full"
               >
                 Schedule Task
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Recurring Task */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Recurring Task</h3>
-            <p className="text-sm text-neutral-600 mb-3">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Recurring Task</Text>
+            </div>
+            <p className="text-sm text-kumo-subtle mb-3">
               Schedule a task to repeat at an interval
             </p>
             <div className="space-y-2">
               <div className="flex gap-2">
-                <input
+                <Input
+                  aria-label="Interval in seconds"
                   type="number"
                   value={intervalSeconds}
-                  onChange={(e) => setIntervalSeconds(e.target.value)}
-                  className="input w-20"
-                  min="5"
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                    setIntervalSeconds(e.target.value)
+                  }
+                  className="w-20"
+                  min={5}
                 />
-                <span className="text-sm text-neutral-500 self-center">
+                <span className="text-sm text-kumo-subtle self-center">
                   second interval
                 </span>
               </div>
-              <input
+              <Input
+                aria-label="Recurring task label"
                 type="text"
                 value={intervalLabel}
-                onChange={(e) => setIntervalLabel(e.target.value)}
-                className="input w-full"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setIntervalLabel(e.target.value)
+                }
+                className="w-full"
                 placeholder="Label"
               />
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={handleScheduleRecurring}
-                className="btn btn-primary w-full"
+                className="w-full"
               >
                 Schedule Recurring
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Active Schedules */}
-          <div className="card p-4">
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">
+              <Text variant="heading3">
                 Active Schedules ({schedules.length})
-              </h3>
-              <button
-                type="button"
-                onClick={refreshSchedules}
-                className="text-xs text-neutral-500 hover:text-black"
-              >
+              </Text>
+              <Button variant="ghost" size="xs" onClick={refreshSchedules}>
                 Refresh
-              </button>
+              </Button>
             </div>
             {schedules.length === 0 ? (
-              <p className="text-sm text-neutral-400">No active schedules</p>
+              <p className="text-sm text-kumo-inactive">No active schedules</p>
             ) : (
               <div className="space-y-2">
                 {schedules.map((schedule) => (
                   <div
                     key={schedule.id}
-                    className="flex items-center justify-between py-2 px-3 bg-neutral-50 dark:bg-neutral-800 rounded text-sm"
+                    className="flex items-center justify-between py-2 px-3 bg-kumo-elevated rounded text-sm"
                   >
                     <div>
-                      <div className="font-medium">{schedule.callback}</div>
-                      <div className="text-xs text-neutral-500">
+                      <div className="font-medium text-kumo-default">
+                        {schedule.callback}
+                      </div>
+                      <div className="text-xs text-kumo-subtle">
                         {schedule.type === "interval"
                           ? `Every ${schedule.intervalSeconds}s`
                           : schedule.time
@@ -229,18 +238,19 @@ export function ScheduleDemo() {
                             : schedule.type}
                       </div>
                     </div>
-                    <button
-                      type="button"
+                    <Button
+                      variant="ghost"
+                      size="xs"
                       onClick={() => handleCancel(schedule.id)}
-                      className="text-xs text-red-600 hover:text-red-800"
+                      className="text-kumo-danger"
                     >
                       Cancel
-                    </button>
+                    </Button>
                   </div>
                 ))}
               </div>
             )}
-          </div>
+          </Surface>
         </div>
 
         {/* Logs */}

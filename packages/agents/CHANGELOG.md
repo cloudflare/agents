@@ -1,5 +1,16 @@
 # @cloudflare/agents
 
+## 0.3.10
+
+### Patch Changes
+
+- [#839](https://github.com/cloudflare/agents/pull/839) [`68916bf`](https://github.com/cloudflare/agents/commit/68916bfa08358d4bb5d61aff37acd8dc4ffc950e) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Invalidate query cache on disconnect to fix stale auth tokens
+
+- [#841](https://github.com/cloudflare/agents/pull/841) [`3f490d0`](https://github.com/cloudflare/agents/commit/3f490d045844e4884db741afbb66ca1fe65d4093) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Escape authError to prevent XSS attacks and store it in the connection state to avoid needing script tags to display error.
+
+- Updated dependencies [[`83f137f`](https://github.com/cloudflare/agents/commit/83f137f7046aeafc3b480b5aa4518f6290b14406)]:
+  - @cloudflare/ai-chat@0.0.6
+
 ## 0.3.9
 
 ### Patch Changes

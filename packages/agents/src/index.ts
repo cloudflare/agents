@@ -148,8 +148,7 @@ export class SqlError extends Error {
 export function callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
-    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
-    context: ClassMethodDecoratorContext
+    _context: ClassMethodDecoratorContext
   ) {
     if (!callableMetadata.has(target)) {
       callableMetadata.set(target, metadata);
@@ -259,6 +258,7 @@ export type MCPServer = {
   // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
   // to communicate a change to a non-ready state.
   state: MCPConnectionState;
+  error: string | null;
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
@@ -348,7 +348,7 @@ export function getCurrentAgent<
  * @returns A wrapped method that runs within the agent context
  */
 
-// biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
 function withAgentContext<T extends (...args: any[]) => any>(
   method: T
 ): (
@@ -989,7 +989,7 @@ export class Agent<
    *
    * IMPORTANT: This hook must be synchronous.
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   validateStateChange(nextState: State, source: Connection | "server") {
     // override this to validate state updates
   }
@@ -999,7 +999,7 @@ export class Agent<
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
@@ -1153,11 +1153,11 @@ export class Agent<
 
         // Now, methodName is confirmed to be a custom method/function
         // Wrap the custom method with context
+        /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
         const wrappedFunction = withAgentContext(
-          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
           this[methodName as keyof this] as (...args: any[]) => any
-          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
         ) as any;
+        /* oxlint-enable @typescript-eslint/no-explicit-any */
 
         // if the method is callable, copy the metadata from the original method
         if (this._isCallable(methodName)) {
@@ -3182,6 +3182,7 @@ export class Agent<
         mcpState.servers[server.id] = {
           auth_url: server.auth_url,
           capabilities: serverConn?.serverCapabilities ?? null,
+          error: serverConn?.connectionError ?? null,
           instructions: serverConn?.instructions ?? null,
           name: server.name,
           server_url: server.server_url,

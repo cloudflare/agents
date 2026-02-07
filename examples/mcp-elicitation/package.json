@@ -8,5 +8,8 @@
     "dev": "wrangler dev",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "agents": "*"
+  }
 }

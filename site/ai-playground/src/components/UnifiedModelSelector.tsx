@@ -1,5 +1,6 @@
 import { useCombobox } from "downshift";
 import { useEffect, useRef, useState } from "react";
+import { SpinnerIcon, EyeIcon, EyeSlashIcon } from "@phosphor-icons/react";
 import ModelRow from "./ModelRow";
 import type { Model } from "../models";
 
@@ -139,26 +140,17 @@ type FilterState = {
 };
 
 interface UnifiedModelSelectorProps {
-  // Workers AI mode
   workersAiModels: Model[];
   activeWorkersAiModel: Model | undefined;
   isLoadingWorkersAi: boolean;
-
-  // External provider models mode
   useExternalProvider: boolean;
   externalProvider: GatewayProvider;
   externalModel: string | undefined;
   authMethod: AuthMethod;
-
-  // Provider key auth
   providerApiKey?: string;
-
-  // Gateway auth
   gatewayAccountId?: string;
   gatewayId?: string;
   gatewayApiKey?: string;
-
-  // Callbacks
   onModeChange: (useExternal: boolean) => void;
   onWorkersAiModelSelect: (model: Model | null) => void;
   onExternalProviderChange: (provider: GatewayProvider) => void;
@@ -208,11 +200,7 @@ const UnifiedModelSelector = ({
         console.error("Failed to parse stored filters", e);
       }
     }
-    return {
-      Beta: null,
-      LoRA: null,
-      MCP: "show"
-    };
+    return { Beta: null, LoRA: null, MCP: "show" };
   });
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -224,7 +212,6 @@ const UnifiedModelSelector = ({
     }
   }, [workersAiModels, activeWorkersAiModel, useExternalProvider]);
 
-  // Workers AI filtering logic (same as before)
   useEffect(() => {
     if (useExternalProvider) return;
 
@@ -300,13 +287,9 @@ const UnifiedModelSelector = ({
           return acc;
         }, {} as FilterState);
       }
-      if (currentState === null) {
-        newState[tag] = "show";
-      } else if (currentState === "show") {
-        newState[tag] = "hide";
-      } else {
-        newState[tag] = null;
-      }
+      if (currentState === null) newState[tag] = "show";
+      else if (currentState === "show") newState[tag] = "hide";
+      else newState[tag] = null;
       return newState;
     });
   };
@@ -340,14 +323,14 @@ const UnifiedModelSelector = ({
   return (
     <div className="space-y-3">
       {/* Mode Toggle */}
-      <div className="flex items-center gap-2 p-2 bg-gray-50 rounded-md">
+      <div className="flex items-center gap-2 p-2 bg-kumo-control rounded-md">
         <button
           type="button"
           onClick={() => onModeChange(false)}
           className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
             !useExternalProvider
-              ? "bg-white shadow-sm border border-gray-300"
-              : "text-gray-600 hover:text-gray-800"
+              ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
+              : "text-kumo-secondary hover:text-kumo-default"
           }`}
         >
           Workers AI
@@ -357,8 +340,8 @@ const UnifiedModelSelector = ({
           onClick={() => onModeChange(true)}
           className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
             useExternalProvider
-              ? "bg-white shadow-sm border border-gray-300"
-              : "text-gray-600 hover:text-gray-800"
+              ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
+              : "text-kumo-secondary hover:text-kumo-default"
           }`}
         >
           Other Providers
@@ -373,7 +356,7 @@ const UnifiedModelSelector = ({
               <label
                 htmlFor="model"
                 {...getLabelProps()}
-                className="font-semibold text-sm"
+                className="font-semibold text-sm text-kumo-default"
               >
                 Model
               </label>
@@ -386,10 +369,10 @@ const UnifiedModelSelector = ({
                       onClick={(e) => toggleFilter(tag, e)}
                       className={`text-[10px] px-2 py-1 rounded-full border ${
                         filterState[tag] === "show"
-                          ? "bg-green-100 border-green-400"
+                          ? "bg-green-500/10 border-green-400 text-green-700"
                           : filterState[tag] === "hide"
-                            ? "bg-red-100 border-red-400"
-                            : "bg-transparent border-transparent text-gray-400"
+                            ? "bg-red-500/10 border-red-400 text-red-700"
+                            : "bg-transparent border-transparent text-kumo-inactive"
                       }`}
                     >
                       {tag}
@@ -400,14 +383,12 @@ const UnifiedModelSelector = ({
               </div>
             </div>
           </div>
-          <div className="bg-white flex items-center justify-between cursor-pointer w-full border border-gray-200 p-3 rounded-md relative">
+          <div className="bg-kumo-base flex items-center justify-between cursor-pointer w-full border border-kumo-line p-3 rounded-md relative">
             <input
-              className="absolute left-3 top-3 right-3 bg-transparent outline-none"
+              className="absolute left-3 top-3 right-3 bg-transparent outline-none text-kumo-default"
               placeholder={isLoadingWorkersAi ? "Fetching models..." : ""}
               {...getInputProps({ ref: inputRef })}
-              onBlur={() => {
-                setInputValue("");
-              }}
+              onBlur={() => setInputValue("")}
               disabled={isLoadingWorkersAi}
             />
             <div className="flex-1 min-h-[24px]">
@@ -416,32 +397,14 @@ const UnifiedModelSelector = ({
               )}
             </div>
             <span
-              className="shrink-0 px-2"
+              className="shrink-0 px-2 text-kumo-secondary"
               {...(isLoadingWorkersAi ? {} : getToggleButtonProps())}
             >
               {isLoadingWorkersAi ? (
-                <svg
-                  className="animate-spin h-5 w-5 text-gray-400"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  aria-label="Loading models"
-                >
-                  <title>Loading models</title>
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  />
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  />
-                </svg>
+                <SpinnerIcon
+                  size={20}
+                  className="animate-spin text-kumo-inactive"
+                />
               ) : isOpen ? (
                 <>&#8593;</>
               ) : (
@@ -450,29 +413,29 @@ const UnifiedModelSelector = ({
             </span>
           </div>
           {selectedItem && !isOpen && (
-            <div className="p-2 bg-gray-50 border border-gray-200 rounded-md mt-2">
-              <p className="text-sm text-gray-600">
+            <div className="p-2 bg-kumo-tint rounded-md mt-2">
+              <p className="text-sm leading-relaxed text-kumo-secondary">
                 {selectedItem.description}
               </p>
             </div>
           )}
           <ul
-            className={`absolute left-0 right-0 bg-white mt-1 border border-gray-200 px-2 py-2 rounded-md shadow-lg max-h-80 overflow-scroll z-10 ${
+            className={`absolute left-0 right-0 bg-kumo-base mt-1 border border-kumo-line px-2 py-2 rounded-md shadow-lg max-h-80 overflow-scroll z-50 ${
               !isOpen && "hidden"
             }`}
             {...getMenuProps()}
           >
             {isOpen && inputItems.length === 0 && (
-              <li className={"py-2 px-3 flex flex-col rounded-md"}>
+              <li className="py-2 px-3 flex flex-col rounded-md text-kumo-secondary">
                 No models found
               </li>
             )}
             {isOpen &&
               inputItems.map((item, index) => (
                 <li
-                  className={`py-2 px-3 flex flex-col rounded-md ${
+                  className={`py-2 px-3 flex flex-col rounded-md text-kumo-default ${
                     selectedItem === item && "font-bold"
-                  } ${highlightedIndex === index && "bg-gray-100"}`}
+                  } ${highlightedIndex === index && "bg-kumo-tint"}`}
                   key={item.id}
                   {...getItemProps({ index, item })}
                 >
@@ -487,7 +450,7 @@ const UnifiedModelSelector = ({
           <div>
             <label
               htmlFor="provider"
-              className="text-xs text-gray-600 block mb-1"
+              className="text-xs text-kumo-secondary block mb-1"
             >
               Provider
             </label>
@@ -496,7 +459,7 @@ const UnifiedModelSelector = ({
               onChange={(e) =>
                 onExternalProviderChange(e.target.value as GatewayProvider)
               }
-              className="w-full p-2 border border-gray-200 rounded-md text-sm"
+              className="w-full p-2 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
             >
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
@@ -506,10 +469,13 @@ const UnifiedModelSelector = ({
           </div>
 
           <div>
-            <label htmlFor="model" className="text-xs text-gray-600 block mb-1">
+            <label
+              htmlFor="model"
+              className="text-xs text-kumo-secondary block mb-1"
+            >
               Model
             </label>
-            <div className="bg-white border border-gray-200 rounded-md p-2 max-h-40 overflow-y-auto">
+            <div className="bg-kumo-base border border-kumo-line rounded-md p-2 max-h-40 overflow-y-auto">
               {externalModels.map((model) => (
                 <button
                   key={model.id}
@@ -517,18 +483,18 @@ const UnifiedModelSelector = ({
                   onClick={() => onExternalModelSelect(model.id)}
                   className={`w-full text-left py-2 px-2 rounded-md text-xs transition-colors mb-1 ${
                     externalModel === model.id
-                      ? "bg-blue-50 border border-blue-200"
-                      : "hover:bg-gray-50 border border-transparent"
+                      ? "bg-kumo-brand/10 border border-kumo-brand/30 text-kumo-default"
+                      : "hover:bg-kumo-tint border border-transparent text-kumo-default"
                   }`}
                 >
                   <span
                     className={`font-medium ${
-                      externalModel === model.id ? "text-blue-700" : ""
+                      externalModel === model.id ? "text-kumo-brand" : ""
                     }`}
                   >
                     {model.name}
                   </span>
-                  <span className="text-gray-500 ml-2">
+                  <span className="text-kumo-secondary ml-2">
                     {model.description}
                   </span>
                 </button>
@@ -540,7 +506,7 @@ const UnifiedModelSelector = ({
           <div>
             <label
               htmlFor="authentication"
-              className="text-xs text-gray-600 block mb-2"
+              className="text-xs text-kumo-secondary block mb-2"
             >
               Authentication
             </label>
@@ -550,8 +516,8 @@ const UnifiedModelSelector = ({
                 onClick={() => onAuthMethodChange("provider-key")}
                 className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
                   authMethod === "provider-key"
-                    ? "bg-white shadow-sm border border-gray-300"
-                    : "bg-gray-50 text-gray-600 hover:text-gray-800 border border-transparent"
+                    ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
+                    : "bg-kumo-control text-kumo-secondary hover:text-kumo-default border border-transparent"
                 }`}
               >
                 Provider API Key
@@ -561,8 +527,8 @@ const UnifiedModelSelector = ({
                 onClick={() => onAuthMethodChange("gateway")}
                 className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
                   authMethod === "gateway"
-                    ? "bg-white shadow-sm border border-gray-300"
-                    : "bg-gray-50 text-gray-600 hover:text-gray-800 border border-transparent"
+                    ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
+                    : "bg-kumo-control text-kumo-secondary hover:text-kumo-default border border-transparent"
                 }`}
               >
                 AI Gateway
@@ -573,7 +539,7 @@ const UnifiedModelSelector = ({
               <div>
                 <label
                   htmlFor="provider-api-key"
-                  className="text-xs text-gray-600 block mb-1"
+                  className="text-xs text-kumo-secondary block mb-1"
                 >
                   {externalProvider === "openai"
                     ? "OpenAI"
@@ -582,7 +548,7 @@ const UnifiedModelSelector = ({
                       : externalProvider === "google"
                         ? "Google"
                         : "xAI"}{" "}
-                  API Key <span className="text-red-500">*</span>
+                  API Key <span className="text-kumo-danger">*</span>
                 </label>
                 <div className="relative">
                   <input
@@ -591,17 +557,21 @@ const UnifiedModelSelector = ({
                     onChange={(e) => onProviderApiKeyChange(e.target.value)}
                     placeholder={`Enter your ${externalProvider === "xai" ? "xAI" : externalProvider} API key`}
                     required
-                    className="w-full p-2 pr-10 border border-gray-200 rounded-md text-sm"
+                    className="w-full p-2 pr-10 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
                   />
                   <button
                     type="button"
                     onClick={() => setShowProviderKey(!showProviderKey)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-kumo-secondary hover:text-kumo-default"
                   >
-                    {showProviderKey ? "Hide" : "Show"}
+                    {showProviderKey ? (
+                      <EyeSlashIcon size={16} />
+                    ) : (
+                      <EyeIcon size={16} />
+                    )}
                   </button>
                 </div>
-                <p className="text-xs text-gray-500 mt-1">
+                <p className="text-xs text-kumo-inactive mt-1">
                   Your {externalProvider === "xai" ? "xAI" : externalProvider}{" "}
                   API key for direct access
                 </p>
@@ -611,9 +581,9 @@ const UnifiedModelSelector = ({
                 <div>
                   <label
                     htmlFor="account-id"
-                    className="text-xs text-gray-600 block mb-1"
+                    className="text-xs text-kumo-secondary block mb-1"
                   >
-                    Account ID <span className="text-red-500">*</span>
+                    Account ID <span className="text-kumo-danger">*</span>
                   </label>
                   <input
                     type="text"
@@ -621,9 +591,9 @@ const UnifiedModelSelector = ({
                     onChange={(e) => onGatewayAccountIdChange(e.target.value)}
                     placeholder="Enter your Cloudflare account ID"
                     required
-                    className="w-full p-2 border border-gray-200 rounded-md text-sm"
+                    className="w-full p-2 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
                   />
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-kumo-inactive mt-1">
                     Your Cloudflare account ID
                   </p>
                 </div>
@@ -631,9 +601,9 @@ const UnifiedModelSelector = ({
                 <div>
                   <label
                     htmlFor="gateway-id"
-                    className="text-xs text-gray-600 block mb-1"
+                    className="text-xs text-kumo-secondary block mb-1"
                   >
-                    Gateway ID <span className="text-red-500">*</span>
+                    Gateway ID <span className="text-kumo-danger">*</span>
                   </label>
                   <input
                     type="text"
@@ -641,9 +611,9 @@ const UnifiedModelSelector = ({
                     onChange={(e) => onGatewayIdChange(e.target.value)}
                     placeholder="Enter your AI Gateway ID"
                     required
-                    className="w-full p-2 border border-gray-200 rounded-md text-sm"
+                    className="w-full p-2 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
                   />
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-kumo-inactive mt-1">
                     The name/ID of your AI Gateway
                   </p>
                 </div>
@@ -651,9 +621,10 @@ const UnifiedModelSelector = ({
                 <div>
                   <label
                     htmlFor="cloudflare-api-key"
-                    className="text-xs text-gray-600 block mb-1"
+                    className="text-xs text-kumo-secondary block mb-1"
                   >
-                    Cloudflare API Key <span className="text-red-500">*</span>
+                    Cloudflare API Key{" "}
+                    <span className="text-kumo-danger">*</span>
                   </label>
                   <div className="relative">
                     <input
@@ -662,30 +633,34 @@ const UnifiedModelSelector = ({
                       onChange={(e) => onGatewayApiKeyChange(e.target.value)}
                       placeholder="Enter your Cloudflare API key"
                       required
-                      className="w-full p-2 pr-10 border border-gray-200 rounded-md text-sm"
+                      className="w-full p-2 pr-10 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
                     />
                     <button
                       type="button"
                       onClick={() => setShowGatewayKey(!showGatewayKey)}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-kumo-secondary hover:text-kumo-default"
                     >
-                      {showGatewayKey ? "Hide" : "Show"}
+                      {showGatewayKey ? (
+                        <EyeSlashIcon size={16} />
+                      ) : (
+                        <EyeIcon size={16} />
+                      )}
                     </button>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1">
+                  <p className="text-xs text-kumo-inactive mt-1">
                     Required: Cloudflare API key for AI Gateway authentication
                   </p>
                 </div>
 
-                <div className="bg-blue-50 border border-blue-200 rounded-md p-2">
-                  <p className="text-xs text-blue-800">
+                <div className="bg-kumo-info/10 border border-kumo-info/30 rounded-md p-2">
+                  <p className="text-xs text-kumo-info">
                     <strong>Unified Billing:</strong> Uses Cloudflare credits
                     for provider API calls. Load credits in your{" "}
                     <a
                       href="https://dash.cloudflare.com/?to=/:account/ai/ai-gateway"
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="underline hover:text-blue-900"
+                      className="underline hover:opacity-80"
                     >
                       Cloudflare dashboard
                     </a>

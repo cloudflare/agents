@@ -1,5 +1,6 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
 import { useLogs } from "../../hooks";
@@ -29,7 +30,6 @@ export function CallableDemo() {
     addLog("out", "call", { method, args });
     setLastResult(null);
     try {
-      // Use type assertion for dynamic method calls
       const result = await (
         agent.call as (m: string, a?: unknown[]) => Promise<unknown>
       )(method, args);
@@ -60,177 +60,190 @@ export function CallableDemo() {
     <DemoWrapper
       title="Callable Methods"
       description="Expose agent methods as RPC endpoints using the @callable decorator."
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Controls */}
         <div className="space-y-6">
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold">Connection</h3>
-              <ConnectionStatus
-                status={
-                  agent.readyState === WebSocket.OPEN
-                    ? "connected"
-                    : "connecting"
-                }
-              />
-            </div>
-          </div>
-
           {/* Math Operations */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Math Operations</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Math Operations</Text>
+            </div>
             <div className="flex gap-2 mb-3">
-              <input
+              <Input
+                aria-label="Argument A"
                 type="number"
                 value={argA}
-                onChange={(e) => setArgA(e.target.value)}
-                className="input w-20"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setArgA(e.target.value)
+                }
+                className="w-20"
               />
-              <input
+              <Input
+                aria-label="Argument B"
                 type="number"
                 value={argB}
-                onChange={(e) => setArgB(e.target.value)}
-                className="input w-20"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setArgB(e.target.value)
+                }
+                className="w-20"
               />
             </div>
             <div className="flex gap-2">
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => handleCall("add", [Number(argA), Number(argB)])}
-                className="btn btn-primary"
               >
                 add({argA}, {argB})
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="secondary"
                 onClick={() =>
                   handleCall("multiply", [Number(argA), Number(argB)])
                 }
-                className="btn btn-secondary"
               >
                 multiply({argA}, {argB})
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Echo */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Echo</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Echo</Text>
+            </div>
             <div className="flex gap-2">
-              <input
+              <Input
+                aria-label="Echo message"
                 type="text"
                 value={echoMessage}
-                onChange={(e) => setEchoMessage(e.target.value)}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setEchoMessage(e.target.value)
+                }
+                className="flex-1"
               />
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => handleCall("echo", [echoMessage])}
-                className="btn btn-primary"
               >
                 Echo
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Async Operation */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Async Operation</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Async Operation</Text>
+            </div>
             <div className="flex gap-2">
-              <input
+              <Input
+                aria-label="Delay in milliseconds"
                 type="number"
                 value={delayMs}
-                onChange={(e) => setDelayMs(e.target.value)}
-                className="input w-24"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setDelayMs(e.target.value)
+                }
+                className="w-24"
                 placeholder="ms"
               />
-              <button
-                type="button"
+              <Button
+                variant="primary"
                 onClick={() => handleCall("slowOperation", [Number(delayMs)])}
-                className="btn btn-primary"
               >
                 slowOperation({delayMs})
-              </button>
+              </Button>
             </div>
-            <p className="text-xs text-neutral-500 mt-2">
+            <p className="text-xs text-kumo-subtle mt-2">
               Simulates a slow operation with configurable delay
             </p>
-          </div>
+          </Surface>
 
           {/* Error Handling */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Error Handling</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Error Handling</Text>
+            </div>
             <div className="flex gap-2">
-              <input
+              <Input
+                aria-label="Error message"
                 type="text"
                 value={errorMessage}
-                onChange={(e) => setErrorMessage(e.target.value)}
-                className="input flex-1"
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                  setErrorMessage(e.target.value)
+                }
+                className="flex-1"
               />
-              <button
-                type="button"
+              <Button
+                variant="destructive"
                 onClick={() =>
                   handleCall("throwError", [errorMessage]).catch(() => {})
                 }
-                className="btn btn-danger"
               >
                 Throw Error
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Utility */}
-          <div className="card p-4">
-            <h3 className="font-semibold mb-4">Utility Methods</h3>
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Utility Methods</Text>
+            </div>
             <div className="flex gap-2 flex-wrap">
-              <button
-                type="button"
+              <Button
+                variant="secondary"
                 onClick={() => handleCall("getTimestamp", [])}
-                className="btn btn-secondary"
               >
                 getTimestamp()
-              </button>
-              <button
-                type="button"
-                onClick={handleListMethods}
-                className="btn btn-secondary"
-              >
+              </Button>
+              <Button variant="secondary" onClick={handleListMethods}>
                 listMethods()
-              </button>
+              </Button>
             </div>
-          </div>
+          </Surface>
 
           {/* Available Methods */}
           {methods.length > 0 && (
-            <div className="card p-4">
-              <h3 className="font-semibold mb-4">Available Methods</h3>
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
+              <div className="mb-4">
+                <Text variant="heading3">Available Methods</Text>
+              </div>
               <div className="space-y-1 text-sm">
                 {methods.map((m) => (
                   <div
                     key={m.name}
-                    className="flex justify-between py-1 border-b border-neutral-100 last:border-0"
+                    className="flex justify-between py-1 border-b border-kumo-fill last:border-0"
                   >
-                    <code className="font-mono">{m.name}</code>
+                    <code className="font-mono text-kumo-default">
+                      {m.name}
+                    </code>
                     {m.description && (
-                      <span className="text-neutral-500 text-xs">
+                      <span className="text-kumo-subtle text-xs">
                         {m.description}
                       </span>
                     )}
                   </div>
                 ))}
               </div>
-            </div>
+            </Surface>
           )}
 
           {/* Last Result */}
           {lastResult && (
-            <div className="card p-4">
-              <h3 className="font-semibold mb-2">Last Result</h3>
-              <pre className="text-xs bg-neutral-50 dark:bg-neutral-900 p-3 rounded overflow-x-auto">
-                {lastResult}
-              </pre>
-            </div>
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
+              <div className="mb-2">
+                <Text variant="heading3">Last Result</Text>
+              </div>
+              <CodeBlock code={lastResult} lang="jsonc" />
+            </Surface>
           )}
         </div>
 

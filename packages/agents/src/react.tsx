@@ -61,7 +61,7 @@ function deleteCacheEntry(key: string): void {
 function createStubProxy<T = Record<string, Method>>(
   call: (method: string, args: unknown[]) => unknown
 ): T {
-  // biome-ignore lint/suspicious/noExplicitAny: proxy needs any for dynamic method access
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- proxy needs any for dynamic method access
   return new Proxy<any>(
     {},
     {
@@ -99,7 +99,8 @@ export const _testUtils = {
   getCacheEntry,
   deleteCacheEntry,
   clearCache: () => queryCache.clear(),
-  createStubProxy
+  createStubProxy,
+  createCacheKey
 };
 
 /**
@@ -180,7 +181,7 @@ type OptionalParametersMethod<T extends RPCMethod> =
   AllOptional<Parameters<T>> extends true ? T : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
-// biome-ignore lint: suppressions/parse
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic agent type constraint
 type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
 
 type OptionalAgentMethods<T> = {
@@ -197,7 +198,7 @@ type RequiredAgentMethods<T> = Omit<
 >;
 
 type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
-  // biome-ignore lint: suppressions/parse
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic promise return type
   ReturnType<AgentMethods<T>[K]> extends Promise<any>
     ? ReturnType<AgentMethods<T>[K]>
     : Promise<ReturnType<AgentMethods<T>[K]>>;
@@ -297,13 +298,24 @@ export function useAgent<State>(
     [agentNamespace, options.name, queryDeps]
   );
 
+  // Track current cache key in a ref for use in onClose handler.
+  // This ensures we invalidate the correct cache entry when the connection closes,
+  // even if the component re-renders with different props before onClose fires.
+  // We update synchronously during render (not in useEffect) to avoid race
+  // conditions where onClose could fire before the effect runs.
+  const cacheKeyRef = useRef(cacheKey);
+  cacheKeyRef.current = cacheKey;
+
   const ttl = cacheTtl ?? 5 * 60 * 1000;
 
   // Track cache invalidation to force re-render when TTL expires
   const [cacheInvalidatedAt, setCacheInvalidatedAt] = useState<number>(0);
 
+  // Disable socket while waiting for async query to refresh after disconnect
+  const isAsyncQuery = query && typeof query === "function";
+  const [awaitingQueryRefresh, setAwaitingQueryRefresh] = useState(false);
+
   // Get or create the query promise
-  // biome-ignore lint/correctness/useExhaustiveDependencies: cacheInvalidatedAt intentionally forces re-evaluation when TTL expires
   const queryPromise = useMemo(() => {
     if (!query || typeof query !== "function") {
       return null;
@@ -383,6 +395,13 @@ export function useAgent<State>(
     }
   }
 
+  // Re-enable socket after async query resolves
+  useEffect(() => {
+    if (awaitingQueryRefresh && resolvedQuery !== undefined) {
+      setAwaitingQueryRefresh(false);
+    }
+  }, [awaitingQueryRefresh, resolvedQuery]);
+
   // Store identity in React state for reactivity
   const [identity, setIdentity] = useState({
     name: options.name || "default",
@@ -413,10 +432,16 @@ export function useAgent<State>(
     resetReady();
   }
 
-  // If basePath is provided, use it directly; otherwise construct from agent/name
+  // If basePath is provided, use it directly; otherwise construct from agent/name.
+  // WORKAROUND: When using basePath, we still set `room` and `party` because
+  // PartySocket.reconnect() requires `room` to be set, even though basePath bypasses
+  // the room-based URL construction. This should be removed once partysocket is fixed
+  // to skip the `room` check when `basePath` is provided.
   const socketOptions = options.basePath
     ? {
         basePath: options.basePath,
+        party: agentNamespace,
+        room: options.name || "default",
         path: options.path,
         query: resolvedQuery,
         ...restOptions
@@ -430,8 +455,11 @@ export function useAgent<State>(
         ...restOptions
       };
 
+  const socketEnabled = !awaitingQueryRefresh && (restOptions.enabled ?? true);
+
   const agent = usePartySocket({
     ...socketOptions,
+    enabled: socketEnabled,
     onMessage: (message) => {
       if (typeof message.data === "string") {
         let parsedMessage: Record<string, unknown>;
@@ -534,6 +562,15 @@ export function useAgent<State>(
       resetReady();
       setIdentity((prev) => ({ ...prev, identified: false }));
 
+      // Pause reconnection for async queries until fresh query params are ready
+      if (isAsyncQuery) {
+        setAwaitingQueryRefresh(true);
+      }
+
+      // Invalidate cache and trigger re-render to fetch fresh query params
+      deleteCacheEntry(cacheKeyRef.current);
+      setCacheInvalidatedAt(Date.now());
+
       // Reject all pending calls (consistent with AgentClient behavior)
       const error = new Error("Connection closed");
       for (const pending of pendingCallsRef.current.values()) {
@@ -556,7 +593,7 @@ export function useAgent<State>(
   };
   // Create the call method
   const call = useCallback(
-    <T = unknown,>(
+    <T = unknown>(
       method: string,
       args: unknown[] = [],
       streamOptions?: StreamOptions

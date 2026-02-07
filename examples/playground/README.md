@@ -117,7 +117,7 @@ The playground uses several Durable Object agents:
 
 ## Environment Variables
 
-Create a `.dev.vars` file for local development:
+Create a `.env` file for local development:
 
 ```
 OPENAI_API_KEY=sk-...

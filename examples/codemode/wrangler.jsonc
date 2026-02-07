@@ -1,7 +1,7 @@
 {
   "name": "codemode-demo",
   "main": "src/server.ts",
-  "compatibility_date": "2025-09-25",
+  "compatibility_date": "2026-01-28",
   "compatibility_flags": [
     "nodejs_compat",
     "experimental",
