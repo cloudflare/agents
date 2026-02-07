@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "jsx-a11y", "typescript", "react-hooks"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-explicit-any": "error",
+    "no-inferrable-types": "error",
+    "prefer-as-const": "error",
+    "default-param-last": "error",
+    "no-unused-expressions": "off",
+    "no-this-alias": "off",
+    "jsx-a11y/click-events-have-key-events": "off",
+    "jsx-a11y/no-static-element-interactions": "off",
+    "jsx-a11y/label-has-associated-control": "off",
+    "jsx-a11y/img-redundant-alt": "off",
+    "jsx-a11y/anchor-has-content": "off",
+    "react-hooks/exhaustive-deps": "warn",
+    "no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_"
+      }
+    ]
+  },
+  "ignorePatterns": [
+    "node_modules",
+    "**/node_modules",
+    "dist",
+    "**/dist",
+    ".wrangler",
+    "**/.wrangler",
+    "**/env.d.ts"
+  ]
+}

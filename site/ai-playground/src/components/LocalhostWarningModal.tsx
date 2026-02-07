@@ -1,4 +1,4 @@
-/** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
+/* oxlint-disable */
 import { XIcon } from "@phosphor-icons/react";
 import ShellCommand from "./ShellCommand";
 

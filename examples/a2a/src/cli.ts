@@ -392,7 +392,7 @@ async function main() {
       console.log(
         colorize("dim", "--- End of response stream for this input ---")
       );
-      // biome-ignore lint/suspicious/noExplicitAny: comes direct from the google samples
+      // oxlint-disable-next-line
     } catch (error: any) {
       const timestamp = new Date().toLocaleTimeString();
       const prefix = colorize("red", `\n${agentName} [${timestamp}] ERROR:`);

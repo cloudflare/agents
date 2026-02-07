@@ -147,7 +147,7 @@ const App = () => {
 
   const [agentInput, setAgentInput] = useState("");
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Only run once on mount
+  // oxlint-disable-next-line
   useEffect(() => {
     const getModels = async () => {
       try {
@@ -350,7 +350,7 @@ const App = () => {
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
               >
-                {/* biome-ignore lint/a11y/noLabelWithoutControl: eh */}
+                {/* oxlint-disable-next-line */}
                 <label className="font-semibold text-sm block mb-1 text-kumo-default">
                   System Message
                 </label>
@@ -365,7 +365,7 @@ const App = () => {
               <div
                 className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
               >
-                {/* biome-ignore lint/a11y/noLabelWithoutControl: eh */}
+                {/* oxlint-disable-next-line */}
                 <label className="font-semibold text-sm block mb-1 text-kumo-default">
                   Temperature
                 </label>
@@ -409,7 +409,7 @@ const App = () => {
 
                       return (
                         <li
-                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          // oxlint-disable-next-line
                           key={i}
                           className="mb-3 flex items-start border-b border-b-kumo-line w-full py-2"
                         >
@@ -445,7 +445,7 @@ const App = () => {
                       if (!part.text || part.text.trim() === "") return null;
                       return (
                         <li
-                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          // oxlint-disable-next-line
                           key={i}
                           className="mb-3 w-full"
                         >
@@ -457,7 +457,7 @@ const App = () => {
                     if (isToolUIPart(part)) {
                       return (
                         <li
-                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          // oxlint-disable-next-line
                           key={i}
                           className="mb-3 w-full"
                         >
@@ -472,14 +472,14 @@ const App = () => {
                     ) {
                       return (
                         <li
-                          // biome-ignore lint/suspicious/noArrayIndexKey: it's fine
+                          // oxlint-disable-next-line
                           key={i}
                           className="mb-3 w-full"
                         >
                           <img
                             className="max-w-md mx-auto rounded-lg"
                             src={part.url}
-                            // biome-ignore lint/a11y/noRedundantAlt: it's fine
+                            // oxlint-disable-next-line
                             alt="Image from tool call response"
                           />
                         </li>

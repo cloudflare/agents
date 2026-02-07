@@ -71,7 +71,7 @@ const getsDetail = createScorer<string, Schedule>({
 const getsDescription = createScorer<string, Schedule>({
   description: "Checks if the output is the right description",
   name: "getsDescription",
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: tests
+  // oxlint-disable-next-line
   scorer: ({ input, output, expected }) => {
     return output.description.toLowerCase() ===
       expected?.description.toLowerCase()

@@ -61,7 +61,7 @@ function deleteCacheEntry(key: string): void {
 function createStubProxy<T = Record<string, Method>>(
   call: (method: string, args: unknown[]) => unknown
 ): T {
-  // biome-ignore lint/suspicious/noExplicitAny: proxy needs any for dynamic method access
+  // oxlint-disable-next-line
   return new Proxy<any>(
     {},
     {
@@ -181,7 +181,7 @@ type OptionalParametersMethod<T extends RPCMethod> =
   AllOptional<Parameters<T>> extends true ? T : never;
 
 // all methods of the Agent, excluding the ones that are declared in the base Agent class
-// biome-ignore lint: suppressions/parse
+// oxlint-disable-next-line
 type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
 
 type OptionalAgentMethods<T> = {
@@ -198,7 +198,7 @@ type RequiredAgentMethods<T> = Omit<
 >;
 
 type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
-  // biome-ignore lint: suppressions/parse
+  // oxlint-disable-next-line
   ReturnType<AgentMethods<T>[K]> extends Promise<any>
     ? ReturnType<AgentMethods<T>[K]>
     : Promise<ReturnType<AgentMethods<T>[K]>>;
@@ -316,7 +316,7 @@ export function useAgent<State>(
   const [awaitingQueryRefresh, setAwaitingQueryRefresh] = useState(false);
 
   // Get or create the query promise
-  // biome-ignore lint/correctness/useExhaustiveDependencies: cacheInvalidatedAt intentionally forces re-evaluation when TTL expires
+  // oxlint-disable-next-line
   const queryPromise = useMemo(() => {
     if (!query || typeof query !== "function") {
       return null;
@@ -594,7 +594,7 @@ export function useAgent<State>(
   };
   // Create the call method
   const call = useCallback(
-    <T = unknown,>(
+    <T = unknown>(
       method: string,
       args: unknown[] = [],
       streamOptions?: StreamOptions

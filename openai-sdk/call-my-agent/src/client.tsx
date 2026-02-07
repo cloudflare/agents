@@ -12,7 +12,7 @@ interface Message {
   content: Array<{
     type: string;
     transcript: string;
-    // biome-ignore lint/suspicious/noExplicitAny: later
+    // oxlint-disable-next-line
     audio?: any;
   }>;
 }

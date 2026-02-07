@@ -1,4 +1,4 @@
-/** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
+/* oxlint-disable */
 import type { UIMessage } from "ai";
 import { Link } from "@cloudflare/kumo";
 import { XIcon } from "@phosphor-icons/react";

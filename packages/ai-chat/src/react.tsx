@@ -354,10 +354,12 @@ export function useAgentChat<
   onToolCallRef.current = onToolCall;
 
   const agentUrl = new URL(
-    `${// @ts-expect-error we're using a protected _url property that includes query params
-    ((agent._url as string | null) || agent._pkurl)
-      ?.replace("ws://", "http://")
-      .replace("wss://", "https://")}`
+    `${
+      // @ts-expect-error we're using a protected _url property that includes query params
+      ((agent._url as string | null) || agent._pkurl)
+        ?.replace("ws://", "http://")
+        .replace("wss://", "https://")
+    }`
   );
 
   agentUrl.searchParams.delete("_pk");

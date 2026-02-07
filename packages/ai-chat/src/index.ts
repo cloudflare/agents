@@ -876,9 +876,9 @@ export class AIChatAgent<
    * @returns Response to send to the client or undefined
    */
   async onChatMessage(
-    // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+    // oxlint-disable-next-line
     onFinish: StreamTextOnFinishCallback<ToolSet>,
-    // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+    // oxlint-disable-next-line
     options?: OnChatMessageOptions
   ): Promise<Response | undefined> {
     throw new Error(

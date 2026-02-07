@@ -148,7 +148,7 @@ export class SqlError extends Error {
 export function callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
-    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
+    // oxlint-disable-next-line
     context: ClassMethodDecoratorContext
   ) {
     if (!callableMetadata.has(target)) {
@@ -349,7 +349,7 @@ export function getCurrentAgent<
  * @returns A wrapped method that runs within the agent context
  */
 
-// biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+// oxlint-disable-next-line
 function withAgentContext<T extends (...args: any[]) => any>(
   method: T
 ): (
@@ -990,7 +990,7 @@ export class Agent<
    *
    * IMPORTANT: This hook must be synchronous.
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+  // oxlint-disable-next-line
   validateStateChange(nextState: State, source: Connection | "server") {
     // override this to validate state updates
   }
@@ -1000,7 +1000,7 @@ export class Agent<
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
+  // oxlint-disable-next-line
   onStateUpdate(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates
   }
@@ -1155,9 +1155,9 @@ export class Agent<
         // Now, methodName is confirmed to be a custom method/function
         // Wrap the custom method with context
         const wrappedFunction = withAgentContext(
-          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+          // oxlint-disable-next-line
           this[methodName as keyof this] as (...args: any[]) => any
-          // biome-ignore lint/suspicious/noExplicitAny: I can't typescript
+          // oxlint-disable-next-line
         ) as any;
 
         // if the method is callable, copy the metadata from the original method

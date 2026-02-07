@@ -1,5 +1,5 @@
-/** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
-/** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
+/* oxlint-disable */
+/* oxlint-disable */
 import { GithubLogoIcon } from "@phosphor-icons/react";
 import { Button } from "@cloudflare/kumo";
 import { ModeToggle } from "@cloudflare/agents-ui";

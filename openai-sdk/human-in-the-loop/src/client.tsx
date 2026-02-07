@@ -4,7 +4,7 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { AgentState, MyAgent } from "./server";
 
-// biome-ignore lint/suspicious/noExplicitAny: later
+// oxlint-disable-next-line
 type AppState = RunResult<unknown, Agent<unknown, any>> | null;
 
 // Types for the agent state structure
@@ -131,7 +131,7 @@ function ApprovalModal({
 }
 
 // Component to display agent state
-// biome-ignore lint/suspicious/noExplicitAny: later
+// oxlint-disable-next-line
 function AgentStateDisplay({ state }: any) {
   const hasInterruption = state.currentStep?.type === "next_step_interruption";
   const firstInterruption = hasInterruption
@@ -243,7 +243,7 @@ function App() {
         setState(parsedState);
 
         // Check for interruptions - access the state property correctly
-        // biome-ignore lint/suspicious/noExplicitAny: later
+        // oxlint-disable-next-line
         const agentState = parsedState as any;
         if (agentState?.currentStep?.type === "next_step_interruption") {
           const interruption = agentState.currentStep.data?.interruptions[0];
@@ -344,7 +344,7 @@ function App() {
         </button>
       </div>
 
-      {/* biome-ignore lint/suspicious/noExplicitAny: later */}
+      {/* oxlint-disable-next-line */}
       {state && <AgentStateDisplay state={state as any} />}
 
       {showApprovalModal && currentInterruption && (

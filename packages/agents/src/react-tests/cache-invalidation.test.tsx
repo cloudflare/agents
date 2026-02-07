@@ -14,7 +14,7 @@ import { getTestWorkerHost } from "./test-config";
 // Helper to generate cache keys the same way useAgent does internally
 const createCacheKey = _testUtils.createCacheKey;
 
-// biome-ignore lint/suspicious/noExplicitAny: Tests don't need strict typing
+// oxlint-disable-next-line
 type TestAgent = ReturnType<typeof useAgent<any>>;
 
 afterEach(() => {

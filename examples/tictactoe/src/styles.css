@@ -1,4 +1,3 @@
-/** biome-ignore-all lint/correctness/noInvalidPositionAtImportRule: kumo says different */
 @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";

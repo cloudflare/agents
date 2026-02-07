@@ -1,4 +1,4 @@
-/** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
+/* oxlint-disable */
 import "./app.css";
 
 import { useAgent } from "agents/react";

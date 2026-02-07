@@ -7,7 +7,7 @@ import fg from "fast-glob";
 // we do this in 2 passes
 // first let's cycle through all packages and get thier version numbers
 
-// biome-ignore lint/suspicious/noExplicitAny: vibes
+// oxlint-disable-next-line
 const packageJsons: Record<string, any> = {};
 
 for await (const file of await fg.glob(

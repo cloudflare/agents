@@ -10,7 +10,7 @@ import { useAgent, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
 // Simplified type for test assertions - avoids complex generic inference issues
-// biome-ignore lint/suspicious/noExplicitAny: Tests don't need strict typing for agent object
+// oxlint-disable-next-line
 type TestAgent = ReturnType<typeof useAgent<any>>;
 
 // Clean up after each test

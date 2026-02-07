@@ -1,4 +1,4 @@
-/** biome-ignore-all lint/a11y/noStaticElementInteractions: game board cells */
+/* oxlint-disable */
 import { useAgent } from "agents/react";
 import {
   ArrowsClockwiseIcon,

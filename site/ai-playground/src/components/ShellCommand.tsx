@@ -18,7 +18,7 @@ const ShellCommand = ({
   };
 
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: it's fine
+    // oxlint-disable-next-line
     <div
       className="relative group"
       onMouseEnter={() => setIsHovered(true)}

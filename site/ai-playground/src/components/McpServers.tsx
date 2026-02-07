@@ -1,4 +1,4 @@
-/** biome-ignore-all lint/correctness/useUniqueElementIds: it's fine */
+/* oxlint-disable */
 import { useEffect, useRef, useState } from "react";
 import {
   GearIcon,
@@ -172,7 +172,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
   };
 
   // Auto-scroll debug log when new entries arrive
-  // biome-ignore lint/correctness/useExhaustiveDependencies: mcpLogs triggers the scroll
+  // oxlint-disable-next-line
   useEffect(() => {
     if (logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight;

@@ -55,7 +55,7 @@ export class A2AHonoApp {
 
         // Check if it's an AsyncGenerator (stream)
         if (
-          // biome-ignore lint/suspicious/noExplicitAny: to fix
+          // oxlint-disable-next-line
           typeof (rpcResponseOrStream as any)?.[Symbol.asyncIterator] ===
           "function"
         ) {

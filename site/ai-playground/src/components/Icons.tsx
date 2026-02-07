@@ -1,4 +1,4 @@
-/** biome-ignore-all lint/correctness/useUniqueElementIds: gradient IDs are scoped per SVG */
+/* oxlint-disable */
 export { TrashIcon } from "@phosphor-icons/react";
 
 export const SparkleIcon = () => (
