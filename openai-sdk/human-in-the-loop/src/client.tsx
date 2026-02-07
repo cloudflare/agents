@@ -1,11 +1,24 @@
-import type { Agent, RunResult } from "@openai/agents";
 import { useAgent } from "agents/react";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { AgentState, MyAgent } from "./server";
 
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK generic Agent type
-type AppState = RunResult<unknown, Agent<unknown, any>> | null;
+/**
+ * The OpenAI Agents SDK exports SerializedRunState (a Zod schema) from
+ * @openai/agents-core, but its inferred type is deeply nested with dozens
+ * of fields. This interface covers only the subset the UI actually reads.
+ */
+interface RunResultState {
+  currentAgent?: { name: string };
+  originalInput?: string;
+  currentStep?: {
+    type: string;
+    output?: string;
+    data?: { interruptions?: ToolApprovalItem[] };
+  };
+  lastProcessedResponse?: { toolsUsed?: string[] };
+  generatedItems?: unknown[];
+}
 
 // Types for the agent state structure
 interface ToolApprovalItem {
@@ -131,11 +144,10 @@ function ApprovalModal({
 }
 
 // Component to display agent state
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- untyped agent state props
-function AgentStateDisplay({ state }: any) {
+function AgentStateDisplay({ state }: { state: RunResultState }) {
   const hasInterruption = state.currentStep?.type === "next_step_interruption";
   const firstInterruption = hasInterruption
-    ? state.currentStep.data?.interruptions[0]
+    ? state.currentStep?.data?.interruptions?.[0]
     : null;
 
   return (
@@ -172,14 +184,14 @@ function AgentStateDisplay({ state }: any) {
           </div>
         )}
 
-      {state.lastProcessedResponse?.toolsUsed?.length > 0 && (
+      {(state.lastProcessedResponse?.toolsUsed?.length ?? 0) > 0 && (
         <div style={{ marginBottom: "16px" }}>
           <strong>Tools Used:</strong>{" "}
-          {state.lastProcessedResponse.toolsUsed.join(", ")}
+          {state.lastProcessedResponse?.toolsUsed?.join(", ")}
         </div>
       )}
 
-      {state.generatedItems?.length > 0 && (
+      {(state.generatedItems?.length ?? 0) > 0 && (
         <div style={{ marginBottom: "16px" }}>
           <strong>Generated Items:</strong>
           <div
@@ -219,7 +231,7 @@ function AgentStateDisplay({ state }: any) {
 }
 
 function App() {
-  const [state, setState] = useState<AppState>(null);
+  const [state, setState] = useState<RunResultState | null>(null);
   const [question, setQuestion] = useState<string | null>(null);
   const [showApprovalModal, setShowApprovalModal] = useState(false);
   const [currentInterruption, setCurrentInterruption] =
@@ -238,15 +250,13 @@ function App() {
     }) {
       console.log("[Client] onStateUpdate called with serialisedRunState:");
       if (serialisedRunState) {
-        const parsedState = JSON.parse(serialisedRunState) as AppState;
+        const parsedState = JSON.parse(serialisedRunState) as RunResultState;
         console.log("[Client] Parsed state:", parsedState);
         setState(parsedState);
 
-        // Check for interruptions - access the state property correctly
-        // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- dynamic state shape from agent
-        const agentState = parsedState as any;
-        if (agentState?.currentStep?.type === "next_step_interruption") {
-          const interruption = agentState.currentStep.data?.interruptions[0];
+        // Check for interruptions
+        if (parsedState?.currentStep?.type === "next_step_interruption") {
+          const interruption = parsedState.currentStep.data?.interruptions?.[0];
           if (interruption) {
             console.log("[Client] Found interruption:", interruption);
             setCurrentInterruption(interruption);
@@ -344,8 +354,7 @@ function App() {
         </button>
       </div>
 
-      {/* oxlint-disable-next-line @typescript-eslint/no-explicit-any -- passing untyped state */}
-      {state && <AgentStateDisplay state={state as any} />}
+      {state && <AgentStateDisplay state={state} />}
 
       {showApprovalModal && currentInterruption && (
         <ApprovalModal

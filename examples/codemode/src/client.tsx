@@ -6,6 +6,19 @@ import { useState, useEffect, useRef } from "react";
 import type { Codemode } from "./server";
 import type { MCPServersState } from "agents";
 
+/**
+ * The AI SDK exports ToolUIPart, but it's generic over tool definitions.
+ * Since this component accesses codemode-specific fields (functionDescription,
+ * code) that aren't on the generic type, we define a local interface instead.
+ */
+interface ToolPart {
+  type: string;
+  state?: string;
+  errorText?: string;
+  input?: { functionDescription?: string; [key: string]: unknown };
+  output?: { code?: string; result?: string; [key: string]: unknown };
+}
+
 // Component to render different types of message parts
 function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
   if (part.type === "text") {
@@ -64,8 +77,7 @@ function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
 
   if (part.type.startsWith("tool-")) {
     const toolName = part.type.replace("tool-", "");
-    // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- type assertion for tool parts
-    const toolPart = part as any;
+    const toolPart = part as unknown as ToolPart;
     return (
       <div className="part-block tool-block">
         <div className="part-header">
@@ -117,6 +129,7 @@ function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
                         type="button"
                         className="copy-button"
                         onClick={() =>
+                          toolPart.output?.code &&
                           navigator.clipboard.writeText(toolPart.output.code)
                         }
                         title="Copy code"

@@ -392,26 +392,26 @@ async function main() {
       console.log(
         colorize("dim", "--- End of response stream for this input ---")
       );
-      // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- error needs message property
-    } catch (error: any) {
+    } catch (error: unknown) {
       const timestamp = new Date().toLocaleTimeString();
       const prefix = colorize("red", `\n${agentName} [${timestamp}] ERROR:`);
-      console.error(
-        prefix,
-        "Error communicating with agent:",
-        error.message || error
-      );
-      if (error.code) {
-        console.error(colorize("gray", `   Code: ${error.code}`));
+      const err =
+        error instanceof Error
+          ? error
+          : new Error(typeof error === "string" ? error : String(error));
+      const errWithCode = error as { code?: string; data?: unknown };
+      console.error(prefix, "Error communicating with agent:", err.message);
+      if (errWithCode.code) {
+        console.error(colorize("gray", `   Code: ${errWithCode.code}`));
       }
-      if (error.data) {
+      if (errWithCode.data) {
         console.error(
-          colorize("gray", `   Data: ${JSON.stringify(error.data)}`)
+          colorize("gray", `   Data: ${JSON.stringify(errWithCode.data)}`)
         );
       }
-      if (!(error.code || error.data) && error.stack) {
+      if (!(errWithCode.code || errWithCode.data) && err.stack) {
         console.error(
-          colorize("gray", error.stack.split("\n").slice(1, 3).join("\n"))
+          colorize("gray", err.stack.split("\n").slice(1, 3).join("\n"))
         );
       }
     } finally {
