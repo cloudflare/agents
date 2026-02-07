@@ -76,24 +76,38 @@ OPENAI_API_KEY=your-key-here
 
 Never commit actual secrets. Prefer `.env` / `.env.example` over `.dev.vars` / `.dev.vars.example`.
 
-### UI — Kumo design system
+### UI — Kumo + agents-ui
 
-All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for UI components and styling:
+All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for components and `@cloudflare/agents-ui` for shared cross-example UI. **Always check agents-ui before building something custom** — if it handles connection status, theme toggling, or branding, use the package.
 
-- Use Kumo components (`Button`, `Input`, `Surface`, `Text`, `Badge`, etc.) instead of hand-rolled HTML elements
+#### Kumo basics
+
+- Use Kumo components (`Button`, `Input`, `Surface`, `Text`, `Badge`, `Empty`, etc.) instead of hand-rolled HTML
 - Use `@phosphor-icons/react` for icons (Kumo's icon library)
 - Use Kumo semantic color tokens (`text-kumo-default`, `bg-kumo-base`, `border-kumo-line`, etc.) instead of raw Tailwind colors
 - Use the `data-mode` attribute for dark mode — no `dark:` Tailwind variants
-- Import Kumo styles and the Workers theme in your CSS:
-  ```css
-  @import "tailwindcss";
-  @import "@cloudflare/kumo/styles/tailwind";
-  @import "@cloudflare/agents-ui/theme/workers.css";
-  ```
-- Use shared components from `@cloudflare/agents-ui` (`ConnectionIndicator`, `ModeToggle`, `PoweredByAgents`) and hooks from `@cloudflare/agents-ui/hooks` (`ThemeProvider`, `useTheme`)
-- Every example should include `<PoweredByAgents />` as a footer attribution
 - Set `data-theme="workers"` on `<html>` for the Cloudflare-branded color theme
-- See `/design/visuals.md` for detailed Kumo usage patterns and known gaps
+
+#### CSS imports (in `src/styles.css`)
+
+```css
+@import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "@cloudflare/agents-ui/theme/workers.css";
+```
+
+#### `@cloudflare/agents-ui` — required shared components
+
+Every example should use these from `@cloudflare/agents-ui`:
+
+- **`ThemeProvider`** (from `@cloudflare/agents-ui/hooks`) — wrap your app in `client.tsx`
+- **`ConnectionIndicator`** — show WebSocket connection state in the header
+- **`ModeToggle`** — light/dark/system toggle in the header
+- **`PoweredByAgents`** — footer attribution badge (**required in every example**)
+
+Don't re-implement connection indicators, theme toggles, or branding — import them.
+
+See `/design/visuals.md` for detailed Kumo usage patterns and known gaps.
 
 ### Dependencies
 

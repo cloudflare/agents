@@ -134,13 +134,11 @@ export const PoweredByAgents = forwardRef<
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className={`inline-flex items-center gap-3.5 text-xs text-kumo-inactive transition-colors hover:text-kumo-subtle ${className ?? ""}`}
+      className={`inline-flex items-center gap-3 text-xs text-kumo-inactive transition-colors hover:text-kumo-subtle ${className ?? ""}`}
       {...props}
     >
-      <CloudflareLogo
-        style={{ width: 48, height: 22, flexShrink: 0, marginRight: 10 }}
-      />
-      <span className="flex flex-col justify-center whitespace-nowrap leading-snug">
+      <CloudflareLogo className="h-5 w-auto shrink-0" />
+      <span className="flex flex-col whitespace-nowrap leading-snug">
         <span>Powered by</span>
         <span className="font-semibold text-kumo-default">
           Cloudflare Agents

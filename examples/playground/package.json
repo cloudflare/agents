@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "agents": "*",
     "cronstrue": "^3.11.0",
     "nanoid": "^5.1.6",
     "postal-mime": "^2.7.3",

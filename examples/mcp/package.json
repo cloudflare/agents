@@ -1,6 +1,7 @@
 {
   "author": "",
   "dependencies": {
+    "agents": "*",
     "mcp-remote": "^0.1.37"
   },
   "keywords": [],

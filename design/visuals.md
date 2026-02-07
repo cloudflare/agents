@@ -40,15 +40,23 @@ The theme lives in `packages/agents-ui/src/theme/workers.css` and is consumed vi
 
 Then set `data-theme="workers"` on `<html>`.
 
-### Shared components and hooks
+### Shared components and hooks — always use `@cloudflare/agents-ui` first
 
-`@cloudflare/agents-ui` also exports React components and hooks used across all examples:
+Before building any UI that handles connection status, theme switching, or branding, check `@cloudflare/agents-ui` — it likely already has what you need. The goal is zero hand-rolled duplicates of these patterns across examples.
 
-- **`ConnectionIndicator`** — a dot + label showing WebSocket connection status (`connecting`, `connected`, `disconnected`)
-- **`ModeToggle`** — a button that cycles through system → light → dark theme modes
-- **`PoweredByAgents`** — a "Powered by Cloudflare Agents" footer badge with the Cloudflare cloud glyph, linking to the Agents docs
-- **`CloudflareLogo`** — the Cloudflare cloud glyph SVG in brand orange/yellow colors
-- **`ThemeProvider` / `useTheme`** (from `@cloudflare/agents-ui/hooks`) — context provider and hook for managing light/dark/system mode, persisting the choice to `localStorage`
+`@cloudflare/agents-ui` exports:
+
+| Export                | Import path                               | Purpose                                                                                              |
+| --------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `ConnectionIndicator` | `@cloudflare/agents-ui`                   | Dot + label for WebSocket connection state (`connecting`, `connected`, `disconnected`)               |
+| `ModeToggle`          | `@cloudflare/agents-ui`                   | Button cycling system → light → dark theme modes                                                     |
+| `PoweredByAgents`     | `@cloudflare/agents-ui`                   | "Powered by Cloudflare Agents" footer badge with cloud glyph — **every example should include this** |
+| `CloudflareLogo`      | `@cloudflare/agents-ui`                   | Cloudflare cloud glyph SVG in brand orange/yellow                                                    |
+| `ThemeProvider`       | `@cloudflare/agents-ui/hooks`             | Context provider for light/dark/system mode, persists to `localStorage`                              |
+| `useTheme`            | `@cloudflare/agents-ui/hooks`             | Hook to read/set the current theme mode                                                              |
+| Workers theme CSS     | `@cloudflare/agents-ui/theme/workers.css` | Cloudflare-branded color overrides for Kumo tokens                                                   |
+
+Every example's `client.tsx` should wrap the app in `<ThemeProvider>`, use `<ConnectionIndicator>` for connection state, include `<ModeToggle>` in the header, and place `<PoweredByAgents />` in the footer. Don't re-implement any of these — import from the package.
 
 To switch back to Kumo's default theme, remove the `data-theme` attribute.
 

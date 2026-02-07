@@ -4,7 +4,7 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
-    "directory": "public"
+    "not_found_handling": "single-page-application"
   },
   "durable_objects": {
     "bindings": [
