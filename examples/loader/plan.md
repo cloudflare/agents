@@ -24,9 +24,9 @@
 - [x] **Phase 4: Agent Loop (LLM integration)** - COMPLETE (GPT-5.2 with reasoning, 13 tools)
 - [ ] **Phase 5: Session & Message Architecture** - IN PROGRESS
   - [x] 5.0 Action Logging (audit trail for all tool calls)
-  - [ ] 5.1 Message Storage Schema
+  - [x] 5.1 Message Storage Schema (tool calls + reasoning persisted, history returns full data)
   - [ ] 5.2 Background Task Scheduling
-  - [ ] 5.3 WebSocket Streaming Protocol
+  - [x] 5.3 WebSocket Streaming Protocol (broadcast to all tabs, history/sync on connect, stream replay)
 - [x] **Phase 5.4: Task Management** - COMPLETE
   - [x] tasks.ts module with pure functions (71 tests)
   - [x] LLM task tools (createSubtask, listTasks, completeTask)

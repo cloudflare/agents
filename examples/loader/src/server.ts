@@ -99,6 +99,21 @@ export interface ChatMessage {
 }
 
 /**
+ * Stored message format returned in history
+ */
+export interface StoredMessage {
+  role: "user" | "assistant";
+  content: string;
+  toolCalls?: Array<{
+    id: string;
+    name: string;
+    input: unknown;
+    output?: unknown;
+  }>;
+  reasoning?: string;
+}
+
+/**
  * Think WebSocket message types
  * Wrapped with __think__: 1 to allow multiplexing with other message types
  */
@@ -110,7 +125,38 @@ export type ThinkPayload =
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | { type: "tool_result"; callId: string; name: string; output: unknown }
   | { type: "chat"; message: { role: "assistant"; content: string } }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string }
+  // New: sent on connect for state replay
+  | { type: "history"; messages: StoredMessage[] }
+  | {
+      type: "sync";
+      status: string;
+      sessionId: string;
+      streaming?: {
+        content: string;
+        reasoning: string;
+        toolCalls: Array<{
+          id: string;
+          name: string;
+          input: unknown;
+          output?: unknown;
+        }>;
+      };
+    }
+  // New: broadcast to all tabs when user sends a message
+  | { type: "user_message"; content: string }
+  // New: sent at end of a complete response with all data
+  | {
+      type: "message_complete";
+      content: string;
+      toolCalls?: Array<{
+        id: string;
+        name: string;
+        input: unknown;
+        output?: unknown;
+      }>;
+      reasoning?: string;
+    };
 
 export interface ThinkMessage {
   __think__: 1;
@@ -273,6 +319,18 @@ export class Think extends Agent<Env, ThinkState> {
   // AbortController for cancelling ongoing operations
   private currentAbortController: AbortController | null = null;
 
+  // Current streaming state - tracks in-progress response for reconnecting clients
+  private currentStream: {
+    content: string;
+    reasoning: string;
+    toolCalls: Array<{
+      id: string;
+      name: string;
+      input: unknown;
+      output?: unknown;
+    }>;
+  } | null = null;
+
   /**
    * Emit a debug event to all subscribed connections.
    * Uses connection state to track debug subscriptions (survives hibernation).
@@ -303,6 +361,21 @@ export class Think extends Agent<Env, ThinkState> {
         sentCount,
         "debug connections"
       );
+    }
+  }
+
+  /**
+   * Broadcast a Think message to ALL connected WebSocket clients.
+   * Used for streaming events so all tabs see the same stream.
+   */
+  private broadcastThink(payload: ThinkPayload): void {
+    const msg = thinkMsg(payload);
+    for (const conn of this.getConnections()) {
+      try {
+        conn.send(msg);
+      } catch {
+        // Connection might be closed, ignore
+      }
     }
   }
 
@@ -376,10 +449,14 @@ export class Think extends Agent<Env, ThinkState> {
     `;
 
     // Migration: add reasoning column if it doesn't exist (for existing DBs)
-    try {
+    const columns = this.sql`PRAGMA table_info(chat_messages)` as {
+      name: string;
+    }[];
+    const hasReasoning = Array.from(columns).some(
+      (c) => c.name === "reasoning"
+    );
+    if (!hasReasoning) {
       this.sql`ALTER TABLE chat_messages ADD COLUMN reasoning TEXT`;
-    } catch {
-      // Column already exists, ignore
     }
 
     // Action log table for audit trail
@@ -1296,17 +1373,12 @@ export class Think extends Agent<Env, ThinkState> {
         }
 
         case "cancel":
-          // Cancel any ongoing operation
+          // Cancel any ongoing operation - the AbortError in handleChatMessage
+          // will broadcast text_done and clean up state in its catch/finally blocks
           if (this.currentAbortController) {
             this.currentAbortController.abort();
-            this.currentAbortController = null;
             console.log("[Think] Cancelled ongoing operation");
           }
-          // Reset status to idle
-          this.setState({ ...this.state, status: "idle" });
-          this.emitDebug({ event: "state:change", status: "idle" });
-          // Send cancellation confirmation
-          connection.send(thinkMsg({ type: "text_done" }));
           break;
 
         default:
@@ -1344,15 +1416,42 @@ export class Think extends Agent<Env, ThinkState> {
       })
     );
 
-    // TODO: Send full Yjs document state for late-joining clients
-    // Currently clients need to fetch files via get-files message
+    // Send chat history over WebSocket so client has full context immediately
+    const messages = this.getChatHistoryForClient();
+    if (messages.length > 0) {
+      connection.send(
+        thinkMsg({
+          type: "history",
+          messages: messages as StoredMessage[]
+        })
+      );
+    }
+
+    // Send sync with current status and any in-progress streaming data
+    const syncPayload: ThinkPayload = {
+      type: "sync",
+      status: this.state.status,
+      sessionId: this.state.sessionId
+    };
+    // If there's an active stream, include accumulated content so the client can catch up
+    if (
+      this.currentStream &&
+      (this.state.status === "thinking" || this.state.status === "executing")
+    ) {
+      (syncPayload as Extract<ThinkPayload, { type: "sync" }>).streaming = {
+        content: this.currentStream.content,
+        reasoning: this.currentStream.reasoning,
+        toolCalls: this.currentStream.toolCalls
+      };
+    }
+    connection.send(thinkMsg(syncPayload));
   }
 
   /**
    * Handle chat messages from the user - runs the LLM agent loop
    */
   private async handleChatMessage(
-    connection: Connection,
+    _connection: Connection,
     content: string
   ): Promise<void> {
     this.emitDebug({
@@ -1376,6 +1475,9 @@ export class Think extends Agent<Env, ThinkState> {
       output?: unknown;
     }> = [];
 
+    // Initialize current stream state for reconnecting clients
+    this.currentStream = { content: "", reasoning: "", toolCalls: [] };
+
     try {
       // Load chat history
       this.loadChatHistory();
@@ -1384,6 +1486,9 @@ export class Think extends Agent<Env, ThinkState> {
       const userMessage: ModelMessage = { role: "user", content };
       this.chatHistory.push(userMessage);
       this.saveChatMessage("user", content);
+
+      // Broadcast user message to all tabs (sender already shows it locally)
+      this.broadcastThink({ type: "user_message", content });
 
       // Create root task for this message (orchestration-level tracking)
       const rootTask = this.createRootTask(content);
@@ -1423,34 +1528,40 @@ export class Think extends Agent<Env, ThinkState> {
         }
       });
 
-      // Process the stream and send events to client in real-time
+      // Process the stream and broadcast events to ALL connected clients
       for await (const event of stream.fullStream) {
         switch (event.type) {
           case "reasoning-delta":
             // Stream reasoning as it arrives (GPT-5 reasoning models)
             if (event.text) {
               accumulatedReasoning += event.text;
-              connection.send(
-                thinkMsg({ type: "reasoning_delta", delta: event.text })
-              );
+              if (this.currentStream)
+                this.currentStream.reasoning = accumulatedReasoning;
+              this.broadcastThink({
+                type: "reasoning_delta",
+                delta: event.text
+              });
             }
             break;
 
           case "text-delta":
             // Send text chunks as they arrive for real-time display
             accumulatedText += event.text;
-            connection.send(
-              thinkMsg({ type: "text_delta", delta: event.text })
-            );
+            if (this.currentStream)
+              this.currentStream.content = accumulatedText;
+            this.broadcastThink({ type: "text_delta", delta: event.text });
             break;
 
-          case "tool-call":
+          case "tool-call": {
             // Tool call is starting - track for persistence
-            accumulatedToolCalls.push({
+            const toolCall = {
               id: event.toolCallId,
               name: event.toolName,
               input: event.input
-            });
+            };
+            accumulatedToolCalls.push(toolCall);
+            if (this.currentStream)
+              this.currentStream.toolCalls = [...accumulatedToolCalls];
             this.setState({ ...this.state, status: "executing" });
             this.emitDebug({ event: "state:change", status: "executing" });
             this.emitDebug({
@@ -1458,18 +1569,17 @@ export class Think extends Agent<Env, ThinkState> {
               name: event.toolName,
               callId: event.toolCallId
             });
-            connection.send(
-              thinkMsg({
-                type: "tool_call",
-                id: event.toolCallId,
-                name: event.toolName,
-                input: event.input
-              })
-            );
+            this.broadcastThink({
+              type: "tool_call",
+              id: event.toolCallId,
+              name: event.toolName,
+              input: event.input
+            });
             break;
+          }
 
           case "tool-result":
-            // Tool has completed - log and send result
+            // Tool has completed - log and broadcast result
             {
               const isError =
                 typeof event.output === "object" &&
@@ -1504,15 +1614,15 @@ export class Think extends Agent<Env, ThinkState> {
                 (t) => t.id === event.toolCallId
               );
               if (tc) tc.output = event.output;
+              if (this.currentStream)
+                this.currentStream.toolCalls = [...accumulatedToolCalls];
 
-              connection.send(
-                thinkMsg({
-                  type: "tool_result",
-                  callId: event.toolCallId,
-                  name: event.toolName,
-                  output: event.output
-                })
-              );
+              this.broadcastThink({
+                type: "tool_result",
+                callId: event.toolCallId,
+                name: event.toolName,
+                output: event.output
+              });
 
               this.emitDebug({
                 event: "tool:end",
@@ -1530,7 +1640,7 @@ export class Think extends Agent<Env, ThinkState> {
       }
 
       // Send done signal after stream completes
-      connection.send(thinkMsg({ type: "text_done" }));
+      this.broadcastThink({ type: "text_done" });
 
       // Get final result - await the promises
       const finalResponse = accumulatedText || (await stream.text) || "";
@@ -1543,9 +1653,7 @@ export class Think extends Agent<Env, ThinkState> {
           .filter(Boolean)
           .join("\n\n");
         if (reasoningText) {
-          connection.send(
-            thinkMsg({ type: "reasoning", content: reasoningText })
-          );
+          this.broadcastThink({ type: "reasoning", content: reasoningText });
         }
       }
 
@@ -1572,16 +1680,14 @@ export class Think extends Agent<Env, ThinkState> {
           reasoning: finalReasoning || undefined
         });
 
-        // Send final response to client
-        connection.send(
-          thinkMsg({
-            type: "chat",
-            message: {
-              role: "assistant",
-              content: finalResponse
-            }
-          })
-        );
+        // Broadcast message_complete with full data to all clients
+        this.broadcastThink({
+          type: "message_complete",
+          content: finalResponse,
+          toolCalls:
+            accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
+          reasoning: finalReasoning || undefined
+        });
       }
 
       // Log usage stats including reasoning tokens
@@ -1619,8 +1725,8 @@ export class Think extends Agent<Env, ThinkState> {
       if (e instanceof Error && e.name === "AbortError") {
         console.log("[Think] Operation was cancelled");
         const stoppedMarker = "\n\n*[Generation stopped]*";
-        connection.send(thinkMsg({ type: "text_delta", delta: stoppedMarker }));
-        connection.send(thinkMsg({ type: "text_done" }));
+        this.broadcastThink({ type: "text_delta", delta: stoppedMarker });
+        this.broadcastThink({ type: "text_done" });
 
         // Save partial response to history so context is preserved
         if (accumulatedText.trim()) {
@@ -1645,13 +1751,15 @@ export class Think extends Agent<Env, ThinkState> {
       } else {
         console.error("Agent loop error:", e);
         const errorMessage = e instanceof Error ? e.message : String(e);
-        connection.send(
-          thinkMsg({ type: "error", error: `Agent error: ${errorMessage}` })
-        );
+        this.broadcastThink({
+          type: "error",
+          error: `Agent error: ${errorMessage}`
+        });
       }
     } finally {
-      // Clean up AbortController
+      // Clean up AbortController and streaming state
       this.currentAbortController = null;
+      this.currentStream = null;
       this.setState({ ...this.state, status: "idle" });
       this.emitDebug({ event: "state:change", status: "idle" });
     }
@@ -2399,10 +2507,10 @@ export default class extends WorkerEntrypoint {
       // Delete messages from database after the cutoff
       // Get message IDs to delete
       const allMessages = this.sql`
-        SELECT id, created_at FROM chat_messages 
+        SELECT id, timestamp FROM chat_messages 
         WHERE session_id = ${this.state.sessionId} 
-        ORDER BY created_at ASC
-      ` as { id: number; created_at: string }[];
+        ORDER BY timestamp ASC
+      ` as { id: number; timestamp: number }[];
 
       if (allMessages.length > cutoffIndex) {
         const idsToDelete = allMessages.slice(cutoffIndex).map((m) => m.id);

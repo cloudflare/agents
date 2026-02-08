@@ -40,7 +40,7 @@ import type { Task } from "./tasks";
 export interface SubagentEnv {
   OPENAI_API_KEY: string;
   BRAVE_API_KEY?: string;
-  // biome-ignore lint/suspicious/noExplicitAny: LOADER type is complex and varies
+  // oxlint-disable-next-line no-explicit-any -- WorkerLoader type has complex generic parameters
   LOADER: any;
 }
 
@@ -91,7 +91,7 @@ declare global {
 }
 
 interface DurableObjectFacets {
-  // biome-ignore lint/suspicious/noExplicitAny: Facets API allows various DO types
+  // oxlint-disable-next-line no-explicit-any -- Facets API is experimental with incomplete types
   get<T = any>(
     name: string,
     getStartupOptions: () => FacetStartupOptions | Promise<FacetStartupOptions>
@@ -103,7 +103,7 @@ interface DurableObjectFacets {
 interface FacetStartupOptions {
   id?: string;
   // The class must be a DurableObject class from ctx.exports, not a regular ES6 class
-  // biome-ignore lint/suspicious/noExplicitAny: Facets API accepts DO bindings
+  // oxlint-disable-next-line no-explicit-any -- Facets API accepts DO bindings with no shared type
   class: any;
 }
 
@@ -924,7 +924,7 @@ export class RpcTestFacet extends DurableObject<SubagentEnv, RpcTestProps> {
       // Check if Think is available
       let hasThink = false;
       try {
-        // biome-ignore lint/suspicious/noExplicitAny: checking dynamic exports
+        // oxlint-disable-next-line no-explicit-any -- checking dynamic exports at runtime
         hasThink = hasExports && typeof (exports as any).Think !== "undefined";
       } catch {
         // Access failed
@@ -956,7 +956,7 @@ export class RpcTestFacet extends DurableObject<SubagentEnv, RpcTestProps> {
     error?: string;
   }> {
     try {
-      // biome-ignore lint/suspicious/noExplicitAny: accessing dynamic exports
+      // oxlint-disable-next-line no-explicit-any -- accessing dynamic exports at runtime
       const exports = this.ctx.exports as any;
 
       // Check if Think namespace is available
@@ -1031,7 +1031,7 @@ export class RpcTestFacet extends DurableObject<SubagentEnv, RpcTestProps> {
     error?: string;
   }> {
     try {
-      // biome-ignore lint/suspicious/noExplicitAny: accessing dynamic exports
+      // oxlint-disable-next-line no-explicit-any -- accessing dynamic exports at runtime
       const exports = this.ctx.exports as any;
 
       if (!exports || !exports.Think) {

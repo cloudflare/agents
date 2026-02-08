@@ -30,7 +30,33 @@ type ThinkPayload =
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | { type: "tool_result"; callId: string; name: string; output: unknown }
   | { type: "chat"; message: { role: "assistant"; content: string } }
-  | { type: "error"; error: string };
+  | { type: "error"; error: string }
+  | {
+      type: "history";
+      messages: Array<{
+        role: string;
+        content: string;
+        toolCalls?: ToolCall[];
+        reasoning?: string;
+      }>;
+    }
+  | {
+      type: "sync";
+      status: string;
+      sessionId: string;
+      streaming?: {
+        content: string;
+        reasoning: string;
+        toolCalls: ToolCall[];
+      };
+    }
+  | { type: "user_message"; content: string }
+  | {
+      type: "message_complete";
+      content: string;
+      toolCalls?: ToolCall[];
+      reasoning?: string;
+    };
 
 interface ThinkMessage {
   __think__: 1;
@@ -208,32 +234,20 @@ function App() {
       console.log("[DEBUG CLIENT] debugEnabled:", debugEnabled);
       // @ts-expect-error - accessing target.url for debug
       console.log("[DEBUG CLIENT] WebSocket URL:", event?.target?.url);
-      loadHistory();
+      // History is sent over WebSocket via "history" message on connect.
+      // No HTTP fallback needed - the WS history message is reliable and
+      // an HTTP fetch would race with it and overwrite streaming state.
     },
     onClose: () => console.log("Disconnected"),
     onError: (error) => console.error("WebSocket error:", error)
   });
 
-  // Start new assistant message on status change
-  const prevStatusRef = useRef<string>("idle");
-  useEffect(() => {
-    if (status === "thinking" && prevStatusRef.current === "idle") {
-      streamingMessageRef.current = "";
-      streamingReasoningRef.current = "";
-      currentToolCallsRef.current = [];
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `assistant-${Date.now()}`,
-          role: "assistant",
-          content: "",
-          toolCalls: [],
-          isStreaming: true
-        }
-      ]);
-    }
-    prevStatusRef.current = status;
-  }, [status]);
+  // Note: We do NOT create streaming messages from status changes.
+  // Instead, streaming messages are created by:
+  //   - sendMessage() when the user sends a message
+  //   - text_delta/reasoning_delta/tool_call handlers when events arrive (multi-tab sync)
+  //   - sync handler when reconnecting mid-stream
+  // This avoids race conditions between status updates, history, and sync on reconnect.
 
   const handleMessage = useCallback((msg: ThinkPayload) => {
     switch (msg.type) {
@@ -243,10 +257,21 @@ function App() {
           const updated = [...prev];
           const last = updated.length - 1;
           if (last >= 0 && updated[last].isStreaming) {
+            // Update existing streaming message
             updated[last] = {
               ...updated[last],
               content: streamingMessageRef.current
             };
+          } else {
+            // No streaming message yet (e.g. multi-tab sync, or useEffect hasn't fired)
+            // Create one so deltas aren't lost
+            updated.push({
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              content: streamingMessageRef.current,
+              toolCalls: [],
+              isStreaming: true
+            });
           }
           return updated;
         });
@@ -270,11 +295,24 @@ function App() {
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated.length - 1;
-          if (last >= 0 && updated[last].role === "assistant") {
+          if (
+            last >= 0 &&
+            updated[last].role === "assistant" &&
+            updated[last].isStreaming
+          ) {
             updated[last] = {
               ...updated[last],
               toolCalls: [...currentToolCallsRef.current]
             };
+          } else {
+            // No streaming message yet - create one with tool calls
+            updated.push({
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              content: streamingMessageRef.current,
+              toolCalls: [...currentToolCallsRef.current],
+              isStreaming: true
+            });
           }
           return updated;
         });
@@ -306,11 +344,25 @@ function App() {
         setMessages((prev) => {
           const updated = [...prev];
           const last = updated.length - 1;
-          if (last >= 0 && updated[last].role === "assistant") {
+          if (
+            last >= 0 &&
+            updated[last].role === "assistant" &&
+            updated[last].isStreaming
+          ) {
             updated[last] = {
               ...updated[last],
               reasoning: streamingReasoningRef.current
             };
+          } else {
+            // No streaming message yet - create one
+            updated.push({
+              id: `assistant-${Date.now()}`,
+              role: "assistant",
+              content: "",
+              reasoning: streamingReasoningRef.current,
+              toolCalls: [],
+              isStreaming: true
+            });
           }
           return updated;
         });
@@ -356,6 +408,110 @@ function App() {
           return updated;
         });
         break;
+
+      // ── New: WebSocket-based history + sync ──────────────────
+
+      case "history":
+        // Server sends full history on connect - replace any stale state
+        if (msg.messages && msg.messages.length > 0) {
+          historyLoadedRef.current = true;
+          setMessages(
+            msg.messages.map(
+              (
+                m: {
+                  role: string;
+                  content: string;
+                  toolCalls?: ToolCall[];
+                  reasoning?: string;
+                },
+                idx: number
+              ) => ({
+                id: `history-${idx}`,
+                role: m.role as "user" | "assistant",
+                content: m.content,
+                toolCalls: m.toolCalls,
+                reasoning: m.reasoning
+              })
+            )
+          );
+        }
+        break;
+
+      case "sync":
+        // Server sends current status + streaming state on connect.
+        // This is the definitive state setter for reconnection.
+        if (
+          msg.streaming &&
+          (msg.status === "thinking" || msg.status === "executing")
+        ) {
+          // Agent is mid-stream - set refs and merge streaming into messages atomically
+          streamingMessageRef.current = msg.streaming.content;
+          streamingReasoningRef.current = msg.streaming.reasoning;
+          currentToolCallsRef.current = msg.streaming.toolCalls || [];
+          setMessages((prev) => {
+            // Remove any stale streaming messages (from races with status changes)
+            const stable = prev.filter((m) => !m.isStreaming);
+            return [
+              ...stable,
+              {
+                id: `assistant-${Date.now()}`,
+                role: "assistant" as const,
+                content: msg.streaming!.content,
+                toolCalls: msg.streaming!.toolCalls,
+                reasoning: msg.streaming!.reasoning || undefined,
+                isStreaming: true
+              }
+            ];
+          });
+        }
+        break;
+
+      case "user_message":
+        // Another tab sent a message (or broadcast from server)
+        setMessages((prev) => {
+          // Check if we already have this user message anywhere near the end
+          // (sender tab adds it locally before broadcast arrives)
+          for (
+            let i = prev.length - 1;
+            i >= Math.max(0, prev.length - 3);
+            i--
+          ) {
+            if (prev[i].role === "user" && prev[i].content === msg.content) {
+              return prev; // Already have it
+            }
+          }
+          // Reset streaming refs for the upcoming response (this is another tab)
+          streamingMessageRef.current = "";
+          streamingReasoningRef.current = "";
+          currentToolCallsRef.current = [];
+          return [
+            ...prev,
+            {
+              id: `user-${Date.now()}`,
+              role: "user" as const,
+              content: msg.content
+            }
+          ];
+        });
+        break;
+
+      case "message_complete":
+        // Response is complete - update with final data (ensures tool calls + reasoning are set)
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated.length - 1;
+          if (last >= 0 && updated[last].role === "assistant") {
+            updated[last] = {
+              ...updated[last],
+              content: msg.content,
+              toolCalls: msg.toolCalls,
+              reasoning: msg.reasoning,
+              isStreaming: false
+            };
+          }
+          return updated;
+        });
+        break;
     }
   }, []);
 
@@ -388,9 +544,21 @@ function App() {
     if (!input.trim() || status !== "idle") return;
     const content = input.trim();
     lastUserMessageRef.current = content;
+    // Reset streaming refs for the new response
+    streamingMessageRef.current = "";
+    streamingReasoningRef.current = "";
+    currentToolCallsRef.current = [];
+    // Add user message + empty streaming message in one update
     setMessages((prev) => [
       ...prev,
-      { id: `user-${Date.now()}`, role: "user", content }
+      { id: `user-${Date.now()}`, role: "user", content },
+      {
+        id: `assistant-${Date.now() + 1}`,
+        role: "assistant",
+        content: "",
+        toolCalls: [],
+        isStreaming: true
+      }
     ]);
     agent.send(JSON.stringify({ type: "chat", content }));
     setInput("");
@@ -405,13 +573,25 @@ function App() {
   // Retry the last user message
   const retryLastMessage = useCallback(() => {
     if (status !== "idle" || !lastUserMessageRef.current) return;
-    // Remove the last assistant message if it exists
+    // Reset streaming refs
+    streamingMessageRef.current = "";
+    streamingReasoningRef.current = "";
+    currentToolCallsRef.current = [];
+    // Remove the last assistant message and add a fresh streaming message
     setMessages((prev) => {
       const lastIdx = prev.length - 1;
-      if (lastIdx >= 0 && prev[lastIdx].role === "assistant") {
-        return prev.slice(0, lastIdx);
-      }
-      return prev;
+      const trimmed =
+        lastIdx >= 0 && prev[lastIdx].role === "assistant"
+          ? prev.slice(0, lastIdx)
+          : [...prev];
+      trimmed.push({
+        id: `assistant-${Date.now()}`,
+        role: "assistant",
+        content: "",
+        toolCalls: [],
+        isStreaming: true
+      });
+      return trimmed;
     });
     // Resend the message
     agent.send(
@@ -469,11 +649,21 @@ function App() {
       setEditingMessageId(null);
       setEditingContent("");
 
-      // Send the edited message as a new message
+      // Reset streaming refs and send the edited message
       lastUserMessageRef.current = newContent;
+      streamingMessageRef.current = "";
+      streamingReasoningRef.current = "";
+      currentToolCallsRef.current = [];
       setMessages((prev) => [
         ...prev,
-        { id: `user-${Date.now()}`, role: "user", content: newContent }
+        { id: `user-${Date.now()}`, role: "user", content: newContent },
+        {
+          id: `assistant-${Date.now() + 1}`,
+          role: "assistant",
+          content: "",
+          toolCalls: [],
+          isStreaming: true
+        }
       ]);
       agent.send(JSON.stringify({ type: "chat", content: newContent }));
     },

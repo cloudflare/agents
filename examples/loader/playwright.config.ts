@@ -1,5 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
-import { existsSync, readFileSync, copyFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -7,20 +7,13 @@ import { join } from "node:path";
  */
 function loadEnvFile(): void {
   const envPath = join(process.cwd(), ".env");
-  const devVarsPath = join(process.cwd(), ".dev.vars");
 
   if (!existsSync(envPath)) return;
 
   try {
     const content = readFileSync(envPath, "utf-8");
 
-    // Copy .env to .dev.vars so wrangler can read secrets
-    if (!existsSync(devVarsPath)) {
-      copyFileSync(envPath, devVarsPath);
-      console.log("[Playwright] Created .dev.vars from .env for wrangler");
-    }
-
-    // Also load into process.env for test skipping logic
+    // Load .env into process.env for test skipping logic
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;

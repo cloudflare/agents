@@ -1331,7 +1331,7 @@ Returns the results from all completed subagents.`,
 }
 
 export function createTools(ctx: ToolContext) {
-  // biome-ignore lint/suspicious/noExplicitAny: Tool types are complex and vary
+  // oxlint-disable-next-line no-explicit-any -- AI SDK tool types are complex generics that don't compose well
   const tools: Record<string, any> = {
     bash: createBashTool(ctx),
     readFile: createReadFileTool(ctx),

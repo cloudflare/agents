@@ -28,7 +28,7 @@ export class ParentRPC {
   } | null = null;
 
   constructor(
-    // biome-ignore lint/suspicious/noExplicitAny: DurableObjectState with exports
+    // oxlint-disable-next-line no-explicit-any -- DurableObjectState.exports is untyped
     private ctx: { exports: any },
     private parentDOId: string
   ) {}

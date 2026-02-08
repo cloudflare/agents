@@ -67,6 +67,7 @@ function getLanguage(filename: string): string {
 // ── Streamdown renderer ───────────────────────────────────────────────
 
 function useStreamdown() {
+  // oxlint-disable-next-line no-explicit-any -- Streamdown plugin type mismatch
   const ref = useRef(new Streamdown({ plugins: [code() as any] }));
   return ref.current;
 }
