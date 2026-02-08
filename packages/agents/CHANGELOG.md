@@ -1,5 +1,21 @@
 # @cloudflare/agents
 
+## 0.4.0
+
+### Minor Changes
+
+- [#848](https://github.com/cloudflare/agents/pull/848) [`a167344`](https://github.com/cloudflare/agents/commit/a167344aab6960a51901886539c206a2c937bb1e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Upgrade MCP SDK to 1.26.0 to prevent cross-client response leakage. Updated examples for stateless MCP Servers create new `McpServer` instance per request instead of sharing a single instance. A guard is added in this version of the MCP SDK which will prevent connection to a Server instance that has already been connected to a transport. Developers will need to modify their code if they declare their `McpServer` instance as a global variable.
+
+### Patch Changes
+
+- [#855](https://github.com/cloudflare/agents/pull/855) [`271a3cf`](https://github.com/cloudflare/agents/commit/271a3cffd769d646b1d6498f5676662ced94cf27) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgent` and `AgentClient` crashing when using `basePath` routing. `PartySocket.reconnect()` requires `room` to be set, but `basePath` mode bypasses room-based URL construction. The fix provides `room` and `party` in socket options even when `basePath` is used, as a workaround pending a fix in partysocket.
+
+- [#865](https://github.com/cloudflare/agents/pull/865) [`c3211d0`](https://github.com/cloudflare/agents/commit/c3211d0b0cc36aa294c15569ae650d3afeab9926) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- Updated dependencies [[`21a7977`](https://github.com/cloudflare/agents/commit/21a79778f5150aecd890f55a164d397f70db681e), [`3de98a3`](https://github.com/cloudflare/agents/commit/3de98a398d55aeca51c7b845ed4c5d6051887d6d), [`c3211d0`](https://github.com/cloudflare/agents/commit/c3211d0b0cc36aa294c15569ae650d3afeab9926)]:
+  - @cloudflare/codemode@0.0.7
+  - @cloudflare/ai-chat@0.0.7
+
 ## 0.3.10
 
 ### Patch Changes
@@ -116,7 +132,7 @@ const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
   maxAge: 7 * 24 * 60 * 60, // Optional: 7 days (default: 30 days)
   onInvalidSignature: (email, reason) => {
     console.warn(`Invalid signature from ${email.from}: ${reason}`);
-  }
+  },
 });
 ```
 
@@ -126,7 +142,7 @@ const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
 await this.replyToEmail(email, {
   fromName: "My Agent",
   body: "Thanks!",
-  secret: this.env.EMAIL_SECRET // Signs headers for secure reply routing
+  secret: this.env.EMAIL_SECRET, // Signs headers for secure reply routing
 });
 ```
 
@@ -210,7 +226,7 @@ await this.scheduleEvery(300, "syncData", { source: "api" });
 ```typescript
 await agent.call("method", [args], {
   timeout: 5000,
-  stream: { onChunk, onDone, onError }
+  stream: { onChunk, onDone, onError },
 });
 ```
 
@@ -231,7 +247,7 @@ Options-based `addMcpServer()` overload for cleaner configuration:
 ```typescript
 await this.addMcpServer("server", url, {
   callbackHost: "https://my-worker.workers.dev",
-  transport: { headers: { Authorization: "Bearer ..." } }
+  transport: { headers: { Authorization: "Bearer ..." } },
 });
 ```
 
@@ -247,7 +263,7 @@ await this.addMcpServer("server", url, {
 ```typescript
 const agent = useAgent({
   basePath: "user",
-  onIdentity: (name, agentType) => console.log(`Connected to ${name}`)
+  onIdentity: (name, agentType) => console.log(`Connected to ${name}`),
 });
 ```
 
@@ -281,7 +297,7 @@ import { createAddressBasedEmailResolver, signAgentHeaders } from "agents";
 // After
 import {
   createAddressBasedEmailResolver,
-  signAgentHeaders
+  signAgentHeaders,
 } from "agents/email";
 ```
 
@@ -299,7 +315,7 @@ When using `scheduleSchema` with OpenAI models via the AI SDK, pass `providerOpt
 ```typescript
 await generateObject({
   // ... other options
-  providerOptions: { openai: { strictJsonSchema: false } }
+  providerOptions: { openai: { strictJsonSchema: false } },
 });
 ```
 
@@ -335,7 +351,7 @@ await generateObject({
       await this.reportProgress({
         step: "process",
         percent: 0.5,
-        message: "Halfway done"
+        message: "Halfway done",
       });
       this.broadcastToClients({ type: "update", taskId: params.taskId });
 
@@ -510,7 +526,7 @@ await generateObject({
   // New format (preferred, supports timeout)
   await agent.call("method", [args], {
     timeout: 5000,
-    stream: { onChunk, onDone, onError }
+    stream: { onChunk, onDone, onError },
   });
 
   // Legacy format (still fully supported for backward compatibility)
@@ -638,7 +654,7 @@ await generateObject({
   ```typescript
   // Awkward when you only need transport options
   await this.addMcpServer("server", url, undefined, undefined, {
-    transport: { headers: { Authorization: "Bearer ..." } }
+    transport: { headers: { Authorization: "Bearer ..." } },
   });
   ```
 
@@ -647,13 +663,13 @@ await generateObject({
   ```typescript
   // Clean options object
   await this.addMcpServer("server", url, {
-    transport: { headers: { Authorization: "Bearer ..." } }
+    transport: { headers: { Authorization: "Bearer ..." } },
   });
 
   // With callback host
   await this.addMcpServer("server", url, {
     callbackHost: "https://my-worker.workers.dev",
-    transport: { type: "sse" }
+    transport: { type: "sse" },
   });
   ```
 
@@ -683,7 +699,7 @@ await generateObject({
   // Client connects to /user instead of /agents/user-agent/...
   const agent = useAgent({
     agent: "UserAgent",
-    basePath: "user"
+    basePath: "user",
   });
   ```
 
@@ -704,7 +720,7 @@ await generateObject({
         (await routeAgentRequest(request, env)) ??
         new Response("Not found", { status: 404 })
       );
-    }
+    },
   };
   ```
 
@@ -720,7 +736,7 @@ await generateObject({
     basePath: "user",
     onIdentity: (name, agentType) => {
       console.log(`Connected to ${agentType} instance: ${name}`);
-    }
+    },
   });
   ```
 
@@ -747,7 +763,7 @@ await generateObject({
     basePath: "user",
     onIdentityChange: (oldName, newName, oldAgent, newAgent) => {
       console.log(`Session changed: ${oldName} → ${newName}`);
-    }
+    },
   });
   ```
 
@@ -795,7 +811,7 @@ await generateObject({
   // After
   import {
     createAddressBasedEmailResolver,
-    signAgentHeaders
+    signAgentHeaders,
   } from "agents/email";
   ```
 
@@ -822,7 +838,7 @@ await generateObject({
       // Optional: log failures for debugging
       // reason: "missing_headers" | "expired" | "invalid" | "malformed_timestamp"
       console.warn(`Invalid signature from ${email.from}: ${reason}`);
-    }
+    },
   });
   ```
 
@@ -839,7 +855,7 @@ await generateObject({
   await this.replyToEmail(email, {
     fromName: "My Agent",
     body: "Thanks!",
-    secret: this.env.EMAIL_SECRET // Signs headers for secure reply routing
+    secret: this.env.EMAIL_SECRET, // Signs headers for secure reply routing
   });
   ```
 
@@ -852,7 +868,7 @@ await generateObject({
     resolver,
     onNoRoute: (email) => {
       email.setReject("Unknown recipient");
-    }
+    },
   });
   ```
 
@@ -2136,7 +2152,7 @@ await generateObject({
     initialState = {
       counter: 0,
       text: "",
-      color: "#3B82F6"
+      color: "#3B82F6",
     };
 
     doSomething() {
@@ -2153,7 +2169,7 @@ await generateObject({
     agent: "my-agent",
     onStateUpdate: (state) => {
       setState(state);
-    }
+    },
   });
   ```
 
