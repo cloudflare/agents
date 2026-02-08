@@ -1,0 +1,2 @@
+# GitHub webhook secret - set this to the same value you configure in GitHub
+GITHUB_WEBHOOK_SECRET=your-webhook-secret-here

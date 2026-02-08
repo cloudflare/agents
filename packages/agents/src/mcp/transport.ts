@@ -2,18 +2,25 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   type MessageExtraInfo,
   type RequestInfo,
-  isJSONRPCError,
+  isJSONRPCErrorResponse,
   isJSONRPCRequest,
-  isJSONRPCResponse,
+  isJSONRPCResultResponse,
   type JSONRPCMessage,
   JSONRPCMessageSchema,
   type RequestId
 } from "@modelcontextprotocol/sdk/types.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type {
+  EventStore,
+  StreamId,
+  EventId
+} from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { getCurrentAgent, type Connection } from "..";
 import type { McpAgent } from ".";
-import { MessageType } from "../ai-types";
+import { MessageType } from "../types";
 import { MCP_HTTP_METHOD_HEADER, MCP_MESSAGE_HEADER } from "./utils";
+
+export type { EventStore, StreamId, EventId };
 
 export class McpSSETransport implements Transport {
   sessionId: string;
@@ -63,32 +70,6 @@ export class McpSSETransport implements Transport {
   }
 }
 
-export type StreamId = string;
-export type EventId = string;
-
-// TODO: Implement this and make it opt-in?
-/**
- * Interface for resumability support via event storage
- */
-export interface EventStore {
-  /**
-   * Stores an event for later retrieval
-   * @param streamId ID of the stream the event belongs to
-   * @param message The JSON-RPC message to store
-   * @returns The generated event ID for the stored event
-   */
-  storeEvent(streamId: StreamId, message: JSONRPCMessage): Promise<EventId>;
-
-  replayEventsAfter(
-    lastEventId: EventId,
-    {
-      send
-    }: {
-      send: (eventId: EventId, message: JSONRPCMessage) => Promise<void>;
-    }
-  ): Promise<StreamId>;
-}
-
 /**
  * Configuration options for StreamableHTTPServerTransport
  */
@@ -122,6 +103,16 @@ export class StreamableHTTPServerTransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage, extra?: MessageExtraInfo) => void;
+
+  /**
+   * Optional message interceptor that can intercept messages before they are passed to onmessage.
+   * If the interceptor returns true, the message is considered handled and won't be forwarded.
+   * This is used by McpAgent to intercept elicitation responses.
+   */
+  messageInterceptor?: (
+    message: JSONRPCMessage,
+    extra?: MessageExtraInfo
+  ) => Promise<boolean>;
 
   constructor(options: StreamableHTTPServerTransportOptions) {
     const { agent } = getCurrentAgent<McpAgent>();
@@ -253,6 +244,16 @@ export class StreamableHTTPServerTransport implements Transport {
     if (!hasRequests) {
       // We process without sending anything
       for (const message of messages) {
+        // check if message should be intercepted (i.e. elicitation responses)
+        if (this.messageInterceptor) {
+          const handled = await this.messageInterceptor(message, {
+            authInfo,
+            requestInfo
+          });
+          if (handled) {
+            continue; // msg was handled by interceptor, skip onmessage
+          }
+        }
         this.onmessage?.(message, { authInfo, requestInfo });
       }
     } else if (hasRequests) {
@@ -271,6 +272,15 @@ export class StreamableHTTPServerTransport implements Transport {
 
       // handle each message
       for (const message of messages) {
+        if (this.messageInterceptor) {
+          const handled = await this.messageInterceptor(message, {
+            authInfo,
+            requestInfo
+          });
+          if (handled) {
+            continue; // Message was handled by interceptor, skip onmessage
+          }
+        }
         this.onmessage?.(message, { authInfo, requestInfo });
       }
       // The server SHOULD NOT close the SSE stream before sending all JSON-RPC responses
@@ -297,7 +307,7 @@ export class StreamableHTTPServerTransport implements Transport {
     if (!agent) throw new Error("Agent was not found in send");
 
     let requestId = options?.relatedRequestId;
-    if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       // If the message is a response, use the request ID from the message
       requestId = message.id;
     }
@@ -307,7 +317,7 @@ export class StreamableHTTPServerTransport implements Transport {
     // Those will be sent via dedicated response SSE streams
     if (requestId === undefined) {
       // For standalone SSE streams, we can only send requests and notifications
-      if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
+      if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
         throw new Error(
           "Cannot send a response on a standalone SSE stream unless resuming a previous client request"
         );
@@ -356,7 +366,7 @@ export class StreamableHTTPServerTransport implements Transport {
 
     let shouldClose = false;
 
-    if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       this._requestResponseMap.set(requestId, message);
       const relatedIds = connection.state?.requestIds ?? [];
       // Check if we have responses for all requests using this connection

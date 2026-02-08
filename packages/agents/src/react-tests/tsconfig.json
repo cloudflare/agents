@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "types": [
+      "node",
+      "@vitest/browser/providers/playwright",
+      "@cloudflare/workers-types"
+    ]
+  },
+  "extends": "../../../../tsconfig.base.json",
+  "include": ["./**/*.ts", "./**/*.tsx"]
+}

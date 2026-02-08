@@ -2,7 +2,7 @@ import { routeAgentRequest, Agent, callable, type Connection } from "agents";
 
 import { getSchedulePrompt } from "agents/schedule";
 
-import { experimental_codemode as codemode } from "agents/codemode/ai";
+import { experimental_codemode as codemode } from "@cloudflare/codemode/ai";
 import {
   streamText,
   type UIMessage,
@@ -18,7 +18,7 @@ import { env } from "cloudflare:workers";
 
 // export this WorkerEntryPoint that lets you
 // reroute function calls back to a caller
-export { CodeModeProxy } from "agents/codemode/ai";
+export { CodeModeProxy } from "@cloudflare/codemode/ai";
 
 // inline this until enable_ctx_exports is supported by default
 declare global {
@@ -83,7 +83,7 @@ export class Codemode extends Agent<Env, State> {
     description: "Add an MCP server to the agent"
   })
   addMcp({ name, url }: { name: string; url: string }) {
-    void this.addMcpServer(name, url, "http://localhost:5173")
+    void this.addMcpServer(name, url, { callbackHost: "http://localhost:5173" })
       .then(() => {
         console.log("mcpServer added", name, url);
       })
@@ -132,6 +132,7 @@ export class Codemode extends Agent<Env, State> {
     this.tools = allTools;
 
     const { prompt, tools: wrappedTools } = await codemode({
+      model,
       prompt: `You are a helpful assistant that can do various tasks... 
 
 ${getSchedulePrompt({ date: new Date() })}
@@ -153,7 +154,7 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
     const result = streamText({
       system: prompt,
 
-      messages: convertToModelMessages(this.state.messages),
+      messages: await convertToModelMessages(this.state.messages),
       model,
       // tools: allTools,
       tools: wrappedTools,

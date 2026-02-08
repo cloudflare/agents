@@ -7,18 +7,15 @@ import {
 import * as z from "zod";
 import { Agent, getAgentByName } from "agents";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+import { env } from "cloudflare:workers";
 
 const STATE_KEY = "mcp_transport_state";
-
-type Env = {
-  MyAgent: DurableObjectNamespace<MyAgent>;
-};
 
 interface State {
   counter: number;
 }
 
-export class MyAgent extends Agent<Env, State> {
+export class MyAgent extends Agent<Cloudflare.Env, State> {
   server = new McpServer(
     {
       name: "test",
@@ -125,7 +122,7 @@ export class MyAgent extends Agent<Env, State> {
 }
 
 export default {
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
+  async fetch(request: Request) {
     const sessionId =
       request.headers.get("mcp-session-id") ?? crypto.randomUUID();
     const agent = await getAgentByName(env.MyAgent, sessionId);

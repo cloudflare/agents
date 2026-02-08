@@ -1,18 +1,8 @@
 import { openai } from "@ai-sdk/openai";
-import {
-  Agent,
-  type AgentNamespace,
-  callable,
-  routeAgentRequest
-} from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 
 import { generateObject } from "ai";
 import { z } from "zod";
-
-type Env = {
-  OPENAI_API_KEY: string;
-  TicTacToe: AgentNamespace<TicTacToe>;
-};
 
 type Player = "X" | "O";
 

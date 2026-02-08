@@ -1,4 +1,3 @@
-/** biome-ignore-all lint/a11y/noStaticElementInteractions: it's fine */
 import "./app.css";
 
 import { useAgent } from "agents/react";
@@ -84,6 +83,7 @@ function Toast({ toast, onClose }: { toast: Toast; onClose: () => void }) {
     <div className={`toast ${toast.type}`}>
       <span className="toast-icon">{getIcon(toast.type)}</span>
       <span className="toast-message">{toast.message}</span>
+      {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- toast close */}
       <span className="toast-close" onClick={onClose}>
         ✕
       </span>
@@ -550,6 +550,7 @@ export default function App() {
     <div className="container">
       <ToastContainer toasts={toasts} onClose={removeToast} />
       <header>
+        {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- theme toggle */}
         <div className="theme-toggle" onClick={toggleTheme}>
           <span className="theme-toggle-icon">
             {theme === "light" ? "🌞" : "🌙"}

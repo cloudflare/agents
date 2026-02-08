@@ -1,0 +1,22 @@
+diff --git a/node_modules/vitest-browser-react/dist/chunk-WWN7MBX6.js b/node_modules/vitest-browser-react/dist/chunk-WWN7MBX6.js
+index 61adcf7..b5d7645 100644
+--- a/node_modules/vitest-browser-react/dist/chunk-WWN7MBX6.js
++++ b/node_modules/vitest-browser-react/dist/chunk-WWN7MBX6.js
+@@ -3,6 +3,8 @@ import { debug, getElementLocatorSelectors } from "@vitest/browser/utils";
+ import React from "react";
+ import ReactDOMClient from "react-dom/client";
+ function act(cb) {
++  // This patch is needed to properly set up the act environment for react-tests. 
++  const originalIS_REACT_ACT_ENVIRONMENT = globalThis.IS_REACT_ACT_ENVIRONMENT;
+   const _act = React.act || React.unstable_act;
+   if (typeof _act !== "function") {
+     cb();
+@@ -12,7 +14,7 @@ function act(cb) {
+       _act(cb);
+     } finally {
+       ;
+-      globalThis.IS_REACT_ACT_ENVIRONMENT = false;
++      globalThis.IS_REACT_ACT_ENVIRONMENT = originalIS_REACT_ACT_ENVIRONMENT;
+     }
+   }
+ }

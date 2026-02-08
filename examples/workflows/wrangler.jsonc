@@ -1,0 +1,30 @@
+{
+  "name": "workflows-demo",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TaskAgent",
+        "class_name": "TaskAgent"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "task-processing-workflow",
+      "binding": "TASK_WORKFLOW",
+      "class_name": "TaskProcessingWorkflow"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TaskAgent"]
+    }
+  ]
+}

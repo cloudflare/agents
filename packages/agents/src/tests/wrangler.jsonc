@@ -1,5 +1,5 @@
 {
-  "compatibility_date": "2025-04-17",
+  "compatibility_date": "2026-01-28",
   "compatibility_flags": [
     "nodejs_compat",
     // adding these flags since the vitest runner needs them
@@ -28,10 +28,6 @@
       },
       { "class_name": "TestRaceAgent", "name": "TAG_AGENT" },
       {
-        "class_name": "TestChatAgent",
-        "name": "TestChatAgent"
-      },
-      {
         "class_name": "TestOAuthAgent",
         "name": "TestOAuthAgent"
       },
@@ -46,9 +42,57 @@
       {
         "class_name": "TestReadonlyAgent",
         "name": "TestReadonlyAgent"
+      },
+      {
+        "class_name": "TestScheduleAgent",
+        "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestWorkflowAgent",
+        "name": "TestWorkflowAgent"
+      },
+      {
+        "class_name": "TestAddMcpServerAgent",
+        "name": "TestAddMcpServerAgent"
+      },
+      {
+        "class_name": "TestStateAgent",
+        "name": "TestStateAgent"
+      },
+      {
+        "class_name": "TestStateAgentNoInitial",
+        "name": "TestStateAgentNoInitial"
+      },
+      {
+        "class_name": "TestThrowingStateAgent",
+        "name": "TestThrowingStateAgent"
+      },
+      {
+        "class_name": "TestNoIdentityAgent",
+        "name": "TestNoIdentityAgent"
+      },
+      {
+        "class_name": "TestCallableAgent",
+        "name": "TestCallableAgent"
+      },
+      {
+        "class_name": "TestChildAgent",
+        "name": "TestChildAgent"
       }
     ]
   },
+  "workflows": [
+    {
+      "name": "test-processing-workflow",
+      "binding": "TEST_WORKFLOW",
+      "class_name": "TestProcessingWorkflow"
+    },
+    {
+      "name": "simple-test-workflow",
+      "binding": "SIMPLE_WORKFLOW",
+      "class_name": "SimpleTestWorkflow"
+    }
+  ],
   "main": "worker.ts",
   "migrations": [
     {
@@ -58,11 +102,19 @@
         "TestCaseSensitiveAgent",
         "TestUserNotificationAgent",
         "TestRaceAgent",
-        "TestChatAgent",
         "TestOAuthAgent",
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
-        "TestReadonlyAgent"
+        "TestReadonlyAgent",
+        "TestScheduleAgent",
+        "TestWorkflowAgent",
+        "TestAddMcpServerAgent",
+        "TestStateAgent",
+        "TestStateAgentNoInitial",
+        "TestThrowingStateAgent",
+        "TestNoIdentityAgent",
+        "TestCallableAgent",
+        "TestChildAgent"
       ],
       "tag": "v1"
     }

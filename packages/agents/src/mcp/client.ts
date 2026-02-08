@@ -1,4 +1,5 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import escapeHtml from "escape-html";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
@@ -43,6 +44,13 @@ export type MCPServerOptions = {
     type?: TransportType;
   };
 };
+
+/**
+ * Result of an OAuth callback request
+ */
+export type MCPOAuthCallbackResult =
+  | { serverId: string; authSuccess: true; authError?: undefined }
+  | { serverId: string; authSuccess: false; authError: string };
 
 /**
  * Options for registering an MCP server
@@ -185,6 +193,19 @@ export class MCPClientManager {
       "UPDATE cf_agents_mcp_servers SET auth_url = NULL WHERE id = ?",
       serverId
     );
+  }
+
+  private failConnection(
+    serverId: string,
+    error: string
+  ): MCPOAuthCallbackResult {
+    this.clearServerAuthUrl(serverId);
+    if (this.mcpConnections[serverId]) {
+      this.mcpConnections[serverId].connectionState = MCPConnectionState.FAILED;
+      this.mcpConnections[serverId].connectionError = error;
+    }
+    this._onServerStateChanged.fire();
+    return { serverId, authSuccess: false, authError: error };
   }
 
   jsonSchema: typeof import("ai").jsonSchema | undefined;
@@ -615,6 +636,8 @@ export class MCPClientManager {
             auth_url: authUrl,
             client_id: clientId ?? null
           });
+          // Broadcast again so clients receive the auth_url
+          this._onServerStateChanged.fire();
         }
 
         return {
@@ -635,125 +658,118 @@ export class MCPClientManager {
     }
   }
 
+  private extractServerIdFromState(state: string | null): string | null {
+    if (!state) return null;
+    const parts = state.split(".");
+    return parts.length === 2 ? parts[1] : null;
+  }
+
   isCallbackRequest(req: Request): boolean {
     if (req.method !== "GET") {
       return false;
     }
 
-    // Quick heuristic check: most callback URLs contain "/callback"
-    // This avoids DB queries for obviously non-callback requests
     if (!req.url.includes("/callback")) {
       return false;
     }
 
-    // Check database for matching callback URL
-    const servers = this.getServersFromStorage();
-    return servers.some(
-      (server) => server.callback_url && req.url.startsWith(server.callback_url)
-    );
-  }
-
-  async handleCallbackRequest(req: Request) {
     const url = new URL(req.url);
-
-    // Find the matching server from database
-    const servers = this.getServersFromStorage();
-    const matchingServer = servers.find((server: MCPServerRow) => {
-      return server.callback_url && req.url.startsWith(server.callback_url);
-    });
-
-    if (!matchingServer) {
-      throw new Error(
-        `No callback URI match found for the request url: ${req.url}. Was the request matched with \`isCallbackRequest()\`?`
-      );
+    const state = url.searchParams.get("state");
+    const serverId = this.extractServerIdFromState(state);
+    if (!serverId) {
+      return false;
     }
 
-    const serverId = matchingServer.id;
+    const servers = this.getServersFromStorage();
+    return servers.some((server) => server.id === serverId);
+  }
+
+  async handleCallbackRequest(req: Request): Promise<MCPOAuthCallbackResult> {
+    const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     const error = url.searchParams.get("error");
     const errorDescription = url.searchParams.get("error_description");
 
-    // Handle OAuth error responses from the provider
-    if (error) {
-      return {
-        serverId,
-        authSuccess: false,
-        authError: errorDescription || error
-      };
-    }
-
-    if (!code) {
-      throw new Error("Unauthorized: no code provided");
-    }
+    // Early validation - these throw because we can't identify the connection
     if (!state) {
       throw new Error("Unauthorized: no state provided");
+    }
+
+    const serverId = this.extractServerIdFromState(state);
+    if (!serverId) {
+      throw new Error(
+        "No serverId found in state parameter. Expected format: {nonce}.{serverId}"
+      );
+    }
+
+    const servers = this.getServersFromStorage();
+    const serverExists = servers.some((server) => server.id === serverId);
+    if (!serverExists) {
+      throw new Error(
+        `No server found with id "${serverId}". Was the request matched with \`isCallbackRequest()\`?`
+      );
     }
 
     if (this.mcpConnections[serverId] === undefined) {
       throw new Error(`Could not find serverId: ${serverId}`);
     }
 
-    // If connection is already ready/connected, this is likely a duplicate callback
-    if (
-      this.mcpConnections[serverId].connectionState ===
-        MCPConnectionState.READY ||
-      this.mcpConnections[serverId].connectionState ===
-        MCPConnectionState.CONNECTED
-    ) {
-      // make sure auth_url is cleared
-      this.clearServerAuthUrl(serverId);
-
-      // Already authenticated and ready, treat as success
-      return {
-        serverId,
-        authSuccess: true
-      };
-    }
-
-    if (
-      this.mcpConnections[serverId].connectionState !==
-      MCPConnectionState.AUTHENTICATING
-    ) {
-      throw new Error(
-        `Failed to authenticate: the client is in "${this.mcpConnections[serverId].connectionState}" state, expected "authenticating"`
-      );
-    }
-
+    // We have a valid connection - all errors from here should fail the connection
     const conn = this.mcpConnections[serverId];
-    if (!conn.options.transport.authProvider) {
-      throw new Error(
-        "Trying to finalize authentication for a server connection without an authProvider"
-      );
-    }
-
-    // Get clientId from auth provider (stored during redirectToAuthorization) or fallback to state for backward compatibility
-    const clientId = conn.options.transport.authProvider.clientId || state;
-
-    // Set the OAuth credentials
-    conn.options.transport.authProvider.clientId = clientId;
-    conn.options.transport.authProvider.serverId = serverId;
 
     try {
+      if (!conn.options.transport.authProvider) {
+        throw new Error(
+          "Trying to finalize authentication for a server connection without an authProvider"
+        );
+      }
+
+      const authProvider = conn.options.transport.authProvider;
+      authProvider.serverId = serverId;
+
+      // Two-phase state validation: check first (non-destructive), consume later
+      // This prevents DoS attacks where attacker consumes valid state before legitimate callback
+      const stateValidation = await authProvider.checkState(state);
+      if (!stateValidation.valid) {
+        throw new Error(stateValidation.error || "Invalid state");
+      }
+
+      if (error) {
+        // Escape external OAuth error params to prevent XSS
+        throw new Error(escapeHtml(errorDescription || error));
+      }
+
+      if (!code) {
+        throw new Error("Unauthorized: no code provided");
+      }
+
+      // Already authenticated - just return success
+      if (
+        conn.connectionState === MCPConnectionState.READY ||
+        conn.connectionState === MCPConnectionState.CONNECTED
+      ) {
+        this.clearServerAuthUrl(serverId);
+        return { serverId, authSuccess: true };
+      }
+
+      if (conn.connectionState !== MCPConnectionState.AUTHENTICATING) {
+        throw new Error(
+          `Failed to authenticate: the client is in "${conn.connectionState}" state, expected "authenticating"`
+        );
+      }
+
+      await authProvider.consumeState(state);
       await conn.completeAuthorization(code);
+      await authProvider.deleteCodeVerifier();
       this.clearServerAuthUrl(serverId);
+      conn.connectionError = null;
       this._onServerStateChanged.fire();
 
-      return {
-        serverId,
-        authSuccess: true
-      };
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-
-      this._onServerStateChanged.fire();
-
-      return {
-        serverId,
-        authSuccess: false,
-        authError: errorMessage
-      };
+      return { serverId, authSuccess: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return this.failConnection(serverId, message);
     }
   }
 
@@ -927,8 +943,15 @@ export class MCPClientManager {
                 serverId: tool.serverId
               });
               if (result.isError) {
-                // @ts-expect-error TODO we should fix this
-                throw new Error(result.content[0].text);
+                const content = result.content as
+                  | Array<{ type: string; text?: string }>
+                  | undefined;
+                const textContent = content?.[0];
+                const message =
+                  textContent?.type === "text" && textContent.text
+                    ? textContent.text
+                    : "Tool call failed";
+                throw new Error(message);
               }
               return result;
             },

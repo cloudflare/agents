@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CaretDownIcon } from "@phosphor-icons/react";
 
 interface ToolCallCardProps {
   part: {
@@ -14,35 +15,25 @@ export const ToolCallCard = ({ part }: ToolCallCardProps) => {
   const toolName = part.type.replace("tool-", "");
 
   return (
-    <div className="bg-orange-50 rounded-lg p-3 border border-orange-200">
+    <div className="bg-orange-500/10 rounded-lg p-3 border border-orange-500/20">
       <button
         type="button"
         onClick={() => setIsExpanded(!isExpanded)}
         className="w-full flex items-center gap-2 cursor-pointer"
       >
         <div className="w-2 h-2 rounded-full bg-orange-400" />
-        <span className="font-semibold text-sm text-orange-900">
+        <span className="font-semibold text-sm text-kumo-default">
           {toolName}
         </span>
         {part.state === "output-available" && (
-          <span className="text-xs text-orange-600">✓ Completed</span>
+          <span className="text-xs text-kumo-success">✓ Completed</span>
         )}
-        <svg
-          className={`ml-auto w-4 h-4 text-gray-600 transition-transform ${
+        <CaretDownIcon
+          size={16}
+          className={`ml-auto text-kumo-secondary transition-transform ${
             isExpanded ? "rotate-180" : ""
           }`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <title>Expand/collapse</title>
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M19 9l-7 7-7-7"
-          />
-        </svg>
+        />
       </button>
 
       <div
@@ -51,19 +42,19 @@ export const ToolCallCard = ({ part }: ToolCallCardProps) => {
         }`}
       >
         <div className="mb-2">
-          <div className="text-xs font-medium text-gray-600 mb-1">
+          <div className="text-xs font-medium text-kumo-secondary mb-1">
             Arguments:
           </div>
-          <pre className="bg-white rounded p-2 text-xs overflow-auto max-h-32">
+          <pre className="bg-kumo-control rounded p-2 text-xs overflow-auto max-h-32 text-kumo-default">
             {JSON.stringify(part.input, null, 2)}
           </pre>
         </div>
         {part.state === "output-available" && (
           <div>
-            <div className="text-xs font-medium text-gray-600 mb-1">
+            <div className="text-xs font-medium text-kumo-secondary mb-1">
               Result:
             </div>
-            <pre className="bg-white rounded p-2 text-xs overflow-auto max-h-32 whitespace-pre-wrap">
+            <pre className="bg-kumo-control rounded p-2 text-xs overflow-auto max-h-32 whitespace-pre-wrap text-kumo-default">
               {typeof part.output === "string"
                 ? part.output
                 : JSON.stringify(part.output, null, 2)}

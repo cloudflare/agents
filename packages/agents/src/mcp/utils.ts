@@ -3,13 +3,13 @@ import {
   type JSONRPCMessage,
   type MessageExtraInfo,
   InitializeRequestSchema,
-  isJSONRPCResponse,
+  isJSONRPCResultResponse,
   isJSONRPCNotification
 } from "@modelcontextprotocol/sdk/types.js";
 import type { McpAgent } from ".";
 import { getAgentByName } from "..";
 import type { CORSOptions } from "./types";
-import { MessageType } from "../ai-types";
+import { MessageType } from "../types";
 
 /**
  * Since we use WebSockets to bridge the client to the
@@ -314,7 +314,7 @@ export const createStreamingHttpHandler = (
         // If there are no requests, we send the messages to the agent and acknowledge the request with a 202
         // since we don't expect any responses back through this connection
         const hasOnlyNotificationsOrResponses = messages.every(
-          (msg) => isJSONRPCNotification(msg) || isJSONRPCResponse(msg)
+          (msg) => isJSONRPCNotification(msg) || isJSONRPCResultResponse(msg)
         );
         if (hasOnlyNotificationsOrResponses) {
           // closing the websocket will also close the SSE connection

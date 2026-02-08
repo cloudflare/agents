@@ -1,6 +1,63 @@
+@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "@cloudflare/agents-ui/theme/workers.css";
 
 @source "../../../node_modules/streamdown/dist/index.js";
+
+/* ── Streamdown ↔ Workers theme bridge ──
+   Streamdown uses shadcn-style Tailwind v4 color tokens (--color-*).
+   Scope them to .sd-theme so they don't leak into the rest of the app. */
+.sd-theme {
+  --color-primary: light-dark(#e07315, #f6821f);
+  --color-primary-foreground: light-dark(#ffffff, #ffffff);
+  --color-foreground: light-dark(#111827, #e8eaed);
+  --color-background: light-dark(#ffffff, #08090d);
+  --color-muted: light-dark(#f0f2f5, #1c1f28);
+  --color-muted-foreground: light-dark(#6b7280, #9aa0ab);
+  --color-border: light-dark(#e2e5eb, #2c3040);
+
+  /* Ensure long text wraps instead of overflowing */
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* ── Flatten Streamdown code blocks ──
+   Strip the panel wrapper, header bar, and buttons. */
+
+/* Outer wrapper div (has rounded-xl border p-4) — nuke the chrome */
+.sd-theme .rounded-xl:has(pre) {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0.5rem 0;
+  background: none;
+}
+
+/* Header bar placeholder inside the wrapper */
+.sd-theme .rounded-xl:has(pre) > :not(:has(pre)):not(pre) {
+  display: none !important;
+}
+
+/* The pre itself */
+.sd-theme pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  background: var(--color-muted);
+  border-radius: 0.375rem;
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  border: none;
+  margin: 0;
+}
+
+.sd-theme pre code {
+  all: unset;
+  font: inherit;
+}
 
 html,
 body,
@@ -10,21 +67,40 @@ body,
   margin: 0;
 }
 
-.bg-ai {
-  background-image: linear-gradient(75deg, #901475, #ce2f55, #ff6633);
-}
-
-.bg-ai-loop {
-  background-image: linear-gradient(
-    75deg,
-    #901475,
-    #ce2f55,
-    #ff6633,
-    #ce2f55,
-    #901475
-  );
-}
-
 button {
   cursor: pointer;
+}
+
+/* ── AI brand gradient (preserve across migration) ── */
+@layer components {
+  .bg-ai {
+    background-image: linear-gradient(75deg, #901475, #ce2f55, #ff6633);
+  }
+
+  .bg-ai-loop {
+    background-image: linear-gradient(
+      75deg,
+      #901475,
+      #ce2f55,
+      #ff6633,
+      #ce2f55,
+      #901475
+    );
+  }
+}
+
+/* ── Gradient animation for Run / Add buttons ── */
+@keyframes gradient-background {
+  0% {
+    background-position: 0% 0%;
+  }
+  100% {
+    background-position: 200% 0%;
+  }
+}
+
+@layer utilities {
+  .animate-gradient-background {
+    animation: gradient-background 3s linear infinite;
+  }
 }

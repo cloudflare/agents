@@ -71,8 +71,7 @@ const getsDetail = createScorer<string, Schedule>({
 const getsDescription = createScorer<string, Schedule>({
   description: "Checks if the output is the right description",
   name: "getsDescription",
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: tests
-  scorer: ({ input, output, expected }) => {
+  scorer: ({ input: _input, output, expected }) => {
     return output.description.toLowerCase() ===
       expected?.description.toLowerCase()
       ? 1
@@ -330,6 +329,9 @@ evalite<string, Schedule>("Evals for scheduling", {
       const result = await generateObject({
         maxRetries: 5,
         model, // <- the shape of the object that the scheduler expects
+        providerOptions: {
+          openai: { strictJsonSchema: false }
+        },
         prompt: `${getSchedulePrompt({ date: new Date() })}
       
 Input to parse: "${input}"`,

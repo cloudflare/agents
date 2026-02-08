@@ -9,5 +9,8 @@
     "start": "concurrently \"vite dev\" \"wrangler dev\" --kill-others"
   },
   "type": "module",
-  "version": "0.0.0"
+  "version": "0.0.0",
+  "dependencies": {
+    "agents": "*"
+  }
 }

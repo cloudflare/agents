@@ -1,88 +1,119 @@
 import "./styles.css";
-import { nanoid } from "nanoid";
-import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import Chat from "./components/Chat";
-import RPC from "./components/RPC";
-import { Scheduler } from "./components/Scheduler";
-import { Stateful } from "./components/Stateful";
+import { forwardRef } from "react";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  Link as RouterLink
+} from "react-router-dom";
+import { LinkProvider, type LinkComponentProps } from "@cloudflare/kumo";
+import { ThemeProvider } from "./hooks/useTheme";
 
-interface Toast {
-  id: string;
-  message: string;
-  type: "success" | "error" | "info";
-}
+/**
+ * Adapter between Kumo's LinkProvider (to?: string) and React Router's Link (to: To).
+ * Falls back to a plain <a> when `to` is not provided.
+ */
+const AppLink = forwardRef<HTMLAnchorElement, LinkComponentProps>(
+  ({ to, ...props }, ref) => {
+    if (to) {
+      return <RouterLink ref={ref} to={to} {...props} />;
+    }
+    // oxlint-disable-next-line jsx-a11y/anchor-has-content -- content comes from spread props
+    return <a ref={ref} {...props} />;
+  }
+);
+import { Layout } from "./layout";
+import { Home } from "./pages/Home";
 
-function Toast({
-  message,
-  type,
-  onClose
-}: {
-  message: string;
-  type: "success" | "error" | "info";
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      onClose();
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
+// Core demos
+import { StateDemo } from "./demos/core/StateDemo";
+import { CallableDemo } from "./demos/core/CallableDemo";
+import { StreamingDemo } from "./demos/core/StreamingDemo";
+import { ScheduleDemo } from "./demos/core/ScheduleDemo";
+import { ConnectionsDemo } from "./demos/core/ConnectionsDemo";
+import { SqlDemo } from "./demos/core/SqlDemo";
+import { RoutingDemo } from "./demos/core/RoutingDemo";
 
-  return <div className={`toast toast-${type}`}>{message}</div>;
-}
+// AI demos
+import { ChatDemo } from "./demos/ai/ChatDemo";
+import { ToolsDemo } from "./demos/ai/ToolsDemo";
+
+// MCP demos
+import { McpServerDemo } from "./demos/mcp/ServerDemo";
+import { McpClientDemo } from "./demos/mcp/ClientDemo";
+import { McpOAuthDemo } from "./demos/mcp/OAuthDemo";
+
+// Workflow demos
+import { WorkflowBasicDemo } from "./demos/workflow/BasicDemo";
+import { WorkflowApprovalDemo } from "./demos/workflow/ApprovalDemo";
+
+// Email demos
+import { ReceiveDemo, SecureDemo } from "./demos/email";
+
+// Multi-Agent demos
+import {
+  SupervisorDemo,
+  ChatRoomsDemo,
+  WorkersDemo,
+  PipelineDemo
+} from "./demos/multi-agent";
 
 function App() {
-  const [toasts, setToasts] = useState<Toast[]>([]);
-
-  const addToast = (
-    message: string,
-    type: "success" | "error" | "info" = "success"
-  ) => {
-    const newToast: Toast = {
-      id: nanoid(8),
-      message,
-      type
-    };
-    setToasts((prev) => [...prev, newToast]);
-  };
-
-  const removeToast = (id: string) => {
-    setToasts((prev) => prev.filter((toast) => toast.id !== id));
-  };
-
   return (
-    <div className="container">
-      <div className="toasts-container">
-        {toasts.map((toast) => (
-          <Toast
-            key={toast.id}
-            message={toast.message}
-            type={toast.type}
-            onClose={() => removeToast(toast.id)}
-          />
-        ))}
-      </div>
+    <ThemeProvider>
+      <LinkProvider component={AppLink}>
+        <BrowserRouter>
+          <Routes>
+            <Route path="/" element={<Layout />}>
+              <Route index element={<Home />} />
 
-      <div className="grid grid-cols-2 gap-8">
-        <div className="col-span-1">
-          <h2 className="text-xl font-bold mb-4">Scheduler</h2>
-          <Scheduler addToast={addToast} />
-        </div>
-        <div className="col-span-1">
-          <h2 className="text-xl font-bold mb-4">State Sync Demo</h2>
-          <Stateful addToast={addToast} />
-        </div>
-        <div className="col-span-1">
-          <h2 className="text-xl font-bold mb-4">Chat</h2>
-          <Chat />
-        </div>
-        <div className="col-span-1">
-          <h2 className="text-xl font-bold mb-4">RPC Demo</h2>
-          <RPC addToast={addToast} />
-        </div>
-      </div>
-    </div>
+              {/* Core */}
+              <Route path="core/state" element={<StateDemo />} />
+              <Route path="core/callable" element={<CallableDemo />} />
+              <Route path="core/streaming" element={<StreamingDemo />} />
+              <Route path="core/schedule" element={<ScheduleDemo />} />
+              <Route path="core/connections" element={<ConnectionsDemo />} />
+              <Route path="core/sql" element={<SqlDemo />} />
+              <Route path="core/routing" element={<RoutingDemo />} />
+
+              {/* AI */}
+              <Route path="ai/chat" element={<ChatDemo />} />
+              <Route path="ai/tools" element={<ToolsDemo />} />
+
+              {/* MCP */}
+              <Route path="mcp/server" element={<McpServerDemo />} />
+              <Route path="mcp/client" element={<McpClientDemo />} />
+              <Route path="mcp/oauth" element={<McpOAuthDemo />} />
+
+              {/* Workflow */}
+              <Route path="workflow/basic" element={<WorkflowBasicDemo />} />
+              <Route
+                path="workflow/approval"
+                element={<WorkflowApprovalDemo />}
+              />
+
+              {/* Multi-Agent */}
+              <Route
+                path="multi-agent/supervisor"
+                element={<SupervisorDemo />}
+              />
+              <Route path="multi-agent/rooms" element={<ChatRoomsDemo />} />
+              <Route path="multi-agent/workers" element={<WorkersDemo />} />
+              <Route path="multi-agent/pipeline" element={<PipelineDemo />} />
+
+              {/* Email */}
+              <Route path="email/receive" element={<ReceiveDemo />} />
+              <Route path="email/secure" element={<SecureDemo />} />
+
+              {/* Fallback */}
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </LinkProvider>
+    </ThemeProvider>
   );
 }
 

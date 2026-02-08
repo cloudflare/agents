@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.2.25",
+  "version": "0.3.10",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -17,45 +17,60 @@
     "url": "git+https://github.com/cloudflare/agents.git"
   },
   "bin": {
-    "agents": "dist/cli.js"
+    "agents": "dist/cli/index.js"
   },
   "author": "Cloudflare Inc.",
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.73",
     "@cfworker/json-schema": "^4.1.1",
-    "@modelcontextprotocol/sdk": "^1.23.0",
-    "ai": "5.0.103",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "cron-schedule": "^6.0.0",
+    "escape-html": "^1.0.3",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
-    "mimetext": "^3.0.27",
+    "mimetext": "^3.0.28",
     "nanoid": "^5.1.6",
-    "partyserver": "^0.0.75",
-    "partysocket": "1.1.6",
-    "yargs": "^18.0.0",
-    "zod": "^3.25.76",
-    "zod-to-ts": "^2.0.0"
+    "partyserver": "^0.1.2",
+    "partysocket": "1.1.11",
+    "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.1.0",
+    "@ai-sdk/openai": "^3.0.26",
+    "@ai-sdk/react": "^3.0.79",
+    "@cloudflare/workers-oauth-provider": "^0.2.2",
+    "@types/escape-html": "^1.0.4",
+    "@types/react": "^19.2.13",
     "@types/yargs": "^17.0.35",
-    "react": "*",
+    "ai": "^6.0.77",
+    "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
-    "x402": "^0.7.3"
+    "x402": "^1.1.0",
+    "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "react": "*",
+    "@ai-sdk/openai": "^3.0.0",
+    "@ai-sdk/react": "^3.0.0",
+    "@cloudflare/ai-chat": "^0.0.6",
+    "@cloudflare/codemode": "^0.0.6",
+    "ai": "^6.0.0",
+    "react": "^19.0.0",
     "viem": ">=2.0.0",
-    "x402": "^0.7.1"
+    "x402": "^0.7.1",
+    "zod": "^3.25.0 || ^4.0.0"
   },
   "peerDependenciesMeta": {
-    "x402": {
+    "@ai-sdk/openai": {
+      "optional": true
+    },
+    "@ai-sdk/react": {
       "optional": true
     },
     "viem": {
+      "optional": true
+    },
+    "x402": {
       "optional": true
     }
   },
@@ -66,25 +81,10 @@
       "import": "./dist/index.js",
       "require": "./dist/index.js"
     },
-    "./ai-chat-agent": {
-      "types": "./dist/ai-chat-agent.d.ts",
-      "import": "./dist/ai-chat-agent.js",
-      "require": "./dist/ai-chat-agent.js"
-    },
-    "./ai-chat-v5-migration": {
-      "types": "./dist/ai-chat-v5-migration.d.ts",
-      "import": "./dist/ai-chat-v5-migration.js",
-      "require": "./dist/ai-chat-v5-migration.js"
-    },
-    "./ai-react": {
-      "types": "./dist/ai-react.d.ts",
-      "import": "./dist/ai-react.js",
-      "require": "./dist/ai-react.js"
-    },
-    "./ai-types": {
-      "types": "./dist/ai-types.d.ts",
-      "import": "./dist/ai-types.js",
-      "require": "./dist/ai-types.js"
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "require": "./dist/types.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
@@ -126,10 +126,45 @@
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./workflows": {
+      "types": "./dist/workflows.d.ts",
+      "import": "./dist/workflows.js",
+      "require": "./dist/workflows.js"
+    },
+    "./internal_context": {
+      "types": "./dist/internal_context.d.ts",
+      "import": "./dist/internal_context.js",
+      "require": "./dist/internal_context.js"
+    },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",
       "require": "./dist/mcp/x402.js"
+    },
+    "./ai-chat-agent": {
+      "types": "./dist/ai-chat-agent.d.ts",
+      "import": "./dist/ai-chat-agent.js",
+      "require": "./dist/ai-chat-agent.js"
+    },
+    "./ai-chat-v5-migration": {
+      "types": "./dist/ai-chat-v5-migration.d.ts",
+      "import": "./dist/ai-chat-v5-migration.js",
+      "require": "./dist/ai-chat-v5-migration.js"
+    },
+    "./ai-react": {
+      "types": "./dist/ai-react.d.ts",
+      "import": "./dist/ai-react.js",
+      "require": "./dist/ai-react.js"
+    },
+    "./ai-types": {
+      "types": "./dist/ai-types.d.ts",
+      "import": "./dist/ai-types.js",
+      "require": "./dist/ai-types.js"
+    },
+    "./email": {
+      "types": "./dist/email.d.ts",
+      "import": "./dist/email.js",
+      "require": "./dist/email.js"
     }
   },
   "publishConfig": {

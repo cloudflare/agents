@@ -1,12 +1,7 @@
 {
-  "assets": {
-    "directory": "public"
-  },
-  "compatibility_date": "2025-03-14",
-  "compatibility_flags": [
-    "nodejs_compat",
-    "nodejs_compat_populate_process_env"
-  ],
+  "assets": {},
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {

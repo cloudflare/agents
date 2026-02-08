@@ -1,5 +1,5 @@
 /**
- * Based on @hono/mcp transport implementation (https://github.com/honojs/middleware/tree/main/packages/mcp)
+ * Based on webStandardStreamableHttp.ts (https://github.com/modelcontextprotocol/typescript-sdk/blob/main/packages/server/src/server/webStandardStreamableHttp.ts)
  */
 
 import type {
@@ -9,24 +9,26 @@ import type {
 import type {
   JSONRPCMessage,
   RequestId,
-  InitializeRequest,
   RequestInfo,
-  MessageExtraInfo
+  MessageExtraInfo,
+  InitializeRequestParams
 } from "@modelcontextprotocol/sdk/types.js";
 import {
   isInitializeRequest,
-  isJSONRPCError,
+  isJSONRPCErrorResponse,
   isJSONRPCRequest,
-  isJSONRPCResponse,
-  JSONRPCMessageSchema
+  isJSONRPCResultResponse,
+  JSONRPCMessageSchema,
+  SUPPORTED_PROTOCOL_VERSIONS
 } from "@modelcontextprotocol/sdk/types.js";
 import type { CORSOptions } from "./types";
+import type {
+  EventStore,
+  EventId
+} from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-const SUPPORTED_PROTOCOL_VERSIONS = ["2025-03-26", "2025-06-18"] as const;
-const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
 const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
-
-type ProtocolVersion = (typeof SUPPORTED_PROTOCOL_VERSIONS)[number];
+const RESTORE_REQUEST_ID = "__restore__";
 
 interface StreamMapping {
   writer?: WritableStreamDefaultWriter<Uint8Array>;
@@ -43,16 +45,28 @@ export interface MCPStorageApi {
 export interface TransportState {
   sessionId?: string;
   initialized: boolean;
-  protocolVersion?: ProtocolVersion;
+  initializeParams?: InitializeRequestParams;
 }
 
 export interface WorkerTransportOptions {
+  /**
+   * Function that generates a session ID for the transport.
+   * The session ID SHOULD be globally unique and cryptographically secure.
+   * Return undefined to disable session management (stateless mode).
+   */
   sessionIdGenerator?: () => string;
   /**
    * Enable traditional Request/Response mode, this will disable streaming.
    */
   enableJsonResponse?: boolean;
+  /**
+   * Callback fired when a new session is initialized.
+   */
   onsessioninitialized?: (sessionId: string) => void;
+  /**
+   * Callback fired when a session is closed via DELETE request.
+   */
+  onsessionclosed?: (sessionId: string) => void;
   corsOptions?: CORSOptions;
   /**
    * Optional storage api for persisting transport state.
@@ -60,6 +74,16 @@ export interface WorkerTransportOptions {
    * so it survives hibernation/restart.
    */
   storage?: MCPStorageApi;
+  /**
+   * Event store for resumability support.
+   * If provided, enables clients to reconnect and resume messages using Last-Event-ID.
+   */
+  eventStore?: EventStore;
+  /**
+   * Retry interval in milliseconds to suggest to clients in SSE retry field.
+   * Controls client reconnection timing for polling behavior.
+   */
+  retryInterval?: number;
 }
 
 export class WorkerTransport implements Transport {
@@ -68,14 +92,17 @@ export class WorkerTransport implements Transport {
   private sessionIdGenerator?: () => string;
   private enableJsonResponse = false;
   private onsessioninitialized?: (sessionId: string) => void;
+  private onsessionclosed?: (sessionId: string) => void;
   private standaloneSseStreamId = "_GET_stream";
   private streamMapping = new Map<string, StreamMapping>();
   private requestToStreamMapping = new Map<RequestId, string>();
   private requestResponseMap = new Map<RequestId, JSONRPCMessage>();
   private corsOptions?: CORSOptions;
-  private protocolVersion?: ProtocolVersion;
   private storage?: MCPStorageApi;
   private stateRestored = false;
+  private eventStore?: EventStore;
+  private retryInterval?: number;
+  private initializeParams?: TransportState["initializeParams"];
 
   sessionId?: string;
   onclose?: () => void;
@@ -86,8 +113,11 @@ export class WorkerTransport implements Transport {
     this.sessionIdGenerator = options?.sessionIdGenerator;
     this.enableJsonResponse = options?.enableJsonResponse ?? false;
     this.onsessioninitialized = options?.onsessioninitialized;
+    this.onsessionclosed = options?.onsessionclosed;
     this.corsOptions = options?.corsOptions;
     this.storage = options?.storage;
+    this.eventStore = options?.eventStore;
+    this.retryInterval = options?.retryInterval;
   }
 
   /**
@@ -104,7 +134,16 @@ export class WorkerTransport implements Transport {
     if (state) {
       this.sessionId = state.sessionId;
       this.initialized = state.initialized;
-      this.protocolVersion = state.protocolVersion;
+
+      // Restore _clientCapabilities on the Server instance by replaying the original initialize request
+      if (state.initializeParams && this.onmessage) {
+        this.onmessage({
+          jsonrpc: "2.0",
+          id: RESTORE_REQUEST_ID,
+          method: "initialize",
+          params: state.initializeParams
+        });
+      }
     }
 
     this.stateRestored = true;
@@ -121,7 +160,7 @@ export class WorkerTransport implements Transport {
     const state: TransportState = {
       sessionId: this.sessionId,
       initialized: this.initialized,
-      protocolVersion: this.protocolVersion
+      initializeParams: this.initializeParams
     };
 
     await Promise.resolve(this.storage.set(state));
@@ -134,45 +173,32 @@ export class WorkerTransport implements Transport {
     this.started = true;
   }
 
+  /**
+   * Validates the MCP-Protocol-Version header on incoming requests.
+   *
+   * This performs a simple check: if a version header is present, it must be
+   * in the SUPPORTED_PROTOCOL_VERSIONS list. We do not track the negotiated
+   * version or enforce version consistency across requests - the SDK handles
+   * version negotiation during initialization, and we simply reject any
+   * explicitly unsupported versions.
+   *
+   * - Header present and supported: Accept
+   * - Header present and unsupported: 400 Bad Request
+   * - Header missing: Accept (version validation is optional)
+   */
   private validateProtocolVersion(request: Request): Response | undefined {
-    const versionHeader = request.headers.get(MCP_PROTOCOL_VERSION_HEADER);
-
-    if (!versionHeader) {
-      if (
-        !this.protocolVersion ||
-        this.protocolVersion === DEFAULT_PROTOCOL_VERSION
-      ) {
-        return undefined;
-      }
-      // If we negotiated a different version, the client MUST send the header
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: `Bad Request: ${MCP_PROTOCOL_VERSION_HEADER} header is required`
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
+    const protocolVersion = request.headers.get(MCP_PROTOCOL_VERSION_HEADER);
 
     if (
-      !SUPPORTED_PROTOCOL_VERSIONS.includes(versionHeader as ProtocolVersion)
+      protocolVersion !== null &&
+      !SUPPORTED_PROTOCOL_VERSIONS.includes(protocolVersion)
     ) {
       return new Response(
         JSON.stringify({
           jsonrpc: "2.0",
           error: {
             code: -32000,
-            message: `Bad Request: Unsupported ${MCP_PROTOCOL_VERSION_HEADER}: ${versionHeader}. Supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")}`
+            message: `Bad Request: Unsupported protocol version: ${protocolVersion} (supported versions: ${SUPPORTED_PROTOCOL_VERSIONS.join(", ")})`
           },
           id: null
         }),
@@ -185,28 +211,6 @@ export class WorkerTransport implements Transport {
         }
       );
     }
-
-    // Check if it matches the negotiated version
-    if (this.protocolVersion && versionHeader !== this.protocolVersion) {
-      return new Response(
-        JSON.stringify({
-          jsonrpc: "2.0",
-          error: {
-            code: -32000,
-            message: `Bad Request: ${MCP_PROTOCOL_VERSION_HEADER} mismatch. Expected: ${this.protocolVersion}, Got: ${versionHeader}`
-          },
-          id: null
-        }),
-        {
-          status: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...this.getHeaders()
-          }
-        }
-      );
-    }
-
     return undefined;
   }
 
@@ -295,7 +299,18 @@ export class WorkerTransport implements Transport {
       return versionError;
     }
 
-    const streamId = this.standaloneSseStreamId;
+    let streamId = this.standaloneSseStreamId;
+
+    // Check for resumability via Last-Event-ID
+    const lastEventId = request.headers.get("Last-Event-ID");
+    if (lastEventId && this.eventStore) {
+      // Get the stream ID for this event if available
+      const eventStreamId =
+        await this.eventStore.getStreamIdForEventId?.(lastEventId);
+      if (eventStreamId) {
+        streamId = eventStreamId;
+      }
+    }
 
     if (this.streamMapping.get(streamId) !== undefined) {
       return new Response(
@@ -349,6 +364,38 @@ export class WorkerTransport implements Transport {
         writer.close().catch(() => {});
       }
     });
+
+    // Write priming event with retry interval if configured
+    if (this.retryInterval !== undefined) {
+      await writer.write(encoder.encode(`retry: ${this.retryInterval}\n\n`));
+    }
+
+    // Replay events if resuming and eventStore is configured
+    if (lastEventId && this.eventStore) {
+      const replayedStreamId = await this.eventStore.replayEventsAfter(
+        lastEventId,
+        {
+          send: async (eventId: EventId, message: JSONRPCMessage) => {
+            const data = `id: ${eventId}\nevent: message\ndata: ${JSON.stringify(message)}\n\n`;
+            await writer.write(encoder.encode(data));
+          }
+        }
+      );
+      // Update stream ID if different from what we had
+      if (replayedStreamId !== streamId) {
+        this.streamMapping.delete(streamId);
+        streamId = replayedStreamId;
+        this.streamMapping.set(streamId, {
+          writer,
+          encoder,
+          cleanup: () => {
+            clearInterval(keepAlive);
+            this.streamMapping.delete(streamId);
+            writer.close().catch(() => {});
+          }
+        });
+      }
+    }
 
     return new Response(readable, { headers });
   }
@@ -504,25 +551,18 @@ export class WorkerTransport implements Transport {
         );
       }
 
-      // Capture protocol version from initialization request
-      const initRequest = messages.find(isInitializeRequest) as
-        | InitializeRequest
-        | undefined;
-      if (initRequest?.params) {
-        const version = initRequest.params.protocolVersion;
-        if (
-          version &&
-          SUPPORTED_PROTOCOL_VERSIONS.includes(version as ProtocolVersion)
-        ) {
-          this.protocolVersion = version as ProtocolVersion;
-        } else {
-          // Default to 2025-03-26 if not specified or unsupported
-          this.protocolVersion = DEFAULT_PROTOCOL_VERSION;
-        }
-      }
-
       this.sessionId = this.sessionIdGenerator?.();
       this.initialized = true;
+
+      const initMessage = messages.find(isInitializeRequest);
+      if (initMessage && isInitializeRequest(initMessage)) {
+        this.initializeParams = {
+          capabilities: initMessage.params.capabilities,
+          clientInfo: initMessage.params.clientInfo,
+          protocolVersion: initMessage.params.protocolVersion
+        };
+      }
+
       await this.saveState();
 
       if (this.sessionId && this.onsessioninitialized) {
@@ -627,7 +667,16 @@ export class WorkerTransport implements Transport {
       return versionError;
     }
 
+    // Capture session ID before closing
+    const closedSessionId = this.sessionId;
+
     await this.close();
+
+    // Fire onsessionclosed callback if configured
+    if (closedSessionId && this.onsessionclosed) {
+      this.onsessionclosed(closedSessionId);
+    }
+
     return new Response(null, {
       status: 200,
       headers: { ...this.getHeaders() }
@@ -741,6 +790,31 @@ export class WorkerTransport implements Transport {
     this.onclose?.();
   }
 
+  /**
+   * Close an SSE stream for a specific request, triggering client reconnection.
+   * Use this to implement polling behavior during long-running operations -
+   * client will reconnect after the retry interval specified in the priming event.
+   */
+  closeSSEStream(requestId: RequestId): void {
+    const streamId = this.requestToStreamMapping.get(requestId);
+    if (!streamId) {
+      return;
+    }
+
+    const stream = this.streamMapping.get(streamId);
+    if (stream) {
+      stream.cleanup();
+    }
+
+    // Clean up request mappings for this stream
+    for (const [reqId, sid] of this.requestToStreamMapping.entries()) {
+      if (sid === streamId) {
+        this.requestToStreamMapping.delete(reqId);
+        this.requestResponseMap.delete(reqId);
+      }
+    }
+  }
+
   async send(
     message: JSONRPCMessage,
     options?: TransportSendOptions
@@ -749,12 +823,16 @@ export class WorkerTransport implements Transport {
     let requestId: RequestId | undefined = options?.relatedRequestId;
 
     // Then override with message.id for responses/errors
-    if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       requestId = message.id;
     }
 
+    if (requestId === RESTORE_REQUEST_ID) {
+      return;
+    }
+
     if (requestId === undefined) {
-      if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
+      if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
         throw new Error(
           "Cannot send a response on a standalone SSE stream unless resuming a previous client request"
         );
@@ -766,7 +844,17 @@ export class WorkerTransport implements Transport {
       }
 
       if (standaloneSse.writer && standaloneSse.encoder) {
-        const data = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
+        // Store event for resumability if eventStore is configured
+        let eventId: EventId | undefined;
+        if (this.eventStore) {
+          eventId = await this.eventStore.storeEvent(
+            this.standaloneSseStreamId,
+            message
+          );
+        }
+
+        const idLine = eventId ? `id: ${eventId}\n` : "";
+        const data = `${idLine}event: message\ndata: ${JSON.stringify(message)}\n\n`;
         await standaloneSse.writer.write(standaloneSse.encoder.encode(data));
       }
       return;
@@ -788,12 +876,19 @@ export class WorkerTransport implements Transport {
 
     if (!this.enableJsonResponse) {
       if (response.writer && response.encoder) {
-        const data = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
+        // Store event for resumability if eventStore is configured
+        let eventId: EventId | undefined;
+        if (this.eventStore) {
+          eventId = await this.eventStore.storeEvent(streamId, message);
+        }
+
+        const idLine = eventId ? `id: ${eventId}\n` : "";
+        const data = `${idLine}event: message\ndata: ${JSON.stringify(message)}\n\n`;
         await response.writer.write(response.encoder.encode(data));
       }
     }
 
-    if (isJSONRPCResponse(message) || isJSONRPCError(message)) {
+    if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
       this.requestResponseMap.set(requestId, message);
 
       const relatedIds = Array.from(this.requestToStreamMapping.entries())

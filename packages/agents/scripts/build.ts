@@ -8,6 +8,7 @@ async function main() {
     entry: [
       "src/*.ts",
       "src/*.tsx",
+      "src/cli/index.ts",
       "src/mcp/index.ts",
       "src/mcp/client.ts",
       "src/mcp/do-oauth-client-provider.ts",
@@ -22,8 +23,8 @@ async function main() {
     fixedExtension: false
   });
 
-  // then run prettier on the generated .d.ts files
-  execSync("prettier --write ./dist/*.d.ts");
+  // then run oxfmt on the generated .d.ts files
+  execSync("oxfmt --write ./dist/*.d.ts");
 
   process.exit(0);
 }

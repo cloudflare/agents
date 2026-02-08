@@ -85,7 +85,7 @@ const result = streamText({
 ### After (With Codemode)
 
 ```typescript
-import { experimental_codemode as codemode } from "agents/codemode/ai";
+import { experimental_codemode as codemode } from "@cloudflare/codemode/ai";
 
 // Define your tools as usual
 const tools = {
@@ -105,10 +105,11 @@ export const globalOutbound = {
   }
 };
 
-export { CodeModeProxy } from "agents/codemode/ai";
+export { CodeModeProxy } from "@cloudflare/codemode/ai";
 
 // Use codemode wrapper
 const { prompt, tools: wrappedTools } = await codemode({
+  model: openai("gpt-4o"), // optional, defaults to openai("gpt-4.1")
   prompt: "You are a helpful assistant...",
   tools,
   globalOutbound: env.globalOutbound,
@@ -166,7 +167,7 @@ export const globalOutbound = {
 };
 
 // Export the proxy for tool execution
-export { CodeModeProxy } from "agents/codemode/ai";
+export { CodeModeProxy } from "@cloudflare/codemode/ai";
 ```
 
 ## Benefits for MCP Server Integration

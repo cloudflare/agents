@@ -1,9 +1,10 @@
 {
   "author": "",
   "dependencies": {
-    "hono": "^4.10.7",
-    "x402-fetch": "^0.7.3",
-    "x402-hono": "^0.7.3"
+    "agents": "*",
+    "hono": "^4.11.8",
+    "x402-fetch": "^1.1.0",
+    "x402-hono": "^1.1.0"
   },
   "keywords": [],
   "name": "@cloudflare/agents-x402-example",

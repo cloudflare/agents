@@ -1,17 +1,12 @@
 import { openai } from "@ai-sdk/openai";
-import { type AgentNamespace, routeAgentRequest } from "agents";
-import { AIChatAgent } from "agents/ai-chat-agent";
+import { routeAgentRequest } from "agents";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 import {
   streamText,
   convertToModelMessages,
   createUIMessageStream,
   createUIMessageStreamResponse
 } from "ai";
-
-type Env = {
-  OPENAI_API_KEY: string;
-  ResumableStreamingChat: AgentNamespace<ResumableStreamingChat>;
-};
 
 /**
  * Resumable Streaming Chat Agent
@@ -24,19 +19,24 @@ type Env = {
  *
  * No special setup required - just use onChatMessage() as usual.
  */
-export class ResumableStreamingChat extends AIChatAgent<Env> {
+export class ResumableStreamingChat extends AIChatAgent {
   /**
    * Handle incoming chat messages.
    */
   async onChatMessage() {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
-        const result = streamText({
-          model: openai("gpt-4o"),
-          messages: convertToModelMessages(this.messages)
-        });
+        try {
+          const result = streamText({
+            model: openai("gpt-4o"),
+            messages: await convertToModelMessages(this.messages)
+          });
 
-        writer.merge(result.toUIMessageStream());
+          writer.merge(result.toUIMessageStream());
+        } catch (error) {
+          console.error("Stream error:", error);
+          throw error;
+        }
       }
     });
     return createUIMessageStreamResponse({ stream });

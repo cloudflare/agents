@@ -3,7 +3,6 @@
 import { type OpenAIProvider, createOpenAI } from "@ai-sdk/openai";
 import {
   Agent,
-  type AgentNamespace,
   type Connection,
   type WSMessage,
   routeAgentRequest
@@ -16,11 +15,11 @@ type Env = {
   AI_GATEWAY_TOKEN: string;
   AI_GATEWAY_ACCOUNT_ID: string;
   AI_GATEWAY_ID: string;
-  Sequential: AgentNamespace<Agent<Env>>;
-  Routing: AgentNamespace<Agent<Env>>;
-  Parallel: AgentNamespace<Agent<Env>>;
-  Orchestrator: AgentNamespace<Agent<Env>>;
-  Evaluator: AgentNamespace<Agent<Env>>;
+  Sequential: DurableObjectNamespace<Agent<Env>>;
+  Routing: DurableObjectNamespace<Agent<Env>>;
+  Parallel: DurableObjectNamespace<Agent<Env>>;
+  Orchestrator: DurableObjectNamespace<Agent<Env>>;
+  Evaluator: DurableObjectNamespace<Agent<Env>>;
 };
 
 // createAgent is a helper function to generate an agent class

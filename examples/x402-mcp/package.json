@@ -7,5 +7,8 @@
     "dev": "wrangler dev",
     "types": "wrangler types --include-runtime false"
   },
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "agents": "*"
+  }
 }

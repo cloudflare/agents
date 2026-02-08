@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { JSONRPCRequest } from "@modelcontextprotocol/sdk/types.js";
+import { LATEST_PROTOCOL_VERSION } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   WorkerTransport,
@@ -279,85 +280,10 @@ describe("WorkerTransport", () => {
       // Should accept and default to 2025-03-26
       expect(response.status).toBe(200);
     });
-
-    it("should default to 2025-03-26 for unsupported version", async () => {
-      const server = createTestServer();
-      const transport = await setupTransport(server);
-
-      const request = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "1",
-          method: "initialize",
-          params: {
-            capabilities: {},
-            clientInfo: { name: "test", version: "1.0" },
-            protocolVersion: "2099-01-01" // Unsupported future version
-          }
-        })
-      });
-
-      const response = await transport.handleRequest(request);
-
-      // Should accept but use default version
-      expect(response.status).toBe(200);
-    });
   });
 
   describe("Protocol Version - Validation on subsequent requests", () => {
-    it("should allow missing header for default version 2025-03-26", async () => {
-      const server = createTestServer();
-      const transport = await setupTransport(server, {
-        sessionIdGenerator: () => "test-session"
-      });
-
-      // Initialize with 2025-03-26
-      const initRequest = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "1",
-          method: "initialize",
-          params: {
-            capabilities: {},
-            clientInfo: { name: "test", version: "1.0" },
-            protocolVersion: "2025-03-26"
-          }
-        })
-      });
-
-      await transport.handleRequest(initRequest);
-
-      // Subsequent request WITHOUT MCP-Protocol-Version header
-      const followupRequest = new Request("http://example.com/", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/event-stream",
-          "mcp-session-id": "test-session"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "notifications/initialized"
-        })
-      });
-
-      const response = await transport.handleRequest(followupRequest);
-
-      // Should allow for backwards compatibility
-      expect(response.status).toBe(202);
-    });
-
-    it("should require header for version 2025-06-18", async () => {
+    it("should accept missing header (defaults to negotiated version)", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
@@ -400,16 +326,11 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(followupRequest);
 
-      // Should require header for version > 2025-03-26
-      expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("MCP-Protocol-Version");
-      expect(body.error.message).toContain("required");
+      // Should accept - defaults to negotiated version
+      expect(response.status).toBe(202);
     });
 
-    it("should accept correct version header on subsequent requests", async () => {
+    it("should accept negotiated version header", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
@@ -456,13 +377,16 @@ describe("WorkerTransport", () => {
       expect(response.status).toBe(202);
     });
 
-    it("should reject unsupported version header", async () => {
+    it("should accept any supported version header regardless of negotiated version", async () => {
+      // NOTE: The transport does not enforce version consistency after negotiation.
+      // We only validate that the version header, if present, is in SUPPORTED_PROTOCOL_VERSIONS.
+      // The SDK handles version semantics - the transport just rejects unknown versions.
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
       });
 
-      // Initialize
+      // Initialize with 2025-03-26
       const initRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
@@ -483,14 +407,14 @@ describe("WorkerTransport", () => {
 
       await transport.handleRequest(initRequest);
 
-      // Subsequent request with unsupported version
+      // Subsequent request with a different but supported version
       const followupRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
           "mcp-session-id": "test-session",
-          "MCP-Protocol-Version": "2099-01-01"
+          "MCP-Protocol-Version": "2025-06-18"
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -500,21 +424,17 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(followupRequest);
 
-      expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("Unsupported");
-      expect(body.error.message).toContain("MCP-Protocol-Version");
+      // Should accept - we only check if version is in supported list, not if it matches negotiated
+      expect(response.status).toBe(202);
     });
 
-    it("should reject mismatched version header", async () => {
+    it("should reject unsupported version header", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "test-session"
       });
 
-      // Initialize with 2025-06-18
+      // Initialize
       const initRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
@@ -535,14 +455,14 @@ describe("WorkerTransport", () => {
 
       await transport.handleRequest(initRequest);
 
-      // Subsequent request with different version
+      // Subsequent request with unsupported version (valid format but not in supported list)
       const followupRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json, text/event-stream",
           "mcp-session-id": "test-session",
-          "MCP-Protocol-Version": "2025-03-26"
+          "MCP-Protocol-Version": "1999-01-01"
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -556,17 +476,17 @@ describe("WorkerTransport", () => {
       const body = (await response.json()) as {
         error: { message: string };
       };
-      expect(body.error.message).toContain("mismatch");
-      expect(body.error.message).toContain("Expected: 2025-06-18");
-      expect(body.error.message).toContain("Got: 2025-03-26");
+      expect(body.error.message).toContain("Unsupported protocol version");
+      expect(body.error.message).toContain("1999-01-01");
     });
   });
 
   describe("Protocol Version - Validation on GET requests", () => {
-    it("should validate protocol version on SSE GET requests", async () => {
+    it("should accept GET request without version header (defaults to negotiated)", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
-        sessionIdGenerator: () => "test-session"
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
       });
 
       // Initialize with 2025-06-18
@@ -588,9 +508,10 @@ describe("WorkerTransport", () => {
         })
       });
 
-      await transport.handleRequest(initRequest);
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
 
-      // GET request without version header
+      // GET request without version header - should accept
       const getRequest = new Request("http://example.com/", {
         method: "GET",
         headers: {
@@ -601,22 +522,19 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(getRequest);
 
-      expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("MCP-Protocol-Version");
+      // Should accept - missing header defaults to negotiated version
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/event-stream");
     });
-  });
 
-  describe("Protocol Version - Validation on DELETE requests", () => {
-    it("should validate protocol version on DELETE requests", async () => {
+    it("should reject GET request with unsupported version header", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
-        sessionIdGenerator: () => "test-session"
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
       });
 
-      // Initialize with 2025-06-18
+      // Initialize
       const initRequest = new Request("http://example.com/", {
         method: "POST",
         headers: {
@@ -635,9 +553,58 @@ describe("WorkerTransport", () => {
         })
       });
 
-      await transport.handleRequest(initRequest);
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
 
-      // DELETE request without version header
+      // GET request with unsupported version header
+      const getRequest = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session",
+          "MCP-Protocol-Version": "1999-01-01"
+        }
+      });
+
+      const response = await transport.handleRequest(getRequest);
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Unsupported protocol version");
+    });
+  });
+
+  describe("Protocol Version - Validation on DELETE requests", () => {
+    it("should accept DELETE request without version header (defaults to negotiated)", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
+
+      // DELETE request without version header - should accept
       const deleteRequest = new Request("http://example.com/", {
         method: "DELETE",
         headers: {
@@ -647,11 +614,53 @@ describe("WorkerTransport", () => {
 
       const response = await transport.handleRequest(deleteRequest);
 
+      // Should accept - missing header defaults to negotiated version
+      expect(response.status).toBe(200);
+    });
+
+    it("should reject DELETE request with unsupported version header", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      const initResponse = await transport.handleRequest(initRequest);
+      await initResponse.json();
+
+      // DELETE request with unsupported version header
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "test-session",
+          "MCP-Protocol-Version": "1999-01-01"
+        }
+      });
+
+      const response = await transport.handleRequest(deleteRequest);
+
       expect(response.status).toBe(400);
-      const body = (await response.json()) as {
-        error: { message: string };
-      };
-      expect(body.error.message).toContain("MCP-Protocol-Version");
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Unsupported protocol version");
     });
   });
 
@@ -667,9 +676,12 @@ describe("WorkerTransport", () => {
         }
       };
 
+      // Use enableJsonResponse to get a proper JSON response instead of SSE stream
+      // This ensures the SDK response is fully processed before the promise resolves
       const transport = await setupTransport(server, {
         sessionIdGenerator: () => "persistent-session",
-        storage: mockStorage
+        storage: mockStorage,
+        enableJsonResponse: true
       });
 
       const request = new Request("http://example.com/", {
@@ -690,20 +702,55 @@ describe("WorkerTransport", () => {
         })
       });
 
-      await transport.handleRequest(request);
+      // Wait for the response to complete - this ensures the SDK has
+      // processed the request and sent its response through transport.send()
+      const response = await transport.handleRequest(request);
+      await response.json(); // Wait for response to be fully processed
 
       expect(storedState).toBeDefined();
       expect(storedState?.sessionId).toBe("persistent-session");
       expect(storedState?.initialized).toBe(true);
-      expect(storedState?.protocolVersion).toBe("2025-06-18");
+    });
+
+    it("should negotiate down to latest supported version when client requests unsupported version", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        enableJsonResponse: true
+      });
+
+      // Client requests a future unsupported version
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2099-01-01" // Unsupported future version
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+      const body = (await response.json()) as {
+        result?: { protocolVersion: string };
+      };
+
+      // Server should respond with latest supported version
+      expect(body.result?.protocolVersion).toBe(LATEST_PROTOCOL_VERSION);
     });
 
     it("should restore session state from storage", async () => {
       const server = createTestServer();
       const existingState = {
         sessionId: "restored-session",
-        initialized: true,
-        protocolVersion: "2025-06-18" as const
+        initialized: true
       };
 
       const mockStorage = {
@@ -780,8 +827,7 @@ describe("WorkerTransport", () => {
           getCalls++;
           return {
             sessionId: "restored-session",
-            initialized: true,
-            protocolVersion: "2025-03-26" as const
+            initialized: true
           };
         },
         set: async () => {}
@@ -809,6 +855,293 @@ describe("WorkerTransport", () => {
       await transport.handleRequest(request);
 
       expect(getCalls).toBe(1);
+    });
+  });
+
+  describe("Client Capabilities Persistence (Serverless Restart)", () => {
+    it("should persist initializeParams when client sends capabilities", async () => {
+      const server = createTestServer();
+      let storedState: TransportState | undefined;
+
+      const mockStorage = {
+        get: async () => storedState,
+        set: async (state: TransportState) => {
+          storedState = state;
+        }
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {
+              elicitation: { form: {} }
+            },
+            clientInfo: { name: "test-client", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+      await response.json();
+
+      expect(response.status).toBe(200);
+      expect(storedState).toBeDefined();
+      expect(storedState?.initializeParams).toBeDefined();
+      expect(
+        storedState?.initializeParams?.capabilities?.elicitation?.form
+      ).toBeDefined();
+      expect(storedState?.initializeParams?.clientInfo).toEqual({
+        name: "test-client",
+        version: "1.0"
+      });
+      expect(storedState?.initializeParams?.protocolVersion).toBe("2025-06-18");
+    });
+
+    it("should restore client capabilities on Server instance after restart", async () => {
+      // Phase 1: Initialize with capabilities
+      let storedState: TransportState | undefined;
+      const mockStorage = {
+        get: async () => storedState,
+        set: async (state: TransportState) => {
+          storedState = state;
+        }
+      };
+
+      const server1 = createTestServer();
+      const transport1 = await setupTransport(server1, {
+        sessionIdGenerator: () => "test-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {
+              elicitation: { form: {} }
+            },
+            clientInfo: { name: "test-client", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      await transport1.handleRequest(initRequest);
+
+      // Verify server1 has capabilities
+      expect(
+        server1.server.getClientCapabilities()?.elicitation?.form
+      ).toBeDefined();
+
+      // Phase 2: Simulate serverless restart with NEW instances
+      const server2 = createTestServer();
+      const transport2 = await setupTransport(server2, {
+        sessionIdGenerator: () => "test-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      // Trigger state restoration by making a request
+      const listRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "2",
+          method: "tools/list",
+          params: {}
+        })
+      });
+
+      await transport2.handleRequest(listRequest);
+
+      // Verify capabilities were restored on server2
+      expect(transport2.sessionId).toBe("test-session");
+      expect(server2.server.getClientCapabilities()).toBeDefined();
+      expect(
+        server2.server.getClientCapabilities()?.elicitation?.form
+      ).toBeDefined();
+    });
+
+    it("should restore clientInfo on Server instance after restart", async () => {
+      let storedState: TransportState | undefined;
+      const mockStorage = {
+        get: async () => storedState,
+        set: async (state: TransportState) => {
+          storedState = state;
+        }
+      };
+
+      const server1 = createTestServer();
+      const transport1 = await setupTransport(server1, {
+        sessionIdGenerator: () => "test-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "my-client", version: "2.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      await transport1.handleRequest(initRequest);
+
+      // Simulate restart
+      const server2 = createTestServer();
+      const transport2 = await setupTransport(server2, {
+        sessionIdGenerator: () => "test-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      const listRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "2",
+          method: "tools/list",
+          params: {}
+        })
+      });
+
+      await transport2.handleRequest(listRequest);
+
+      // Verify clientInfo was restored
+      expect(server2.server.getClientVersion()).toEqual({
+        name: "my-client",
+        version: "2.0"
+      });
+    });
+
+    it("should handle old storage format without initializeParams (backward compatibility)", async () => {
+      // Simulate old stored state without initializeParams field
+      const oldState: TransportState = {
+        sessionId: "old-session",
+        initialized: true
+        // No initializeParams - simulating old storage format
+      };
+
+      const mockStorage = {
+        get: async () => oldState,
+        set: async () => {}
+      };
+
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "old-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "tools/list",
+          params: {}
+        })
+      });
+
+      // Should not throw
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(200);
+
+      // Session restored but capabilities not available (no initializeParams)
+      expect(transport.sessionId).toBe("old-session");
+      expect(server.server.getClientCapabilities()).toBeUndefined();
+    });
+
+    it("should persist initializeParams with empty capabilities", async () => {
+      const server = createTestServer();
+      let storedState: TransportState | undefined;
+
+      const mockStorage = {
+        get: async () => storedState,
+        set: async (state: TransportState) => {
+          storedState = state;
+        }
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        storage: mockStorage,
+        enableJsonResponse: true
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {}, // Empty but present
+            clientInfo: { name: "test-client", version: "1.0" },
+            protocolVersion: "2025-06-18"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+      await response.json();
+
+      expect(response.status).toBe(200);
+      expect(storedState?.initializeParams).toBeDefined();
+      expect(storedState?.initializeParams?.capabilities).toEqual({});
     });
   });
 
@@ -1369,6 +1702,646 @@ describe("WorkerTransport", () => {
           transport.send(message, { relatedRequestId: "req-2" })
         ).rejects.toThrow(/No connection established/);
       });
+    });
+  });
+
+  describe("Resumability - EventStore", () => {
+    it("should accept eventStore option", async () => {
+      const server = createTestServer();
+
+      const eventStore = {
+        storeEvent: vi.fn(async () => "event-id"),
+        replayEventsAfter: vi.fn(async () => "_GET_stream")
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        eventStore
+      });
+
+      expect(transport).toBeDefined();
+    });
+
+    it("should call replayEventsAfter when Last-Event-ID is provided on GET request", async () => {
+      const server = createTestServer();
+      let replayWasCalled = false;
+
+      const eventStore = {
+        storeEvent: vi.fn(async () => "event-id"),
+        getStreamIdForEventId: vi.fn(async () => "_GET_stream"),
+        replayEventsAfter: vi.fn(async () => {
+          replayWasCalled = true;
+          return "_GET_stream";
+        })
+      };
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        eventStore
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Reconnect with Last-Event-ID - this should trigger replayEventsAfter
+      const reconnectRequest = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session",
+          "Last-Event-ID": "_GET_stream_100"
+        }
+      });
+
+      const response = await transport.handleRequest(reconnectRequest);
+      expect(response.status).toBe(200);
+
+      // Verify replayEventsAfter was called
+      expect(replayWasCalled).toBe(true);
+      expect(eventStore.replayEventsAfter).toHaveBeenCalledWith(
+        "_GET_stream_100",
+        expect.objectContaining({ send: expect.any(Function) })
+      );
+    });
+  });
+
+  describe("Standalone GET SSE Stream", () => {
+    it("should allow one GET SSE stream per session", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // First GET should succeed
+      const getRequest1 = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response1 = await transport.handleRequest(getRequest1);
+      expect(response1.status).toBe(200);
+
+      // Second GET should fail with 409 Conflict
+      const getRequest2 = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response2 = await transport.handleRequest(getRequest2);
+      expect(response2.status).toBe(409);
+
+      const body = (await response2.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Only one SSE stream");
+    });
+
+    it("should reject GET without Accept: text/event-stream", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // GET without proper Accept header
+      const getRequest = new Request("http://example.com/", {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response = await transport.handleRequest(getRequest);
+      expect(response.status).toBe(406);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("must accept text/event-stream");
+    });
+  });
+
+  describe("DELETE Request and onsessionclosed", () => {
+    it("should handle DELETE request and close session", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // DELETE to close session
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "test-session"
+        }
+      });
+
+      const response = await transport.handleRequest(deleteRequest);
+      expect(response.status).toBe(200);
+    });
+
+    it("should fire onsessionclosed callback on DELETE", async () => {
+      const server = createTestServer();
+      let closedSessionId: string | undefined;
+      let callbackCalled = false;
+
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "close-test-session",
+        onsessionclosed: (sessionId: string) => {
+          callbackCalled = true;
+          closedSessionId = sessionId;
+        }
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // DELETE to close session
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "close-test-session"
+        }
+      });
+
+      await transport.handleRequest(deleteRequest);
+
+      expect(callbackCalled).toBe(true);
+      expect(closedSessionId).toBe("close-test-session");
+    });
+
+    it("should reject DELETE with wrong session ID", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // DELETE with wrong session ID
+      const deleteRequest = new Request("http://example.com/", {
+        method: "DELETE",
+        headers: {
+          "mcp-session-id": "wrong-session"
+        }
+      });
+
+      const response = await transport.handleRequest(deleteRequest);
+      expect(response.status).toBe(404);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain("Session not found");
+    });
+  });
+
+  describe("closeSSEStream method", () => {
+    it("should close SSE stream for specific request ID", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Make a tool call request to establish a stream
+      const toolRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "tool-1",
+          method: "tools/call",
+          params: { name: "test-tool", arguments: { message: "test" } }
+        })
+      });
+
+      const response = await transport.handleRequest(toolRequest);
+      expect(response.status).toBe(200);
+
+      // Close the stream for this request
+      transport.closeSSEStream("tool-1");
+
+      // The stream should be closed - subsequent operations on this request should fail
+      // (The actual behavior depends on timing, but the stream cleanup should have been triggered)
+    });
+  });
+
+  describe("Unsupported HTTP Methods", () => {
+    it("should return 405 for unsupported methods", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const putRequest = new Request("http://example.com/", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+
+      const response = await transport.handleRequest(putRequest);
+      expect(response.status).toBe(405);
+      expect(response.headers.get("Allow")).toBe("GET, POST, DELETE, OPTIONS");
+    });
+
+    it("should return 405 for PATCH method", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const patchRequest = new Request("http://example.com/", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+
+      const response = await transport.handleRequest(patchRequest);
+      expect(response.status).toBe(405);
+    });
+  });
+
+  describe("Batch Requests", () => {
+    it("should handle batch JSON-RPC requests", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session",
+        enableJsonResponse: true
+      });
+
+      // Initialize first
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Send batch request
+      const batchRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify([
+          {
+            jsonrpc: "2.0",
+            id: "batch-1",
+            method: "tools/list",
+            params: {}
+          },
+          {
+            jsonrpc: "2.0",
+            id: "batch-2",
+            method: "prompts/list",
+            params: {}
+          }
+        ])
+      });
+
+      const response = await transport.handleRequest(batchRequest);
+      expect(response.status).toBe(200);
+    });
+
+    it("should reject batch containing initialize request with other messages", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const batchRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify([
+          {
+            jsonrpc: "2.0",
+            id: "1",
+            method: "initialize",
+            params: {
+              capabilities: {},
+              clientInfo: { name: "test", version: "1.0" },
+              protocolVersion: "2025-03-26"
+            }
+          },
+          {
+            jsonrpc: "2.0",
+            id: "2",
+            method: "tools/list",
+            params: {}
+          }
+        ])
+      });
+
+      const response = await transport.handleRequest(batchRequest);
+      expect(response.status).toBe(400);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain(
+        "Only one initialization request is allowed"
+      );
+    });
+  });
+
+  describe("Notification Handling", () => {
+    it("should return 202 for notification-only requests", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        sessionIdGenerator: () => "test-session"
+      });
+
+      // Initialize first
+      const initRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      await transport.handleRequest(initRequest);
+
+      // Send notification (no id field)
+      const notificationRequest = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "mcp-session-id": "test-session"
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized"
+        })
+      });
+
+      const response = await transport.handleRequest(notificationRequest);
+      expect(response.status).toBe(202);
+    });
+  });
+
+  describe("Content-Type Validation", () => {
+    it("should reject POST with wrong Content-Type", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain",
+          Accept: "application/json, text/event-stream"
+        },
+        body: "not json"
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(415);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain(
+        "Content-Type must be application/json"
+      );
+    });
+
+    it("should reject POST missing Accept header for both JSON and SSE", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json" // Missing text/event-stream
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "1",
+          method: "initialize",
+          params: {
+            capabilities: {},
+            clientInfo: { name: "test", version: "1.0" },
+            protocolVersion: "2025-03-26"
+          }
+        })
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(406);
+
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toContain(
+        "must accept both application/json and text/event-stream"
+      );
+    });
+  });
+
+  describe("Invalid JSON Handling", () => {
+    it("should return parse error for invalid JSON body", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: "{ invalid json }"
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(400);
+
+      const body = (await response.json()) as { error: { code: number } };
+      expect(body.error.code).toBe(-32700); // Parse error
+    });
+
+    it("should return error for invalid JSON-RPC message structure", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server);
+
+      const request = new Request("http://example.com/", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream"
+        },
+        body: JSON.stringify({ invalid: "message" }) // Missing jsonrpc field
+      });
+
+      const response = await transport.handleRequest(request);
+      expect(response.status).toBe(400);
+
+      const body = (await response.json()) as { error: { code: number } };
+      expect(body.error.code).toBe(-32700);
     });
   });
 });

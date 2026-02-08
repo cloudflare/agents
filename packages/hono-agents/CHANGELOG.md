@@ -1,5 +1,51 @@
 # hono-agents
 
+## 3.0.2
+
+### Patch Changes
+
+- [#800](https://github.com/cloudflare/agents/pull/800) [`a54edf5`](https://github.com/cloudflare/agents/commit/a54edf56b462856d1ef4f424c2363ac43a53c46e) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
+- Updated dependencies [[`0c3c9bb`](https://github.com/cloudflare/agents/commit/0c3c9bb62ceff66ed38d3bbd90c767600f1f3453), [`0c3c9bb`](https://github.com/cloudflare/agents/commit/0c3c9bb62ceff66ed38d3bbd90c767600f1f3453), [`d1a0c2b`](https://github.com/cloudflare/agents/commit/d1a0c2b73b1119d71e120091753a6bcca0e2faa9), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`fd79481`](https://github.com/cloudflare/agents/commit/fd7948180abf066fa3d27911a83ffb4c91b3f099), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`0c3c9bb`](https://github.com/cloudflare/agents/commit/0c3c9bb62ceff66ed38d3bbd90c767600f1f3453), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`e20da53`](https://github.com/cloudflare/agents/commit/e20da5319eb46bac6ac580edf71836b00ac6f8bb), [`f604008`](https://github.com/cloudflare/agents/commit/f604008957f136241815909319a552bad6738b58), [`7aebab3`](https://github.com/cloudflare/agents/commit/7aebab369d1bef6c685e05a4a3bd6627edcb87db), [`a54edf5`](https://github.com/cloudflare/agents/commit/a54edf56b462856d1ef4f424c2363ac43a53c46e), [`7c74336`](https://github.com/cloudflare/agents/commit/7c743360d7e3639e187725391b9d5c114838bd18), [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa), [`ded8d3e`](https://github.com/cloudflare/agents/commit/ded8d3e8aeba0358ebd4aecb5ba15344b5a21db1)]:
+  - agents@0.3.7
+
+## 3.0.1
+
+### Patch Changes
+
+- [#771](https://github.com/cloudflare/agents/pull/771) [`87dc96d`](https://github.com/cloudflare/agents/commit/87dc96d19de1d26dbb2badecbb9955a4eb8e9e2e) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- Updated dependencies [[`cf8a1e7`](https://github.com/cloudflare/agents/commit/cf8a1e7a24ecaac62c2aefca7b0fd5bf1373e8bd), [`87dc96d`](https://github.com/cloudflare/agents/commit/87dc96d19de1d26dbb2badecbb9955a4eb8e9e2e)]:
+  - agents@0.3.4
+
+## 3.0.0
+
+### Patch Changes
+
+- Updated dependencies [[`accdd78`](https://github.com/cloudflare/agents/commit/accdd78688a71287153687907f682b0feeacd155)]:
+  - agents@0.3.0
+
+## 2.0.8
+
+### Patch Changes
+
+- [#739](https://github.com/cloudflare/agents/pull/739) [`e9b6bb7`](https://github.com/cloudflare/agents/commit/e9b6bb7ea2727e4692d9191108c5609c6a44d9d9) Thanks [@threepointone](https://github.com/threepointone)! - update all dependencies
+  - remove the changesets cli patch, as well as updating node version, so we don't need to explicitly install newest npm
+  - lock mcp sdk version till we figure out how to do breaking changes correctly
+  - removes stray permissions block from release.yml
+
+- Updated dependencies [[`e9b6bb7`](https://github.com/cloudflare/agents/commit/e9b6bb7ea2727e4692d9191108c5609c6a44d9d9), [`087264c`](https://github.com/cloudflare/agents/commit/087264cd3b3bebff3eb6e59d850e091d086ff591), [`b8c0595`](https://github.com/cloudflare/agents/commit/b8c0595b22ef6421370d3d14e74ddc9ed708d719), [`9fbb1b6`](https://github.com/cloudflare/agents/commit/9fbb1b6587176a70296b30592eaba5f821c68208), [`57b7f2e`](https://github.com/cloudflare/agents/commit/57b7f2e26e4d5e6eb370b2b8a690a542c3c269c9)]:
+  - agents@0.2.34
+
+## 2.0.7
+
+### Patch Changes
+
+- [#681](https://github.com/cloudflare/agents/pull/681) [`0035951`](https://github.com/cloudflare/agents/commit/0035951104b7decf13ef50922d5ea6e7c09ccc18) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- Updated dependencies [[`64a6ac3`](https://github.com/cloudflare/agents/commit/64a6ac3df08b6ca2b527e0315044fef453cfcc3f), [`0035951`](https://github.com/cloudflare/agents/commit/0035951104b7decf13ef50922d5ea6e7c09ccc18), [`5e80ca6`](https://github.com/cloudflare/agents/commit/5e80ca68cc6bd23af0836c85b194ea03b000ed9c)]:
+  - agents@0.2.26
+
 ## 2.0.6
 
 ### Patch Changes
