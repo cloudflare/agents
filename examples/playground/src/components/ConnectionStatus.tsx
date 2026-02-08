@@ -35,9 +35,9 @@ export function ConnectionStatus({
   return (
     <div className="flex items-center gap-2 text-sm">
       <span
-        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.bg} ${cfg.text}`}
+        className={`inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium min-w-[6.5rem] ${cfg.bg} ${cfg.text}`}
       >
-        <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dot}`} />
         {cfg.label}
       </span>
       {agentName && instanceName && status === "connected" && (

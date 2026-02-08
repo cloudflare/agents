@@ -503,6 +503,7 @@ onStateUpdate(state: State, source: Connection | "server") {
 
 ## Next Steps
 
+- [Readonly Connections](./readonly-connections.md) - Restrict which connections can update state
 - [Client SDK](./client-sdk.md) - Full client-side state sync documentation
 - [Workflows](./workflows.md) - Durable state updates from workflows
 - [SQL API](./sql.md) - When to use SQL instead of state

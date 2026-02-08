@@ -1,143 +1,46 @@
 # Readonly Connections
 
-Readonly connections allow you to restrict certain WebSocket connections from modifying the agent's state while still allowing them to receive state updates and call RPC methods.
+Readonly connections restrict certain WebSocket clients from modifying agent state while still letting them receive state updates and call non-mutating RPC methods.
 
 ## Overview
 
 When a connection is marked as readonly:
 
-- ✅ It can **receive** state updates from the server
-- ✅ It can **call** RPC methods (callable methods on the agent)
-- ❌ It **cannot** send state updates via `setState()`
-
-This is useful for scenarios like:
-
-- **View-only modes**: Users who should only observe but not modify
-- **Role-based access**: Restricting state modifications based on user roles
-- **Multi-tenant scenarios**: Some tenants have read-only access
-- **Audit/monitoring connections**: Observers that shouldn't affect the system
-
-## API Reference
-
-### Server-Side Methods
-
-#### `shouldConnectionBeReadonly(connection, ctx): boolean`
-
-An overridable hook that determines if a connection should be marked as readonly when it connects.
+- It **receives** state updates from the server
+- It **can call** RPC methods that don't modify state
+- It **cannot** call `this.setState()` — neither via client-side `setState()` nor via a `@callable()` method that calls `this.setState()` internally
 
 ```typescript
-export class MyAgent extends Agent<Env, State> {
-  shouldConnectionBeReadonly(
-    connection: Connection,
-    ctx: ConnectionContext
-  ): boolean {
-    // Example: Check query parameters
+import { Agent, type Connection, type ConnectionContext } from "agents";
+
+export class DocAgent extends Agent<Env, DocState> {
+  shouldConnectionBeReadonly(connection: Connection, ctx: ConnectionContext) {
     const url = new URL(ctx.request.url);
-    return url.searchParams.get("readonly") === "true";
+    return url.searchParams.get("mode") === "view";
   }
 }
 ```
 
-#### `setConnectionReadonly(connection, readonly = true): void`
-
-Explicitly mark or unmark a connection as readonly. Can be called at any time.
-
 ```typescript
-export class MyAgent extends Agent<Env, State> {
-  onConnect(connection: Connection, ctx: ConnectionContext) {
-    // Dynamic logic to determine readonly status
-    if (userIsViewer) {
-      this.setConnectionReadonly(connection, true);
-    }
-  }
-
-  @callable()
-  async promoteToEditor(connectionId: string) {
-    const conn = this.getConnections().find((c) => c.id === connectionId);
-    if (conn) {
-      this.setConnectionReadonly(conn, false);
-    }
-  }
-}
-```
-
-#### `isConnectionReadonly(connection): boolean`
-
-Check if a connection is currently marked as readonly.
-
-```typescript
-export class MyAgent extends Agent<Env, State> {
-  @callable()
-  async checkAccess() {
-    const { connection } = getCurrentAgent();
-    if (connection) {
-      return {
-        canEdit: !this.isConnectionReadonly(connection)
-      };
-    }
-  }
-}
-```
-
-### Client-Side API
-
-#### `onStateUpdateError` Callback
-
-Handle errors when a readonly connection attempts to update state.
-
-```typescript
-// Using AgentClient
-const client = new AgentClient({
-  agent: "MyAgent",
-  name: "instance",
-  onStateUpdateError: (error) => {
-    console.error("State update failed:", error);
-    alert("You don't have permission to modify the state");
-  }
-});
-
-// Using React Hook
+// Client - view-only mode
 const agent = useAgent({
-  agent: "MyAgent",
-  name: "instance",
-  onStateUpdateError: (error) => {
-    setError(error);
-    // Show user-friendly message
-  }
-});
-```
-
-## Usage Examples
-
-### Example 1: Query Parameter Based Access
-
-```typescript
-export class DocumentAgent extends Agent<Env, DocumentState> {
-  shouldConnectionBeReadonly(
-    connection: Connection,
-    ctx: ConnectionContext
-  ): boolean {
-    const url = new URL(ctx.request.url);
-    const mode = url.searchParams.get("mode");
-    return mode === "view";
-  }
-}
-
-// Client connects with readonly mode
-const agent = useAgent({
-  agent: "DocumentAgent",
+  agent: "DocAgent",
   name: "doc-123",
   query: { mode: "view" },
   onStateUpdateError: (error) => {
-    toast.error("Document is in view-only mode");
+    toast.error("You're in view-only mode");
   }
 });
 ```
 
-### Example 2: Role-Based Access Control
+## Marking connections as readonly
+
+### On connect
+
+Override `shouldConnectionBeReadonly` to evaluate each connection when it first connects. Return `true` to mark it readonly.
 
 ```typescript
-export class CollaborativeAgent extends Agent<Env, CollabState> {
+export class MyAgent extends Agent<Env, State> {
   shouldConnectionBeReadonly(
     connection: Connection,
     ctx: ConnectionContext
@@ -146,324 +49,228 @@ export class CollaborativeAgent extends Agent<Env, CollabState> {
     const role = url.searchParams.get("role");
     return role === "viewer" || role === "guest";
   }
-
-  onConnect(connection: Connection, ctx: ConnectionContext) {
-    const url = new URL(ctx.request.url);
-    const userId = url.searchParams.get("userId");
-
-    console.log(
-      `User ${userId} connected (readonly: ${this.isConnectionReadonly(connection)})`
-    );
-  }
-
-  @callable()
-  async upgradeToEditor() {
-    const { connection } = getCurrentAgent();
-    if (!connection) return;
-
-    // Check permissions (pseudo-code)
-    const canUpgrade = await checkUserPermissions();
-    if (canUpgrade) {
-      this.setConnectionReadonly(connection, false);
-      return { success: true };
-    }
-
-    throw new Error("Insufficient permissions");
-  }
 }
 ```
 
-### Example 3: Admin Dashboard
+This hook runs before the initial state is sent to the client, so the connection is readonly from the very first message.
 
-```typescript
-export class MonitoringAgent extends Agent<Env, SystemState> {
-  shouldConnectionBeReadonly(
-    connection: Connection,
-    ctx: ConnectionContext
-  ): boolean {
-    const url = new URL(ctx.request.url);
-    // Only admins can modify state
-    return url.searchParams.get("admin") !== "true";
-  }
+### At any time
 
-  onStateUpdate(state: SystemState, source: Connection | "server") {
-    if (source !== "server") {
-      // Log who modified the state
-      console.log(`State modified by connection ${source.id}`);
-    }
-  }
-}
-
-// Admin client (can modify)
-const adminAgent = useAgent({
-  agent: "MonitoringAgent",
-  name: "system",
-  query: { admin: "true" }
-});
-
-// Viewer client (readonly)
-const viewerAgent = useAgent({
-  agent: "MonitoringAgent",
-  name: "system",
-  query: { admin: "false" },
-  onStateUpdateError: (error) => {
-    console.log("Viewer cannot modify state");
-  }
-});
-```
-
-### Example 4: Dynamic Permission Changes
+Use `setConnectionReadonly` to change a connection's readonly status dynamically:
 
 ```typescript
 export class GameAgent extends Agent<Env, GameState> {
   @callable()
-  async startSpectatorMode() {
+  async startSpectating() {
     const { connection } = getCurrentAgent();
-    if (!connection) return;
-
-    this.setConnectionReadonly(connection, true);
-    return { mode: "spectator" };
+    if (connection) {
+      this.setConnectionReadonly(connection, true);
+    }
   }
 
   @callable()
   async joinAsPlayer() {
     const { connection } = getCurrentAgent();
-    if (!connection) return;
-
-    const canJoin = this.state.players.length < 4;
-    if (canJoin) {
+    if (connection) {
       this.setConnectionReadonly(connection, false);
-      return { mode: "player" };
     }
-
-    throw new Error("Game is full");
   }
-
-  @callable()
-  async getMyPermissions() {
-    const { connection } = getCurrentAgent();
-    if (!connection) return null;
-
-    return {
-      canEdit: !this.isConnectionReadonly(connection),
-      connectionId: connection.id
-    };
-  }
-}
-
-// Client-side React component
-function GameComponent() {
-  const [canEdit, setCanEdit] = useState(false);
-
-  const agent = useAgent({
-    agent: "GameAgent",
-    name: "game-123",
-    onStateUpdateError: (error) => {
-      toast.error("Cannot modify game state in spectator mode");
-    }
-  });
-
-  useEffect(() => {
-    agent.call("getMyPermissions").then(perms => {
-      setCanEdit(perms?.canEdit ?? false);
-    });
-  }, [agent]);
-
-  return (
-    <div>
-      <button
-        onClick={() => agent.call("joinAsPlayer")}
-        disabled={canEdit}
-      >
-        Join as Player
-      </button>
-
-      <button
-        onClick={() => agent.call("startSpectatorMode")}
-        disabled={!canEdit}
-      >
-        Switch to Spectator
-      </button>
-
-      <div>
-        {canEdit ? "You can modify the game" : "You are spectating"}
-      </div>
-    </div>
-  );
 }
 ```
 
-## Behavior Details
+### Letting a connection toggle its own status
 
-### What Happens When a Readonly Connection Tries to Update State?
-
-1. The connection sends a state update message
-2. The server checks if the connection is readonly
-3. If readonly, the server sends back an error response:
-   ```json
-   {
-     "type": "cf_agent_state_error",
-     "error": "Connection is readonly"
-   }
-   ```
-4. The client's `onStateUpdateError` callback is invoked
-5. The state is **not** updated on the server
-6. Other connections are **not** notified
-
-### State Synchronization
-
-- Readonly connections still **receive** state updates from the server
-- When state is updated (by server or other connections), readonly connections get the new state
-- They just cannot **initiate** state changes themselves
-
-### RPC Methods
-
-- Readonly connections **can** call RPC methods (functions marked with `@callable()`)
-- It's up to you to implement additional authorization checks within RPC methods if needed
-
-### Connection Cleanup
-
-- When a connection closes, it's automatically removed from the readonly tracking set
-- No memory leaks from disconnected connections
-
-## Best Practices
-
-### 1. Combine with Authentication
+A connection can toggle its own readonly status via a callable. This is useful for "lock/unlock" UIs where viewers can opt into editing mode:
 
 ```typescript
-export class SecureAgent extends Agent<Env, State> {
-  shouldConnectionBeReadonly(
-    connection: Connection,
-    ctx: ConnectionContext
-  ): boolean {
-    const url = new URL(ctx.request.url);
-    const token = url.searchParams.get("token");
+import { Agent, callable, getCurrentAgent } from "agents";
 
-    // Verify token and get permissions
-    const permissions = this.verifyToken(token);
-    return !permissions.canWrite;
+export class CollabAgent extends Agent<Env, State> {
+  @callable()
+  async setMyReadonly(readonly: boolean) {
+    const { connection } = getCurrentAgent();
+    if (connection) {
+      this.setConnectionReadonly(connection, readonly);
+    }
   }
 }
 ```
 
-### 2. Provide Clear User Feedback
+On the client:
+
+```typescript
+// Toggle between readonly and writable
+await agent.call("setMyReadonly", [true]); // lock
+await agent.call("setMyReadonly", [false]); // unlock
+```
+
+### Checking status
+
+Use `isConnectionReadonly` to check a connection's current status:
+
+```typescript
+@callable()
+async getPermissions() {
+  const { connection } = getCurrentAgent();
+  if (connection) {
+    return { canEdit: !this.isConnectionReadonly(connection) };
+  }
+}
+```
+
+## Handling errors on the client
+
+Errors surface in two ways depending on how the write was attempted:
+
+- **Client-side `setState()`** — the server sends a `cf_agent_state_error` message. Handle it with the `onStateUpdateError` callback.
+- **`@callable()` methods** — the RPC call rejects with an error. Handle it with a `try`/`catch` around `agent.call()`.
 
 ```typescript
 const agent = useAgent({
   agent: "MyAgent",
   name: "instance",
+  // Fires when client-side setState() is blocked
   onStateUpdateError: (error) => {
-    // User-friendly messages
-    if (error.includes("readonly")) {
-      showToast("You're in view-only mode. Upgrade to edit.");
-    }
+    setError(error);
   }
 });
+
+// Fires when a callable that writes state is blocked
+try {
+  await agent.call("updateSettings", [newSettings]);
+} catch (e) {
+  setError(e instanceof Error ? e.message : String(e)); // "Connection is readonly"
+}
 ```
 
-### 3. Check Permissions Before UI Actions
+To avoid showing errors in the first place, check permissions before rendering edit controls:
 
 ```typescript
-function EditButton() {
+function Editor() {
   const [canEdit, setCanEdit] = useState(false);
-  const agent = useAgent({ /* ... */ });
+  const agent = useAgent({ agent: "MyAgent", name: "instance" });
 
   useEffect(() => {
-    agent.call("checkPermissions").then(perms => {
-      setCanEdit(perms.canEdit);
-    });
+    agent.call("getPermissions").then((p) => setCanEdit(p.canEdit));
   }, []);
 
-  return (
-    <button disabled={!canEdit}>
-      {canEdit ? "Edit" : "View Only"}
-    </button>
-  );
+  return <button disabled={!canEdit}>{canEdit ? "Edit" : "View Only"}</button>;
 }
 ```
 
-### 4. Log Access Attempts
+## API reference
+
+### `shouldConnectionBeReadonly(connection, ctx)`
+
+Called when a connection is established. Override to control which connections are readonly.
+
+| Parameter    | Type                | Description                  |
+| ------------ | ------------------- | ---------------------------- |
+| `connection` | `Connection`        | The connecting client        |
+| `ctx`        | `ConnectionContext` | Contains the upgrade request |
+| **Returns**  | `boolean`           | `true` to mark as readonly   |
+
+Default: returns `false` (all connections are writable).
+
+### `setConnectionReadonly(connection, readonly?)`
+
+Mark or unmark a connection as readonly. Can be called at any time.
+
+| Parameter    | Type         | Description                               |
+| ------------ | ------------ | ----------------------------------------- |
+| `connection` | `Connection` | The connection to update                  |
+| `readonly`   | `boolean`    | `true` to make readonly (default: `true`) |
+
+### `isConnectionReadonly(connection)`
+
+Check if a connection is currently readonly.
+
+| Parameter    | Type         | Description             |
+| ------------ | ------------ | ----------------------- |
+| `connection` | `Connection` | The connection to check |
+| **Returns**  | `boolean`    | `true` if readonly      |
+
+### `onStateUpdateError` (client)
+
+Callback on `AgentClient` and `useAgent` options. Called when the server rejects a state update.
+
+| Parameter | Type     | Description                   |
+| --------- | -------- | ----------------------------- |
+| `error`   | `string` | Error message from the server |
+
+## How it works
+
+Readonly status is stored in the connection's WebSocket attachment, which persists through the WebSocket Hibernation API. The flag is namespaced internally so it cannot be accidentally overwritten by `connection.setState()`. This means:
+
+- **Survives hibernation** — the flag is serialized and restored when the agent wakes up
+- **No cleanup needed** — connection state is automatically discarded when the connection closes
+- **Zero overhead** — no database tables or queries, just the connection's built-in attachment
+- **Safe from user code** — `connection.state` and `connection.setState()` never expose or overwrite the readonly flag
+
+When a readonly connection tries to modify state, the server blocks it — regardless of whether the write comes from client-side `setState()` or from a `@callable()` method:
+
+```
+Client (readonly)                     Agent
+       │                                │
+       │  setState({ count: 1 })        │
+       │ ─────────────────────────────▶ │  Check readonly → blocked
+       │  ◀───────────────────────────  │
+       │  cf_agent_state_error          │
+       │                                │
+       │  call("increment")             │
+       │ ─────────────────────────────▶ │  increment() calls this.setState()
+       │                                │  Check readonly → throw
+       │  ◀───────────────────────────  │
+       │  RPC error: "Connection is     │
+       │              readonly"         │
+       │                                │
+       │  call("getPermissions")        │
+       │ ─────────────────────────────▶ │  getPermissions() — no setState()
+       │  ◀───────────────────────────  │
+       │  RPC result: { canEdit: false }│
+```
+
+## What readonly does and does not restrict
+
+| Action                                                 | Allowed? |
+| ------------------------------------------------------ | -------- |
+| Receive state broadcasts                               | Yes      |
+| Call `@callable()` methods that don't write state      | Yes      |
+| Call `@callable()` methods that call `this.setState()` | **No**   |
+| Send state updates via client-side `setState()`        | **No**   |
+
+The enforcement happens inside `setState()` itself. When a `@callable()` method tries to call `this.setState()` and the current connection context is readonly, the framework throws an `Error("Connection is readonly")`. This means you don't need manual permission checks in your RPC methods — any callable that writes state is automatically blocked for readonly connections.
+
+## Caveats
+
+### Side effects in callables still run
+
+The readonly check happens inside `this.setState()`, not at the start of the callable. If your method has side effects before the state write, those will still execute:
 
 ```typescript
-export class AuditedAgent extends Agent<Env, State> {
-  onStateUpdate(state: State, source: Connection | "server") {
-    if (source !== "server") {
-      this.audit({
-        action: "state_update",
-        connectionId: source.id,
-        readonly: this.isConnectionReadonly(source),
-        timestamp: Date.now()
-      });
-    }
-  }
+@callable()
+async processOrder(orderId: string) {
+  await sendConfirmationEmail(orderId); // runs even for readonly connections
+  await chargePayment(orderId);         // runs too
+  this.setState({ ...this.state, orders: [...this.state.orders, orderId] }); // throws
 }
 ```
 
-## Migration Guide
-
-If you have existing agents and want to add readonly connection support:
-
-1. **Server-side**: No breaking changes. The feature is opt-in.
-2. **Client-side**: Add `onStateUpdateError` handlers where needed.
+To avoid this, either check permissions before side effects or structure your code so the state write comes first:
 
 ```typescript
-// Before
-const agent = useAgent({
-  agent: "MyAgent",
-  name: "instance"
-});
-
-// After (with error handling)
-const agent = useAgent({
-  agent: "MyAgent",
-  name: "instance",
-  onStateUpdateError: (error) => {
-    console.error("State update error:", error);
-  }
-});
+@callable()
+async processOrder(orderId: string) {
+  // Write state first — throws immediately for readonly connections
+  this.setState({ ...this.state, orders: [...this.state.orders, orderId] });
+  // Side effects only run if setState succeeded
+  await sendConfirmationEmail(orderId);
+  await chargePayment(orderId);
+}
 ```
-
-## How It Works
-
-### Persistence Across Hibernation
-
-Readonly connection status is **automatically persisted to the agent's SQL storage**, which means:
-
-✅ **Survives hibernation** - When an agent hibernates and wakes up, readonly connections maintain their status
-✅ **No memory leaks** - Connections are automatically cleaned up when they close
-✅ **Performance optimized** - Uses in-memory cache with SQL fallback
-
-The implementation uses a two-tier approach:
-
-1. **In-memory Set** for fast lookups during active operation
-2. **SQL table** (`cf_agents_readonly_connections`) for persistence across hibernation
-
-When checking if a connection is readonly:
-
-1. First checks the in-memory cache (fast)
-2. If not found, queries SQL storage (handles post-hibernation case)
-3. Populates cache if found in storage
-
-### Storage Details
-
-The readonly status is stored in a dedicated table:
-
-```sql
-CREATE TABLE cf_agents_readonly_connections (
-  connection_id TEXT PRIMARY KEY NOT NULL,
-  created_at INTEGER DEFAULT (unixepoch())
-)
-```
-
-All CRUD operations automatically sync both in-memory and persistent storage.
-
-## Limitations
-
-- Readonly status only applies to state updates via `setState()`
-- RPC methods can still be called (implement your own checks if needed)
 
 ## Related
 
-- [State Management](./index.md)
-- [Connection Management](./context-management.md)
-- [Cross-Domain Authentication](./cross-domain-authentication.md)
+- [State Management](./state.md)
+- [HTTP & WebSockets](./http-websockets.md)
+- [Callable Methods](./callable-methods.md)

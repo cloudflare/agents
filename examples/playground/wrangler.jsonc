@@ -14,6 +14,7 @@
       { "name": "SqlAgent", "class_name": "SqlAgent" },
       { "name": "ConnectionsAgent", "class_name": "ConnectionsAgent" },
       { "name": "RoutingAgent", "class_name": "RoutingAgent" },
+      { "name": "ReadonlyAgent", "class_name": "ReadonlyAgent" },
       // AI demo agents
       { "name": "ChatAgent", "class_name": "ChatAgent" },
       // Multi-agent demo agents
@@ -53,6 +54,7 @@
         "SqlAgent",
         "ConnectionsAgent",
         "RoutingAgent",
+        "ReadonlyAgent",
         // AI demo agents
         "ChatAgent",
         // Multi-agent demo agents

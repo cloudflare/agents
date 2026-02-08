@@ -12,6 +12,7 @@
 - [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
 - [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls
+- [Readonly Connections](./readonly-connections.md) - Restricting which connections can modify state
 - [getCurrentAgent()](./get-current-agent.md) - Accessing agent context across async calls
 
 ## Client SDK

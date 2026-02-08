@@ -82,6 +82,11 @@ const navigation: NavCategory[] = [
         label: "Routing",
         path: "/core/routing",
         icon: <SignpostIcon size={16} />
+      },
+      {
+        label: "Readonly",
+        path: "/core/readonly",
+        icon: <ShieldIcon size={16} />
       }
     ]
   },

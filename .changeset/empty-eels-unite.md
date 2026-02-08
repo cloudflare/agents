@@ -2,6 +2,10 @@
 "agents": patch
 ---
 
-Add readonly connection support to agents
+Add readonly connections: restrict WebSocket clients from modifying agent state
 
-Introduces readonly connections to restrict certain WebSocket clients from modifying agent state while allowing state updates and RPC calls. Adds server-side methods for managing readonly status, persists status in SQL for hibernation, and client-side error handling via onStateUpdateError. Updates documentation and relevant types, client, and React hook implementations.
+- New hooks: `shouldConnectionBeReadonly`, `setConnectionReadonly`, `isConnectionReadonly`
+- Blocks both client-side `setState()` and mutating `@callable()` methods for readonly connections
+- Readonly flag stored in a namespaced connection attachment (`_cf_readonly`), surviving hibernation without extra SQL
+- Connection state wrapping hides the internal flag from user code and preserves it across `connection.setState()` calls
+- Client-side `onStateUpdateError` callback for handling rejected state updates

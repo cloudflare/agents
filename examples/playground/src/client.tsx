@@ -35,6 +35,7 @@ import { ScheduleDemo } from "./demos/core/ScheduleDemo";
 import { ConnectionsDemo } from "./demos/core/ConnectionsDemo";
 import { SqlDemo } from "./demos/core/SqlDemo";
 import { RoutingDemo } from "./demos/core/RoutingDemo";
+import { ReadonlyDemo } from "./demos/core/ReadonlyDemo";
 
 // AI demos
 import { ChatDemo } from "./demos/ai/ChatDemo";
@@ -77,6 +78,7 @@ function App() {
               <Route path="core/connections" element={<ConnectionsDemo />} />
               <Route path="core/sql" element={<SqlDemo />} />
               <Route path="core/routing" element={<RoutingDemo />} />
+              <Route path="core/readonly" element={<ReadonlyDemo />} />
 
               {/* AI */}
               <Route path="ai/chat" element={<ChatDemo />} />

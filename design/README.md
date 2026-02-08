@@ -6,6 +6,7 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 
 ## Contents
 
-| File                       | Scope                                                    |
-| -------------------------- | -------------------------------------------------------- |
-| [visuals.md](./visuals.md) | UI component library choice, Kumo usage, custom patterns |
+| File                                                 | Scope                                                            |
+| ---------------------------------------------------- | ---------------------------------------------------------------- |
+| [visuals.md](./visuals.md)                           | UI component library choice, Kumo usage, custom patterns         |
+| [readonly-connections.md](./readonly-connections.md) | Readonly connection enforcement, storage, tradeoffs, and caveats |

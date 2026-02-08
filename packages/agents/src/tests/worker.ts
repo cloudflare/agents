@@ -12,6 +12,7 @@ import {
   Agent,
   callable,
   getAgentByName,
+  getCurrentAgent,
   routeAgentRequest,
   type Connection,
   type WSMessage
@@ -1031,16 +1032,65 @@ export class TestReadonlyAgent extends Agent<Env, { count: number }> {
   }
 
   @callable()
-  async getReadonlyFromDb() {
-    const rows = this.sql<{ connection_id: string }>`
-      SELECT connection_id FROM cf_agents_readonly_connections
-    `;
-    return rows.map((r) => r.connection_id);
-  }
-
-  @callable()
   async getStateUpdateAttempts() {
     return this.stateUpdateAttempts;
+  }
+
+  /** Returns the calling connection's ID so the client can pass it to other RPCs. */
+  @callable()
+  async getMyConnectionId() {
+    const { connection } = getCurrentAgent();
+    return connection ? connection.id : null;
+  }
+
+  /**
+   * Returns connection.state (user-visible) and readonly status for the given connection.
+   * Used to verify that the wrapping hides _cf_readonly from user code.
+   */
+  @callable()
+  async getConnectionUserState(connectionId: string) {
+    const conn = Array.from(this.getConnections()).find(
+      (c) => c.id === connectionId
+    );
+    if (!conn) return null;
+    return { state: conn.state, isReadonly: this.isConnectionReadonly(conn) };
+  }
+
+  /**
+   * Calls connection.setState(newState) (value form) and returns the resulting
+   * user-visible state + readonly status. Tests that the wrapping preserves _cf_readonly.
+   */
+  @callable()
+  async setConnectionUserState(
+    connectionId: string,
+    newState: Record<string, unknown>
+  ) {
+    const conn = Array.from(this.getConnections()).find(
+      (c) => c.id === connectionId
+    );
+    if (!conn) return null;
+    conn.setState(newState);
+    return { state: conn.state, isReadonly: this.isConnectionReadonly(conn) };
+  }
+
+  /**
+   * Calls connection.setState(prev => ({ ...prev, ...updates })) (callback form)
+   * and returns the result. Tests the callback branch of the wrapping.
+   */
+  @callable()
+  async setConnectionUserStateCallback(
+    connectionId: string,
+    updates: Record<string, unknown>
+  ) {
+    const conn = Array.from(this.getConnections()).find(
+      (c) => c.id === connectionId
+    );
+    if (!conn) return null;
+    conn.setState((prev: Record<string, unknown> | null) => ({
+      ...(prev ?? {}),
+      ...updates
+    }));
+    return { state: conn.state, isReadonly: this.isConnectionReadonly(conn) };
   }
 }
 
