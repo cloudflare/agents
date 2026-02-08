@@ -29,9 +29,9 @@ A counter agent with persistent state, callable methods, and real-time sync to a
 // server.ts
 import { Agent, routeAgentRequest, callable } from "agents";
 
-type State = { count: number };
+export type CounterState = { count: number };
 
-export class Counter extends Agent<Env, State> {
+export class CounterAgent extends Agent<Env, CounterState> {
   initialState: State = { count: 0 };
 
   @callable()
@@ -61,12 +61,13 @@ export default {
 // client.tsx
 import { useAgent } from "agents/react";
 import { useState } from "react";
+import type { CounterAgent, CounterState } from "./server";
 
 function Counter() {
   const [count, setCount] = useState(0);
 
-  const agent = useAgent<State>({
-    agent: "Counter",
+  const agent = useAgent<CounterAgent, CounterState>({
+    agent: "CounterAgent",
     onStateUpdate: (state) => setCount(state.count)
   });
 
