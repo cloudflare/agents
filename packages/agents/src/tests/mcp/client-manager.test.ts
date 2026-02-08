@@ -538,6 +538,42 @@ describe("MCPClientManager OAuth Integration", () => {
         'Failed to authenticate: the client is in "failed" state, expected "authenticating"'
       );
     });
+
+    it("should recognize custom callback paths that do not contain '/callback'", async () => {
+      const customCallbackUrl = "http://localhost:3000/mcp-oauth-return";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: "server1",
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: customCallbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const state = stateStorage.createState("server1");
+
+      // Custom path should be recognized via state param, not URL path
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customCallbackUrl}?code=test&state=${state}`)
+        )
+      ).toBe(true);
+
+      // Invalid state should still be rejected
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customCallbackUrl}?code=test&state=invalid`)
+        )
+      ).toBe(false);
+
+      // Missing state should still be rejected
+      expect(
+        manager.isCallbackRequest(new Request(`${customCallbackUrl}?code=test`))
+      ).toBe(false);
+    });
   });
 
   describe("OAuth Security", () => {
@@ -718,6 +754,49 @@ describe("MCPClientManager OAuth Integration", () => {
 
       expect(
         manager.isCallbackRequest(new Request(`${callbackUrl}?code=test`))
+      ).toBe(false);
+    });
+
+    it("should match callback requests by state param regardless of URL path", async () => {
+      const serverId = "test-server";
+      const customPath = "http://localhost:3000/my-custom-oauth-return";
+      const stateStorage = createMockStateStorage();
+
+      saveServerToMock({
+        id: serverId,
+        name: "Test Server",
+        server_url: "http://test.com",
+        callback_url: customPath,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const validState = stateStorage.createState(serverId);
+
+      // Should match even though URL doesn't contain "/callback"
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customPath}?code=test&state=${validState}`)
+        )
+      ).toBe(true);
+
+      // Should match on a completely different URL as long as state is valid
+      expect(
+        manager.isCallbackRequest(
+          new Request(
+            `http://localhost:3000/anything?code=test&state=${validState}`
+          )
+        )
+      ).toBe(true);
+
+      // POST should still be rejected
+      expect(
+        manager.isCallbackRequest(
+          new Request(`${customPath}?code=test&state=${validState}`, {
+            method: "POST"
+          })
+        )
       ).toBe(false);
     });
 

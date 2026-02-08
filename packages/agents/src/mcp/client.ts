@@ -669,10 +669,6 @@ export class MCPClientManager {
       return false;
     }
 
-    if (!req.url.includes("/callback")) {
-      return false;
-    }
-
     const url = new URL(req.url);
     const state = url.searchParams.get("state");
     const serverId = this.extractServerIdFromState(state);
