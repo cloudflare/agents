@@ -11,7 +11,13 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import { writeFileSync, unlinkSync, existsSync, readFileSync } from "node:fs";
+import {
+  writeFileSync,
+  unlinkSync,
+  existsSync,
+  readFileSync,
+  rmSync
+} from "node:fs";
 import { join } from "node:path";
 
 const E2E_PORT = process.env.E2E_PORT || "8799";
@@ -20,6 +26,9 @@ const HEALTH_CHECK_INTERVAL = 500;
 
 // File to store server info between setup and tests
 const CONFIG_FILE = join(process.cwd(), "e2e", ".e2e-config.json");
+
+// Separate persistence directory for e2e tests (avoids polluting dev .wrangler state)
+const E2E_PERSIST_DIR = join(process.cwd(), ".wrangler-e2e");
 
 let wranglerProcess: ChildProcess | null = null;
 
@@ -86,13 +95,22 @@ export async function setup() {
 
   console.log(`\n[E2E] Starting wrangler dev on port ${E2E_PORT}...`);
 
+  // Clean up previous e2e persistence state for a fresh start
+  if (existsSync(E2E_PERSIST_DIR)) {
+    rmSync(E2E_PERSIST_DIR, { recursive: true, force: true });
+    console.log("[E2E] Cleaned up previous e2e state");
+  }
+
   // Build wrangler args with --var for each needed variable
+  // Use --persist-to to isolate e2e state from dev .wrangler
   const wranglerArgs = [
     "wrangler",
     "dev",
     "--port",
     E2E_PORT,
     "--local",
+    "--persist-to",
+    E2E_PERSIST_DIR,
     "--var",
     "ENABLE_SUBAGENT_API:true"
   ];
@@ -245,5 +263,11 @@ export async function teardown() {
         console.error("[E2E] Error stopping wrangler:", error);
       }
     }
+  }
+
+  // Clean up e2e persistence directory
+  if (existsSync(E2E_PERSIST_DIR)) {
+    rmSync(E2E_PERSIST_DIR, { recursive: true, force: true });
+    console.log("[E2E] Cleaned up e2e state");
   }
 }

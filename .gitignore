@@ -137,6 +137,7 @@ dist
 
 # cloudflare/wrangler
 .wrangler
+.wrangler-e2e
 .dev.vars
 
 # macOS

@@ -894,9 +894,21 @@ The code runs in an isolated V8 environment with:
 - 30 second timeout by default
 - console.log() outputs captured in logs
 
-Return values are JSON-stringified. For complex outputs, return an object.
+You can write code in two styles:
 
-Example: "const data = [1,2,3,4,5]; const sum = data.reduce((a,b) => a+b, 0); return { sum, avg: sum/data.length };"`,
+1. Simple (bare code with return):
+   const data = [1,2,3,4,5];
+   const sum = data.reduce((a,b) => a+b, 0);
+   return { sum, avg: sum/data.length };
+
+2. Module style (export default function, receives env bindings):
+   export default async function(env) {
+     const result = await env.BASH.exec("echo hello");
+     return result;
+   }
+
+Use style 1 for simple computations. Use style 2 when you need env bindings (BASH, FS, FETCH).
+Return values are JSON-stringified. Use console.log() for intermediate outputs.`,
     inputSchema: jsonSchema<{
       code: string;
       modules?: Record<string, string>;
@@ -907,7 +919,7 @@ Example: "const data = [1,2,3,4,5]; const sum = data.reduce((a,b) => a+b, 0); re
         code: {
           type: "string",
           description:
-            "JavaScript code to execute. The code should use 'return' to provide a result. Use console.log() for intermediate outputs."
+            "JavaScript code to execute. Use 'return' for a result. For env bindings, use 'export default async function(env) { ... }'. Use console.log() for intermediate outputs."
         },
         modules: {
           type: "object",

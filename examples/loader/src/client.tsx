@@ -177,37 +177,6 @@ function App() {
     setTheme((t) => (t === "dark" ? "light" : "dark"));
   }, []);
 
-  // Load chat history
-  const loadHistory = useCallback(async () => {
-    if (historyLoadedRef.current) return;
-    historyLoadedRef.current = true;
-    try {
-      const res = await fetch("/agents/think/dev-session/chat/history");
-      if (!res.ok) return;
-      const data = (await res.json()) as {
-        messages?: Array<{
-          role: string;
-          content: string;
-          toolCalls?: ToolCall[];
-          reasoning?: string;
-        }>;
-      };
-      if (data.messages && data.messages.length > 0) {
-        setMessages(
-          data.messages.map((msg, idx) => ({
-            id: `history-${idx}`,
-            role: msg.role as "user" | "assistant",
-            content: msg.content,
-            toolCalls: msg.toolCalls,
-            reasoning: msg.reasoning
-          }))
-        );
-      }
-    } catch (e) {
-      console.error("Failed to load history:", e);
-    }
-  }, []);
-
   // WebSocket connection - pass debug=1 if debug mode enabled
   const agent = useAgent<ThinkState>({
     agent: "Think",

@@ -1800,6 +1800,16 @@ export class Think extends Agent<Env, ThinkState> {
       // Build the harness that wraps user code
       const harnessModule = this.buildHarnessModule();
 
+      // Wrap bare code that uses `return` at the top level.
+      // ES modules don't allow bare `return` - it must be inside a function.
+      // Detect: has `return` but no `export default` function/class
+      const hasExport = /export\s+default/.test(code);
+      const hasReturn = /\breturn\b/.test(code);
+      const wrappedCode =
+        !hasExport && hasReturn
+          ? `export default { __executeBody: async function(env) {\n${code}\n} };`
+          : code;
+
       // Get the dynamic worker
       const worker = this.env.LOADER.get(executionId, () => ({
         compatibilityDate: "2025-11-01",
@@ -1807,7 +1817,7 @@ export class Think extends Agent<Env, ThinkState> {
         mainModule: "harness.js",
         modules: {
           "harness.js": harnessModule,
-          "agent.js": code,
+          "agent.js": wrappedCode,
           ...(options.modules || {})
         },
         // Pass loopback bindings - tools the code can use
@@ -1969,9 +1979,13 @@ export default class extends WorkerEntrypoint {
     try {
       let output;
       if (typeof agent === 'function') {
+        // Code exported a function (e.g. export default async function(env) { ... })
         output = await agent(this.env);
       } else if (agent && typeof agent.default === 'function') {
         output = await agent.default(this.env);
+      } else if (typeof agent === 'object' && agent !== null && '__executeBody' in agent) {
+        // Code was wrapped in a function by the harness (bare code with return statements)
+        output = await agent.__executeBody(this.env);
       } else {
         output = agent;
       }
