@@ -128,7 +128,7 @@ export class MyAgent extends Agent<Env, { items: string[] }> {
     this.setState({ items: [...this.state.items, item] });
   }
 
-  onStatePersisted(state: State, source: Connection | "server") {
+  onStateChanged(state: State, source: Connection | "server") {
     // Called after state is persisted and broadcast
   }
 }

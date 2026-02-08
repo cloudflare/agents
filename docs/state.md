@@ -29,7 +29,7 @@ export class GameAgent extends Agent<Env, GameState> {
   };
 
   // React to state changes
-  onStatePersisted(state: GameState, source: Connection | "server") {
+  onStateChanged(state: GameState, source: Connection | "server") {
     if (source !== "server" && state.players.length >= 2) {
       // Client added a player, start the game
       this.setState({ ...state, status: "playing" });
@@ -136,7 +136,7 @@ Use `setState()` to update state. This:
 
 1. Saves to SQLite (persistent)
 2. Broadcasts to all connected clients
-3. Triggers `onStatePersisted()` (after broadcast; best-effort)
+3. Triggers `onStateChanged()` (after broadcast; best-effort)
 
 ```typescript
 // Replace entire state
@@ -181,10 +181,10 @@ this.setState({
 
 ## Responding to State Changes
 
-Override `onStatePersisted()` to react when state changes (notifications/side-effects):
+Override `onStateChanged()` to react when state changes (notifications/side-effects):
 
 ```typescript
-onStatePersisted(state: GameState, source: Connection | "server") {
+onStateChanged(state: GameState, source: Connection | "server") {
   console.log("State updated:", state);
   console.log("Updated by:", source === "server" ? "server" : source.id);
 }
@@ -207,9 +207,9 @@ validateStateChange(nextState: GameState, source: Connection | "server") {
 }
 ```
 
-> `onStatePersisted()` is not intended for validation; it is a notification hook and should not block broadcasts.
+> `onStateChanged()` is not intended for validation; it is a notification hook and should not block broadcasts.
 >
-> **Migration note:** `onStatePersisted` replaces the deprecated `onStateUpdate` (server-side hook). If you're using `onStateUpdate` on your agent class, rename it to `onStatePersisted` — the signature and behavior are identical. A console warning will fire once per class until you rename it.
+> **Migration note:** `onStateChanged` replaces the deprecated `onStateUpdate` (server-side hook). If you're using `onStateUpdate` on your agent class, rename it to `onStateChanged` — the signature and behavior are identical. A console warning will fire once per class until you rename it.
 
 ### The `source` Parameter
 
@@ -227,7 +227,7 @@ This is useful for:
 - Triggering side effects only on client actions
 
 ```typescript
-onStatePersisted(state: State, source: Connection | "server") {
+onStateChanged(state: State, source: Connection | "server") {
   // Ignore server-initiated updates
   if (source === "server") return;
 
@@ -245,7 +245,7 @@ onStatePersisted(state: State, source: Connection | "server") {
 ### Common Pattern: Client-Driven Actions
 
 ```typescript
-onStatePersisted(state: State, source: Connection | "server") {
+onStateChanged(state: State, source: Connection | "server") {
   if (source === "server") return;
 
   // Client added a message
@@ -405,7 +405,7 @@ function sendMessage(text: string) {
 }
 
 // Server-side
-onStatePersisted(state: State, source: Connection | "server") {
+onStateChanged(state: State, source: Connection | "server") {
   if (source === "server") return;
 
   const pendingMessages = state.messages.filter(m => m.pending);
@@ -468,12 +468,12 @@ Be careful not to trigger state updates in response to your own updates:
 
 ```typescript
 // Bad - infinite loop
-onStatePersisted(state: State) {
+onStateChanged(state: State) {
   this.setState({ ...state, lastUpdated: Date.now() });
 }
 
 // Good - check source
-onStatePersisted(state: State, source: Connection | "server") {
+onStateChanged(state: State, source: Connection | "server") {
   if (source === "server") return;  // Don't react to own updates
   this.setState({ ...state, lastUpdated: Date.now() });
 }
@@ -490,10 +490,10 @@ onStatePersisted(state: State, source: Connection | "server") {
 
 ### Methods
 
-| Method             | Signature                                                | Description                                   |
-| ------------------ | -------------------------------------------------------- | --------------------------------------------- |
-| `setState`         | `(state: State) => void`                                 | Update state, persist, and broadcast          |
-| `onStatePersisted` | `(state: State, source: Connection \| "server") => void` | Called after state is persisted and broadcast |
+| Method           | Signature                                                | Description                                   |
+| ---------------- | -------------------------------------------------------- | --------------------------------------------- |
+| `setState`       | `(state: State) => void`                                 | Update state, persist, and broadcast          |
+| `onStateChanged` | `(state: State, source: Connection \| "server") => void` | Called after state is persisted and broadcast |
 
 ### Workflow Step Methods
 

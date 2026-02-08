@@ -77,7 +77,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
     */
   }
 
-  onStatePersisted(state: State) {
+  onStateChanged(state: State) {
     console.log({ stateUpdate: state });
   }
 

@@ -171,7 +171,7 @@ export class TestThrowingStateAgent extends Agent<
   }
 }
 
-// Test Agent using the new onStatePersisted hook (successor to onStateUpdate)
+// Test Agent using the new onStateChanged hook (successor to onStateUpdate)
 export class TestPersistedStateAgent extends Agent<
   Record<string, unknown>,
   TestState
@@ -184,10 +184,10 @@ export class TestPersistedStateAgent extends Agent<
     lastUpdated: null
   };
 
-  // Track onStatePersisted calls
+  // Track onStateChanged calls
   persistedCalls: Array<{ state: TestState; source: string }> = [];
 
-  onStatePersisted(state: TestState, source: Connection | "server") {
+  onStateChanged(state: TestState, source: Connection | "server") {
     this.persistedCalls.push({
       state,
       source: source === "server" ? "server" : source.id
@@ -229,7 +229,7 @@ export class TestBothHooksAgent extends Agent<
     void state;
   }
 
-  onStatePersisted(state: TestState, _source: Connection | "server") {
+  onStateChanged(state: TestState, _source: Connection | "server") {
     void state;
   }
 

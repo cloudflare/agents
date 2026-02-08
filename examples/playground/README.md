@@ -20,15 +20,15 @@ The playground is organized into feature categories, each with interactive demos
 
 ### Core
 
-| Demo            | Description                                                                |
-| --------------- | -------------------------------------------------------------------------- |
-| **State**       | Real-time state synchronization with `setState()` and `onStatePersisted()` |
-| **Callable**    | RPC methods using the `@callable` decorator                                |
-| **Streaming**   | Streaming responses with `StreamingResponse`                               |
-| **Schedule**    | One-time, recurring, and cron-based task scheduling                        |
-| **Connections** | WebSocket lifecycle, client tracking, and broadcasting                     |
-| **SQL**         | Direct SQLite queries using `this.sql` template literal                    |
-| **Routing**     | Agent naming strategies (per-user, shared, per-session)                    |
+| Demo            | Description                                                              |
+| --------------- | ------------------------------------------------------------------------ |
+| **State**       | Real-time state synchronization with `setState()` and `onStateChanged()` |
+| **Callable**    | RPC methods using the `@callable` decorator                              |
+| **Streaming**   | Streaming responses with `StreamingResponse`                             |
+| **Schedule**    | One-time, recurring, and cron-based task scheduling                      |
+| **Connections** | WebSocket lifecycle, client tracking, and broadcasting                   |
+| **SQL**         | Direct SQLite queries using `this.sql` template literal                  |
+| **Routing**     | Agent naming strategies (per-user, shared, per-session)                  |
 
 ### Multi-Agent
 

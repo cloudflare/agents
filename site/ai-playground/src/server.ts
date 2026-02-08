@@ -279,7 +279,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
     return await this.env.AI.models({ per_page: 1000 });
   }
 
-  onStatePersisted() {}
+  onStateChanged() {}
 }
 
 /**

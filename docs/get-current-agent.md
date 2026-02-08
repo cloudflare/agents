@@ -65,7 +65,7 @@ export class MyAgent extends AIChatAgent {
 
 ### Built-in vs Custom Methods
 
-- **Built-in methods** (onRequest, onEmail, onStatePersisted): Already have context
+- **Built-in methods** (onRequest, onEmail, onStateChanged): Already have context
 - **Custom methods** (your methods): Automatically wrapped during initialization
 - **External functions**: Access context through `getCurrentAgent()`
 

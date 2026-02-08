@@ -647,8 +647,8 @@ describe("state management", () => {
     });
   });
 
-  describe("onStatePersisted hook", () => {
-    it("should call onStatePersisted after setState (server-side)", async () => {
+  describe("onStateChanged hook", () => {
+    it("should call onStateChanged after setState (server-side)", async () => {
       const room = `persisted-hook-${crypto.randomUUID()}`;
       const agentStub = await getAgentByName(env.TestPersistedStateAgent, room);
 
@@ -660,7 +660,7 @@ describe("state management", () => {
         lastUpdated: "server"
       });
 
-      // onStatePersisted runs via waitUntil; poll until observed
+      // onStateChanged runs via waitUntil; poll until observed
       let calls: Array<{ state: unknown; source: string }> = [];
       const start = Date.now();
       while (Date.now() - start < 2000) {
@@ -675,7 +675,7 @@ describe("state management", () => {
       expect((last.state as { count: number }).count).toBe(7);
     });
 
-    it("should call onStatePersisted with connection source for client-originated updates", async () => {
+    it("should call onStateChanged with connection source for client-originated updates", async () => {
       const room = `persisted-hook-client-${crypto.randomUUID()}`;
 
       const { ws } = await connectWS(
@@ -714,7 +714,7 @@ describe("state management", () => {
       ws.close();
     });
 
-    it("should throw if both onStateUpdate and onStatePersisted are overridden on the same class", async () => {
+    it("should throw if both onStateUpdate and onStateChanged are overridden on the same class", async () => {
       const room = `both-hooks-${crypto.randomUUID()}`;
       const agentStub = await getAgentByName(env.TestBothHooksAgent, room);
 
@@ -733,7 +733,7 @@ describe("state management", () => {
       }
       expect(threw).toBe(true);
       expect(errorMessage).toContain(
-        "Cannot override both onStatePersisted and onStateUpdate"
+        "Cannot override both onStateChanged and onStateUpdate"
       );
     });
   });

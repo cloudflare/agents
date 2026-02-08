@@ -8,7 +8,7 @@
 
 ## Core Concepts
 
-- [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStatePersisted()`
+- [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateChanged()`
 - [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
 - [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls

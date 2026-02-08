@@ -425,7 +425,7 @@ export class Agent<
 
   /**
    * Cached persistence-hook dispatch mode, computed once in the constructor.
-   * - "new"  → call onStatePersisted
+   * - "new"  → call onStateChanged
    * - "old"  → call onStateUpdate (deprecated)
    * - "none" → neither hook is overridden, skip entirely
    */
@@ -687,7 +687,7 @@ export class Agent<
       const proto = Object.getPrototypeOf(this);
       const hasOwnNew = Object.prototype.hasOwnProperty.call(
         proto,
-        "onStatePersisted"
+        "onStateChanged"
       );
       const hasOwnOld = Object.prototype.hasOwnProperty.call(
         proto,
@@ -696,8 +696,8 @@ export class Agent<
 
       if (hasOwnNew && hasOwnOld) {
         throw new Error(
-          `[Agent] Cannot override both onStatePersisted and onStateUpdate. ` +
-            `Remove onStateUpdate — it has been renamed to onStatePersisted.`
+          `[Agent] Cannot override both onStateChanged and onStateUpdate. ` +
+            `Remove onStateUpdate — it has been renamed to onStateChanged.`
         );
       }
 
@@ -706,13 +706,13 @@ export class Agent<
         if (!_onStateUpdateWarnedClasses.has(ctor)) {
           _onStateUpdateWarnedClasses.add(ctor);
           console.warn(
-            `[Agent] onStateUpdate is deprecated. Rename to onStatePersisted — the behavior is identical.`
+            `[Agent] onStateUpdate is deprecated. Rename to onStateChanged — the behavior is identical.`
           );
         }
       }
 
       const base = Agent.prototype;
-      if (proto.onStatePersisted !== base.onStatePersisted) {
+      if (proto.onStateChanged !== base.onStateChanged) {
         this._persistenceHookMode = "new";
       } else if (proto.onStateUpdate !== base.onStateUpdate) {
         this._persistenceHookMode = "old";
@@ -1066,7 +1066,7 @@ export class Agent<
             }
           );
         } catch (e) {
-          // onStatePersisted/onStateUpdate errors should not affect state or broadcasts
+          // onStateChanged/onStateUpdate errors should not affect state or broadcasts
           try {
             await this.onError(e);
           } catch {
@@ -1261,12 +1261,12 @@ export class Agent<
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-  onStatePersisted(state: State | undefined, source: Connection | "server") {
+  onStateChanged(state: State | undefined, source: Connection | "server") {
     // override this to handle state updates after persist + broadcast
   }
 
   /**
-   * @deprecated Renamed to `onStatePersisted` — the behavior is identical.
+   * @deprecated Renamed to `onStateChanged` — the behavior is identical.
    * `onStateUpdate` will be removed in the next major version.
    *
    * Called after the Agent's state has been persisted and broadcast to all clients.
@@ -1278,7 +1278,7 @@ export class Agent<
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   onStateUpdate(state: State | undefined, source: Connection | "server") {
-    // override this to handle state updates (deprecated — use onStatePersisted)
+    // override this to handle state updates (deprecated — use onStateChanged)
   }
 
   /**
@@ -1291,7 +1291,7 @@ export class Agent<
   ): Promise<void> {
     switch (this._persistenceHookMode) {
       case "new":
-        await this.onStatePersisted(state, source);
+        await this.onStateChanged(state, source);
         break;
       case "old":
         await this.onStateUpdate(state, source);
