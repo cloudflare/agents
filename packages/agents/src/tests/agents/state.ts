@@ -265,4 +265,41 @@ export class TestNoIdentityAgent extends Agent<
   updateState(state: TestState) {
     this.setState(state);
   }
+
+  // Test method: calls addMcpServer without callbackPath — should throw enforcement error
+  async testAddMcpServerWithoutCallbackPath(): Promise<{
+    threw: boolean;
+    message: string;
+  }> {
+    try {
+      await this.addMcpServer("test-server", "https://mcp.example.com", {
+        callbackHost: "https://example.com"
+      });
+      return { threw: false, message: "" };
+    } catch (err) {
+      return {
+        threw: true,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  // Test method: calls addMcpServer with callbackPath — should not throw the enforcement error
+  async testAddMcpServerWithCallbackPath(): Promise<{
+    threw: boolean;
+    message: string;
+  }> {
+    try {
+      await this.addMcpServer("test-server", "https://mcp.example.com", {
+        callbackHost: "https://example.com",
+        callbackPath: "/mcp-callback"
+      });
+      return { threw: false, message: "" };
+    } catch (err) {
+      return {
+        threw: true,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
 }

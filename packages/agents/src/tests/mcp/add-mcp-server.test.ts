@@ -20,6 +20,44 @@ type ResolvedArgs = {
   client?: unknown;
 };
 
+describe("addMcpServer callbackPath enforcement", () => {
+  it("should throw when sendIdentityOnConnect is false and callbackPath is not provided", async () => {
+    const agentStub = await getAgentByName(
+      env.TestNoIdentityAgent,
+      "test-no-callback-path"
+    );
+    const result =
+      (await agentStub.testAddMcpServerWithoutCallbackPath()) as unknown as {
+        threw: boolean;
+        message: string;
+      };
+
+    expect(result.threw).toBe(true);
+    expect(result.message).toContain(
+      "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false"
+    );
+  });
+
+  it("should not throw enforcement error when sendIdentityOnConnect is false and callbackPath is provided", async () => {
+    const agentStub = await getAgentByName(
+      env.TestNoIdentityAgent,
+      "test-with-callback-path"
+    );
+    // This may fail for other reasons (can't connect to remote MCP server) but should NOT
+    // throw the callbackPath enforcement error
+    const result =
+      (await agentStub.testAddMcpServerWithCallbackPath()) as unknown as {
+        threw: boolean;
+        message: string;
+      };
+
+    expect(result.threw).toBe(true); // Throws for connection error, not enforcement
+    expect(result.message).not.toContain(
+      "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false"
+    );
+  });
+});
+
 describe("addMcpServer API overloads", () => {
   describe("new options-based API", () => {
     it("should resolve options object with all fields", async () => {
