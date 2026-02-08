@@ -269,6 +269,14 @@ export type MCPServer = {
 export type AddMcpServerOptions = {
   /** OAuth callback host (auto-derived from request if omitted) */
   callbackHost?: string;
+  /**
+   * Custom callback URL path — bypasses the default `/agents/{class}/{name}/callback` construction.
+   * Required when `sendIdentityOnConnect` is `false` to prevent leaking the instance name.
+   * When set, the callback URL becomes `{callbackHost}/{callbackPath}`.
+   * The developer must route this path to the agent instance via `getAgentByName`.
+   * Should be a plain path (e.g., `/mcp-callback`) — do not include query strings or fragments.
+   */
+  callbackPath?: string;
   /** Agents routing prefix (default: "agents") */
   agentsPrefix?: string;
   /** MCP client options */
@@ -3046,12 +3054,15 @@ export class Agent<
         }
       | undefined;
 
+    let resolvedCallbackPath: string | undefined;
+
     if (
       typeof callbackHostOrOptions === "object" &&
       callbackHostOrOptions !== null
     ) {
       // New API: options object as third parameter
       resolvedCallbackHost = callbackHostOrOptions.callbackHost;
+      resolvedCallbackPath = callbackHostOrOptions.callbackPath;
       resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
       resolvedOptions = {
         client: callbackHostOrOptions.client,
@@ -3062,6 +3073,15 @@ export class Agent<
       resolvedCallbackHost = callbackHostOrOptions;
       resolvedAgentsPrefix = agentsPrefix ?? "agents";
       resolvedOptions = options;
+    }
+
+    // Enforce callbackPath when sendIdentityOnConnect is false
+    if (!this._resolvedOptions.sendIdentityOnConnect && !resolvedCallbackPath) {
+      throw new Error(
+        "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false — " +
+          "the default callback URL would expose the instance name. " +
+          "Provide a callbackPath and route the callback request to this agent via getAgentByName."
+      );
     }
 
     // If callbackHost is not provided, derive it from the current request
@@ -3078,7 +3098,11 @@ export class Agent<
       resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
     }
 
-    const callbackUrl = `${resolvedCallbackHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    // Build the callback URL: use callbackPath if provided, otherwise default to /agents/{class}/{name}/callback
+    const host = resolvedCallbackHost.replace(/\/$/, "");
+    const callbackUrl = resolvedCallbackPath
+      ? `${host}/${resolvedCallbackPath.replace(/^\//, "")}`
+      : `${host}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
     // TODO: make zod/ai sdk more performant and remove this
     // Late initialization of jsonSchemaFn (needed for getAITools)
