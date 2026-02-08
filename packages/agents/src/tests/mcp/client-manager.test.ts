@@ -757,7 +757,7 @@ describe("MCPClientManager OAuth Integration", () => {
       ).toBe(false);
     });
 
-    it("should match callback requests by state param regardless of URL path", async () => {
+    it("should match callback requests by state param and registered pathname", async () => {
       const serverId = "test-server";
       const customPath = "http://localhost:3000/my-custom-oauth-return";
       const stateStorage = createMockStateStorage();
@@ -774,21 +774,21 @@ describe("MCPClientManager OAuth Integration", () => {
 
       const validState = stateStorage.createState(serverId);
 
-      // Should match even though URL doesn't contain "/callback"
+      // Should match when pathname matches the registered callback URL
       expect(
         manager.isCallbackRequest(
           new Request(`${customPath}?code=test&state=${validState}`)
         )
       ).toBe(true);
 
-      // Should match on a completely different URL as long as state is valid
+      // Should NOT match on a different pathname even with valid state (defense-in-depth)
       expect(
         manager.isCallbackRequest(
           new Request(
             `http://localhost:3000/anything?code=test&state=${validState}`
           )
         )
-      ).toBe(true);
+      ).toBe(false);
 
       // POST should still be rejected
       expect(
