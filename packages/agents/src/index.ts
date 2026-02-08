@@ -866,7 +866,7 @@ export class Agent<
     // Wrap onClose if it exists to clean up readonly connections
     const _onClose = this.onClose?.bind(this);
     if (_onClose) {
-      // biome-ignore lint/suspicious/noExplicitAny: need to pass through all args
+      // oxlint-disable-next-line typescript-eslint(no-explicit-any) -- need to pass through all args
       this.onClose = (connection: Connection, ...args: any[]) => {
         return agentContext.run(
           { agent: this, connection, request: undefined, email: undefined },
@@ -877,7 +877,7 @@ export class Agent<
               DELETE FROM cf_agents_readonly_connections
               WHERE connection_id = ${connection.id}
             `;
-            // biome-ignore lint/suspicious/noExplicitAny: need to pass through all args
+            // oxlint-disable-next-line typescript-eslint(no-explicit-any) -- need to pass through all args
             return this._tryCatch(() => (_onClose as any)(connection, ...args));
           }
         );
