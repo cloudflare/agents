@@ -3099,9 +3099,10 @@ export class Agent<
     }
 
     // Build the callback URL: use callbackPath if provided, otherwise default to /agents/{class}/{name}/callback
+    const host = resolvedCallbackHost.replace(/\/$/, "");
     const callbackUrl = resolvedCallbackPath
-      ? `${resolvedCallbackHost}/${resolvedCallbackPath.replace(/^\//, "")}`
-      : `${resolvedCallbackHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+      ? `${host}/${resolvedCallbackPath.replace(/^\//, "")}`
+      : `${host}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
 
     // TODO: make zod/ai sdk more performant and remove this
     // Late initialization of jsonSchemaFn (needed for getAITools)
