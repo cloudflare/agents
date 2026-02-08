@@ -676,14 +676,16 @@ export class MCPClientManager {
       return false;
     }
 
-    // Match by server ID AND verify the request pathname matches the registered callback URL.
+    // Match by server ID AND verify the request origin + pathname matches the registered callback URL.
     // This prevents unrelated GET requests with a `state` param from being intercepted.
     const servers = this.getServersFromStorage();
     return servers.some((server) => {
       if (server.id !== serverId) return false;
       try {
         const storedUrl = new URL(server.callback_url);
-        return storedUrl.pathname === url.pathname;
+        return (
+          storedUrl.origin === url.origin && storedUrl.pathname === url.pathname
+        );
       } catch {
         return false;
       }

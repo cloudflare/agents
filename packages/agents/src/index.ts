@@ -274,6 +274,7 @@ export type AddMcpServerOptions = {
    * Required when `sendIdentityOnConnect` is `false` to prevent leaking the instance name.
    * When set, the callback URL becomes `{callbackHost}/{callbackPath}`.
    * The developer must route this path to the agent instance via `getAgentByName`.
+   * Should be a plain path (e.g., `/mcp-callback`) — do not include query strings or fragments.
    */
   callbackPath?: string;
   /** Agents routing prefix (default: "agents") */
