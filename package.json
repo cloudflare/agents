@@ -23,7 +23,8 @@
     "check": "sherif && npm run check:exports && oxfmt --check . && oxlint examples/ packages/ guides/ openai-sdk/ site/ai-playground/ && npm run typecheck",
     "test": "npm run test -w agents -w @cloudflare/ai-chat",
     "test:react": "npm run test:react -w agents",
-    "postinstall": "patch-package && playwright install --with-deps chromium",
+    "postinstall": "patch-package",
+    "prepare:playwright": "playwright install --with-deps chromium",
     "prepare": "husky"
   },
   "license": "MIT",
