@@ -434,16 +434,10 @@ export function useAgent<State>(
     resetReady();
   }
 
-  // If basePath is provided, use it directly; otherwise construct from agent/name.
-  // WORKAROUND: When using basePath, we still set `room` and `party` because
-  // PartySocket.reconnect() requires `room` to be set, even though basePath bypasses
-  // the room-based URL construction. This should be removed once partysocket is fixed
-  // to skip the `room` check when `basePath` is provided.
+  // If basePath is provided, use it directly; otherwise construct from agent/name
   const socketOptions = options.basePath
     ? {
         basePath: options.basePath,
-        party: agentNamespace,
-        room: options.name || "default",
         path: options.path,
         query: resolvedQuery,
         ...restOptions

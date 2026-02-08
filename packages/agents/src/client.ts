@@ -164,19 +164,9 @@ export class AgentClient<State = unknown> extends PartySocket {
   constructor(options: AgentClientOptions<State>) {
     const agentNamespace = camelCaseToKebabCase(options.agent);
 
-    // If basePath is provided, use it directly; otherwise construct from agent/name.
-    // WORKAROUND: When using basePath, we still set `room` and `party` because
-    // PartySocket.reconnect() requires `room` to be set, even though basePath bypasses
-    // the room-based URL construction. This should be removed once partysocket is fixed
-    // to skip the `room` check when `basePath` is provided.
+    // If basePath is provided, use it directly; otherwise construct from agent/name
     const socketOptions = options.basePath
-      ? {
-          basePath: options.basePath,
-          party: agentNamespace,
-          room: options.name || "default",
-          path: options.path,
-          ...options
-        }
+      ? { basePath: options.basePath, path: options.path, ...options }
       : {
           party: agentNamespace,
           prefix: "agents",
