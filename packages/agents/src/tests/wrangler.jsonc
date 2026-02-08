@@ -40,6 +40,10 @@
         "name": "TestDestroyScheduleAgent"
       },
       {
+        "class_name": "TestReadonlyAgent",
+        "name": "TestReadonlyAgent"
+      },
+      {
         "class_name": "TestScheduleAgent",
         "name": "TestScheduleAgent"
       },
@@ -101,6 +105,7 @@
         "TestOAuthAgent",
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
+        "TestReadonlyAgent",
         "TestScheduleAgent",
         "TestWorkflowAgent",
         "TestAddMcpServerAgent",

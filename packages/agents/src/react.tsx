@@ -132,6 +132,8 @@ export type UseAgentOptions<State = unknown> = Omit<
   cacheTtl?: number;
   /** Called when the Agent's state is updated */
   onStateUpdate?: (state: State, source: "server" | "client") => void;
+  /** Called when a state update fails (e.g., connection is readonly) */
+  onStateUpdateError?: (error: string) => void;
   /** Called when MCP server state is updated */
   onMcpUpdate?: (mcpServers: MCPServersState) => void;
   /**
@@ -520,6 +522,10 @@ export function useAgent<State>(
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
           options.onStateUpdate?.(parsedMessage.state as State, "server");
+          return;
+        }
+        if (parsedMessage.type === MessageType.CF_AGENT_STATE_ERROR) {
+          options.onStateUpdateError?.(parsedMessage.error as string);
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_MCP_SERVERS) {
