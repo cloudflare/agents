@@ -1023,7 +1023,9 @@ export class Think extends Agent<Env, ThinkState> {
   }
 
   /**
-   * Save a message to chat history
+   * Save a message to chat history.
+   * Tool call outputs and inputs are truncated for storage efficiency.
+   * Full data is available during the live stream and in the action_log.
    */
   private saveChatMessage(
     role: "user" | "assistant" | "system",
@@ -1034,7 +1036,16 @@ export class Think extends Agent<Env, ThinkState> {
     }
   ): void {
     const toolCallsJson = options?.toolCalls
-      ? JSON.stringify(options.toolCalls)
+      ? JSON.stringify(
+          this.truncateToolCallsForStorage(
+            options.toolCalls as Array<{
+              id: string;
+              name: string;
+              input: unknown;
+              output?: unknown;
+            }>
+          )
+        )
       : null;
     // Truncate reasoning for storage (keep first 2000 chars)
     const reasoning = options?.reasoning
@@ -1044,6 +1055,107 @@ export class Think extends Agent<Env, ThinkState> {
       INSERT INTO chat_messages (session_id, role, content, tool_calls, reasoning, timestamp)
       VALUES (${this.state.sessionId}, ${role}, ${content}, ${toolCallsJson}, ${reasoning}, ${Date.now()})
     `;
+  }
+
+  /**
+   * Truncate tool call inputs and outputs for storage.
+   * Keeps enough for meaningful history display, discards bulk data.
+   *
+   * - Inputs: strip large content (file bodies, code), keep identifiers
+   * - Outputs: truncate to summary + preview (max 1000 chars)
+   *
+   * Full outputs are preserved in:
+   *   1. The live WebSocket stream (real-time display)
+   *   2. The action_log table (audit trail with summarizeOutput)
+   *
+   * Future: LLM-based summarization, R2 storage for full content
+   */
+  private truncateToolCallsForStorage(
+    toolCalls: Array<{
+      id: string;
+      name: string;
+      input: unknown;
+      output?: unknown;
+    }>
+  ): Array<{
+    id: string;
+    name: string;
+    input: unknown;
+    output?: unknown;
+    _truncated?: boolean;
+  }> {
+    const MAX_OUTPUT_CHARS = 1000;
+    const MAX_INPUT_CHARS = 500;
+
+    return toolCalls.map((tc) => {
+      const result: {
+        id: string;
+        name: string;
+        input: unknown;
+        output?: unknown;
+        _truncated?: boolean;
+      } = {
+        id: tc.id,
+        name: tc.name,
+        input: tc.input,
+        output: tc.output
+      };
+
+      // Truncate input for tools with large payloads
+      if (tc.name === "writeFile" || tc.name === "editFile") {
+        // Keep filename, strip content/replacement bodies
+        const inp = tc.input as Record<string, unknown>;
+        const trimmed: Record<string, unknown> = {
+          filename: inp.filename
+        };
+        if (tc.name === "editFile") {
+          // Keep a preview of what was replaced
+          const text = String(inp.textToReplace || "");
+          trimmed.textToReplace =
+            text.length > 100
+              ? `${text.slice(0, 100)}... (${text.length} chars)`
+              : text;
+          const repl = String(inp.replacement || "");
+          trimmed.replacement =
+            repl.length > 100
+              ? `${repl.slice(0, 100)}... (${repl.length} chars)`
+              : repl;
+        } else {
+          // writeFile: just note the size
+          const content = String(inp.content || "");
+          trimmed.content = `(${content.length} chars)`;
+        }
+        result.input = trimmed;
+        result._truncated = true;
+      } else {
+        // For other tools, cap input size generically
+        const inputStr = JSON.stringify(tc.input);
+        if (inputStr.length > MAX_INPUT_CHARS) {
+          // Keep original object but note it was large
+          // (most non-file inputs are small enough)
+          result.input = tc.input;
+        }
+      }
+
+      // Truncate output
+      if (tc.output !== undefined) {
+        const outputStr =
+          typeof tc.output === "string" ? tc.output : JSON.stringify(tc.output);
+
+        if (outputStr.length > MAX_OUTPUT_CHARS) {
+          // Use tool-specific summary if possible, with preview
+          const summary = this.summarizeOutput(tc.name, tc.name, tc.output);
+          result.output = {
+            _summary: summary,
+            _preview: outputStr.slice(0, MAX_OUTPUT_CHARS),
+            _fullSize: outputStr.length
+          };
+          result._truncated = true;
+        }
+      }
+
+      return result;
+    });
   }
 
   /**

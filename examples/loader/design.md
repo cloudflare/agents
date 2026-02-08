@@ -19,8 +19,8 @@
 | Code Execution     | ✅ Complete | LOADER-based JS sandbox, module support        |
 | LLM Integration    | ✅ Complete | GPT-5.2, 13 tools, auto tool loop, reasoning   |
 | Action Logging     | ✅ Complete | Audit trail for all tool calls                 |
-| Message Storage    | ❌ Planned  | One row per message, R2 for large content      |
-| Streaming Protocol | ✅ Complete | text_delta, tool_call/result, text_done        |
+| Message Storage    | ✅ Complete | Tool calls truncated, reasoning capped at 2K   |
+| Streaming Protocol | ✅ Complete | Broadcast all tabs, history/sync on connect    |
 | Subagent Streaming | ❌ Designed | Optional streaming from facets to parent       |
 | Background Tasks   | ✅ Complete | schedule() API, subagent monitoring & recovery |
 | Task Management    | ✅ Complete | Hierarchical tasks, dependencies, LLM tools    |
@@ -29,7 +29,10 @@
 | Multi-Model        | ❌ Planned  | Smart routing: primary/fast/summarizer/vision  |
 | Chat UI            | ✅ Complete | Stop/retry/edit, debug panel, history          |
 | Vibe Code Editor   | ⚡ Partial  | Split-pane editor with chat, files, preview    |
-| Demo Switcher      | ✅ Complete | Route between chat and editor demos            |
+| Assistant UI       | ⚡ Mockup   | Personal assistant with skills/connections     |
+| Demo Switcher      | ✅ Complete | Route between chat, editor, assistant demos    |
+| Multi-Tab Sync     | ✅ Complete | All tabs see same stream, reconnect resumes    |
+| Code Execution     | ✅ Complete | Auto-wraps bare return, two code styles        |
 | Code Editor        | ❌ Planned  | Monaco/CodeMirror with Yjs sync                |
 | Sandbox            | ❌ Planned  | Full VM for heavy workloads                    |
 

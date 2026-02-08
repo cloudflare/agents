@@ -198,6 +198,32 @@
   - [ ] 7.9 Accept/Revert Changes - Proposed changes workflow (inspired by Minions)
   - **Inspiration**: Minions (AI Gadgets) - Yjs, FileSidebar, GadgetUI sandbox
   - **Simplifications for v1**: No Yjs (plain strings), no collab, auto-accept changes
+- [ ] **Phase 7b: Agent Modes** - PLANNED
+  - **Goal**: Different interaction modes like coding agents (Cursor, Claude Code, OpenCode)
+  - **Modes**:
+    - [ ] **Chat Mode** (default) - Full tool access, streaming responses, current behavior
+    - [ ] **Plan Mode** - Read-only analysis, proposes a plan before executing. Agent can read files and search but NOT write/execute. Outputs a structured plan the user can approve/reject/edit before switching to Chat mode to execute.
+    - [ ] **Ask Mode** - Read-only Q&A, no tool calls. Agent answers questions about the codebase or coding in general using only its knowledge + file reading. No side effects.
+    - [ ] **Debug Mode** - Systematic troubleshooting. Agent gathers runtime evidence (logs, state, errors) before diagnosing. Could auto-enable the debug panel.
+  - **Design questions**:
+    - [ ] How does mode affect tool availability? (filter tools per mode vs separate system prompts)
+    - [ ] UI for mode switching: tabs? slash commands? `/plan`, `/ask`, `/debug`?
+    - [ ] Can the agent suggest switching modes? ("This is complex, want me to plan first?")
+    - [ ] Does mode persist per conversation or per message?
+    - [ ] How do modes interact with multi-tab sync?
+  - **Implementation sketch**:
+    - [ ] `AgentMode` type: `"chat" | "plan" | "ask" | "debug"`
+    - [ ] Mode stored in ThinkState (synced to all clients)
+    - [ ] `getToolsForMode(mode)` filters available tools
+    - [ ] `getSystemPromptForMode(mode)` adjusts instructions
+    - [ ] Plan mode outputs structured `{ steps: [], summary }` instead of free text
+    - [ ] Ask mode disables all write tools, only keeps readFile, listFiles, webSearch
+    - [ ] Client UI shows mode indicator + switch control
+  - **Inspiration**:
+    - OpenCode: Build (full) vs Plan (read-only) agents, switchable with Tab
+    - Cursor: Agent / Ask / Plan / Debug modes
+    - Claude Code: Plan mode that proposes then executes
+  - **Dependencies**: Phase 5.13 (Extensibility) would make mode-specific tool sets cleaner
 - [ ] Phase 8: Advanced Features (Multi-Session, Multiplayer)
 
 ### Agent Architecture Features Status
@@ -207,7 +233,7 @@
 | Task Management    | High     | ✅ Complete    | `tasks.ts`       | 71 tests, LLM tools, hybrid orchestration     |
 | Async Tool Calls   | High     | ⚡ Partial     | `scheduling.ts`  | Subagent recovery complete, main loop TBD     |
 | E2E Testing        | High     | ✅ Complete    | `e2e/`           | wrangler dev harness, 14 passing tests        |
-| Browser Testing    | High     | ✅ Complete    | `browser-tests/` | Playwright, 16 UI tests (chat, history, etc.) |
+| Browser Testing    | High     | ✅ Complete    | `browser-tests/` | Playwright, 22 UI tests (chat, sync, resume)  |
 | Subagent Pattern   | Medium   | ✅ Complete    | `subagent.ts`    | With hibernation recovery, status monitoring  |
 | Chat UI            | High     | ✅ Complete    | `client.tsx`     | Stop/retry/edit, debug panel, history         |
 | Vibe Code Editor   | High     | ⚡ In Progress | `editor.tsx`     | Split-pane, file tree, preview, agent tools   |
@@ -215,33 +241,43 @@
 | Multi-Model        | Medium   | ❌ Planned     | `server.ts`      | Smart routing: primary/fast/summarizer/vision |
 | Subagent Streaming | Low      | ❌ Designed    | `subagent.ts`    | Optional streaming from facets to parent      |
 | Context Compaction | Medium   | ❌ Not Started | `context.ts`     | Summarize older messages                      |
+| Multi-Tab Sync     | High     | ✅ Complete    | `server.ts`      | Broadcast all tabs, reconnect resume, sync    |
 | Streaming Tools    | Low      | ✅ Complete    | Phase 5.8        | text_delta + tool_call/result streaming       |
 | Tool Caching       | Low      | ❌ Not Started | -                | Cache expensive results                       |
 | Tools via Props    | Future   | ❌ Not Started | `server.ts`      | Serialization challenge, multiple approaches  |
 | Long-term Memory   | Future   | ❌ Not Started | -                | R2/KV for persistent memory                   |
+| Agent Modes        | High     | ❌ Planned     | `server.ts`      | Chat/Plan/Ask/Debug like Cursor/OpenCode      |
 | Scheduling Tool    | Medium   | ❌ Planned     | `server.ts`      | Natural language reminders, recurring tasks   |
 
 ### Architecture Decisions Made
 
-| Decision            | Choice                | Rationale                                    |
-| ------------------- | --------------------- | -------------------------------------------- |
-| Action Logging      | SQLite, summarized    | Audit trail, debugging, future approval      |
-| Session Model       | User DO + Session DO  | Multi-tab/multi-device, future multiplayer   |
-| Message Storage     | SQLite + R2 for large | Row limit compliance, full history           |
-| Message Hierarchy   | parent_message_id     | Link subagent messages to delegating parent  |
-| Reasoning Text      | Truncated on save     | Stream full, store summary (first 500 chars) |
-| Background Tasks    | schedule() API        | Built-in, handles DO evictions, retries      |
-| Retry Strategy      | Exponential backoff   | 3 attempts: 2s, 4s, 8s delays                |
-| Task Management     | Hierarchical tasks    | Break complex work into subtasks             |
-| Subagent Pattern    | DO Facets             | **Isolated storage**, props-based data       |
-| Subagent Streaming  | Opt-in via callback   | Default silent, stream when UX requires it   |
-| Context Compaction  | Summarize older msgs  | Keep main agent coherent                     |
-| Extensibility       | Augment, not replace  | Core immutable, class extends, props dynamic |
-| Multi-Model         | Role-based routing    | Think decides when, users configure which    |
-| Custom Tools Props  | TBD - serialization   | Props must be serializable, tools have funcs |
-| Cancellation        | AbortController       | Standard Web API, streamText() integration   |
-| Debug Subscriptions | Connection state      | Survives DO hibernation, per-connection      |
-| Message Editing     | Truncate & resend     | Server truncates history, client re-sends    |
+| Decision            | Choice                | Rationale                                       |
+| ------------------- | --------------------- | ----------------------------------------------- |
+| Action Logging      | SQLite, summarized    | Audit trail, debugging, future approval         |
+| Session Model       | User DO + Session DO  | Multi-tab/multi-device, future multiplayer      |
+| Message Storage     | SQLite + R2 for large | Row limit compliance, full history              |
+| Message Hierarchy   | parent_message_id     | Link subagent messages to delegating parent     |
+| Reasoning Text      | Truncated on save     | Stream full, store summary (first 500 chars)    |
+| Background Tasks    | schedule() API        | Built-in, handles DO evictions, retries         |
+| Retry Strategy      | Exponential backoff   | 3 attempts: 2s, 4s, 8s delays                   |
+| Task Management     | Hierarchical tasks    | Break complex work into subtasks                |
+| Subagent Pattern    | DO Facets             | **Isolated storage**, props-based data          |
+| Subagent Streaming  | Opt-in via callback   | Default silent, stream when UX requires it      |
+| Context Compaction  | Summarize older msgs  | Keep main agent coherent                        |
+| Extensibility       | Augment, not replace  | Core immutable, class extends, props dynamic    |
+| Multi-Model         | Role-based routing    | Think decides when, users configure which       |
+| Custom Tools Props  | TBD - serialization   | Props must be serializable, tools have funcs    |
+| Cancellation        | AbortController       | Standard Web API, streamText() integration      |
+| Debug Subscriptions | Connection state      | Survives DO hibernation, per-connection         |
+| Message Editing     | Truncate & resend     | Server truncates history, client re-sends       |
+| Multi-Tab Sync      | broadcastThink()      | All streaming events sent to all connections    |
+| Reconnection        | history + sync msgs   | Server sends history then stream state          |
+| Stream Resume       | currentStream state   | Server tracks in-progress content for replay    |
+| Streaming Messages  | Event-driven creation | No useEffect race; text_delta creates if needed |
+| Code Execution      | Auto-wrap bare return | Detects bare return, wraps in function          |
+| E2E Persistence     | --persist-to isolate  | Separate .wrangler-e2e dir for test runs        |
+| Linting             | oxlint + oxfmt        | Migrated from biome, suppress comments updated  |
+| Tool Output Storage | Truncate + summary    | 1000 char cap, full data in stream + action_log |
 
 ---
 
@@ -791,50 +827,60 @@ async logAction(entry: Omit<ActionLogEntry, 'id' | 'timestamp'>): Promise<string
 
 ### 5.1 Message Storage Schema
 
+**Status**: Core complete, optimizations ongoing
+
 **Acceptance Criteria**:
 
-- [ ] One row per message in SQLite
-- [ ] Support for user, assistant, tool messages
-- [ ] R2 integration for large content (>50KB)
-- [ ] Reasoning truncated for storage (full during stream)
-- [ ] Token counting for context management
+- [x] One row per message in SQLite (chat_messages table)
+- [x] Support for user, assistant messages with tool_calls + reasoning columns
+- [x] Reasoning truncated for storage (first 2000 chars, full during stream)
+- [x] Tool call outputs truncated for storage (max 1000 chars, with summary + preview)
+- [x] Tool call inputs trimmed for write-heavy tools (writeFile content stripped, editFile previewed)
+- [x] `_truncated` flag on stored tool calls so client knows data was abbreviated
+- [ ] R2 integration for large content (>50KB) - FUTURE
+- [ ] Token counting for context management - FUTURE
+- [ ] LLM-based summarization of tool outputs - FUTURE
 
-**Schema**:
+**Current Schema** (chat_messages):
 
 ```sql
-CREATE TABLE messages (
-  id TEXT PRIMARY KEY,
+CREATE TABLE chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
   role TEXT NOT NULL,
   content TEXT,
-  content_r2_key TEXT,
-  tool_calls JSON,
-  tool_results_summary TEXT,
-  tool_results_preview TEXT,
-  tool_results_r2_key TEXT,
-  reasoning TEXT,
-  reasoning_full_size INTEGER,
-  status TEXT DEFAULT 'pending',
-  error TEXT,
-  task_id TEXT,
-  checkpoint TEXT,
-  heartbeat_at INTEGER,
-  timestamp INTEGER NOT NULL,
-  tokens_input INTEGER,
-  tokens_output INTEGER,
-  model TEXT,
-  attempt INTEGER DEFAULT 1,
-  parent_id TEXT
+  tool_calls TEXT,    -- JSON, truncated (outputs ≤1000 chars, inputs trimmed)
+  reasoning TEXT,     -- truncated to 2000 chars
+  timestamp INTEGER NOT NULL
 );
 ```
 
-**Tasks**:
+**Truncation Strategy** (`truncateToolCallsForStorage`):
 
-- [ ] Create new message schema
-- [ ] Implement message CRUD operations
-- [ ] Add R2 storage for large content
-- [ ] Implement `summarizeToolResult()` helper
-- [ ] Implement `truncateReasoning()` helper
-- [ ] Add token counting
+| Tool        | Input                                                        | Output                           |
+| ----------- | ------------------------------------------------------------ | -------------------------------- |
+| writeFile   | Keep filename, strip content (note size)                     | Truncate to 1000 chars + summary |
+| editFile    | Keep filename, preview textToReplace/replacement (100 chars) | Truncate to 1000 chars + summary |
+| readFile    | Keep as-is (small)                                           | Truncate to 1000 chars + summary |
+| bash        | Keep as-is                                                   | exit code + char counts summary  |
+| browseUrl   | Keep as-is                                                   | URL + title summary              |
+| webSearch   | Keep as-is                                                   | N results summary                |
+| executeCode | Keep as-is                                                   | success/error + preview          |
+| Others      | Keep as-is                                                   | Generic truncation to 1000 chars |
+
+**Full data preserved in**:
+
+1. Live WebSocket stream (real-time, untruncated)
+2. `action_log` table (audit trail with `summarizeOutput`)
+
+**Future Optimizations** (Phase 5.1b):
+
+- [ ] **LLM summarization**: Use fast model to generate meaningful summaries of tool outputs
+- [ ] **R2 offloading**: Store full tool outputs in R2 when >50KB, keep summary + R2 key in SQLite
+- [ ] **Async summarization**: Run summarization in background via `schedule()` after response completes
+- [ ] **Token counting**: Track input/output tokens per message for cost monitoring
+- [ ] **Extended schema**: Add model, tokens_input, tokens_output, parent_id columns
+- [ ] **Content R2**: Offload very long assistant responses (>50KB) to R2
 
 ### 5.2 Background Task Scheduling
 
@@ -910,14 +956,14 @@ async handleExecutionError(payload: ChatPayload, error: Error) {
 - [ ] Add orphaned task recovery on startup (using findOrphanedMessages)
 - [ ] Add cancellation support via `cancelSchedule()`
 
-### 5.3 WebSocket Streaming Protocol
+### 5.3 WebSocket Streaming Protocol ✓ COMPLETE
 
 **Acceptance Criteria**:
 
-- [ ] Fine-grained events (text-delta, reasoning-delta, tool-call-\*)
-- [ ] Multi-tab sync (all connected tabs see same state)
-- [ ] Reconnection with state replay
-- [ ] Background task status updates
+- [x] Fine-grained events (text_delta, reasoning_delta, tool_call, tool_result)
+- [x] Multi-tab sync (broadcastThink sends to all connections)
+- [x] Reconnection with state replay (history + sync + currentStream on connect)
+- [ ] Background task status updates (deferred - depends on 5.2)
 
 **Message Types**:
 
@@ -958,12 +1004,15 @@ type WSMessage =
 
 **Tasks**:
 
-- [ ] Define TypeScript types for all message types
-- [ ] Update agent loop to use streamText instead of generateText
-- [ ] Implement delta broadcasting for text and reasoning
-- [ ] Add tool call lifecycle events
-- [ ] Implement reconnection handler with history replay
-- [ ] Add sync on connect
+- [x] Define TypeScript types for all message types (ThinkPayload with history, sync, user_message, message_complete)
+- [x] Update agent loop to use streamText (done in Phase 5.8)
+- [x] Implement delta broadcasting for text and reasoning (broadcastThink)
+- [x] Add tool call lifecycle events (tool_call + tool_result broadcast)
+- [x] Implement reconnection handler with history replay (history msg on connect)
+- [x] Add sync on connect (sync msg with currentStream state for mid-stream resume)
+- [x] Multi-tab message sync (user_message broadcast, text_delta creates msg if needed)
+- [x] Playwright tests: 6 tests for history, multi-tab sync, reconnection
+- [ ] Background task status events (task-queued, task-retrying, etc.) - deferred
 
 ### 5.4 Task Management
 
@@ -1498,7 +1547,7 @@ Facets don't work in vitest-pool-workers but DO work in E2E (wrangler dev):
 
 **Test Framework**: Vitest with `@cloudflare/vitest-pool-workers`
 
-**Current Test Coverage**: 298 passing, 18 skipped, 22 todo (338 total)
+**Current Test Coverage**: 325 passing, 21 skipped, 19 todo (365 total) + 22 Playwright browser tests
 
 ### Core Unit Tests ✓
 
