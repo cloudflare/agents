@@ -219,7 +219,7 @@ Your agent is now live on Cloudflare's global network, running close to your use
 
 Now that you have a working agent, explore these topics:
 
-- **[State Management](./state.md)** - Deep dive into `setState()`, `initialState`, and `onStateUpdate()`
+- **[State Management](./state.md)** - Deep dive into `setState()`, `initialState`, and `onStatePersisted()`
 - **[Client SDK](./client-sdk.md)** - Full `useAgent` and `AgentClient` API reference
 - **[Scheduling](./scheduling.md)** - Run tasks on a delay, schedule, or cron
 - **[Agent Class](./agent-class.md)** - Lifecycle methods, HTTP handlers, and WebSocket events

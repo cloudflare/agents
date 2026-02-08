@@ -128,8 +128,8 @@ export class MyAgent extends Agent<Env, { items: string[] }> {
     this.setState({ items: [...this.state.items, item] });
   }
 
-  onStateUpdate(state: State, source: Connection | "server") {
-    // Called when state changes from any source
+  onStatePersisted(state: State, source: Connection | "server") {
+    // Called after state is persisted and broadcast
   }
 }
 ```

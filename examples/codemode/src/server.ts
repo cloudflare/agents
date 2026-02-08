@@ -107,7 +107,7 @@ export class Codemode extends Agent<Env, State> {
     });
   }
 
-  async onStateUpdate(state: State, source: Connection | "server") {
+  async onStatePersisted(state: State, source: Connection | "server") {
     if (source === "server") {
       return;
     }

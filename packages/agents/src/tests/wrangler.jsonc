@@ -68,6 +68,14 @@
         "name": "TestThrowingStateAgent"
       },
       {
+        "class_name": "TestPersistedStateAgent",
+        "name": "TestPersistedStateAgent"
+      },
+      {
+        "class_name": "TestBothHooksAgent",
+        "name": "TestBothHooksAgent"
+      },
+      {
         "class_name": "TestNoIdentityAgent",
         "name": "TestNoIdentityAgent"
       },
@@ -112,6 +120,8 @@
         "TestStateAgent",
         "TestStateAgentNoInitial",
         "TestThrowingStateAgent",
+        "TestPersistedStateAgent",
+        "TestBothHooksAgent",
         "TestNoIdentityAgent",
         "TestCallableAgent",
         "TestChildAgent"

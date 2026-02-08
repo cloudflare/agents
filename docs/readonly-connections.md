@@ -125,6 +125,8 @@ Errors surface in two ways depending on how the write was attempted:
 - **Client-side `setState()`** — the server sends a `cf_agent_state_error` message. Handle it with the `onStateUpdateError` callback.
 - **`@callable()` methods** — the RPC call rejects with an error. Handle it with a `try`/`catch` around `agent.call()`.
 
+> **Note:** `onStateUpdateError` also fires when `validateStateChange` rejects a client-originated state update (with the message `"State update rejected"`). This makes the callback useful for handling any rejected state write, not just readonly errors.
+
 ```typescript
 const agent = useAgent({
   agent: "MyAgent",

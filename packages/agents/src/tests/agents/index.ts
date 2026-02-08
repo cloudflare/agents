@@ -12,6 +12,8 @@ export {
   TestStateAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
+  TestPersistedStateAgent,
+  TestBothHooksAgent,
   TestNoIdentityAgent
 } from "./state";
 export type { TestState } from "./state";

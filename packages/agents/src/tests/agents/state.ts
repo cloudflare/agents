@@ -171,6 +171,77 @@ export class TestThrowingStateAgent extends Agent<
   }
 }
 
+// Test Agent using the new onStatePersisted hook (successor to onStateUpdate)
+export class TestPersistedStateAgent extends Agent<
+  Record<string, unknown>,
+  TestState
+> {
+  observability = undefined;
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  // Track onStatePersisted calls
+  persistedCalls: Array<{ state: TestState; source: string }> = [];
+
+  onStatePersisted(state: TestState, source: Connection | "server") {
+    this.persistedCalls.push({
+      state,
+      source: source === "server" ? "server" : source.id
+    });
+  }
+
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: TestState) {
+    this.setState(state);
+  }
+
+  getPersistedCalls() {
+    return this.persistedCalls;
+  }
+
+  clearPersistedCalls() {
+    this.persistedCalls = [];
+  }
+}
+
+// Test Agent that overrides BOTH hooks on the same class — should throw at runtime
+export class TestBothHooksAgent extends Agent<
+  Record<string, unknown>,
+  TestState
+> {
+  observability = undefined;
+
+  initialState: TestState = {
+    count: 0,
+    items: [],
+    lastUpdated: null
+  };
+
+  // Defining both on the same class is an error
+  onStateUpdate(state: TestState, _source: Connection | "server") {
+    void state;
+  }
+
+  onStatePersisted(state: TestState, _source: Connection | "server") {
+    void state;
+  }
+
+  getState() {
+    return this.state;
+  }
+
+  updateState(state: TestState) {
+    this.setState(state);
+  }
+}
+
 // Test Agent with sendIdentityOnConnect disabled
 export class TestNoIdentityAgent extends Agent<
   Record<string, unknown>,

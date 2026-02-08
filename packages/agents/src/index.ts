@@ -294,6 +294,12 @@ const DEFAULT_STATE = {} as unknown;
 const CF_READONLY_KEY = "_cf_readonly";
 
 /**
+ * Tracks which agent constructors have already emitted the onStateUpdate
+ * deprecation warning, so it fires at most once per class.
+ */
+const _onStateUpdateWarnedClasses = new WeakSet<Function>();
+
+/**
  * Default options for Agent configuration.
  * Child classes can override specific options without spreading.
  */
@@ -416,6 +422,14 @@ export class Agent<
       setRaw: (state: unknown) => unknown;
     }
   >();
+
+  /**
+   * Cached persistence-hook dispatch mode, computed once in the constructor.
+   * - "new"  → call onStatePersisted
+   * - "old"  → call onStateUpdate (deprecated)
+   * - "none" → neither hook is overridden, skip entirely
+   */
+  private _persistenceHookMode: "new" | "old" | "none" = "none";
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -667,6 +681,45 @@ export class Agent<
         this.observability?.emit(event);
       })
     );
+    // Compute persistence-hook dispatch mode once.
+    // Throws immediately if both hooks are overridden on the same class.
+    {
+      const proto = Object.getPrototypeOf(this);
+      const hasOwnNew = Object.prototype.hasOwnProperty.call(
+        proto,
+        "onStatePersisted"
+      );
+      const hasOwnOld = Object.prototype.hasOwnProperty.call(
+        proto,
+        "onStateUpdate"
+      );
+
+      if (hasOwnNew && hasOwnOld) {
+        throw new Error(
+          `[Agent] Cannot override both onStatePersisted and onStateUpdate. ` +
+            `Remove onStateUpdate — it has been renamed to onStatePersisted.`
+        );
+      }
+
+      if (hasOwnOld) {
+        const ctor = this.constructor;
+        if (!_onStateUpdateWarnedClasses.has(ctor)) {
+          _onStateUpdateWarnedClasses.add(ctor);
+          console.warn(
+            `[Agent] onStateUpdate is deprecated. Rename to onStatePersisted — the behavior is identical.`
+          );
+        }
+      }
+
+      const base = Agent.prototype;
+      if (proto.onStatePersisted !== base.onStatePersisted) {
+        this._persistenceHookMode = "new";
+      } else if (proto.onStateUpdate !== base.onStateUpdate) {
+        this._persistenceHookMode = "old";
+      }
+      // default "none" already set in field initializer
+    }
+
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
       return agentContext.run(
@@ -720,7 +773,19 @@ export class Agent<
               );
               return;
             }
-            this._setStateInternal(parsed.state as State, connection);
+            try {
+              this._setStateInternal(parsed.state as State, connection);
+            } catch (e) {
+              // validateStateChange (or another sync error) rejected the update.
+              // Log the full error server-side, send a generic message to the client.
+              console.error("[Agent] State update rejected:", e);
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_STATE_ERROR,
+                  error: "State update rejected"
+                })
+              );
+            }
             return;
           }
 
@@ -997,11 +1062,11 @@ export class Agent<
                 },
                 this.ctx
               );
-              await this.onStateUpdate(nextState, source);
+              await this._callStatePersistenceHook(nextState, source);
             }
           );
         } catch (e) {
-          // onStateUpdate errors should not affect state or broadcasts
+          // onStatePersisted/onStateUpdate errors should not affect state or broadcasts
           try {
             await this.onError(e);
           } catch {
@@ -1188,13 +1253,51 @@ export class Agent<
   }
 
   /**
-   * Called when the Agent's state is updated
+   * Called after the Agent's state has been persisted and broadcast to all clients.
+   * This is a notification hook — errors here are routed to onError and do not
+   * affect state persistence or client broadcasts.
+   *
+   * @param state Updated state
+   * @param source Source of the state update ("server" or a client connection)
+   */
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
+  onStatePersisted(state: State | undefined, source: Connection | "server") {
+    // override this to handle state updates after persist + broadcast
+  }
+
+  /**
+   * @deprecated Renamed to `onStatePersisted` — the behavior is identical.
+   * `onStateUpdate` will be removed in the next major version.
+   *
+   * Called after the Agent's state has been persisted and broadcast to all clients.
+   * This is a server-side notification hook. For the client-side state callback,
+   * see the `onStateUpdate` option in `useAgent` / `AgentClient`.
+   *
    * @param state Updated state
    * @param source Source of the state update ("server" or a client connection)
    */
   // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
   onStateUpdate(state: State | undefined, source: Connection | "server") {
-    // override this to handle state updates
+    // override this to handle state updates (deprecated — use onStatePersisted)
+  }
+
+  /**
+   * Dispatch to the appropriate persistence hook based on the mode
+   * cached in the constructor. No prototype walks at call time.
+   */
+  private async _callStatePersistenceHook(
+    state: State | undefined,
+    source: Connection | "server"
+  ): Promise<void> {
+    switch (this._persistenceHookMode) {
+      case "new":
+        await this.onStatePersisted(state, source);
+        break;
+      case "old":
+        await this.onStateUpdate(state, source);
+        break;
+      // "none": neither hook overridden — skip
+    }
   }
 
   /**

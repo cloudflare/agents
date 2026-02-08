@@ -566,5 +566,175 @@ describe("state management", () => {
 
       ws.close();
     });
+
+    it("should send CF_AGENT_STATE_ERROR to client when validateStateChange rejects a client-originated update", async () => {
+      const room = `validate-client-${crypto.randomUUID()}`;
+
+      const { ws } = await connectWS(
+        `/agents/test-throwing-state-agent/${room}`
+      );
+
+      // Wait for initial messages (identity, state, mcp_servers)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Collect messages going forward
+      const messages: Array<{ type: string; error?: string; state?: unknown }> =
+        [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        messages.push(JSON.parse(e.data as string));
+      });
+
+      // Send invalid state from the client (count: -1 triggers validateStateChange throw)
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STATE,
+          state: { count: -1, items: ["invalid"], lastUpdated: "client" }
+        })
+      );
+
+      // Wait for the error response
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Should have received a CF_AGENT_STATE_ERROR
+      const errorMessages = messages.filter(
+        (m) => m.type === MessageType.CF_AGENT_STATE_ERROR
+      );
+      expect(errorMessages.length).toBe(1);
+      expect(errorMessages[0].error).toBe("State update rejected");
+
+      // Should NOT have received a state broadcast (the update was rejected)
+      const stateMessages = messages.filter(
+        (m) => m.type === MessageType.CF_AGENT_STATE
+      );
+      expect(stateMessages.length).toBe(0);
+
+      ws.close();
+    });
+
+    it("should send state broadcast (not error) for valid client-originated updates", async () => {
+      const room = `validate-client-valid-${crypto.randomUUID()}`;
+
+      const { ws } = await connectWS(
+        `/agents/test-throwing-state-agent/${room}`
+      );
+
+      // Wait for initial messages
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Collect messages going forward
+      const messages: Array<{ type: string; state?: { count?: number } }> = [];
+      ws.addEventListener("message", (e: MessageEvent) => {
+        messages.push(JSON.parse(e.data as string));
+      });
+
+      // Send valid state from the client
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STATE,
+          state: { count: 10, items: ["valid"], lastUpdated: "client" }
+        })
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      // Should NOT have received an error
+      const errorMessages = messages.filter(
+        (m) => m.type === MessageType.CF_AGENT_STATE_ERROR
+      );
+      expect(errorMessages.length).toBe(0);
+
+      ws.close();
+    });
+  });
+
+  describe("onStatePersisted hook", () => {
+    it("should call onStatePersisted after setState (server-side)", async () => {
+      const room = `persisted-hook-${crypto.randomUUID()}`;
+      const agentStub = await getAgentByName(env.TestPersistedStateAgent, room);
+
+      await agentStub.clearPersistedCalls();
+
+      await agentStub.updateState({
+        count: 7,
+        items: ["persisted"],
+        lastUpdated: "server"
+      });
+
+      // onStatePersisted runs via waitUntil; poll until observed
+      let calls: Array<{ state: unknown; source: string }> = [];
+      const start = Date.now();
+      while (Date.now() - start < 2000) {
+        calls = await agentStub.getPersistedCalls();
+        if (calls.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      const last = calls[calls.length - 1];
+      expect(last.source).toBe("server");
+      expect((last.state as { count: number }).count).toBe(7);
+    });
+
+    it("should call onStatePersisted with connection source for client-originated updates", async () => {
+      const room = `persisted-hook-client-${crypto.randomUUID()}`;
+
+      const { ws } = await connectWS(
+        `/agents/test-persisted-state-agent/${room}`
+      );
+
+      // Wait for initial messages
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const agentStub = await getAgentByName(env.TestPersistedStateAgent, room);
+      await agentStub.clearPersistedCalls();
+
+      // Send state update from client
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STATE,
+          state: { count: 99, items: ["from-client"], lastUpdated: "client" }
+        })
+      );
+
+      // Poll for the hook to fire
+      let calls: Array<{ state: unknown; source: string }> = [];
+      const start = Date.now();
+      while (Date.now() - start < 2000) {
+        calls = await agentStub.getPersistedCalls();
+        if (calls.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+      const last = calls[calls.length - 1];
+      // Source should be a connection ID (not "server")
+      expect(last.source).not.toBe("server");
+      expect((last.state as { count: number }).count).toBe(99);
+
+      ws.close();
+    });
+
+    it("should throw if both onStateUpdate and onStatePersisted are overridden on the same class", async () => {
+      const room = `both-hooks-${crypto.randomUUID()}`;
+      const agentStub = await getAgentByName(env.TestBothHooksAgent, room);
+
+      // Calling setState triggers _callStatePersistenceHook, which should throw
+      let threw = false;
+      let errorMessage = "";
+      try {
+        await agentStub.updateState({
+          count: 1,
+          items: [],
+          lastUpdated: null
+        });
+      } catch (e) {
+        threw = true;
+        errorMessage = e instanceof Error ? e.message : String(e);
+      }
+      expect(threw).toBe(true);
+      expect(errorMessage).toContain(
+        "Cannot override both onStatePersisted and onStateUpdate"
+      );
+    });
   });
 });

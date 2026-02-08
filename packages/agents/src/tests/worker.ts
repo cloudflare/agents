@@ -13,6 +13,8 @@ export {
   TestStateAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
+  TestPersistedStateAgent,
+  TestBothHooksAgent,
   TestNoIdentityAgent,
   TestDestroyScheduleAgent,
   TestScheduleAgent,
@@ -49,6 +51,8 @@ import type {
   TestStateAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
+  TestPersistedStateAgent,
+  TestBothHooksAgent,
   TestNoIdentityAgent,
   TestCallableAgent,
   TestChildAgent
@@ -69,6 +73,8 @@ export type Env = {
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
+  TestPersistedStateAgent: DurableObjectNamespace<TestPersistedStateAgent>;
+  TestBothHooksAgent: DurableObjectNamespace<TestBothHooksAgent>;
   TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
   TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
   TestChildAgent: DurableObjectNamespace<TestChildAgent>;

@@ -201,4 +201,4 @@ Tests live in `packages/agents/src/tests/readonly-connections.test.ts` and cover
 - Readonly status restored after reconnection (hibernation survival)
 - Multiple connections with mixed readonly states
 
-The test agent (`TestReadonlyAgent` in `worker.ts`) has `incrementCount` (mutating) and `getState` (non-mutating) callables, plus `checkReadonly` and `setReadonly` for dynamic status changes.
+The test agent (`TestReadonlyAgent` in `agents/readonly.ts`) has `incrementCount` (mutating) and `getState` (non-mutating) callables, plus `checkReadonly` and `setReadonly` for dynamic status changes.

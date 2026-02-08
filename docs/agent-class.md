@@ -194,7 +194,7 @@ Now finally, the `Agent` class. `Agent` extends `Server` and provides opinionate
 One of the core features of `Agent` is **automatic state persistence**. Developers define the shape of their state via the generic parameter and `initialState` (which is only used if no state exists in storage), and the Agent handles loading, saving, and broadcasting state changes (check `Server`'s `this.broadcast()` above).
 
 `this.state` is a getter that lazily loads state from storage (SQL). **State is persisted across DO evictions** when it's updated with `this.setState()`, which automatically serializes the state and writes it back to storage.  
-There's also `this.onStateUpdate` that you can override to react to state changes.
+There's also `this.onStatePersisted` that you can override to react to state changes.
 
 ```ts
 class MyAgent extends Agent<Env, { count: number }> {
@@ -204,7 +204,7 @@ class MyAgent extends Agent<Env, { count: number }> {
     this.setState({ count: this.state.count + 1 });
   }
 
-  onStateUpdate(state, source) {
+  onStatePersisted(state, source) {
     console.log("State updated:", state);
   }
 }
