@@ -24,7 +24,8 @@ import {
   StackIcon,
   GitMergeIcon,
   ShieldIcon,
-  PaletteIcon
+  PaletteIcon,
+  ArrowsClockwiseIcon
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
@@ -87,6 +88,11 @@ const navigation: NavCategory[] = [
         label: "Readonly",
         path: "/core/readonly",
         icon: <ShieldIcon size={16} />
+      },
+      {
+        label: "Retry",
+        path: "/core/retry",
+        icon: <ArrowsClockwiseIcon size={16} />
       }
     ]
   },

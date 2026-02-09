@@ -22,6 +22,7 @@ These docs are complete and should be added to the official Cloudflare docs site
 | [cross-domain-authentication.md](./cross-domain-authentication.md) | Auth patterns across domains                                             | Medium             |
 | [client-tools-continuation.md](./client-tools-continuation.md)     | Client-side tool call handling                                           | Low                |
 | [codemode.md](./codemode.md)                                       | Experimental CodeAct pattern                                             | Low (experimental) |
+| [retries.md](./retries.md)                                         | Retry utilities: `this.retry()`, per-task retry options, backoff         | Medium             |
 | [resumable-streaming.md](./resumable-streaming.md)                 | Handling interrupted streams                                             | Low                |
 | [migration-to-ai-sdk-v5.md](./migration-to-ai-sdk-v5.md)           | AI SDK v5 migration guide                                                | Low                |
 | [migration-to-ai-sdk-v6.md](./migration-to-ai-sdk-v6.md)           | AI SDK v6 migration guide                                                | Low                |

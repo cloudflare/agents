@@ -23,3 +23,4 @@ export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { TestReadonlyAgent } from "./readonly";
 export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";
 export { TestRaceAgent } from "./race";
+export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";

@@ -90,6 +90,14 @@
       {
         "class_name": "TestChildAgent",
         "name": "TestChildAgent"
+      },
+      {
+        "class_name": "TestRetryAgent",
+        "name": "TestRetryAgent"
+      },
+      {
+        "class_name": "TestRetryDefaultsAgent",
+        "name": "TestRetryDefaultsAgent"
       }
     ]
   },
@@ -129,7 +137,9 @@
         "TestBothHooksAgent",
         "TestNoIdentityAgent",
         "TestCallableAgent",
-        "TestChildAgent"
+        "TestChildAgent",
+        "TestRetryAgent",
+        "TestRetryDefaultsAgent"
       ],
       "tag": "v1"
     }

@@ -35,6 +35,11 @@ const features = [
         name: "Routing",
         path: "/core/routing",
         description: "Agent naming strategies"
+      },
+      {
+        name: "Retry",
+        path: "/core/retry",
+        description: "Retry with backoff and shouldRetry"
       }
     ]
   },

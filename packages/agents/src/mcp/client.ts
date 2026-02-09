@@ -13,6 +13,7 @@ import type {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
+import { type RetryOptions, tryN } from "../retries";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
@@ -43,6 +44,8 @@ export type MCPServerOptions = {
     headers?: HeadersInit;
     type?: TransportType;
   };
+  /** Retry options for connection and reconnection attempts */
+  retry?: RetryOptions;
 };
 
 /**
@@ -63,6 +66,8 @@ export type RegisterServerOptions = {
   transport?: MCPTransportOptions;
   authUrl?: string;
   clientId?: string;
+  /** Retry options for connection and reconnection attempts */
+  retry?: RetryOptions;
 };
 
 /**
@@ -186,6 +191,19 @@ export class MCPClientManager {
     return this.sql<MCPServerRow>(
       "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers"
     );
+  }
+
+  /**
+   * Get the retry options for a server from stored server_options
+   */
+  private getServerRetryOptions(serverId: string): RetryOptions | undefined {
+    const rows = this.sql<MCPServerRow>(
+      "SELECT server_options FROM cf_agents_mcp_servers WHERE id = ?",
+      serverId
+    );
+    if (!rows.length || !rows[0].server_options) return undefined;
+    const parsed: MCPServerOptions = JSON.parse(rows[0].server_options);
+    return parsed.retry;
   }
 
   private clearServerAuthUrl(serverId: string): void {
@@ -321,7 +339,7 @@ export class MCPClientManager {
       }
 
       // Start connection in background (don't await) to avoid blocking the DO
-      this._restoreServer(server.id);
+      this._restoreServer(server.id, parsedOptions?.retry);
     }
 
     this._isRestored = true;
@@ -330,17 +348,29 @@ export class MCPClientManager {
   /**
    * Internal method to restore a single server connection and discovery
    */
-  private async _restoreServer(serverId: string): Promise<void> {
+  private async _restoreServer(
+    serverId: string,
+    retry?: RetryOptions
+  ): Promise<void> {
     // Always try to connect - the connection logic will determine if OAuth is needed
     // If stored OAuth tokens are valid, connection will succeed automatically
     // If tokens are missing/invalid, connection will fail with Unauthorized
     // and state will be set to "authenticating"
-    const connectResult = await this.connectToServer(serverId).catch(
-      (error) => {
-        console.error(`Error connecting to ${serverId}:`, error);
-        return null;
-      }
-    );
+    const maxAttempts = retry?.maxAttempts ?? 3;
+    const baseDelayMs = retry?.baseDelayMs ?? 500;
+    const maxDelayMs = retry?.maxDelayMs ?? 5000;
+
+    const connectResult = await tryN(
+      maxAttempts,
+      async () => this.connectToServer(serverId),
+      { baseDelayMs, maxDelayMs }
+    ).catch((error) => {
+      console.error(
+        `Error connecting to ${serverId} after ${maxAttempts} attempts:`,
+        error
+      );
+      return null;
+    });
 
     if (connectResult?.state === MCPConnectionState.CONNECTED) {
       const discoverResult = await this.discoverIfConnected(serverId);
@@ -573,7 +603,8 @@ export class MCPClientManager {
       auth_url: options.authUrl ?? null,
       server_options: JSON.stringify({
         client: options.client,
-        transport: transportWithoutAuth
+        transport: transportWithoutAuth,
+        retry: options.retry
       })
     });
 
@@ -857,7 +888,16 @@ export class MCPClientManager {
       return;
     }
 
-    const connectResult = await this.connectToServer(serverId);
+    const retry = this.getServerRetryOptions(serverId);
+    const maxAttempts = retry?.maxAttempts ?? 3;
+    const baseDelayMs = retry?.baseDelayMs ?? 500;
+    const maxDelayMs = retry?.maxDelayMs ?? 5000;
+
+    const connectResult = await tryN(
+      maxAttempts,
+      async () => this.connectToServer(serverId),
+      { baseDelayMs, maxDelayMs }
+    );
     this._onServerStateChanged.fire();
 
     if (connectResult.state === MCPConnectionState.CONNECTED) {

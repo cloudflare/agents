@@ -13,6 +13,7 @@ export { SqlAgent } from "./demos/core/sql-agent";
 export { ConnectionsAgent } from "./demos/core/connections-agent";
 export { RoutingAgent } from "./demos/core/routing-agent";
 export { ReadonlyAgent } from "./demos/core/readonly-agent";
+export { RetryAgent } from "./demos/core/retry-agent";
 
 // AI agents
 export { ChatAgent } from "./demos/ai/chat-agent";
