@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
 jobs:
   check:
     timeout-minutes: 10
@@ -27,9 +30,6 @@ jobs:
           cache: "npm"
 
       - run: npm ci
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-
       - run: npm run build
       - run: npm run check
 
@@ -46,6 +46,8 @@ jobs:
           node-version: 24
           cache: "npm"
 
+      - run: npm ci
+
       - name: Get Playwright version
         id: playwright-version
         run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
@@ -56,10 +58,6 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
-
-      - run: npm ci
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
       - name: Install Playwright browsers
         if: steps.playwright-cache.outputs.cache-hit != 'true'
@@ -86,9 +84,6 @@ jobs:
           cache: "npm"
 
       - run: npm ci
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-
       - run: npm run build
 
       - name: Publish agents package to pkg.pr.new

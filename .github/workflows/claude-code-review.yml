@@ -10,6 +10,7 @@ concurrency:
 
 jobs:
   claude-review:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     permissions:
       contents: read
