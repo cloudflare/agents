@@ -2,6 +2,7 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 export default defineWorkersConfig({
   test: {
+    name: "workers",
     // DO RPC methods that intentionally throw produce unhandled rejections
     // in the workerd runtime even though vitest catches them via .rejects.toThrow().
     // This is a known limitation of testing error paths in Durable Objects.

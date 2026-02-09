@@ -9,6 +9,7 @@ export default defineConfig({
     __TEST_WORKER_URL__: JSON.stringify(`http://localhost:${TEST_WORKER_PORT}`)
   },
   test: {
+    name: "react",
     browser: {
       enabled: true,
       instances: [

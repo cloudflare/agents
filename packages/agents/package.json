@@ -182,11 +182,10 @@
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "evals": "(cd evals; evalite)",
-    "test": "vitest --run -r src/tests && vitest --run -r src/react-tests && vitest --run -r src/cli-tests && vitest --run -r src/x402-tests",
-    "test:cli": "vitest -r src/cli-tests",
-    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent",
-    "test:react": "vitest -r src/react-tests",
-    "test:workers": "vitest -r src/tests",
-    "test:x402": "vitest -r src/x402-tests"
+    "test": "vitest --run",
+    "test:cli": "vitest --project cli",
+    "test:react": "vitest --project react",
+    "test:workers": "vitest --project workers",
+    "test:x402": "vitest --project x402"
   }
 }
