@@ -1,18 +1,8 @@
 import { openai } from "@ai-sdk/openai";
-import {
-  Agent,
-  type AgentNamespace,
-  unstable_callable as callable,
-  routeAgentRequest,
-} from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 
 import { generateObject } from "ai";
 import { z } from "zod";
-
-type Env = {
-  OPENAI_API_KEY: string;
-  TicTacToe: AgentNamespace<TicTacToe>;
-};
 
 type Player = "X" | "O";
 
@@ -22,7 +12,7 @@ export type TicTacToeState = {
   board: [
     [played, played, played],
     [played, played, played],
-    [played, played, played],
+    [played, played, played]
   ];
   currentPlayer: Player;
   winner: Player | null;
@@ -33,10 +23,10 @@ export class TicTacToe extends Agent<Env, TicTacToeState> {
     board: [
       [null, null, null],
       [null, null, null],
-      [null, null, null],
+      [null, null, null]
     ],
     currentPlayer: "X",
-    winner: null,
+    winner: null
   };
 
   @callable()
@@ -56,7 +46,7 @@ export class TicTacToe extends Agent<Env, TicTacToeState> {
       ...this.state,
       board,
       currentPlayer: player === "X" ? "O" : "X",
-      winner: this.checkWinner(board),
+      winner: this.checkWinner(board)
     });
 
     if (this.state.winner) {
@@ -93,8 +83,8 @@ Strategic priorities (in order):
 Analyze the board carefully and make the optimal move following these priorities.
 Return only the [row, col] coordinates for your chosen move.`,
       schema: z.object({
-        move: z.array(z.number()),
-      }),
+        move: z.array(z.number())
+      })
     });
     await this.makeMove(
       object.move as [number, number],
@@ -108,45 +98,45 @@ Return only the [row, col] coordinates for your chosen move.`,
       [
         [0, 0],
         [0, 1],
-        [0, 2],
+        [0, 2]
       ],
       [
         [1, 0],
         [1, 1],
-        [1, 2],
+        [1, 2]
       ],
       [
         [2, 0],
         [2, 1],
-        [2, 2],
+        [2, 2]
       ],
       // columns
       [
         [0, 0],
         [1, 0],
-        [2, 0],
+        [2, 0]
       ],
       [
         [0, 1],
         [1, 1],
-        [2, 1],
+        [2, 1]
       ],
       [
         [0, 2],
         [1, 2],
-        [2, 2],
+        [2, 2]
       ],
       // diagonals
       [
         [0, 0],
         [1, 1],
-        [2, 2],
+        [2, 2]
       ],
       [
         [0, 2],
         [1, 1],
-        [2, 0],
-      ],
+        [2, 0]
+      ]
     ];
     for (const line of winningLines) {
       const [a, b, c] = line;
@@ -173,5 +163,5 @@ export default {
       (await routeAgentRequest(request, env, { prefix: "some/prefix" })) ||
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 } satisfies ExportedHandler<Env>;

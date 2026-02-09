@@ -1,10 +1,34 @@
 <!doctype html>
-<html>
+<html lang="en" class="h-full" data-theme="workers">
   <head>
-    <title>Playground</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agents SDK Playground</title>
+    <link rel="icon" href="/favicon.ico" />
+    <script>
+      // Prevent flash of wrong mode/theme
+      (() => {
+        const stored = localStorage.getItem("theme");
+        const prefersDark = window.matchMedia(
+          "(prefers-color-scheme: dark)"
+        ).matches;
+        const isDark = stored === "dark" || (stored !== "light" && prefersDark);
+        document.documentElement.setAttribute(
+          "data-mode",
+          isDark ? "dark" : "light"
+        );
+        document.documentElement.style.colorScheme = isDark ? "dark" : "light";
+        const colorTheme = localStorage.getItem("color-theme") || "workers";
+        if (colorTheme === "kumo") {
+          document.documentElement.removeAttribute("data-theme");
+        } else {
+          document.documentElement.setAttribute("data-theme", colorTheme);
+        }
+      })();
+    </script>
   </head>
-  <body>
-    <div id="root"></div>
+  <body class="h-full bg-kumo-base text-kumo-default antialiased">
+    <div id="root" class="h-full"></div>
     <script src="/src/client.tsx" type="module"></script>
   </body>
 </html>

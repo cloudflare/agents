@@ -12,14 +12,14 @@ interface Message {
   content: Array<{
     type: string;
     transcript: string;
-    // biome-ignore lint/suspicious/noExplicitAny: later
+    // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK audio type not exposed
     audio?: any;
   }>;
 }
 
 function App() {
   const [state, setState] = useState<{ history: RealtimeItem[] }>({
-    history: [],
+    history: []
   });
   const [callStatus, setCallStatus] = useState<
     "connecting" | "connected" | "disconnected"
@@ -35,7 +35,7 @@ function App() {
       if (newState.history && newState.history.length > 0) {
         setCallStatus("connected");
       }
-    },
+    }
   });
 
   // Timer for call duration

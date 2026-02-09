@@ -141,3 +141,7 @@ dist
 
 # macOS
 .DS_Store
+
+.astro
+# Vitest browser test screenshots
+__screenshots__

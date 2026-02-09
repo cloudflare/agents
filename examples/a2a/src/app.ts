@@ -1,11 +1,20 @@
-import type {
-  A2ARequestHandler,
-  A2AResponse,
-  JSONRPCErrorResponse,
-  JSONRPCSuccessResponse,
+import {
+  A2AError,
+  JsonRpcTransportHandler,
+  type A2ARequestHandler,
+  type A2AResponse,
+  type JSONRPCErrorResponse,
+  type JSONRPCSuccessResponse
 } from "@a2a-js/sdk";
-import { A2AError, JsonRpcTransportHandler } from "@a2a-js/sdk";
 import type { Context, Hono } from "hono";
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return (
+    value != null &&
+    typeof (value as Record<symbol, unknown>)[Symbol.asyncIterator] ===
+      "function"
+  );
+}
 
 export class A2AHonoApp {
   private requestHandler: A2ARequestHandler;
@@ -23,6 +32,19 @@ export class A2AHonoApp {
    * @returns The Hono app with A2A routes.
    */
   public setupRoutes(app: Hono, baseUrl = ""): Hono {
+    app.get(baseUrl, async (c: Context) => {
+      return c.html(`
+        <html>
+          <body>
+            <h1>A2A Agent</h1>
+            <p>This is an A2A agent.</p>
+            <p>
+              <a href="${baseUrl}/.well-known/agent.json">Agent Card</a>
+            </p>            
+          </body>
+        </html>
+      `);
+    });
     app.get(`${baseUrl}/.well-known/agent.json`, async (c: Context) => {
       try {
         const agentCard = await this.requestHandler.getAgentCard();
@@ -40,11 +62,7 @@ export class A2AHonoApp {
           await this.jsonRpcTransportHandler.handle(body);
 
         // Check if it's an AsyncGenerator (stream)
-        if (
-          // biome-ignore lint/suspicious/noExplicitAny: to fix
-          typeof (rpcResponseOrStream as any)?.[Symbol.asyncIterator] ===
-          "function"
-        ) {
+        if (isAsyncIterable(rpcResponseOrStream)) {
           const stream = rpcResponseOrStream as AsyncGenerator<
             JSONRPCSuccessResponse,
             void,
@@ -76,7 +94,7 @@ export class A2AHonoApp {
               const errorResponse: JSONRPCErrorResponse = {
                 error: a2aError.toJSONRPCError(),
                 id: body?.id || null,
-                jsonrpc: "2.0",
+                jsonrpc: "2.0"
               };
               const errorChunk = `id: ${Date.now()}\nevent: error\ndata: ${JSON.stringify(errorResponse)}\n\n`;
               await writer.write(new TextEncoder().encode(errorChunk));
@@ -89,8 +107,8 @@ export class A2AHonoApp {
             headers: {
               "Cache-Control": "no-cache",
               Connection: "keep-alive",
-              "Content-Type": "text/event-stream",
-            },
+              "Content-Type": "text/event-stream"
+            }
           });
         }
         // Single JSON-RPC response
@@ -105,7 +123,7 @@ export class A2AHonoApp {
         const errorResponse: JSONRPCErrorResponse = {
           error: a2aError.toJSONRPCError(),
           id: null,
-          jsonrpc: "2.0",
+          jsonrpc: "2.0"
         };
         return c.json(errorResponse, 500);
       }

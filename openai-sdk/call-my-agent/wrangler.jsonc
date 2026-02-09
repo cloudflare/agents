@@ -1,20 +1,20 @@
 {
-  "compatibility_date": "2025-05-05",
+  "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
       {
         "class_name": "MyAgent",
-        "name": "MyAgent",
-      },
-    ],
+        "name": "MyAgent"
+      }
+    ]
   },
   "main": "src/server.ts",
   "migrations": [
     {
       "new_sqlite_classes": ["MyAgent"],
-      "tag": "v1",
-    },
+      "tag": "v1"
+    }
   ],
-  "name": "call-my-agent",
+  "name": "call-my-agent"
 }

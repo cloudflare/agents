@@ -1,6 +1,13 @@
 # MCP Client Demo Using Agents
 
-A minimal example showing an `Agent` as an MCP client.
+A minimal example showing an `Agent` as an MCP client with support for both SSE and HTTP Streamable transports.
+
+## Transport Options
+
+The MCP client supports two transport types:
+
+- **HTTP Streamable** (recommended): Uses HTTP POST + SSE for better performance and reliability
+- **SSE (Server-Sent Events)**
 
 ## Instructions
 
@@ -15,8 +22,25 @@ Then, follow the steps below to setup the client:
 
 Tap "O + enter" to open the front end. It should list out all the tools, prompts, and resources available for each server added.
 
-## Troubleshooting
+## Usage
 
-### TypeError: Cannot read properties of undefined (reading 'connectionState')
+The recommended way to add MCP servers is via `Agent.addMcpServer()`:
 
-Clear the Local Storage cookies in your browser, then restart the client.
+```typescript
+export class MyAgent extends Agent<Env, never> {
+  async addServer(name: string, url: string) {
+    // Simple usage - callback host derived from request
+    await this.addMcpServer(name, url);
+  }
+
+  async addServerWithOptions(name: string, url: string) {
+    // With options
+    await this.addMcpServer(name, url, {
+      callbackHost: "https://my-worker.workers.dev",
+      transport: { type: "sse" }
+    });
+  }
+}
+```
+
+The MCP client handles OAuth authentication automatically using the built-in `DurableObjectOAuthClientProvider`.

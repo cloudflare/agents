@@ -1,0 +1,12 @@
+{
+  "name": "@cloudflare/agents-pizzaz-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "agents": "*"
+  }
+}

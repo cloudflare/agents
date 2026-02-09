@@ -1,19 +1,132 @@
 {
-  "compatibility_date": "2025-04-17",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // adding these flags since the vitest runner needs them
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module"
+  ],
   "durable_objects": {
     "bindings": [
       {
         "class_name": "TestMcpAgent",
-        "name": "MCP_OBJECT",
+        "name": "MCP_OBJECT"
       },
-    ],
+      {
+        "class_name": "TestEmailAgent",
+        "name": "EmailAgent"
+      },
+      {
+        "class_name": "TestCaseSensitiveAgent",
+        "name": "CaseSensitiveAgent"
+      },
+      {
+        "class_name": "TestUserNotificationAgent",
+        "name": "UserNotificationAgent"
+      },
+      { "class_name": "TestRaceAgent", "name": "TAG_AGENT" },
+      {
+        "class_name": "TestOAuthAgent",
+        "name": "TestOAuthAgent"
+      },
+      {
+        "class_name": "TestMcpJurisdiction",
+        "name": "TEST_MCP_JURISDICTION"
+      },
+      {
+        "class_name": "TestDestroyScheduleAgent",
+        "name": "TestDestroyScheduleAgent"
+      },
+      {
+        "class_name": "TestReadonlyAgent",
+        "name": "TestReadonlyAgent"
+      },
+      {
+        "class_name": "TestScheduleAgent",
+        "name": "TestScheduleAgent"
+      },
+      {
+        "class_name": "TestWorkflowAgent",
+        "name": "TestWorkflowAgent"
+      },
+      {
+        "class_name": "TestAddMcpServerAgent",
+        "name": "TestAddMcpServerAgent"
+      },
+      {
+        "class_name": "TestStateAgent",
+        "name": "TestStateAgent"
+      },
+      {
+        "class_name": "TestStateAgentNoInitial",
+        "name": "TestStateAgentNoInitial"
+      },
+      {
+        "class_name": "TestThrowingStateAgent",
+        "name": "TestThrowingStateAgent"
+      },
+      {
+        "class_name": "TestPersistedStateAgent",
+        "name": "TestPersistedStateAgent"
+      },
+      {
+        "class_name": "TestBothHooksAgent",
+        "name": "TestBothHooksAgent"
+      },
+      {
+        "class_name": "TestNoIdentityAgent",
+        "name": "TestNoIdentityAgent"
+      },
+      {
+        "class_name": "TestCallableAgent",
+        "name": "TestCallableAgent"
+      },
+      {
+        "class_name": "TestChildAgent",
+        "name": "TestChildAgent"
+      }
+    ]
   },
+  "workflows": [
+    {
+      "name": "test-processing-workflow",
+      "binding": "TEST_WORKFLOW",
+      "class_name": "TestProcessingWorkflow"
+    },
+    {
+      "name": "simple-test-workflow",
+      "binding": "SIMPLE_WORKFLOW",
+      "class_name": "SimpleTestWorkflow"
+    }
+  ],
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["TestMcpAgent"],
-      "tag": "v1",
-    },
-  ],
+      "new_sqlite_classes": [
+        "TestMcpAgent",
+        "TestEmailAgent",
+        "TestCaseSensitiveAgent",
+        "TestUserNotificationAgent",
+        "TestRaceAgent",
+        "TestOAuthAgent",
+        "TestMcpJurisdiction",
+        "TestDestroyScheduleAgent",
+        "TestReadonlyAgent",
+        "TestScheduleAgent",
+        "TestWorkflowAgent",
+        "TestAddMcpServerAgent",
+        "TestStateAgent",
+        "TestStateAgentNoInitial",
+        "TestThrowingStateAgent",
+        "TestPersistedStateAgent",
+        "TestBothHooksAgent",
+        "TestNoIdentityAgent",
+        "TestCallableAgent",
+        "TestChildAgent"
+      ],
+      "tag": "v1"
+    }
+  ]
 }

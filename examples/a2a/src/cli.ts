@@ -15,7 +15,7 @@ import {
   type Part, // Added for explicit Part typing
   type Task, // Added for direct Task events
   type TaskArtifactUpdateEvent,
-  type TaskStatusUpdateEvent,
+  type TaskStatusUpdateEvent
 } from "@a2a-js/sdk";
 
 // --- ANSI Colors ---
@@ -29,7 +29,7 @@ const colors = {
   magenta: "\x1b[35m",
   red: "\x1b[31m",
   reset: "\x1b[0m",
-  yellow: "\x1b[33m",
+  yellow: "\x1b[33m"
 };
 
 // --- Helper Functions ---
@@ -45,7 +45,7 @@ function generateId(): string {
 // --- State ---
 let currentTaskId: string | undefined; // Initialize as undefined
 let currentContextId: string | undefined; // Initialize as undefined
-const serverUrl = process.argv[2] || "http://localhost:8787"; // Agent's base URL
+const serverUrl = process.argv[2] || "http://localhost:5173"; // Agent's base URL
 const client = new A2AClient(serverUrl);
 let agentName = "Agent"; // Default, try to get from agent card later
 
@@ -53,7 +53,7 @@ let agentName = "Agent"; // Default, try to get from agent card later
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
-  prompt: colorize("cyan", "You: "),
+  prompt: colorize("cyan", "You: ")
 });
 
 // --- Response Handling ---
@@ -121,7 +121,7 @@ function printAgentEvent(
       messageId: generateId(), // Assuming artifact parts are from agent
       parts: update.artifact.parts,
       role: "agent",
-      taskId: update.taskId,
+      taskId: update.taskId
     });
   } else {
     // This case should ideally not be reached if called correctly
@@ -261,10 +261,10 @@ async function main() {
       parts: [
         {
           kind: "text", // Required by TextPart interface
-          text: input,
-        },
+          text: input
+        }
       ],
-      role: "user",
+      role: "user"
     };
 
     // Conditionally add taskId to the message payload
@@ -277,7 +277,7 @@ async function main() {
     }
 
     const params: MessageSendParams = {
-      message: messagePayload,
+      message: messagePayload
       // Optional: configuration for streaming, blocking, etc.
       // configuration: {
       //   acceptedOutputModes: ['text/plain', 'application/json'], // Example
@@ -392,26 +392,40 @@ async function main() {
       console.log(
         colorize("dim", "--- End of response stream for this input ---")
       );
-      // biome-ignore lint/suspicious/noExplicitAny: comes direct from the google samples
-    } catch (error: any) {
+    } catch (error: unknown) {
       const timestamp = new Date().toLocaleTimeString();
       const prefix = colorize("red", `\n${agentName} [${timestamp}] ERROR:`);
-      console.error(
-        prefix,
-        "Error communicating with agent:",
-        error.message || error
-      );
-      if (error.code) {
-        console.error(colorize("gray", `   Code: ${error.code}`));
+      const err =
+        error instanceof Error
+          ? error
+          : new Error(typeof error === "string" ? error : String(error));
+      console.error(prefix, "Error communicating with agent:", err.message);
+
+      // Extract optional code/data from RPC-style errors
+      const code =
+        error != null &&
+        typeof error === "object" &&
+        "code" in error &&
+        typeof (error as Record<string, unknown>).code === "string"
+          ? ((error as Record<string, unknown>).code as string)
+          : undefined;
+      const data =
+        error != null &&
+        typeof error === "object" &&
+        "data" in error &&
+        (error as Record<string, unknown>).data !== undefined
+          ? (error as Record<string, unknown>).data
+          : undefined;
+
+      if (code) {
+        console.error(colorize("gray", `   Code: ${code}`));
       }
-      if (error.data) {
-        console.error(
-          colorize("gray", `   Data: ${JSON.stringify(error.data)}`)
-        );
+      if (data) {
+        console.error(colorize("gray", `   Data: ${JSON.stringify(data)}`));
       }
-      if (!(error.code || error.data) && error.stack) {
+      if (!(code || data) && err.stack) {
         console.error(
-          colorize("gray", error.stack.split("\n").slice(1, 3).join("\n"))
+          colorize("gray", err.stack.split("\n").slice(1, 3).join("\n"))
         );
       }
     } finally {

@@ -1,22 +1,17 @@
 {
-  "author": {
-    "email": "matt@stackone.com",
-    "name": "Matt Carey"
-  },
-  "dependencies": {
-    "@a2a-js/sdk": "^0.2.2",
-    "hono": "^4.8.3"
-  },
-  "devDependencies": {
-    "esbuild": "^0.25.5"
-  },
-  "keywords": [],
   "name": "@cloudflare/agents-a2a-example",
   "private": true,
+  "author": "Matt Carey <mcarey@cloudflare.com>",
+  "dependencies": {
+    "@a2a-js/sdk": "^0.2.2",
+    "agents": "*",
+    "hono": "^4.11.9"
+  },
+  "keywords": [],
   "scripts": {
-    "build": "node build.js",
     "cli": "npx tsx src/cli.ts",
-    "start": "wrangler dev"
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy"
   },
   "type": "module"
 }

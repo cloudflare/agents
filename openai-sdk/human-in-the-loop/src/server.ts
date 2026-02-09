@@ -1,14 +1,6 @@
 import { Agent, type RunResult, RunState, run, tool } from "@openai/agents";
-import {
-  Agent as CFAgent,
-  unstable_callable as callable,
-  routeAgentRequest,
-} from "agents";
+import { Agent as CFAgent, callable, routeAgentRequest } from "agents";
 import { z } from "zod";
-
-type Env = {
-  MyAgent: DurableObjectNamespace<MyAgent>;
-};
 
 const getWeatherTool = tool({
   description: "Get the weather for a given city",
@@ -29,8 +21,8 @@ const getWeatherTool = tool({
     return needsApproval;
   },
   parameters: z.object({
-    location: z.string(),
-  }),
+    location: z.string()
+  })
 });
 
 export type AgentState = {
@@ -39,15 +31,15 @@ export type AgentState = {
 
 export class MyAgent extends CFAgent<Env, AgentState> {
   initialState: AgentState = {
-    serialisedRunState: null,
+    serialisedRunState: null
   };
 
-  // biome-ignore lint/suspicious/noExplicitAny: later
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK type compatibility
   result: RunResult<unknown, Agent<unknown, any>> | null = null;
   agent = new Agent({
     instructions: "You are a helpful assistant",
     name: "Assistant",
-    tools: [getWeatherTool],
+    tools: [getWeatherTool]
   });
 
   async onStart() {
@@ -83,7 +75,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
     console.log("[MyAgent] Serialising state:", serialisedState);
 
     this.setState({
-      serialisedRunState: serialisedState,
+      serialisedRunState: serialisedState
     });
 
     console.log("[MyAgent] State updated, serialisedRunState saved");
@@ -100,8 +92,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
       this.state.serialisedRunState!
     );
     const interruption = this.result?.interruptions?.find(
-      // @ts-expect-error missing type
-      (i) => i.rawItem.callId === id
+      (i) => "callId" in i.rawItem && i.rawItem.callId === id
     );
     if (interruption) {
       if (approval) {
@@ -115,7 +106,7 @@ export class MyAgent extends CFAgent<Env, AgentState> {
       console.log("[MyAgent] Serialising state:", serialisedState);
 
       this.setState({
-        serialisedRunState: serialisedState,
+        serialisedRunState: serialisedState
       });
     } else {
       throw new Error(`[MyAgent] No interruption found with id: ${id}`);
@@ -137,5 +128,5 @@ export default {
     }
     console.log("[Server] No agent route matched, returning 404");
     return new Response("Not found", { status: 404 });
-  },
+  }
 };

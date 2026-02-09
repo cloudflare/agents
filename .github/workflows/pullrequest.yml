@@ -1,18 +1,24 @@
 name: Pull Request
 
-on: pull_request
+on:
+  pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "design/**"
+      - "*.md"
+      - ".changeset/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
 
 jobs:
   check:
-    timeout-minutes: 5
-    strategy:
-      matrix:
-        os: [
-            ubuntu-24.04,
-            # windows-latest,
-            # macos-latest,
-          ]
-    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,11 +26,61 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: "npm"
 
-      - run: npm install
-      - run: npx playwright install --with-deps
+      - run: npm ci
       - run: npm run build
       - run: npm run check
+
+  test:
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run build
       - run: CI=true npm run test
+
+  publish-preview:
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Publish agents package to pkg.pr.new
+        run: npx pkg-pr-new publish ./packages/agents

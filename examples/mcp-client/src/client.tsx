@@ -21,7 +21,7 @@ function App() {
     prompts: [],
     resources: [],
     servers: {},
-    tools: [],
+    tools: []
   });
 
   const agent = useAgent({
@@ -31,7 +31,7 @@ function App() {
     onMcpUpdate: (mcpServers: MCPServersState) => {
       setMcpState(mcpServers);
     },
-    onOpen: () => setIsConnected(true),
+    onOpen: () => setIsConnected(true)
   });
 
   function openPopup(authUrl: string) {
@@ -55,11 +55,11 @@ function App() {
         agent: "my-agent",
         host: agent.host,
         name: sessionId!,
-        path: "add-mcp",
+        path: "add-mcp"
       },
       {
         body: JSON.stringify({ name: serverName, url: serverUrl }),
-        method: "POST",
+        method: "POST"
       }
     );
     setMcpState({
@@ -69,13 +69,62 @@ function App() {
         placeholder: {
           auth_url: null,
           capabilities: null,
+          error: null,
           instructions: null,
           name: serverName,
           server_url: serverUrl,
-          state: "connecting",
-        },
-      },
+          state: "connecting"
+        }
+      }
     });
+  };
+
+  const handleDisconnect = async (serverId: string) => {
+    await agentFetch(
+      {
+        agent: "my-agent",
+        host: agent.host,
+        name: sessionId!,
+        path: "disconnect-mcp"
+      },
+      {
+        body: JSON.stringify({ serverId }),
+        method: "POST"
+      }
+    );
+  };
+
+  const handleGetTools = async (serverId: string) => {
+    try {
+      const response = await agentFetch(
+        {
+          agent: "my-agent",
+          host: agent.host,
+          name: sessionId!,
+          path: "get-tools"
+        },
+        {
+          body: JSON.stringify({ serverId }),
+          method: "POST"
+        }
+      );
+      const data = (await response.json()) as {
+        tools: unknown[];
+        error?: string;
+      };
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      console.log("Server tools:", data.tools);
+      alert(`Server Tools:\n\n${JSON.stringify(data.tools, null, 2)}`);
+    } catch (error) {
+      console.error("Failed to get tools:", error);
+      alert(
+        `Failed to get tools: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   };
 
   return (
@@ -116,14 +165,24 @@ function App() {
                 {server.state} (id: {id})
               </div>
             </div>
-            {server.state === "authenticating" && server.auth_url && (
-              <button
-                type="button"
-                onClick={() => openPopup(server.auth_url as string)}
-              >
-                Authorize
+            <div style={{ display: "flex", gap: "8px" }}>
+              {server.state === "authenticating" && server.auth_url && (
+                <button
+                  type="button"
+                  onClick={() => openPopup(server.auth_url as string)}
+                >
+                  Authorize
+                </button>
+              )}
+              {server.state === "ready" && (
+                <button type="button" onClick={() => handleGetTools(id)}>
+                  List Tools
+                </button>
+              )}
+              <button type="button" onClick={() => handleDisconnect(id)}>
+                Disconnect
               </button>
-            )}
+            </div>
           </div>
         ))}
       </div>

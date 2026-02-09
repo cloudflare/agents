@@ -30,9 +30,9 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
               execute: async ({ city }) => {
                 // Example tool implementation
                 return `The weather in ${city} is sunny.`;
-              },
-            },
-          },
+              }
+            }
+          }
         });
 
         // Stream response using the processed messages
@@ -40,9 +40,9 @@ export class HumanInTheLoop extends AIChatAgent<Env> {
           model: openai("gpt-4o"),
           messages: processedMessages,
           tools,
-          onFinish,
+          onFinish
         }).mergeIntoDataStream(dataStream);
-      },
+      }
     });
   }
 }

@@ -1,0 +1,23 @@
+{
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "PayAgent",
+        "name": "PAY_AGENT"
+      }
+    ]
+  },
+  "main": "src/index.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["PayAgent"],
+      "tag": "v1"
+    }
+  ],
+  "vars": {
+    "SERVER_ADDRESS": "0xFa75d8F07BA244c29cbdb32fD3093D759857072E" // Add your server wallet address here
+  },
+  "name": "x402-demo"
+}

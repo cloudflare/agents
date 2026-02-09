@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { build } from "tsup";
+import { build } from "tsdown";
 
 async function main() {
   await build({
@@ -8,25 +8,23 @@ async function main() {
     entry: [
       "src/*.ts",
       "src/*.tsx",
+      "src/cli/index.ts",
       "src/mcp/index.ts",
       "src/mcp/client.ts",
       "src/mcp/do-oauth-client-provider.ts",
+      "src/mcp/x402.ts",
+      "src/observability/index.ts",
+      "src/codemode/ai.ts"
     ],
-    external: [
-      "cloudflare:workers",
-      "@ai-sdk/react",
-      "ai",
-      "react",
-      "zod",
-      "@modelcontextprotocol/sdk",
-    ],
+    skipNodeModulesBundle: true,
+    external: ["cloudflare:workers", "cloudflare:email"],
     format: "esm",
     sourcemap: true,
-    splitting: true,
+    fixedExtension: false
   });
 
-  // then run prettier on the generated .d.ts files
-  execSync("prettier --write ./dist/*.d.ts");
+  // then run oxfmt on the generated .d.ts files
+  execSync("oxfmt --write ./dist/*.d.ts");
 
   process.exit(0);
 }

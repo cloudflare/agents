@@ -1,63 +1,140 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
 import { McpAgent } from "../mcp/index.ts";
+import { getAgentByName, routeAgentRequest } from "../index.ts";
+
+// Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
+// and wrangler bindings continue to work.
+export {
+  TestMcpAgent,
+  TestMcpJurisdiction,
+  TestAddMcpServerAgent,
+  TestEmailAgent,
+  TestCaseSensitiveAgent,
+  TestUserNotificationAgent,
+  TestStateAgent,
+  TestStateAgentNoInitial,
+  TestThrowingStateAgent,
+  TestPersistedStateAgent,
+  TestBothHooksAgent,
+  TestNoIdentityAgent,
+  TestDestroyScheduleAgent,
+  TestScheduleAgent,
+  TestWorkflowAgent,
+  TestOAuthAgent,
+  TestReadonlyAgent,
+  TestCallableAgent,
+  TestParentAgent,
+  TestChildAgent,
+  TestRaceAgent
+} from "./agents";
+
+export type { TestState } from "./agents";
+
+// Re-export test workflows for wrangler
+export { TestProcessingWorkflow, SimpleTestWorkflow } from "./test-workflow";
+
+// ── Env type ─────────────────────────────────────────────────────────
+// Uses import-type to reference agent classes without creating runtime
+// circular dependencies.
+
+import type {
+  TestMcpAgent,
+  TestEmailAgent,
+  TestCaseSensitiveAgent,
+  TestUserNotificationAgent,
+  TestOAuthAgent,
+  TestMcpJurisdiction,
+  TestDestroyScheduleAgent,
+  TestReadonlyAgent,
+  TestScheduleAgent,
+  TestWorkflowAgent,
+  TestAddMcpServerAgent,
+  TestStateAgent,
+  TestStateAgentNoInitial,
+  TestThrowingStateAgent,
+  TestPersistedStateAgent,
+  TestBothHooksAgent,
+  TestNoIdentityAgent,
+  TestCallableAgent,
+  TestChildAgent
+} from "./agents";
 
 export type Env = {
   MCP_OBJECT: DurableObjectNamespace<McpAgent>;
+  EmailAgent: DurableObjectNamespace<TestEmailAgent>;
+  CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
+  UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
+  TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
+  TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
+  TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
+  TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
+  TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
+  TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
+  TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
+  TestStateAgent: DurableObjectNamespace<TestStateAgent>;
+  TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
+  TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
+  TestPersistedStateAgent: DurableObjectNamespace<TestPersistedStateAgent>;
+  TestBothHooksAgent: DurableObjectNamespace<TestBothHooksAgent>;
+  TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
+  TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
+  TestChildAgent: DurableObjectNamespace<TestChildAgent>;
+  // Workflow bindings for integration testing
+  TEST_WORKFLOW: Workflow;
+  SIMPLE_WORKFLOW: Workflow;
 };
 
-type State = unknown;
+// ── Fetch handler ────────────────────────────────────────────────────
 
-type Props = {
-  testValue: string;
-};
-
-export class TestMcpAgent extends McpAgent<Env, State, Props> {
-  server = new McpServer(
-    { name: "test-server", version: "1.0.0" },
-    { capabilities: { logging: {} } }
-  );
-
-  async init() {
-    this.server.tool(
-      "greet",
-      "A simple greeting tool",
-      { name: z.string().describe("Name to greet") },
-      async ({ name }): Promise<CallToolResult> => {
-        return { content: [{ text: `Hello, ${name}!`, type: "text" }] };
-      }
-    );
-
-    this.server.tool(
-      "getPropsTestValue",
-      {},
-      async (): Promise<CallToolResult> => {
-        return {
-          content: [{ text: this.props.testValue, type: "text" }],
-        };
-      }
-    );
-  }
-}
+import { TestMcpAgent as McpAgentImpl } from "./agents";
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
 
     // set some props that should be passed init
+    // @ts-expect-error - this is fine for now
     ctx.props = {
-      testValue: "123",
+      testValue: "123"
     };
 
     if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-      return TestMcpAgent.serveSSE("/sse").fetch(request, env, ctx);
+      return McpAgentImpl.serveSSE("/sse").fetch(request, env, ctx);
     }
 
     if (url.pathname === "/mcp") {
-      return TestMcpAgent.serve("/mcp").fetch(request, env, ctx);
+      return McpAgentImpl.serve("/mcp").fetch(request, env, ctx);
     }
 
-    return new Response("Not found", { status: 404 });
+    if (url.pathname === "/500") {
+      return new Response("Internal Server Error", { status: 500 });
+    }
+
+    // Custom basePath routing for testing - routes /custom-state/{name} to TestStateAgent
+    if (url.pathname.startsWith("/custom-state/")) {
+      const instanceName = url.pathname.replace("/custom-state/", "");
+      const agent = await getAgentByName(env.TestStateAgent, instanceName);
+      return agent.fetch(request);
+    }
+
+    // Custom basePath routing with simulated auth - routes /user to TestStateAgent with "auth-user" instance
+    if (url.pathname === "/user" || url.pathname.startsWith("/user?")) {
+      // Simulate server-side auth that determines the instance name
+      const simulatedUserId = "auth-user";
+      const agent = await getAgentByName(env.TestStateAgent, simulatedUserId);
+      return agent.fetch(request);
+    }
+
+    return (
+      (await routeAgentRequest(request, env, { cors: true })) ||
+      new Response("Not found", { status: 404 })
+    );
   },
+
+  async email(
+    _message: ForwardableEmailMessage,
+    _env: Env,
+    _ctx: ExecutionContext
+  ) {
+    // Bring this in when we write tests for the complete email handler flow
+  }
 };

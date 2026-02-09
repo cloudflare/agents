@@ -1,0 +1,24 @@
+<svg width="800" height="250" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background pattern -->
+  <defs>
+    <pattern id="dots" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.5" fill="#FF6B35" opacity="0.3"/>
+    </pattern>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="800" height="250" fill="#FFF8F3"/>
+  <rect width="800" height="250" fill="url(#dots)"/>
+  
+  <!-- Main container -->
+  <rect x="40" y="40" width="720" height="170" rx="20" ry="20" fill="white" stroke="#FF6B35" stroke-width="3"/>
+  
+  <!-- Terminal text -->
+  <text x="80" y="135" font-family="'Courier New', monospace" font-size="48" font-weight="bold">
+    <tspan fill="#FF6B35">$</tspan>
+    <tspan dx="20" fill="#D84315">npm i agents</tspan>
+  </text>
+  
+  <!-- Red square accent -->
+  <rect x="700" y="90" width="40" height="70" fill="#D84315"/>
+</svg>

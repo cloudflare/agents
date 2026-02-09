@@ -1,0 +1,33 @@
+{
+  "name": "@cloudflare/agents-ai-playground",
+  "type": "module",
+  "private": true,
+  "author": "AI Agents Team <1800-agents@cloudflare.com>",
+  "scripts": {
+    "start": "vite dev",
+    "clean": "rm -rf .wrangler node_modules/.vite dist",
+    "build": "npm run clean && vite build",
+    "deploy": "npm run build && wrangler deploy --var HOST:https://playground.ai.cloudflare.com --domain playground.ai.cloudflare.com",
+    "types": "wrangler types env.d.ts --include-runtime false --strict-vars false",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.38",
+    "@ai-sdk/google": "^3.0.22",
+    "@ai-sdk/openai": "^3.0.26",
+    "@cloudflare/agents-ui": "*",
+    "@streamdown/code": "^1.0.1",
+    "ai": "^6.0.77",
+    "ai-gateway-provider": "^3.1.1",
+    "downshift": "^9.2.0",
+    "nanoid": "^5.1.6",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-hotkeys-hook": "^5.2.4",
+    "react-textarea-autosize": "^8.5.9",
+    "streamdown": "^2.1.0",
+    "workers-ai-provider": "^3.0.4",
+    "zod": "^4.3.6"
+  },
+  "keywords": []
+}

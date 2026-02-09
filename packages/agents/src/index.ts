@@ -1,28 +1,47 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { agentContext, type AgentEmail } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
+import { signAgentHeaders } from "./email";
 
 import type {
   Prompt,
   Resource,
   ServerCapabilities,
-  Tool,
+  Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
+import { EmailMessage } from "cloudflare:email";
 import {
   type Connection,
   type ConnectionContext,
-  getServerByName,
   type PartyServerOptions,
-  routePartykitRequest,
   Server,
   type WSMessage,
+  getServerByName,
+  routePartykitRequest
 } from "partyserver";
-import { camelCaseToKebabCase } from "./client";
-import { MCPClientManager } from "./mcp/client";
-// import type { MCPClientConnection } from "./mcp/client-connection";
-import { DurableObjectOAuthClientProvider } from "./mcp/do-oauth-client-provider";
+import { camelCaseToKebabCase } from "./utils";
+import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
+import type {
+  WorkflowCallback,
+  WorkflowTrackingRow,
+  WorkflowStatus,
+  RunWorkflowOptions,
+  WorkflowEventPayload,
+  WorkflowInfo,
+  WorkflowQueryCriteria,
+  WorkflowPage
+} from "./workflow-types";
+import { MCPConnectionState } from "./mcp/client-connection";
+import {
+  DurableObjectOAuthClientProvider,
+  type AgentsOAuthProvider
+} from "./mcp/do-oauth-client-provider";
+import type { TransportType } from "./mcp/types";
+import { genericObservability, type Observability } from "./observability";
+import { DisposableStore } from "./core/events";
+import { MessageType } from "./types";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 
@@ -40,7 +59,7 @@ export type RPCRequest = {
  * State update message from client
  */
 export type StateUpdateMessage = {
-  type: "cf_agent_state";
+  type: MessageType.CF_AGENT_STATE;
   state: unknown;
 };
 
@@ -48,7 +67,7 @@ export type StateUpdateMessage = {
  * RPC response message to client
  */
 export type RPCResponse = {
-  type: "rpc";
+  type: MessageType.RPC;
   id: string;
 } & (
   | {
@@ -75,7 +94,7 @@ function isRPCRequest(msg: unknown): msg is RPCRequest {
     typeof msg === "object" &&
     msg !== null &&
     "type" in msg &&
-    msg.type === "rpc" &&
+    msg.type === MessageType.RPC &&
     "id" in msg &&
     typeof msg.id === "string" &&
     "method" in msg &&
@@ -93,7 +112,7 @@ function isStateUpdateMessage(msg: unknown): msg is StateUpdateMessage {
     typeof msg === "object" &&
     msg !== null &&
     "type" in msg &&
-    msg.type === "cf_agent_state" &&
+    msg.type === MessageType.CF_AGENT_STATE &&
     "state" in msg
   );
 }
@@ -108,17 +127,31 @@ export type CallableMetadata = {
   streaming?: boolean;
 };
 
-const callableMetadata = new Map<Function, CallableMetadata>();
+const callableMetadata = new WeakMap<Function, CallableMetadata>();
+
+/**
+ * Error class for SQL execution failures, containing the query that failed
+ */
+export class SqlError extends Error {
+  /** The SQL query that failed */
+  readonly query: string;
+
+  constructor(query: string, cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(`SQL query failed: ${message}`, { cause });
+    this.name = "SqlError";
+    this.query = query;
+  }
+}
 
 /**
  * Decorator that marks a method as callable by clients
  * @param metadata Optional metadata about the callable method
  */
-export function unstable_callable(metadata: CallableMetadata = {}) {
+export function callable(metadata: CallableMetadata = {}) {
   return function callableDecorator<This, Args extends unknown[], Return>(
     target: (this: This, ...args: Args) => Return,
-    // biome-ignore lint/correctness/noUnusedFunctionParameters: later
-    context: ClassMethodDecoratorContext
+    _context: ClassMethodDecoratorContext
   ) {
     if (!callableMetadata.has(target)) {
       callableMetadata.set(target, metadata);
@@ -127,6 +160,30 @@ export function unstable_callable(metadata: CallableMetadata = {}) {
     return target;
   };
 }
+
+let didWarnAboutUnstableCallable = false;
+
+/**
+ * Decorator that marks a method as callable by clients
+ * @deprecated this has been renamed to callable, and unstable_callable will be removed in the next major version
+ * @param metadata Optional metadata about the callable method
+ */
+export const unstable_callable = (metadata: CallableMetadata = {}) => {
+  if (!didWarnAboutUnstableCallable) {
+    didWarnAboutUnstableCallable = true;
+    console.warn(
+      "unstable_callable is deprecated, use callable instead. unstable_callable will be removed in the next major version."
+    );
+  }
+  return callable(metadata);
+};
+
+export type QueueItem<T = string> = {
+  id: string;
+  payload: T;
+  callback: keyof Agent<Cloudflare.Env>;
+  created_at: number;
+};
 
 /**
  * Represents a scheduled task within an Agent
@@ -162,6 +219,14 @@ export type Schedule<T = string> = {
       /** Cron expression defining the schedule */
       cron: string;
     }
+  | {
+      /** Type of schedule for recurring execution at fixed intervals */
+      type: "interval";
+      /** Timestamp for the next execution */
+      time: number;
+      /** Number of seconds between executions */
+      intervalSeconds: number;
+    }
 );
 
 function getNextCronTime(cron: string) {
@@ -169,11 +234,13 @@ function getNextCronTime(cron: string) {
   return interval.getNextDate();
 }
 
+export type { TransportType } from "./mcp/types";
+
 /**
  * MCP Server state update message from server -> Client
  */
 export type MCPServerMessage = {
-  type: "cf_agent_mcp_servers";
+  type: MessageType.CF_AGENT_MCP_SERVERS;
   mcp: MCPServersState;
 };
 
@@ -181,9 +248,9 @@ export type MCPServersState = {
   servers: {
     [id: string]: MCPServer;
   };
-  tools: Tool[];
-  prompts: Prompt[];
-  resources: Resource[];
+  tools: (Tool & { serverId: string })[];
+  prompts: (Prompt & { serverId: string })[];
+  resources: (Resource & { serverId: string })[];
 };
 
 export type MCPServer = {
@@ -193,22 +260,37 @@ export type MCPServer = {
   // This state is specifically about the temporary process of getting a token (if needed).
   // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
   // to communicate a change to a non-ready state.
-  state: "authenticating" | "connecting" | "ready" | "discovering" | "failed";
+  state: MCPConnectionState;
+  error: string | null;
   instructions: string | null;
   capabilities: ServerCapabilities | null;
 };
 
 /**
- * MCP Server data stored in DO SQL for resuming MCP Server connections
+ * Options for adding an MCP server
  */
-type MCPServerRow = {
-  id: string;
-  name: string;
-  server_url: string;
-  client_id: string | null;
-  auth_url: string | null;
-  callback_url: string;
-  server_options: string;
+export type AddMcpServerOptions = {
+  /** OAuth callback host (auto-derived from request if omitted) */
+  callbackHost?: string;
+  /**
+   * Custom callback URL path — bypasses the default `/agents/{class}/{name}/callback` construction.
+   * Required when `sendIdentityOnConnect` is `false` to prevent leaking the instance name.
+   * When set, the callback URL becomes `{callbackHost}/{callbackPath}`.
+   * The developer must route this path to the agent instance via `getAgentByName`.
+   * Should be a plain path (e.g., `/mcp-callback`) — do not include query strings or fragments.
+   */
+  callbackPath?: string;
+  /** Agents routing prefix (default: "agents") */
+  agentsPrefix?: string;
+  /** MCP client options */
+  client?: ConstructorParameters<typeof Client>[1];
+  /** Transport options */
+  transport?: {
+    /** Custom headers for authentication (e.g., bearer tokens, CF Access) */
+    headers?: HeadersInit;
+    /** Transport type: "sse", "streamable-http", or "auto" (default) */
+    type?: TransportType;
+  };
 };
 
 const STATE_ROW_ID = "cf_state_row_id";
@@ -216,24 +298,59 @@ const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
 
-const agentContext = new AsyncLocalStorage<{
-  agent: Agent<unknown>;
-  connection: Connection | undefined;
-  request: Request | undefined;
-}>();
+/**
+ * Internal key used to store the readonly flag in connection state.
+ * Prefixed with _cf_ to avoid collision with user state keys.
+ */
+const CF_READONLY_KEY = "_cf_readonly";
+
+/**
+ * Tracks which agent constructors have already emitted the onStateUpdate
+ * deprecation warning, so it fires at most once per class.
+ */
+const _onStateUpdateWarnedClasses = new WeakSet<Function>();
+
+/**
+ * Default options for Agent configuration.
+ * Child classes can override specific options without spreading.
+ */
+export const DEFAULT_AGENT_STATIC_OPTIONS = {
+  /** Whether the Agent should hibernate when inactive */
+  hibernate: true,
+  /** Whether to send identity (name, agent) to clients on connect */
+  sendIdentityOnConnect: true,
+  /**
+   * Timeout in seconds before a running interval schedule is considered "hung"
+   * and force-reset. Increase this if you have callbacks that legitimately
+   * take longer than 30 seconds.
+   */
+  hungScheduleTimeoutSeconds: 30
+};
+
+type ResolvedAgentOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
+
+/**
+ * Configuration options for the Agent.
+ * Override in subclasses via `static options`.
+ * All fields are optional - defaults are applied at runtime.
+ * Note: `hibernate` defaults to `true` if not specified.
+ */
+export type AgentStaticOptions = Partial<ResolvedAgentOptions>;
 
 export function getCurrentAgent<
-  T extends Agent<unknown, unknown> = Agent<unknown, unknown>,
+  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
 >(): {
   agent: T | undefined;
   connection: Connection | undefined;
-  request: Request<unknown, CfProperties<unknown>> | undefined;
+  request: Request | undefined;
+  email: AgentEmail | undefined;
 } {
   const store = agentContext.getStore() as
     | {
         agent: T;
         connection: Connection | undefined;
-        request: Request<unknown, CfProperties<unknown>> | undefined;
+        request: Request | undefined;
+        email: AgentEmail | undefined;
       }
     | undefined;
   if (!store) {
@@ -241,23 +358,94 @@ export function getCurrentAgent<
       agent: undefined,
       connection: undefined,
       request: undefined,
+      email: undefined
     };
   }
   return store;
 }
 
 /**
+ * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
+ * @param agent The agent instance
+ * @param method The method to wrap
+ * @returns A wrapped method that runs within the agent context
+ */
+
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
+function withAgentContext<T extends (...args: any[]) => any>(
+  method: T
+): (
+  this: Agent<Cloudflare.Env, unknown>,
+  ...args: Parameters<T>
+) => ReturnType<T> {
+  return function (...args: Parameters<T>): ReturnType<T> {
+    const { connection, request, email, agent } = getCurrentAgent();
+
+    if (agent === this) {
+      // already wrapped, so we can just call the method
+      return method.apply(this, args);
+    }
+    // not wrapped, so we need to wrap it
+    return agentContext.run({ agent: this, connection, request, email }, () => {
+      return method.apply(this, args);
+    });
+  };
+}
+
+/**
+ * Extract string keys from Env where the value is a Workflow binding.
+ */
+type WorkflowBinding<E> = {
+  [K in keyof E & string]: E[K] extends Workflow ? K : never;
+}[keyof E & string];
+
+/**
+ * Type for workflow name parameter.
+ * When Env has typed Workflow bindings, provides autocomplete for those keys.
+ * Also accepts any string for dynamic use cases and compatibility.
+ * The `string & {}` trick preserves autocomplete while allowing any string.
+ */
+type WorkflowName<E> = WorkflowBinding<E> | (string & {});
+
+/**
  * Base class for creating Agent implementations
  * @template Env Environment type containing bindings
  * @template State State type to store within the Agent
  */
-export class Agent<Env, State = unknown> extends Server<Env> {
+export class Agent<
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
+> extends Server<Env, Props> {
   private _state = DEFAULT_STATE as State;
+  private _disposables = new DisposableStore();
+  private _destroyed = false;
+
+  /**
+   * Stores raw state accessors for wrapped connections.
+   * Used by setConnectionReadonly/isConnectionReadonly to read/write the
+   * _cf_readonly flag without going through the user-facing state/setState.
+   */
+  private _rawStateAccessors = new WeakMap<
+    Connection,
+    {
+      getRaw: () => Record<string, unknown> | null;
+      setRaw: (state: unknown) => unknown;
+    }
+  >();
+
+  /**
+   * Cached persistence-hook dispatch mode, computed once in the constructor.
+   * - "new"  → call onStateChanged
+   * - "old"  → call onStateUpdate (deprecated)
+   * - "none" → neither hook is overridden, skip entirely
+   */
+  private _persistenceHookMode: "new" | "old" | "none" = "none";
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
 
-  mcp: MCPClientManager = new MCPClientManager(this._ParentClass.name, "0.0.1");
+  readonly mcp: MCPClientManager;
 
   /**
    * Initial state for the Agent
@@ -291,7 +479,24 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     ) {
       const state = result[0]?.state as string; // could be null?
 
-      this._state = JSON.parse(state);
+      try {
+        this._state = JSON.parse(state);
+      } catch (e) {
+        console.error(
+          "Failed to parse stored state, falling back to initialState:",
+          e
+        );
+        if (this.initialState !== DEFAULT_STATE) {
+          this._state = this.initialState;
+          // Persist the fixed state to prevent future parse errors
+          this._setStateInternal(this.initialState);
+        } else {
+          // No initialState defined - clear corrupted data to prevent infinite retry loop
+          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
+          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_WAS_CHANGED}`;
+          return undefined as State;
+        }
+      }
       return this._state;
     }
 
@@ -304,17 +509,41 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     }
     // initial state provided, so we set the state,
     // update db and return the initial state
-    this.setState(this.initialState);
+    this._setStateInternal(this.initialState);
     return this.initialState;
   }
 
   /**
-   * Agent configuration options
+   * Agent configuration options.
+   * Override in subclasses - only specify what you want to change.
+   * @example
+   * class SecureAgent extends Agent {
+   *   static options = { sendIdentityOnConnect: false };
+   * }
    */
-  static options = {
-    /** Whether the Agent should hibernate when inactive */
-    hibernate: true, // default to hibernate
-  };
+  static options: AgentStaticOptions = { hibernate: true };
+
+  /**
+   * Resolved options (merges defaults with subclass overrides)
+   */
+  private get _resolvedOptions(): ResolvedAgentOptions {
+    const ctor = this.constructor as typeof Agent;
+    return {
+      hibernate:
+        ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
+      sendIdentityOnConnect:
+        ctor.options?.sendIdentityOnConnect ??
+        DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
+      hungScheduleTimeoutSeconds:
+        ctor.options?.hungScheduleTimeoutSeconds ??
+        DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds
+    };
+  }
+
+  /**
+   * The observability implementation to use for the Agent
+   */
+  observability?: Observability = genericObservability;
 
   /**
    * Execute SQL queries against the Agent's database
@@ -338,12 +567,29 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       // Execute the SQL query with the provided values
       return [...this.ctx.storage.sql.exec(query, ...values)] as T[];
     } catch (e) {
-      console.error(`failed to execute sql query: ${query}`, e);
-      throw this.onError(e);
+      throw this.onError(new SqlError(query, e));
     }
   }
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
+
+    if (!wrappedClasses.has(this.constructor)) {
+      // Auto-wrap custom methods with agent context
+      this._autoWrapCustomMethods();
+      wrappedClasses.add(this.constructor);
+    }
+
+    this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          server_url TEXT NOT NULL,
+          callback_url TEXT NOT NULL,
+          client_id TEXT,
+          auth_url TEXT,
+          server_options TEXT
+        )
+      `;
 
     this.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_state (
@@ -352,60 +598,152 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       )
     `;
 
-    void this.ctx.blockConcurrencyWhile(async () => {
-      return this._tryCatch(async () => {
-        // Create alarms table if it doesn't exist
-        this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-          callback TEXT,
-          payload TEXT,
-          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron')),
-          time INTEGER,
-          delayInSeconds INTEGER,
-          cron TEXT,
-          created_at INTEGER DEFAULT (unixepoch())
-        )
-      `;
-
-        // execute any pending alarms and schedule the next alarm
-        await this.alarm();
-      });
-    });
-
     this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+      CREATE TABLE IF NOT EXISTS cf_agents_queues (
         id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        server_url TEXT NOT NULL,
-        callback_url TEXT NOT NULL,
-        client_id TEXT,
-        auth_url TEXT,
-        server_options TEXT
+        payload TEXT,
+        callback TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
       )
     `;
+
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_schedules (
+        id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+        callback TEXT,
+        payload TEXT,
+        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+        time INTEGER,
+        delayInSeconds INTEGER,
+        cron TEXT,
+        intervalSeconds INTEGER,
+        running INTEGER DEFAULT 0,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    `;
+
+    // Migration: Add columns for interval scheduling (for existing agents)
+    // Use raw exec to avoid error logging through onError for expected failures
+    const addColumnIfNotExists = (sql: string) => {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch (e) {
+        // Only ignore "duplicate column" errors, re-throw unexpected errors
+        const message = e instanceof Error ? e.message : String(e);
+        if (!message.toLowerCase().includes("duplicate column")) {
+          throw e;
+        }
+      }
+    };
+
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
+    );
+
+    // Workflow tracking table for Agent-Workflow integration
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_workflows (
+        id TEXT PRIMARY KEY NOT NULL,
+        workflow_id TEXT NOT NULL UNIQUE,
+        workflow_name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN (
+          'queued', 'running', 'paused', 'errored',
+          'terminated', 'complete', 'waiting',
+          'waitingForPause', 'unknown'
+        )),
+        metadata TEXT,
+        error_name TEXT,
+        error_message TEXT,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        completed_at INTEGER
+      )
+    `;
+
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)
+    `;
+
+    this.sql`
+      CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
+    `;
+
+    // Initialize MCPClientManager AFTER tables are created
+    this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
+      storage: this.ctx.storage
+    });
+
+    // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)
+    this._disposables.add(
+      this.mcp.onServerStateChanged(async () => {
+        this.broadcastMcpServers();
+      })
+    );
+
+    // Emit MCP observability events
+    this._disposables.add(
+      this.mcp.onObservabilityEvent((event) => {
+        this.observability?.emit(event);
+      })
+    );
+    // Compute persistence-hook dispatch mode once.
+    // Throws immediately if both hooks are overridden on the same class.
+    {
+      const proto = Object.getPrototypeOf(this);
+      const hasOwnNew = Object.prototype.hasOwnProperty.call(
+        proto,
+        "onStateChanged"
+      );
+      const hasOwnOld = Object.prototype.hasOwnProperty.call(
+        proto,
+        "onStateUpdate"
+      );
+
+      if (hasOwnNew && hasOwnOld) {
+        throw new Error(
+          `[Agent] Cannot override both onStateChanged and onStateUpdate. ` +
+            `Remove onStateUpdate — it has been renamed to onStateChanged.`
+        );
+      }
+
+      if (hasOwnOld) {
+        const ctor = this.constructor;
+        if (!_onStateUpdateWarnedClasses.has(ctor)) {
+          _onStateUpdateWarnedClasses.add(ctor);
+          console.warn(
+            `[Agent] onStateUpdate is deprecated. Rename to onStateChanged — the behavior is identical.`
+          );
+        }
+      }
+
+      const base = Agent.prototype;
+      if (proto.onStateChanged !== base.onStateChanged) {
+        this._persistenceHookMode = "new";
+      } else if (proto.onStateUpdate !== base.onStateUpdate) {
+        this._persistenceHookMode = "old";
+      }
+      // default "none" already set in field initializer
+    }
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
       return agentContext.run(
-        { agent: this, connection: undefined, request },
+        { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          if (this.mcp.isCallbackRequest(request)) {
-            await this.mcp.handleCallbackRequest(request);
+          // TODO: make zod/ai sdk more performant and remove this
+          // Late initialization of jsonSchemaFn (needed for getAITools)
+          await this.mcp.ensureJsonSchema();
 
-            // after the MCP connection handshake, we can send updated mcp state
-            this.broadcast(
-              JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: "cf_agent_mcp_servers",
-              })
-            );
-
-            // We probably should let the user configure this response/redirect, but this is fine for now.
-            return new Response("<script>window.close();</script>", {
-              headers: { "content-type": "text/html" },
-              status: 200,
-            });
+          // Handle MCP OAuth callback if this is one
+          const oauthResponse = await this.handleMcpOAuthCallback(request);
+          if (oauthResponse) {
+            return oauthResponse;
           }
 
           return this._tryCatch(() => _onRequest(request));
@@ -415,9 +753,13 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      this._ensureConnectionWrapped(connection);
       return agentContext.run(
-        { agent: this, connection, request: undefined },
+        { agent: this, connection, request: undefined, email: undefined },
         async () => {
+          // TODO: make zod/ai sdk more performant and remove this
+          // Late initialization of jsonSchemaFn (needed for getAITools)
+          await this.mcp.ensureJsonSchema();
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
           }
@@ -431,7 +773,30 @@ export class Agent<Env, State = unknown> extends Server<Env> {
           }
 
           if (isStateUpdateMessage(parsed)) {
-            this._setStateInternal(parsed.state as State, connection);
+            // Check if connection is readonly
+            if (this.isConnectionReadonly(connection)) {
+              // Send error response back to the connection
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_STATE_ERROR,
+                  error: "Connection is readonly"
+                })
+              );
+              return;
+            }
+            try {
+              this._setStateInternal(parsed.state as State, connection);
+            } catch (e) {
+              // validateStateChange (or another sync error) rejected the update.
+              // Log the full error server-side, send a generic message to the client.
+              console.error("[Agent] State update rejected:", e);
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_STATE_ERROR,
+                  error: "State update rejected"
+                })
+              );
+            }
             return;
           }
 
@@ -454,18 +819,59 @@ export class Agent<Env, State = unknown> extends Server<Env> {
               // For streaming methods, pass a StreamingResponse object
               if (metadata?.streaming) {
                 const stream = new StreamingResponse(connection, id);
-                await methodFn.apply(this, [stream, ...args]);
+
+                this.observability?.emit(
+                  {
+                    displayMessage: `RPC streaming call to ${method}`,
+                    id: nanoid(),
+                    payload: {
+                      method,
+                      streaming: true
+                    },
+                    timestamp: Date.now(),
+                    type: "rpc"
+                  },
+                  this.ctx
+                );
+
+                try {
+                  await methodFn.apply(this, [stream, ...args]);
+                } catch (err) {
+                  // Log error server-side for observability
+                  console.error(`Error in streaming method "${method}":`, err);
+                  // Auto-close stream with error if method throws before closing
+                  if (!stream.isClosed) {
+                    stream.error(
+                      err instanceof Error ? err.message : String(err)
+                    );
+                  }
+                }
                 return;
               }
 
               // For regular methods, execute and send response
               const result = await methodFn.apply(this, args);
+
+              this.observability?.emit(
+                {
+                  displayMessage: `RPC call to ${method}`,
+                  id: nanoid(),
+                  payload: {
+                    method,
+                    streaming: metadata?.streaming
+                  },
+                  timestamp: Date.now(),
+                  type: "rpc"
+                },
+                this.ctx
+              );
+
               const response: RPCResponse = {
                 done: true,
                 id,
                 result,
                 success: true,
-                type: "rpc",
+                type: MessageType.RPC
               };
               connection.send(JSON.stringify(response));
             } catch (e) {
@@ -475,7 +881,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
                   e instanceof Error ? e.message : "Unknown error occurred",
                 id: parsed.id,
                 success: false,
-                type: "rpc",
+                type: MessageType.RPC
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
@@ -490,134 +896,521 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = (connection: Connection, ctx: ConnectionContext) => {
+      this._ensureConnectionWrapped(connection);
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
       return agentContext.run(
-        { agent: this, connection, request: ctx.request },
+        { agent: this, connection, request: ctx.request, email: undefined },
         async () => {
-          setTimeout(() => {
-            if (this.state) {
-              connection.send(
-                JSON.stringify({
-                  state: this.state,
-                  type: "cf_agent_state",
-                })
-              );
-            }
+          // Check if connection should be readonly before sending any messages
+          // so that the flag is set before the client can respond
+          if (this.shouldConnectionBeReadonly(connection, ctx)) {
+            this.setConnectionReadonly(connection, true);
+          }
 
+          // Send agent identity first so client knows which instance it's connected to
+          // Can be disabled via static options for security-sensitive instance names
+          if (this._resolvedOptions.sendIdentityOnConnect) {
             connection.send(
               JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: "cf_agent_mcp_servers",
+                name: this.name,
+                agent: camelCaseToKebabCase(this._ParentClass.name),
+                type: MessageType.CF_AGENT_IDENTITY
               })
             );
+          }
 
-            return this._tryCatch(() => _onConnect(connection, ctx));
-          }, 20);
+          if (this.state) {
+            connection.send(
+              JSON.stringify({
+                state: this.state,
+                type: MessageType.CF_AGENT_STATE
+              })
+            );
+          }
+
+          connection.send(
+            JSON.stringify({
+              mcp: this.getMcpServers(),
+              type: MessageType.CF_AGENT_MCP_SERVERS
+            })
+          );
+
+          this.observability?.emit(
+            {
+              displayMessage: "Connection established",
+              id: nanoid(),
+              payload: {
+                connectionId: connection.id
+              },
+              timestamp: Date.now(),
+              type: "connect"
+            },
+            this.ctx
+          );
+          return this._tryCatch(() => _onConnect(connection, ctx));
         }
       );
     };
 
     const _onStart = this.onStart.bind(this);
-    this.onStart = async () => {
+    this.onStart = async (props?: Props) => {
       return agentContext.run(
-        { agent: this, connection: undefined, request: undefined },
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
         async () => {
-          const servers = this.sql<MCPServerRow>`
-            SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-          `;
+          await this._tryCatch(async () => {
+            await this.mcp.restoreConnectionsFromStorage(this.name);
+            this.broadcastMcpServers();
 
-          // from DO storage, reconnect to all servers not currently in the oauth flow using our saved auth information
-          Promise.allSettled(
-            servers.map((server) => {
-              return this._connectToMcpServerInternal(
-                server.name,
-                server.server_url,
-                server.callback_url,
-                server.server_options
-                  ? JSON.parse(server.server_options)
-                  : undefined,
-                {
-                  id: server.id,
-                  oauthClientId: server.client_id ?? undefined,
-                }
-              );
-            })
-          ).then((_results) => {
-            this.broadcast(
-              JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: "cf_agent_mcp_servers",
-              })
-            );
+            // Check for orphaned workflows (tracked but binding no longer exists)
+            this._checkOrphanedWorkflows();
+
+            return _onStart(props);
           });
-          await this._tryCatch(() => _onStart());
         }
       );
     };
   }
 
+  /**
+   * Check for workflows referencing unknown bindings and warn with migration suggestion.
+   */
+  private _checkOrphanedWorkflows(): void {
+    // Get distinct workflow names with counts by active/completed status
+    const distinctNames = this.sql<{
+      workflow_name: string;
+      total: number;
+      active: number;
+      completed: number;
+    }>`
+      SELECT 
+        workflow_name,
+        COUNT(*) as total,
+        SUM(CASE WHEN status NOT IN ('complete', 'errored', 'terminated') THEN 1 ELSE 0 END) as active,
+        SUM(CASE WHEN status IN ('complete', 'errored', 'terminated') THEN 1 ELSE 0 END) as completed
+      FROM cf_agents_workflows 
+      GROUP BY workflow_name
+    `;
+
+    const orphaned = distinctNames.filter(
+      (row) => !this._findWorkflowBindingByName(row.workflow_name)
+    );
+
+    if (orphaned.length > 0) {
+      const currentBindings = this._getWorkflowBindingNames();
+      for (const {
+        workflow_name: oldName,
+        total,
+        active,
+        completed
+      } of orphaned) {
+        const suggestion =
+          currentBindings.length === 1
+            ? `this.migrateWorkflowBinding('${oldName}', '${currentBindings[0]}')`
+            : `this.migrateWorkflowBinding('${oldName}', '<NEW_BINDING_NAME>')`;
+        const breakdown =
+          active > 0 && completed > 0
+            ? ` (${active} active, ${completed} completed)`
+            : active > 0
+              ? ` (${active} active)`
+              : ` (${completed} completed)`;
+        console.warn(
+          `[Agent] Found ${total} workflow(s) referencing unknown binding '${oldName}'${breakdown}. ` +
+            `If you renamed the binding, call: ${suggestion}`
+        );
+      }
+    }
+  }
+
   private _setStateInternal(
-    state: State,
+    nextState: State,
     source: Connection | "server" = "server"
-  ) {
-    this._state = state;
+  ): void {
+    // Validation/gating hook (sync only)
+    this.validateStateChange(nextState, source);
+
+    // Persist state
+    this._state = nextState;
     this.sql`
-    INSERT OR REPLACE INTO cf_agents_state (id, state)
-    VALUES (${STATE_ROW_ID}, ${JSON.stringify(state)})
-  `;
+      INSERT OR REPLACE INTO cf_agents_state (id, state)
+      VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
+    `;
     this.sql`
-    INSERT OR REPLACE INTO cf_agents_state (id, state)
-    VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
-  `;
+      INSERT OR REPLACE INTO cf_agents_state (id, state)
+      VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
+    `;
+
+    // Broadcast state to connected clients immediately
     this.broadcast(
       JSON.stringify({
-        state: state,
-        type: "cf_agent_state",
+        state: nextState,
+        type: MessageType.CF_AGENT_STATE
       }),
       source !== "server" ? [source.id] : []
     );
-    return this._tryCatch(() => {
-      const { connection, request } = agentContext.getStore() || {};
-      return agentContext.run(
-        { agent: this, connection, request },
-        async () => {
-          return this.onStateUpdate(state, source);
+
+    // Notification hook (non-gating). Run after broadcast and do not block.
+    // Use waitUntil for reliability after the handler returns.
+    const { connection, request, email } = agentContext.getStore() || {};
+    this.ctx.waitUntil(
+      (async () => {
+        try {
+          await agentContext.run(
+            { agent: this, connection, request, email },
+            async () => {
+              this.observability?.emit(
+                {
+                  displayMessage: "State updated",
+                  id: nanoid(),
+                  payload: {},
+                  timestamp: Date.now(),
+                  type: "state:update"
+                },
+                this.ctx
+              );
+              await this._callStatePersistenceHook(nextState, source);
+            }
+          );
+        } catch (e) {
+          // onStateChanged/onStateUpdate errors should not affect state or broadcasts
+          try {
+            await this.onError(e);
+          } catch {
+            // swallow
+          }
         }
-      );
-    });
+      })()
+    );
   }
 
   /**
    * Update the Agent's state
    * @param state New state to set
+   * @throws Error if called from a readonly connection context
    */
-  setState(state: State) {
+  setState(state: State): void {
+    // Check if the current context has a readonly connection
+    const store = agentContext.getStore();
+    if (store?.connection && this.isConnectionReadonly(store.connection)) {
+      throw new Error("Connection is readonly");
+    }
     this._setStateInternal(state, "server");
   }
 
   /**
-   * Called when the Agent's state is updated
-   * @param state Updated state
-   * @param source Source of the state update ("server" or a client connection)
+   * Wraps connection.state and connection.setState so that the internal
+   * _cf_readonly flag is hidden from user code and cannot be accidentally
+   * overwritten. Must be called before any user code sees the connection.
+   *
+   * Idempotent — safe to call multiple times on the same connection.
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
-  onStateUpdate(state: State | undefined, source: Connection | "server") {
-    // override this to handle state updates
+  private _ensureConnectionWrapped(connection: Connection) {
+    if (this._rawStateAccessors.has(connection)) return;
+
+    // Determine whether `state` is an accessor (getter) or a data property.
+    // partyserver always defines `state` as a getter via Object.defineProperties,
+    // but we handle the data-property case to stay robust for hibernate: false
+    // and any future connection implementations.
+    const descriptor = Object.getOwnPropertyDescriptor(connection, "state");
+
+    let getRaw: () => Record<string, unknown> | null;
+    let setRaw: (state: unknown) => unknown;
+
+    if (descriptor?.get) {
+      // Accessor property — bind the original getter directly.
+      // The getter reads from the serialized WebSocket attachment, so it
+      // always returns the latest value even after setState updates it.
+      getRaw = descriptor.get.bind(connection) as () => Record<
+        string,
+        unknown
+      > | null;
+      setRaw = connection.setState.bind(connection);
+    } else {
+      // Data property — track raw state in a closure variable.
+      // Reading `connection.state` after our override would call our filtered
+      // getter (circular), so we snapshot the value here and keep it in sync.
+      let rawState = (connection.state ?? null) as Record<
+        string,
+        unknown
+      > | null;
+      getRaw = () => rawState;
+      setRaw = (state: unknown) => {
+        rawState = state as Record<string, unknown> | null;
+        return rawState;
+      };
+    }
+
+    this._rawStateAccessors.set(connection, { getRaw, setRaw });
+
+    const CF_KEY = CF_READONLY_KEY;
+
+    // Override state getter to hide the readonly flag from user code
+    Object.defineProperty(connection, "state", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        const raw = getRaw();
+        if (raw != null && typeof raw === "object" && CF_KEY in raw) {
+          const { [CF_KEY]: _, ...userState } = raw;
+          return Object.keys(userState).length > 0 ? userState : null;
+        }
+        return raw;
+      }
+    });
+
+    // Override setState to preserve the readonly flag when user sets state
+    Object.defineProperty(connection, "setState", {
+      configurable: true,
+      writable: true,
+      value(stateOrFn: unknown | ((prev: unknown) => unknown)) {
+        const raw = getRaw();
+        const readonlyFlag =
+          raw != null && typeof raw === "object"
+            ? (raw as Record<string, unknown>)[CF_KEY]
+            : undefined;
+
+        let newUserState: unknown;
+        if (typeof stateOrFn === "function") {
+          // Pass only the user-visible state (without the readonly flag) to the callback
+          let userVisible: unknown = raw;
+          if (raw != null && typeof raw === "object" && CF_KEY in raw) {
+            const { [CF_KEY]: _, ...rest } = raw;
+            userVisible = Object.keys(rest).length > 0 ? rest : null;
+          }
+          newUserState = (stateOrFn as (prev: unknown) => unknown)(userVisible);
+        } else {
+          newUserState = stateOrFn;
+        }
+
+        // Merge back the readonly flag if it was set
+        if (readonlyFlag !== undefined) {
+          if (newUserState != null && typeof newUserState === "object") {
+            return setRaw({
+              ...(newUserState as Record<string, unknown>),
+              [CF_KEY]: readonlyFlag
+            });
+          }
+          // User set null — store just the flag
+          return setRaw({ [CF_KEY]: readonlyFlag });
+        }
+        return setRaw(newUserState);
+      }
+    });
   }
 
   /**
-   * Called when the Agent receives an email
+   * Mark a connection as readonly or readwrite
+   * @param connection The connection to mark
+   * @param readonly Whether the connection should be readonly (default: true)
+   */
+  setConnectionReadonly(connection: Connection, readonly = true) {
+    this._ensureConnectionWrapped(connection);
+    const accessors = this._rawStateAccessors.get(connection)!;
+    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
+    if (readonly) {
+      accessors.setRaw({ ...raw, [CF_READONLY_KEY]: true });
+    } else {
+      // Remove the key entirely instead of storing false — avoids dead keys
+      // accumulating in the connection attachment.
+      const { [CF_READONLY_KEY]: _, ...rest } = raw;
+      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
+    }
+  }
+
+  /**
+   * Check if a connection is marked as readonly
+   * @param connection The connection to check
+   * @returns True if the connection is readonly
+   */
+  isConnectionReadonly(connection: Connection): boolean {
+    const accessors = this._rawStateAccessors.get(connection);
+    if (accessors) {
+      return !!(accessors.getRaw() as Record<string, unknown> | null)?.[
+        CF_READONLY_KEY
+      ];
+    }
+    // Connection hasn't been wrapped yet — the flag can't have been set via
+    // setConnectionReadonly (which always wraps first), so default to false.
+    return false;
+  }
+
+  /**
+   * Override this method to determine if a connection should be readonly on connect
+   * @param _connection The connection that is being established
+   * @param _ctx Connection context
+   * @returns True if the connection should be readonly
+   */
+  shouldConnectionBeReadonly(
+    _connection: Connection,
+    _ctx: ConnectionContext
+  ): boolean {
+    return false;
+  }
+
+  /**
+   * Called before the Agent's state is persisted and broadcast.
+   * Override to validate or reject an update by throwing an error.
+   *
+   * IMPORTANT: This hook must be synchronous.
+   */
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
+  validateStateChange(nextState: State, source: Connection | "server") {
+    // override this to validate state updates
+  }
+
+  /**
+   * Called after the Agent's state has been persisted and broadcast to all clients.
+   * This is a notification hook — errors here are routed to onError and do not
+   * affect state persistence or client broadcasts.
+   *
+   * @param state Updated state
+   * @param source Source of the state update ("server" or a client connection)
+   */
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
+  onStateChanged(state: State | undefined, source: Connection | "server") {
+    // override this to handle state updates after persist + broadcast
+  }
+
+  /**
+   * @deprecated Renamed to `onStateChanged` — the behavior is identical.
+   * `onStateUpdate` will be removed in the next major version.
+   *
+   * Called after the Agent's state has been persisted and broadcast to all clients.
+   * This is a server-side notification hook. For the client-side state callback,
+   * see the `onStateUpdate` option in `useAgent` / `AgentClient`.
+   *
+   * @param state Updated state
+   * @param source Source of the state update ("server" or a client connection)
+   */
+  // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
+  onStateUpdate(state: State | undefined, source: Connection | "server") {
+    // override this to handle state updates (deprecated — use onStateChanged)
+  }
+
+  /**
+   * Dispatch to the appropriate persistence hook based on the mode
+   * cached in the constructor. No prototype walks at call time.
+   */
+  private async _callStatePersistenceHook(
+    state: State | undefined,
+    source: Connection | "server"
+  ): Promise<void> {
+    switch (this._persistenceHookMode) {
+      case "new":
+        await this.onStateChanged(state, source);
+        break;
+      case "old":
+        await this.onStateUpdate(state, source);
+        break;
+      // "none": neither hook overridden — skip
+    }
+  }
+
+  /**
+   * Called when the Agent receives an email via routeAgentEmail()
+   * Override this method to handle incoming emails
    * @param email Email message to process
    */
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: overridden later
-  onEmail(email: ForwardableEmailMessage) {
+  async _onEmail(email: AgentEmail) {
+    // nb: we use this roundabout way of getting to onEmail
+    // because of https://github.com/cloudflare/workerd/issues/4499
     return agentContext.run(
-      { agent: this, connection: undefined, request: undefined },
+      { agent: this, connection: undefined, request: undefined, email: email },
       async () => {
-        console.error("onEmail not implemented");
+        if ("onEmail" in this && typeof this.onEmail === "function") {
+          return this._tryCatch(() =>
+            (this.onEmail as (email: AgentEmail) => Promise<void>)(email)
+          );
+        } else {
+          console.log("Received email from:", email.from, "to:", email.to);
+          console.log("Subject:", email.headers.get("subject"));
+          console.log(
+            "Implement onEmail(email: AgentEmail): Promise<void> in your agent to process emails"
+          );
+        }
       }
     );
+  }
+
+  /**
+   * Reply to an email
+   * @param email The email to reply to
+   * @param options Options for the reply
+   * @param options.secret Secret for signing agent headers (enables secure reply routing).
+   *   Required if the email was routed via createSecureReplyEmailResolver.
+   *   Pass explicit `null` to opt-out of signing (not recommended for secure routing).
+   * @returns void
+   */
+  async replyToEmail(
+    email: AgentEmail,
+    options: {
+      fromName: string;
+      subject?: string | undefined;
+      body: string;
+      contentType?: string;
+      headers?: Record<string, string>;
+      secret?: string | null;
+    }
+  ): Promise<void> {
+    return this._tryCatch(async () => {
+      // Enforce signing for emails routed via createSecureReplyEmailResolver
+      if (email._secureRouted && options.secret === undefined) {
+        throw new Error(
+          "This email was routed via createSecureReplyEmailResolver. " +
+            "You must pass a secret to replyToEmail() to sign replies, " +
+            "or pass explicit null to opt-out (not recommended)."
+        );
+      }
+
+      const agentName = camelCaseToKebabCase(this._ParentClass.name);
+      const agentId = this.name;
+
+      const { createMimeMessage } = await import("mimetext");
+      const msg = createMimeMessage();
+      msg.setSender({ addr: email.to, name: options.fromName });
+      msg.setRecipient(email.from);
+      msg.setSubject(
+        options.subject || `Re: ${email.headers.get("subject")}` || "No subject"
+      );
+      msg.addMessage({
+        contentType: options.contentType || "text/plain",
+        data: options.body
+      });
+
+      const domain = email.from.split("@")[1];
+      const messageId = `<${agentId}@${domain}>`;
+      msg.setHeader("In-Reply-To", email.headers.get("Message-ID")!);
+      msg.setHeader("Message-ID", messageId);
+      msg.setHeader("X-Agent-Name", agentName);
+      msg.setHeader("X-Agent-ID", agentId);
+
+      // Sign headers if secret is provided (enables secure reply routing)
+      if (typeof options.secret === "string") {
+        const signedHeaders = await signAgentHeaders(
+          options.secret,
+          agentName,
+          agentId
+        );
+        msg.setHeader("X-Agent-Sig", signedHeaders["X-Agent-Sig"]);
+        msg.setHeader("X-Agent-Sig-Ts", signedHeaders["X-Agent-Sig-Ts"]);
+      }
+
+      if (options.headers) {
+        for (const [key, value] of Object.entries(options.headers)) {
+          msg.setHeader(key, value);
+        }
+      }
+      await email.reply({
+        from: email.to,
+        raw: msg.asRaw(),
+        to: email.from
+      });
+    });
   }
 
   private async _tryCatch<T>(fn: () => T | Promise<T>) {
@@ -625,6 +1418,68 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       return await fn();
     } catch (e) {
       throw this.onError(e);
+    }
+  }
+
+  /**
+   * Automatically wrap custom methods with agent context
+   * This ensures getCurrentAgent() works in all custom methods without decorators
+   */
+  private _autoWrapCustomMethods() {
+    // Collect all methods from base prototypes (Agent and Server)
+    const basePrototypes = [Agent.prototype, Server.prototype];
+    const baseMethods = new Set<string>();
+    for (const baseProto of basePrototypes) {
+      let proto = baseProto;
+      while (proto && proto !== Object.prototype) {
+        const methodNames = Object.getOwnPropertyNames(proto);
+        for (const methodName of methodNames) {
+          baseMethods.add(methodName);
+        }
+        proto = Object.getPrototypeOf(proto);
+      }
+    }
+    // Get all methods from the current instance's prototype chain
+    let proto = Object.getPrototypeOf(this);
+    let depth = 0;
+    while (proto && proto !== Object.prototype && depth < 10) {
+      const methodNames = Object.getOwnPropertyNames(proto);
+      for (const methodName of methodNames) {
+        const descriptor = Object.getOwnPropertyDescriptor(proto, methodName);
+
+        // Skip if it's a private method, a base method, a getter, or not a function,
+        if (
+          baseMethods.has(methodName) ||
+          methodName.startsWith("_") ||
+          !descriptor ||
+          !!descriptor.get ||
+          typeof descriptor.value !== "function"
+        ) {
+          continue;
+        }
+
+        // Now, methodName is confirmed to be a custom method/function
+        // Wrap the custom method with context
+        /* oxlint-disable @typescript-eslint/no-explicit-any -- dynamic method wrapping requires any */
+        const wrappedFunction = withAgentContext(
+          this[methodName as keyof this] as (...args: any[]) => any
+        ) as any;
+        /* oxlint-enable @typescript-eslint/no-explicit-any */
+
+        // if the method is callable, copy the metadata from the original method
+        if (this._isCallable(methodName)) {
+          callableMetadata.set(
+            wrappedFunction,
+            callableMetadata.get(this[methodName as keyof this] as Function)!
+          );
+        }
+
+        // set the wrapped function on the prototype
+        this.constructor.prototype[methodName as keyof this] = wrappedFunction;
+      }
+
+      proto = Object.getPrototypeOf(proto);
+      depth++;
     }
   }
 
@@ -663,6 +1518,131 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   }
 
   /**
+   * Queue a task to be executed in the future
+   * @param payload Payload to pass to the callback
+   * @param callback Name of the method to call
+   * @returns The ID of the queued task
+   */
+  async queue<T = unknown>(callback: keyof this, payload: T): Promise<string> {
+    const id = nanoid(9);
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+
+    if (typeof this[callback] !== "function") {
+      throw new Error(`this.${callback} is not a function`);
+    }
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback)
+      VALUES (${id}, ${JSON.stringify(payload)}, ${callback})
+    `;
+
+    void this._flushQueue().catch((e) => {
+      console.error("Error flushing queue:", e);
+    });
+
+    return id;
+  }
+
+  private _flushingQueue = false;
+
+  private async _flushQueue() {
+    if (this._flushingQueue) {
+      return;
+    }
+    this._flushingQueue = true;
+    while (true) {
+      const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues
+      ORDER BY created_at ASC
+    `;
+
+      if (!result || result.length === 0) {
+        break;
+      }
+
+      for (const row of result || []) {
+        const callback = this[row.callback as keyof Agent<Env>];
+        if (!callback) {
+          console.error(`callback ${row.callback} not found`);
+          continue;
+        }
+        const { connection, request, email } = agentContext.getStore() || {};
+        await agentContext.run(
+          {
+            agent: this,
+            connection,
+            request,
+            email
+          },
+          async () => {
+            // TODO: add retries and backoff
+            await (
+              callback as (
+                payload: unknown,
+                queueItem: QueueItem<string>
+              ) => Promise<void>
+            ).bind(this)(JSON.parse(row.payload as string), row);
+            await this.dequeue(row.id);
+          }
+        );
+      }
+    }
+    this._flushingQueue = false;
+  }
+
+  /**
+   * Dequeue a task by ID
+   * @param id ID of the task to dequeue
+   */
+  async dequeue(id: string) {
+    this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
+  }
+
+  /**
+   * Dequeue all tasks
+   */
+  async dequeueAll() {
+    this.sql`DELETE FROM cf_agents_queues`;
+  }
+
+  /**
+   * Dequeue all tasks by callback
+   * @param callback Name of the callback to dequeue
+   */
+  async dequeueAllByCallback(callback: string) {
+    this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
+  }
+
+  /**
+   * Get a queued task by ID
+   * @param id ID of the task to get
+   * @returns The task or undefined if not found
+   */
+  async getQueue(id: string): Promise<QueueItem<string> | undefined> {
+    const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues WHERE id = ${id}
+    `;
+    return result
+      ? { ...result[0], payload: JSON.parse(result[0].payload) }
+      : undefined;
+  }
+
+  /**
+   * Get all queues by key and value
+   * @param key Key to filter by
+   * @param value Value to filter by
+   * @returns Array of matching QueueItem objects
+   */
+  async getQueues(key: string, value: string): Promise<QueueItem<string>[]> {
+    const result = this.sql<QueueItem<string>>`
+      SELECT * FROM cf_agents_queues
+    `;
+    return result.filter((row) => JSON.parse(row.payload)[key] === value);
+  }
+
+  /**
    * Schedule a task to be executed in the future
    * @template T Type of the payload data
    * @param when When to execute the task (Date, seconds delay, or cron expression)
@@ -676,6 +1656,21 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     payload?: T
   ): Promise<Schedule<T>> {
     const id = nanoid(9);
+
+    const emitScheduleCreate = (schedule: Schedule<T>) =>
+      this.observability?.emit(
+        {
+          displayMessage: `Schedule ${schedule.id} created`,
+          id: nanoid(),
+          payload: {
+            callback: callback as string,
+            id: id
+          },
+          timestamp: Date.now(),
+          type: "schedule:create"
+        },
+        this.ctx
+      );
 
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
@@ -696,13 +1691,17 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
       await this._scheduleNextAlarm();
 
-      return {
+      const schedule: Schedule<T> = {
         callback: callback,
         id,
         payload: payload as T,
         time: timestamp,
-        type: "scheduled",
+        type: "scheduled"
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     if (typeof when === "number") {
       const time = new Date(Date.now() + when * 1000);
@@ -717,14 +1716,18 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
       await this._scheduleNextAlarm();
 
-      return {
+      const schedule: Schedule<T> = {
         callback: callback,
         delayInSeconds: when,
         id,
         payload: payload as T,
         time: timestamp,
-        type: "delayed",
+        type: "delayed"
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
     if (typeof when === "string") {
       const nextExecutionTime = getNextCronTime(when);
@@ -739,16 +1742,93 @@ export class Agent<Env, State = unknown> extends Server<Env> {
 
       await this._scheduleNextAlarm();
 
-      return {
+      const schedule: Schedule<T> = {
         callback: callback,
         cron: when,
         id,
         payload: payload as T,
         time: timestamp,
-        type: "cron",
+        type: "cron"
       };
+
+      emitScheduleCreate(schedule);
+
+      return schedule;
     }
-    throw new Error("Invalid schedule type");
+    throw new Error(
+      `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
+    );
+  }
+
+  /**
+   * Schedule a task to run repeatedly at a fixed interval
+   * @template T Type of the payload data
+   * @param intervalSeconds Number of seconds between executions
+   * @param callback Name of the method to call
+   * @param payload Data to pass to the callback
+   * @returns Schedule object representing the scheduled task
+   */
+  async scheduleEvery<T = string>(
+    intervalSeconds: number,
+    callback: keyof this,
+    payload?: T
+  ): Promise<Schedule<T>> {
+    // DO alarms have a max schedule time of 30 days
+    const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60; // 30 days in seconds
+
+    if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
+      throw new Error("intervalSeconds must be a positive number");
+    }
+
+    if (intervalSeconds > MAX_INTERVAL_SECONDS) {
+      throw new Error(
+        `intervalSeconds cannot exceed ${MAX_INTERVAL_SECONDS} seconds (30 days)`
+      );
+    }
+
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+
+    if (typeof this[callback] !== "function") {
+      throw new Error(`this.${callback} is not a function`);
+    }
+
+    const id = nanoid(9);
+    const time = new Date(Date.now() + intervalSeconds * 1000);
+    const timestamp = Math.floor(time.getTime() / 1000);
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, intervalSeconds, time, running)
+      VALUES (${id}, ${callback}, ${JSON.stringify(payload)}, 'interval', ${intervalSeconds}, ${timestamp}, 0)
+    `;
+
+    await this._scheduleNextAlarm();
+
+    const schedule: Schedule<T> = {
+      callback: callback,
+      id,
+      intervalSeconds,
+      payload: payload as T,
+      time: timestamp,
+      type: "interval"
+    };
+
+    this.observability?.emit(
+      {
+        displayMessage: `Schedule ${schedule.id} created`,
+        id: nanoid(),
+        payload: {
+          callback: callback as string,
+          id: id
+        },
+        timestamp: Date.now(),
+        type: "schedule:create"
+      },
+      this.ctx
+    );
+
+    return schedule;
   }
 
   /**
@@ -761,8 +1841,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     const result = this.sql<Schedule<string>>`
       SELECT * FROM cf_agents_schedules WHERE id = ${id}
     `;
-    if (!result) {
-      console.error(`schedule ${id} not found`);
+    if (!result || result.length === 0) {
       return undefined;
     }
 
@@ -778,7 +1857,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   getSchedules<T = string>(
     criteria: {
       id?: string;
-      type?: "scheduled" | "delayed" | "cron";
+      type?: "scheduled" | "delayed" | "cron" | "interval";
       timeRange?: { start?: Date; end?: Date };
     } = {}
   ): Schedule<T>[] {
@@ -810,7 +1889,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       .toArray()
       .map((row) => ({
         ...row,
-        payload: JSON.parse(row.payload as string) as T,
+        payload: JSON.parse(row.payload as string) as T
       })) as Schedule<T>[];
 
     return result;
@@ -819,9 +1898,28 @@ export class Agent<Env, State = unknown> extends Server<Env> {
   /**
    * Cancel a scheduled task
    * @param id ID of the task to cancel
-   * @returns true if the task was cancelled, false otherwise
+   * @returns true if the task was cancelled, false if the task was not found
    */
   async cancelSchedule(id: string): Promise<boolean> {
+    const schedule = await this.getSchedule(id);
+    if (!schedule) {
+      return false;
+    }
+
+    this.observability?.emit(
+      {
+        displayMessage: `Schedule ${id} cancelled`,
+        id: nanoid(),
+        payload: {
+          callback: schedule.callback,
+          id: schedule.id
+        },
+        timestamp: Date.now(),
+        type: "schedule:cancel"
+      },
+      this.ctx
+    );
+
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
     await this._scheduleNextAlarm();
@@ -832,7 +1930,7 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     // Find the next schedule that needs to be executed
     const result = this.sql`
       SELECT time FROM cf_agents_schedules
-      WHERE time > ${Math.floor(Date.now() / 1000)}
+      WHERE time >= ${Math.floor(Date.now() / 1000)}
       ORDER BY time ASC
       LIMIT 1
     `;
@@ -856,46 +1954,115 @@ export class Agent<Env, State = unknown> extends Server<Env> {
     const now = Math.floor(Date.now() / 1000);
 
     // Get all schedules that should be executed now
-    const result = this.sql<Schedule<string>>`
+    const result = this.sql<
+      Schedule<string> & { running?: number; intervalSeconds?: number }
+    >`
       SELECT * FROM cf_agents_schedules WHERE time <= ${now}
     `;
 
-    for (const row of result || []) {
-      const callback = this[row.callback as keyof Agent<Env>];
-      if (!callback) {
-        console.error(`callback ${row.callback} not found`);
-        continue;
-      }
-      await agentContext.run(
-        { agent: this, connection: undefined, request: undefined },
-        async () => {
-          try {
-            await (
-              callback as (
-                payload: unknown,
-                schedule: Schedule<unknown>
-              ) => Promise<void>
-            ).bind(this)(JSON.parse(row.payload as string), row);
-          } catch (e) {
-            console.error(`error executing callback "${row.callback}"`, e);
-          }
+    if (result && Array.isArray(result)) {
+      for (const row of result) {
+        const callback = this[row.callback as keyof Agent<Env>];
+        if (!callback) {
+          console.error(`callback ${row.callback} not found`);
+          continue;
         }
-      );
-      if (row.type === "cron") {
-        // Update next execution time for cron schedules
-        const nextExecutionTime = getNextCronTime(row.cron);
-        const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
-        this.sql`
-          UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-        `;
-      } else {
-        // Delete one-time schedules after execution
-        this.sql`
-          DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-        `;
+        // Overlap prevention for interval schedules with hung callback detection
+        if (row.type === "interval" && row.running === 1) {
+          const executionStartedAt =
+            (row as { execution_started_at?: number }).execution_started_at ??
+            0;
+          const hungTimeoutSeconds =
+            this._resolvedOptions.hungScheduleTimeoutSeconds;
+          const elapsedSeconds = now - executionStartedAt;
+
+          if (elapsedSeconds < hungTimeoutSeconds) {
+            console.warn(
+              `Skipping interval schedule ${row.id}: previous execution still running`
+            );
+            continue;
+          }
+          // Previous execution appears hung, force reset and re-execute
+          console.warn(
+            `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
+          );
+        }
+
+        // Mark interval as running before execution
+        if (row.type === "interval") {
+          this
+            .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
+        }
+
+        await agentContext.run(
+          {
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined
+          },
+          async () => {
+            try {
+              this.observability?.emit(
+                {
+                  displayMessage: `Schedule ${row.id} executed`,
+                  id: nanoid(),
+                  payload: {
+                    callback: row.callback,
+                    id: row.id
+                  },
+                  timestamp: Date.now(),
+                  type: "schedule:execute"
+                },
+                this.ctx
+              );
+
+              await (
+                callback as (
+                  payload: unknown,
+                  schedule: Schedule<unknown>
+                ) => Promise<void>
+              ).bind(this)(JSON.parse(row.payload as string), row);
+            } catch (e) {
+              console.error(`error executing callback "${row.callback}"`, e);
+              // Route schedule errors through onError for consistency
+              try {
+                await this.onError(e);
+              } catch {
+                // swallow onError errors
+              }
+            }
+          }
+        );
+
+        if (this._destroyed) return;
+
+        if (row.type === "cron") {
+          // Update next execution time for cron schedules
+          const nextExecutionTime = getNextCronTime(row.cron);
+          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
+
+          this.sql`
+            UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
+          `;
+        } else if (row.type === "interval") {
+          // Reset running flag and schedule next interval execution
+          const nextTimestamp =
+            Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
+
+          this.sql`
+            UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
+          `;
+        } else {
+          // Delete one-time schedules after execution
+          this.sql`
+            DELETE FROM cf_agents_schedules WHERE id = ${row.id}
+          `;
+        }
       }
     }
+    if (this._destroyed) return;
 
     // Schedule the next alarm
     await this._scheduleNextAlarm();
@@ -906,158 +2073,1408 @@ export class Agent<Env, State = unknown> extends Server<Env> {
    */
   async destroy() {
     // drop all tables
+    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
 
     // delete all alarms
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
-    this.ctx.abort("destroyed"); // enforce that the agent is evicted
+
+    this._disposables.dispose();
+    await this.mcp.dispose();
+
+    this._destroyed = true;
+
+    // `ctx.abort` throws an uncatchable error, so we yield to the event loop
+    // to avoid capturing it and let handlers finish cleaning up
+    setTimeout(() => {
+      this.ctx.abort("destroyed");
+    }, 0);
+
+    this.observability?.emit(
+      {
+        displayMessage: "Agent destroyed",
+        id: nanoid(),
+        payload: {},
+        timestamp: Date.now(),
+        type: "destroy"
+      },
+      this.ctx
+    );
   }
 
   /**
-   * Get all methods marked as callable on this Agent
-   * @returns A map of method names to their metadata
+   * Check if a method is callable
+   * @param method The method name to check
+   * @returns True if the method is marked as callable
    */
   private _isCallable(method: string): boolean {
     return callableMetadata.has(this[method as keyof this] as Function);
   }
 
   /**
-   * Connect to a new MCP Server
-   *
-   * @param url MCP Server SSE URL
-   * @param callbackHost Base host for the agent, used for the redirect URI.
-   * @param agentsPrefix agents routing prefix if not using `agents`
-   * @param options MCP client and transport (header) options
-   * @returns authUrl
+   * Get all methods marked as callable on this Agent
+   * @returns A map of method names to their metadata
    */
-  async addMcpServer(
-    serverName: string,
-    url: string,
-    callbackHost: string,
-    agentsPrefix = "agents",
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      transport?: {
-        headers: HeadersInit;
-      };
+  getCallableMethods(): Map<string, CallableMetadata> {
+    const result = new Map<string, CallableMetadata>();
+
+    // Walk the entire prototype chain to find callable methods from parent classes
+    let prototype = Object.getPrototypeOf(this);
+    while (prototype && prototype !== Object.prototype) {
+      for (const name of Object.getOwnPropertyNames(prototype)) {
+        if (name === "constructor") continue;
+        // Don't override child class methods (first one wins)
+        if (result.has(name)) continue;
+
+        try {
+          const fn = prototype[name];
+          if (typeof fn === "function") {
+            const meta = callableMetadata.get(fn as Function);
+            if (meta) {
+              result.set(name, meta);
+            }
+          }
+        } catch (e) {
+          // Skip properties that can't be accessed (e.g., private members with #)
+          // These throw TypeError when accessed
+          if (!(e instanceof TypeError)) {
+            throw e;
+          }
+        }
+      }
+      prototype = Object.getPrototypeOf(prototype);
     }
-  ): Promise<{ id: string; authUrl: string | undefined }> {
-    const callbackUrl = `${callbackHost}/${agentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
-
-    const result = await this._connectToMcpServerInternal(
-      serverName,
-      url,
-      callbackUrl,
-      options
-    );
-    this.sql`
-        INSERT
-        OR REPLACE INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
-      VALUES (
-        ${result.id},
-        ${serverName},
-        ${url},
-        ${result.clientId ?? null},
-        ${result.authUrl ?? null},
-        ${callbackUrl},
-        ${options ? JSON.stringify(options) : null}
-        );
-    `;
-
-    this.broadcast(
-      JSON.stringify({
-        mcp: this.getMcpServers(),
-        type: "cf_agent_mcp_servers",
-      })
-    );
 
     return result;
   }
 
-  async _connectToMcpServerInternal(
-    _serverName: string,
-    url: string,
-    callbackUrl: string,
-    // it's important that any options here are serializable because we put them into our sqlite DB for reconnection purposes
-    options?: {
-      client?: ConstructorParameters<typeof Client>[1];
-      /**
-       * We don't expose the normal set of transport options because:
-       * 1) we can't serialize things like the auth provider or a fetch function into the DB for reconnection purposes
-       * 2) We probably want these options to be agnostic to the transport type (SSE vs Streamable)
-       *
-       * This has the limitation that you can't override fetch, but I think headers should handle nearly all cases needed (i.e. non-standard bearer auth).
-       */
-      transport?: {
-        headers?: HeadersInit;
-      };
-    },
-    reconnect?: {
-      id: string;
-      oauthClientId?: string;
-    }
-  ): Promise<{
-    id: string;
-    authUrl: string | undefined;
-    clientId: string | undefined;
-  }> {
-    const authProvider = this.createOAuthProvider(callbackUrl);
+  // ==========================================
+  // Workflow Integration Methods
+  // ==========================================
 
-    if (reconnect) {
-      authProvider.serverId = reconnect.id;
-      if (reconnect.oauthClientId) {
-        authProvider.clientId = reconnect.oauthClientId;
+  /**
+   * Start a workflow and track it in this Agent's database.
+   * Automatically injects agent identity into the workflow params.
+   *
+   * @template P - Type of params to pass to the workflow
+   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
+   * @param params - Params to pass to the workflow
+   * @param options - Optional workflow options
+   * @returns The workflow instance ID
+   *
+   * @example
+   * ```typescript
+   * const workflowId = await this.runWorkflow(
+   *   'MY_WORKFLOW',
+   *   { taskId: '123', data: 'process this' }
+   * );
+   * ```
+   */
+  async runWorkflow<P = unknown>(
+    workflowName: WorkflowName<Env>,
+    params: P,
+    options?: RunWorkflowOptions
+  ): Promise<string> {
+    // Look up the workflow binding by name
+    const workflow = this._findWorkflowBindingByName(workflowName);
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowName}' not found in environment`
+      );
+    }
+
+    // Find the binding name for this Agent's namespace
+    const agentBindingName =
+      options?.agentBinding ?? this._findAgentBindingName();
+    if (!agentBindingName) {
+      throw new Error(
+        "Could not detect Agent binding name from class name. " +
+          "Pass it explicitly via options.agentBinding"
+      );
+    }
+
+    // Generate workflow ID if not provided
+    const workflowId = options?.id ?? nanoid();
+
+    // Inject agent identity and workflow name into params
+    const augmentedParams = {
+      ...params,
+      __agentName: this.name,
+      __agentBinding: agentBindingName,
+      __workflowName: workflowName
+    };
+
+    // Create the workflow instance
+    const instance = await workflow.create({
+      id: workflowId,
+      params: augmentedParams
+    });
+
+    // Track the workflow in our database
+    const id = nanoid();
+    const metadataJson = options?.metadata
+      ? JSON.stringify(options.metadata)
+      : null;
+    try {
+      this.sql`
+        INSERT INTO cf_agents_workflows (id, workflow_id, workflow_name, status, metadata)
+        VALUES (${id}, ${instance.id}, ${workflowName}, 'queued', ${metadataJson})
+      `;
+    } catch (e) {
+      if (
+        e instanceof Error &&
+        e.message.includes("UNIQUE constraint failed")
+      ) {
+        throw new Error(
+          `Workflow with ID "${workflowId}" is already being tracked`
+        );
+      }
+      throw e;
+    }
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${instance.id} started`,
+        id: nanoid(),
+        payload: {
+          workflowId: instance.id,
+          workflowName: workflowName
+        },
+        timestamp: Date.now(),
+        type: "workflow:start"
+      },
+      this.ctx
+    );
+
+    return instance.id;
+  }
+
+  /**
+   * Send an event to a running workflow.
+   * The workflow can wait for this event using step.waitForEvent().
+   *
+   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
+   * @param workflowId - ID of the workflow instance
+   * @param event - Event to send
+   *
+   * @example
+   * ```typescript
+   * await this.sendWorkflowEvent(
+   *   'MY_WORKFLOW',
+   *   workflowId,
+   *   { type: 'approval', payload: { approved: true } }
+   * );
+   * ```
+   */
+  async sendWorkflowEvent(
+    workflowName: WorkflowName<Env>,
+    workflowId: string,
+    event: WorkflowEventPayload
+  ): Promise<void> {
+    const workflow = this._findWorkflowBindingByName(workflowName);
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    await instance.sendEvent(event);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Event sent to workflow ${workflowId}`,
+        id: nanoid(),
+        payload: {
+          workflowId,
+          eventType: event.type
+        },
+        timestamp: Date.now(),
+        type: "workflow:event"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Approve a waiting workflow.
+   * Sends an approval event to the workflow that can be received by waitForApproval().
+   *
+   * @param workflowId - ID of the workflow to approve
+   * @param data - Optional approval data (reason, metadata)
+   *
+   * @example
+   * ```typescript
+   * await this.approveWorkflow(workflowId, {
+   *   reason: 'Approved by admin',
+   *   metadata: { approvedBy: userId }
+   * });
+   * ```
+   */
+  async approveWorkflow(
+    workflowId: string,
+    data?: { reason?: string; metadata?: Record<string, unknown> }
+  ): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    await this.sendWorkflowEvent(
+      workflowInfo.workflowName as WorkflowName<Env>,
+      workflowId,
+      {
+        type: "approval",
+        payload: {
+          approved: true,
+          reason: data?.reason,
+          metadata: data?.metadata
+        }
+      }
+    );
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} approved`,
+        id: nanoid(),
+        payload: { workflowId, reason: data?.reason },
+        timestamp: Date.now(),
+        type: "workflow:approved"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Reject a waiting workflow.
+   * Sends a rejection event to the workflow that will cause waitForApproval() to throw.
+   *
+   * @param workflowId - ID of the workflow to reject
+   * @param data - Optional rejection data (reason)
+   *
+   * @example
+   * ```typescript
+   * await this.rejectWorkflow(workflowId, {
+   *   reason: 'Request denied by admin'
+   * });
+   * ```
+   */
+  async rejectWorkflow(
+    workflowId: string,
+    data?: { reason?: string }
+  ): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    await this.sendWorkflowEvent(
+      workflowInfo.workflowName as WorkflowName<Env>,
+      workflowId,
+      {
+        type: "approval",
+        payload: {
+          approved: false,
+          reason: data?.reason
+        }
+      }
+    );
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} rejected`,
+        id: nanoid(),
+        payload: { workflowId, reason: data?.reason },
+        timestamp: Date.now(),
+        type: "workflow:rejected"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Terminate a running workflow.
+   * This immediately stops the workflow and sets its status to "terminated".
+   *
+   * @param workflowId - ID of the workflow to terminate (must be tracked via runWorkflow)
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   * @throws Error if workflow is already completed/errored/terminated (from Cloudflare)
+   *
+   * @note `terminate()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * await this.terminateWorkflow(workflowId);
+   * ```
+   */
+  async terminateWorkflow(workflowId: string): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.terminate();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "terminateWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    // Update tracking table with new status
+    const status = await instance.status();
+    this._updateWorkflowTracking(workflowId, status);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} terminated`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:terminated"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Pause a running workflow.
+   * The workflow can be resumed later with resumeWorkflow().
+   *
+   * @param workflowId - ID of the workflow to pause (must be tracked via runWorkflow)
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   * @throws Error if workflow is not running (from Cloudflare)
+   *
+   * @note `pause()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * await this.pauseWorkflow(workflowId);
+   * ```
+   */
+  async pauseWorkflow(workflowId: string): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.pause();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "pauseWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    const status = await instance.status();
+    this._updateWorkflowTracking(workflowId, status);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} paused`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:paused"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Resume a paused workflow.
+   *
+   * @param workflowId - ID of the workflow to resume (must be tracked via runWorkflow)
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   * @throws Error if workflow is not paused (from Cloudflare)
+   *
+   * @note `resume()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * await this.resumeWorkflow(workflowId);
+   * ```
+   */
+  async resumeWorkflow(workflowId: string): Promise<void> {
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.resume();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "resumeWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    const status = await instance.status();
+    this._updateWorkflowTracking(workflowId, status);
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} resumed`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:resumed"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Restart a workflow instance.
+   * This re-runs the workflow from the beginning with the same ID.
+   *
+   * @param workflowId - ID of the workflow to restart (must be tracked via runWorkflow)
+   * @param options - Optional settings
+   * @param options.resetTracking - If true (default), resets created_at and clears error fields.
+   *                                If false, preserves original timestamps.
+   * @throws Error if workflow not found in tracking table
+   * @throws Error if workflow binding not found in environment
+   *
+   * @note `restart()` is not yet supported in local development (wrangler dev).
+   * It will throw an error locally but works when deployed to Cloudflare.
+   *
+   * @example
+   * ```typescript
+   * // Reset tracking (default)
+   * await this.restartWorkflow(workflowId);
+   *
+   * // Preserve original timestamps
+   * await this.restartWorkflow(workflowId, { resetTracking: false });
+   * ```
+   */
+  async restartWorkflow(
+    workflowId: string,
+    options: { resetTracking?: boolean } = {}
+  ): Promise<void> {
+    const { resetTracking = true } = options;
+
+    const workflowInfo = this.getWorkflow(workflowId);
+    if (!workflowInfo) {
+      throw new Error(`Workflow ${workflowId} not found in tracking table`);
+    }
+
+    const workflow = this._findWorkflowBindingByName(
+      workflowInfo.workflowName as WorkflowName<Env>
+    );
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowInfo.workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    try {
+      await instance.restart();
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("Not implemented")) {
+        throw new Error(
+          "restartWorkflow() is not supported in local development. " +
+            "Deploy to Cloudflare to use this feature. " +
+            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
+        );
+      }
+      throw err;
+    }
+
+    if (resetTracking) {
+      // Reset tracking fields for fresh start
+      const now = Math.floor(Date.now() / 1000);
+      this.sql`
+        UPDATE cf_agents_workflows
+        SET status = 'queued',
+            created_at = ${now},
+            updated_at = ${now},
+            completed_at = NULL,
+            error_name = NULL,
+            error_message = NULL
+        WHERE workflow_id = ${workflowId}
+      `;
+    } else {
+      // Just update status from Cloudflare
+      const status = await instance.status();
+      this._updateWorkflowTracking(workflowId, status);
+    }
+
+    this.observability?.emit(
+      {
+        displayMessage: `Workflow ${workflowId} restarted`,
+        id: nanoid(),
+        payload: { workflowId, workflowName: workflowInfo.workflowName },
+        timestamp: Date.now(),
+        type: "workflow:restarted"
+      },
+      this.ctx
+    );
+  }
+
+  /**
+   * Find a workflow binding by its name.
+   */
+  private _findWorkflowBindingByName(
+    workflowName: string
+  ): Workflow | undefined {
+    const binding = (this.env as Record<string, unknown>)[workflowName];
+    if (
+      binding &&
+      typeof binding === "object" &&
+      "create" in binding &&
+      "get" in binding
+    ) {
+      return binding as Workflow;
+    }
+    return undefined;
+  }
+
+  /**
+   * Get all workflow binding names from the environment.
+   */
+  private _getWorkflowBindingNames(): string[] {
+    const names: string[] = [];
+    for (const [key, value] of Object.entries(
+      this.env as Record<string, unknown>
+    )) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "create" in value &&
+        "get" in value
+      ) {
+        names.push(key);
       }
     }
+    return names;
+  }
+
+  /**
+   * Get the status of a workflow and update the tracking record.
+   *
+   * @param workflowName - Name of the workflow binding in env (e.g., 'MY_WORKFLOW')
+   * @param workflowId - ID of the workflow instance
+   * @returns The workflow status
+   */
+  async getWorkflowStatus(
+    workflowName: WorkflowName<Env>,
+    workflowId: string
+  ): Promise<InstanceStatus> {
+    const workflow = this._findWorkflowBindingByName(workflowName);
+    if (!workflow) {
+      throw new Error(
+        `Workflow binding '${workflowName}' not found in environment`
+      );
+    }
+
+    const instance = await workflow.get(workflowId);
+    const status = await instance.status();
+
+    // Update the tracking record
+    this._updateWorkflowTracking(workflowId, status);
+
+    return status;
+  }
+
+  /**
+   * Get a tracked workflow by ID.
+   *
+   * @param workflowId - Workflow instance ID
+   * @returns Workflow info or undefined if not found
+   */
+  getWorkflow(workflowId: string): WorkflowInfo | undefined {
+    const rows = this.sql<WorkflowTrackingRow>`
+      SELECT * FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
+    `;
+
+    if (!rows || rows.length === 0) {
+      return undefined;
+    }
+
+    return this._rowToWorkflowInfo(rows[0]);
+  }
+
+  /**
+   * Query tracked workflows with cursor-based pagination.
+   *
+   * @param criteria - Query criteria including optional cursor for pagination
+   * @returns WorkflowPage with workflows, total count, and next cursor
+   *
+   * @example
+   * ```typescript
+   * // First page
+   * const page1 = this.getWorkflows({ status: 'running', limit: 20 });
+   *
+   * // Next page
+   * if (page1.nextCursor) {
+   *   const page2 = this.getWorkflows({
+   *     status: 'running',
+   *     limit: 20,
+   *     cursor: page1.nextCursor
+   *   });
+   * }
+   * ```
+   */
+  getWorkflows(criteria: WorkflowQueryCriteria = {}): WorkflowPage {
+    const limit = Math.min(criteria.limit ?? 50, 100);
+    const isAsc = criteria.orderBy === "asc";
+
+    // Get total count (ignores cursor and limit)
+    const total = this._countWorkflows(criteria);
+
+    // Build base query
+    let query = "SELECT * FROM cf_agents_workflows WHERE 1=1";
+    const params: (string | number | boolean)[] = [];
+
+    if (criteria.status) {
+      const statuses = Array.isArray(criteria.status)
+        ? criteria.status
+        : [criteria.status];
+      const placeholders = statuses.map(() => "?").join(", ");
+      query += ` AND status IN (${placeholders})`;
+      params.push(...statuses);
+    }
+
+    if (criteria.workflowName) {
+      query += " AND workflow_name = ?";
+      params.push(criteria.workflowName);
+    }
+
+    if (criteria.metadata) {
+      for (const [key, value] of Object.entries(criteria.metadata)) {
+        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
+        params.push(key, value);
+      }
+    }
+
+    // Apply cursor for keyset pagination
+    if (criteria.cursor) {
+      const cursor = this._decodeCursor(criteria.cursor);
+      if (isAsc) {
+        // ASC: get items after cursor
+        query +=
+          " AND (created_at > ? OR (created_at = ? AND workflow_id > ?))";
+      } else {
+        // DESC: get items before cursor
+        query +=
+          " AND (created_at < ? OR (created_at = ? AND workflow_id < ?))";
+      }
+      params.push(cursor.createdAt, cursor.createdAt, cursor.workflowId);
+    }
+
+    // Order by created_at and workflow_id for consistent keyset pagination
+    query += ` ORDER BY created_at ${isAsc ? "ASC" : "DESC"}, workflow_id ${isAsc ? "ASC" : "DESC"}`;
+
+    // Fetch limit + 1 to detect if there are more pages
+    query += " LIMIT ?";
+    params.push(limit + 1);
+
+    const rows = this.ctx.storage.sql
+      .exec(query, ...params)
+      .toArray() as WorkflowTrackingRow[];
+
+    const hasMore = rows.length > limit;
+    const resultRows = hasMore ? rows.slice(0, limit) : rows;
+    const workflows = resultRows.map((row) => this._rowToWorkflowInfo(row));
+
+    // Build next cursor from last item
+    const nextCursor =
+      hasMore && workflows.length > 0
+        ? this._encodeCursor(workflows[workflows.length - 1])
+        : null;
+
+    return { workflows, total, nextCursor };
+  }
+
+  /**
+   * Count workflows matching criteria (for pagination total).
+   */
+  private _countWorkflows(
+    criteria: Omit<WorkflowQueryCriteria, "limit" | "cursor" | "orderBy"> & {
+      createdBefore?: Date;
+    }
+  ): number {
+    let query = "SELECT COUNT(*) as count FROM cf_agents_workflows WHERE 1=1";
+    const params: (string | number | boolean)[] = [];
+
+    if (criteria.status) {
+      const statuses = Array.isArray(criteria.status)
+        ? criteria.status
+        : [criteria.status];
+      const placeholders = statuses.map(() => "?").join(", ");
+      query += ` AND status IN (${placeholders})`;
+      params.push(...statuses);
+    }
+
+    if (criteria.workflowName) {
+      query += " AND workflow_name = ?";
+      params.push(criteria.workflowName);
+    }
+
+    if (criteria.metadata) {
+      for (const [key, value] of Object.entries(criteria.metadata)) {
+        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
+        params.push(key, value);
+      }
+    }
+
+    if (criteria.createdBefore) {
+      query += " AND created_at < ?";
+      params.push(Math.floor(criteria.createdBefore.getTime() / 1000));
+    }
+
+    const result = this.ctx.storage.sql.exec(query, ...params).toArray() as {
+      count: number;
+    }[];
+
+    return result[0]?.count ?? 0;
+  }
+
+  /**
+   * Encode a cursor from workflow info for pagination.
+   * Stores createdAt as Unix timestamp in seconds (matching DB storage).
+   */
+  private _encodeCursor(workflow: WorkflowInfo): string {
+    return btoa(
+      JSON.stringify({
+        c: Math.floor(workflow.createdAt.getTime() / 1000),
+        i: workflow.workflowId
+      })
+    );
+  }
+
+  /**
+   * Decode a pagination cursor.
+   * Returns createdAt as Unix timestamp in seconds (matching DB storage).
+   */
+  private _decodeCursor(cursor: string): {
+    createdAt: number;
+    workflowId: string;
+  } {
+    try {
+      const data = JSON.parse(atob(cursor));
+      if (typeof data.c !== "number" || typeof data.i !== "string") {
+        throw new Error("Invalid cursor structure");
+      }
+      return { createdAt: data.c, workflowId: data.i };
+    } catch {
+      throw new Error(
+        "Invalid pagination cursor. The cursor may be malformed or corrupted."
+      );
+    }
+  }
+
+  /**
+   * Delete a workflow tracking record.
+   *
+   * @param workflowId - ID of the workflow to delete
+   * @returns true if a record was deleted, false if not found
+   */
+  deleteWorkflow(workflowId: string): boolean {
+    // First check if workflow exists
+    const existing = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_workflows WHERE workflow_id = ${workflowId}
+    `;
+    if (!existing[0] || existing[0].count === 0) {
+      return false;
+    }
+    this.sql`DELETE FROM cf_agents_workflows WHERE workflow_id = ${workflowId}`;
+    return true;
+  }
+
+  /**
+   * Delete workflow tracking records matching criteria.
+   * Useful for cleaning up old completed/errored workflows.
+   *
+   * @param criteria - Criteria for which workflows to delete
+   * @returns Number of records matching criteria (expected deleted count)
+   *
+   * @example
+   * ```typescript
+   * // Delete all completed workflows created more than 7 days ago
+   * const deleted = this.deleteWorkflows({
+   *   status: 'complete',
+   *   createdBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+   * });
+   *
+   * // Delete all errored and terminated workflows
+   * const deleted = this.deleteWorkflows({
+   *   status: ['errored', 'terminated']
+   * });
+   * ```
+   */
+  deleteWorkflows(
+    criteria: Omit<WorkflowQueryCriteria, "limit" | "orderBy"> & {
+      createdBefore?: Date;
+    } = {}
+  ): number {
+    let query = "DELETE FROM cf_agents_workflows WHERE 1=1";
+    const params: (string | number | boolean)[] = [];
+
+    if (criteria.status) {
+      const statuses = Array.isArray(criteria.status)
+        ? criteria.status
+        : [criteria.status];
+      const placeholders = statuses.map(() => "?").join(", ");
+      query += ` AND status IN (${placeholders})`;
+      params.push(...statuses);
+    }
+
+    if (criteria.workflowName) {
+      query += " AND workflow_name = ?";
+      params.push(criteria.workflowName);
+    }
+
+    if (criteria.metadata) {
+      for (const [key, value] of Object.entries(criteria.metadata)) {
+        query += ` AND json_extract(metadata, '$.' || ?) = ?`;
+        params.push(key, value);
+      }
+    }
+
+    if (criteria.createdBefore) {
+      query += " AND created_at < ?";
+      params.push(Math.floor(criteria.createdBefore.getTime() / 1000));
+    }
+
+    const cursor = this.ctx.storage.sql.exec(query, ...params);
+    return cursor.rowsWritten;
+  }
+
+  /**
+   * Migrate workflow tracking records from an old binding name to a new one.
+   * Use this after renaming a workflow binding in wrangler.toml.
+   *
+   * @param oldName - Previous workflow binding name
+   * @param newName - New workflow binding name
+   * @returns Number of records migrated
+   *
+   * @example
+   * ```typescript
+   * // After renaming OLD_WORKFLOW to NEW_WORKFLOW in wrangler.toml
+   * async onStart() {
+   *   const migrated = this.migrateWorkflowBinding('OLD_WORKFLOW', 'NEW_WORKFLOW');
+   * }
+   * ```
+   */
+  migrateWorkflowBinding(oldName: string, newName: string): number {
+    // Validate new binding exists
+    if (!this._findWorkflowBindingByName(newName)) {
+      throw new Error(`Workflow binding '${newName}' not found in environment`);
+    }
+
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_workflows WHERE workflow_name = ${oldName}
+    `;
+    const count = result[0]?.count ?? 0;
+
+    if (count > 0) {
+      this
+        .sql`UPDATE cf_agents_workflows SET workflow_name = ${newName} WHERE workflow_name = ${oldName}`;
+      console.log(
+        `[Agent] Migrated ${count} workflow(s) from '${oldName}' to '${newName}'`
+      );
+    }
+
+    return count;
+  }
+
+  /**
+   * Update workflow tracking record from InstanceStatus
+   */
+  private _updateWorkflowTracking(
+    workflowId: string,
+    status: InstanceStatus
+  ): void {
+    const statusName = status.status;
+    const now = Math.floor(Date.now() / 1000);
+
+    // Determine if workflow is complete
+    const completedStatuses: WorkflowStatus[] = [
+      "complete",
+      "errored",
+      "terminated"
+    ];
+    const completedAt = completedStatuses.includes(statusName) ? now : null;
+
+    // Extract error info if present
+    const errorName = status.error?.name ?? null;
+    const errorMessage = status.error?.message ?? null;
+
+    this.sql`
+      UPDATE cf_agents_workflows
+      SET status = ${statusName},
+          error_name = ${errorName},
+          error_message = ${errorMessage},
+          updated_at = ${now},
+          completed_at = ${completedAt}
+      WHERE workflow_id = ${workflowId}
+    `;
+  }
+
+  /**
+   * Convert a database row to WorkflowInfo
+   */
+  private _rowToWorkflowInfo(row: WorkflowTrackingRow): WorkflowInfo {
+    return {
+      id: row.id,
+      workflowId: row.workflow_id,
+      workflowName: row.workflow_name,
+      status: row.status,
+      metadata: row.metadata ? JSON.parse(row.metadata) : null,
+      error: row.error_name
+        ? { name: row.error_name, message: row.error_message ?? "" }
+        : null,
+      createdAt: new Date(row.created_at * 1000),
+      updatedAt: new Date(row.updated_at * 1000),
+      completedAt: row.completed_at ? new Date(row.completed_at * 1000) : null
+    };
+  }
+
+  /**
+   * Find the binding name for this Agent's namespace by matching class name.
+   * Returns undefined if no match found - use options.agentBinding as fallback.
+   */
+  private _findAgentBindingName(): string | undefined {
+    const className = this._ParentClass.name;
+    for (const [key, value] of Object.entries(
+      this.env as Record<string, unknown>
+    )) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "idFromName" in value &&
+        typeof value.idFromName === "function"
+      ) {
+        // Check if this namespace's binding name matches our class name
+        if (
+          key === className ||
+          camelCaseToKebabCase(key) === camelCaseToKebabCase(className)
+        ) {
+          return key;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  // ==========================================
+  // Workflow Lifecycle Callbacks
+  // ==========================================
+
+  /**
+   * Handle a callback from a workflow.
+   * Called when the Agent receives a callback at /_workflow/callback.
+   * Override this to handle all callback types in one place.
+   *
+   * @param callback - The callback payload
+   */
+  async onWorkflowCallback(callback: WorkflowCallback): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+
+    switch (callback.type) {
+      case "progress":
+        // Update tracking status to "running" when receiving progress
+        // Only transition from queued/waiting to avoid overwriting terminal states
+        this.sql`
+          UPDATE cf_agents_workflows
+          SET status = 'running', updated_at = ${now}
+          WHERE workflow_id = ${callback.workflowId} AND status IN ('queued', 'waiting')
+        `;
+        await this.onWorkflowProgress(
+          callback.workflowName,
+          callback.workflowId,
+          callback.progress
+        );
+        break;
+      case "complete":
+        // Update tracking status to "complete"
+        // Don't overwrite if already terminated/paused (race condition protection)
+        this.sql`
+          UPDATE cf_agents_workflows
+          SET status = 'complete', updated_at = ${now}, completed_at = ${now}
+          WHERE workflow_id = ${callback.workflowId}
+            AND status NOT IN ('terminated', 'paused')
+        `;
+        await this.onWorkflowComplete(
+          callback.workflowName,
+          callback.workflowId,
+          callback.result
+        );
+        break;
+      case "error":
+        // Update tracking status to "errored"
+        // Don't overwrite if already terminated/paused (race condition protection)
+        this.sql`
+          UPDATE cf_agents_workflows
+          SET status = 'errored', updated_at = ${now}, completed_at = ${now},
+              error_name = 'WorkflowError', error_message = ${callback.error}
+          WHERE workflow_id = ${callback.workflowId}
+            AND status NOT IN ('terminated', 'paused')
+        `;
+        await this.onWorkflowError(
+          callback.workflowName,
+          callback.workflowId,
+          callback.error
+        );
+        break;
+      case "event":
+        // No status change for events - they can occur at any stage
+        await this.onWorkflowEvent(
+          callback.workflowName,
+          callback.workflowId,
+          callback.event
+        );
+        break;
+    }
+  }
+
+  /**
+   * Called when a workflow reports progress.
+   * Override to handle progress updates.
+   *
+   * @param workflowName - Workflow binding name
+   * @param workflowId - ID of the workflow
+   * @param progress - Typed progress data (default: DefaultProgress)
+   */
+  async onWorkflowProgress(
+    _workflowName: string,
+    _workflowId: string,
+    _progress: unknown
+  ): Promise<void> {
+    // Override to handle progress updates
+  }
+
+  /**
+   * Called when a workflow completes successfully.
+   * Override to handle completion.
+   *
+   * @param workflowName - Workflow binding name
+   * @param workflowId - ID of the workflow
+   * @param result - Optional result data
+   */
+  async onWorkflowComplete(
+    _workflowName: string,
+    _workflowId: string,
+    _result?: unknown
+  ): Promise<void> {
+    // Override to handle completion
+  }
+
+  /**
+   * Called when a workflow encounters an error.
+   * Override to handle errors.
+   *
+   * @param workflowName - Workflow binding name
+   * @param workflowId - ID of the workflow
+   * @param error - Error message
+   */
+  async onWorkflowError(
+    _workflowName: string,
+    _workflowId: string,
+    _error: string
+  ): Promise<void> {
+    // Override to handle errors
+  }
+
+  /**
+   * Called when a workflow sends a custom event.
+   * Override to handle custom events.
+   *
+   * @param workflowName - Workflow binding name
+   * @param workflowId - ID of the workflow
+   * @param event - Custom event payload
+   */
+  async onWorkflowEvent(
+    _workflowName: string,
+    _workflowId: string,
+    _event: unknown
+  ): Promise<void> {
+    // Override to handle custom events
+  }
+
+  // ============================================================
+  // Internal RPC methods for AgentWorkflow communication
+  // These are called via DO RPC, not exposed via HTTP
+  // ============================================================
+
+  /**
+   * Handle a workflow callback via RPC.
+   * @internal - Called by AgentWorkflow, do not call directly
+   */
+  async _workflow_handleCallback(callback: WorkflowCallback): Promise<void> {
+    await this.onWorkflowCallback(callback);
+  }
+
+  /**
+   * Broadcast a message to all connected clients via RPC.
+   * @internal - Called by AgentWorkflow, do not call directly
+   */
+  _workflow_broadcast(message: unknown): void {
+    this.broadcast(JSON.stringify(message));
+  }
+
+  /**
+   * Update agent state via RPC.
+   * @internal - Called by AgentWorkflow, do not call directly
+   */
+  _workflow_updateState(
+    action: "set" | "merge" | "reset",
+    state?: unknown
+  ): void {
+    if (action === "set") {
+      this.setState(state as State);
+    } else if (action === "merge") {
+      const currentState = this.state ?? ({} as State);
+      this.setState({
+        ...currentState,
+        ...(state as Record<string, unknown>)
+      } as State);
+    } else if (action === "reset") {
+      this.setState(this.initialState);
+    }
+  }
+
+  /**
+   * Connect to a new MCP Server
+   *
+   * @example
+   * // Simple usage
+   * await this.addMcpServer("github", "https://mcp.github.com");
+   *
+   * @example
+   * // With options (preferred for custom headers, transport, etc.)
+   * await this.addMcpServer("github", "https://mcp.github.com", {
+   *   transport: { headers: { "Authorization": "Bearer ..." } }
+   * });
+   *
+   * @example
+   * // Legacy 5-parameter signature (still supported)
+   * await this.addMcpServer("github", url, callbackHost, agentsPrefix, options);
+   *
+   * @param serverName Name of the MCP server
+   * @param url MCP Server URL
+   * @param callbackHostOrOptions Options object, or callback host string (legacy)
+   * @param agentsPrefix agents routing prefix if not using `agents` (legacy)
+   * @param options MCP client and transport options (legacy)
+   * @returns Server id and state - either "authenticating" with authUrl, or "ready"
+   * @throws If connection or discovery fails
+   */
+  async addMcpServer(
+    serverName: string,
+    url: string,
+    callbackHostOrOptions?: string | AddMcpServerOptions,
+    agentsPrefix?: string,
+    options?: {
+      client?: ConstructorParameters<typeof Client>[1];
+      transport?: {
+        headers?: HeadersInit;
+        type?: TransportType;
+      };
+    }
+  ): Promise<
+    | {
+        id: string;
+        state: typeof MCPConnectionState.AUTHENTICATING;
+        authUrl: string;
+      }
+    | {
+        id: string;
+        state: typeof MCPConnectionState.READY;
+        authUrl?: undefined;
+      }
+  > {
+    // Normalize arguments - support both new options API and legacy positional API
+    let resolvedCallbackHost: string | undefined;
+    let resolvedAgentsPrefix: string;
+    let resolvedOptions:
+      | {
+          client?: ConstructorParameters<typeof Client>[1];
+          transport?: {
+            headers?: HeadersInit;
+            type?: TransportType;
+          };
+        }
+      | undefined;
+
+    let resolvedCallbackPath: string | undefined;
+
+    if (
+      typeof callbackHostOrOptions === "object" &&
+      callbackHostOrOptions !== null
+    ) {
+      // New API: options object as third parameter
+      resolvedCallbackHost = callbackHostOrOptions.callbackHost;
+      resolvedCallbackPath = callbackHostOrOptions.callbackPath;
+      resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
+      resolvedOptions = {
+        client: callbackHostOrOptions.client,
+        transport: callbackHostOrOptions.transport
+      };
+    } else {
+      // Legacy API: positional parameters
+      resolvedCallbackHost = callbackHostOrOptions;
+      resolvedAgentsPrefix = agentsPrefix ?? "agents";
+      resolvedOptions = options;
+    }
+
+    // Enforce callbackPath when sendIdentityOnConnect is false
+    if (!this._resolvedOptions.sendIdentityOnConnect && !resolvedCallbackPath) {
+      throw new Error(
+        "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false — " +
+          "the default callback URL would expose the instance name. " +
+          "Provide a callbackPath and route the callback request to this agent via getAgentByName."
+      );
+    }
+
+    // If callbackHost is not provided, derive it from the current request
+    if (!resolvedCallbackHost) {
+      const { request } = getCurrentAgent();
+      if (!request) {
+        throw new Error(
+          "callbackHost is required when not called within a request context"
+        );
+      }
+
+      // Extract the origin from the request
+      const requestUrl = new URL(request.url);
+      resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
+    }
+
+    // Build the callback URL: use callbackPath if provided, otherwise default to /agents/{class}/{name}/callback
+    const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
+    const callbackUrl = resolvedCallbackPath
+      ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
+      : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+
+    // TODO: make zod/ai sdk more performant and remove this
+    // Late initialization of jsonSchemaFn (needed for getAITools)
+    await this.mcp.ensureJsonSchema();
+
+    const id = nanoid(8);
+
+    const authProvider = this.createOAuthProvider(callbackUrl);
+    authProvider.serverId = id;
+
+    // Use the transport type specified in options, or default to "auto"
+    const transportType: TransportType =
+      resolvedOptions?.transport?.type ?? "auto";
 
     // allows passing through transport headers if necessary
     // this handles some non-standard bearer auth setups (i.e. MCP server behind CF access instead of OAuth)
     let headerTransportOpts: SSEClientTransportOptions = {};
-    if (options?.transport?.headers) {
+    if (resolvedOptions?.transport?.headers) {
       headerTransportOpts = {
         eventSourceInit: {
           fetch: (url, init) =>
             fetch(url, {
               ...init,
-              headers: options?.transport?.headers,
-            }),
+              headers: resolvedOptions?.transport?.headers
+            })
         },
         requestInit: {
-          headers: options?.transport?.headers,
-        },
+          headers: resolvedOptions?.transport?.headers
+        }
       };
     }
 
-    const { id, authUrl, clientId } = await this.mcp.connect(url, {
-      client: options?.client,
-      reconnect,
+    // Register server (also saves to storage)
+    await this.mcp.registerServer(id, {
+      url,
+      name: serverName,
+      callbackUrl,
+      client: resolvedOptions?.client,
       transport: {
         ...headerTransportOpts,
         authProvider,
-      },
+        type: transportType
+      }
     });
 
-    return {
-      authUrl,
-      clientId,
-      id,
-    };
+    const result = await this.mcp.connectToServer(id);
+
+    if (result.state === MCPConnectionState.FAILED) {
+      // Server stays in storage so user can retry via connectToServer(id)
+      throw new Error(
+        `Failed to connect to MCP server at ${url}: ${result.error}`
+      );
+    }
+
+    if (result.state === MCPConnectionState.AUTHENTICATING) {
+      return { id, state: result.state, authUrl: result.authUrl };
+    }
+
+    // State is CONNECTED - discover capabilities
+    const discoverResult = await this.mcp.discoverIfConnected(id);
+
+    if (discoverResult && !discoverResult.success) {
+      // Server stays in storage - connection is still valid, user can retry discovery
+      throw new Error(
+        `Failed to discover MCP server capabilities: ${discoverResult.error}`
+      );
+    }
+
+    return { id, state: MCPConnectionState.READY };
   }
 
   async removeMcpServer(id: string) {
-    this.mcp.closeConnection(id);
-    this.sql`
-      DELETE FROM cf_agents_mcp_servers WHERE id = ${id};
-    `;
-    this.broadcast(
-      JSON.stringify({
-        mcp: this.getMcpServers(),
-        type: "cf_agent_mcp_servers",
-      })
-    );
+    await this.mcp.removeServer(id);
   }
 
   getMcpServers(): MCPServersState {
@@ -1065,24 +3482,32 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       prompts: this.mcp.listPrompts(),
       resources: this.mcp.listResources(),
       servers: {},
-      tools: this.mcp.listTools(),
+      tools: this.mcp.listTools()
     };
 
-    const servers = this.sql<MCPServerRow>`
-      SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers;
-    `;
+    const servers = this.mcp.listServers();
 
-    for (const server of servers) {
-      const serverConn = this.mcp.mcpConnections[server.id];
-      mcpState.servers[server.id] = {
-        auth_url: server.auth_url,
-        capabilities: serverConn?.serverCapabilities ?? null,
-        instructions: serverConn?.instructions ?? null,
-        name: server.name,
-        server_url: server.server_url,
-        // mark as "authenticating" because the server isn't automatically connected, so it's pending authenticating
-        state: serverConn?.connectionState ?? "authenticating",
-      };
+    if (servers && Array.isArray(servers) && servers.length > 0) {
+      for (const server of servers) {
+        const serverConn = this.mcp.mcpConnections[server.id];
+
+        // Determine the default state when no connection exists
+        let defaultState: "authenticating" | "not-connected" = "not-connected";
+        if (!serverConn && server.auth_url) {
+          // If there's an auth_url but no connection, it's waiting for OAuth
+          defaultState = "authenticating";
+        }
+
+        mcpState.servers[server.id] = {
+          auth_url: server.auth_url,
+          capabilities: serverConn?.serverCapabilities ?? null,
+          error: serverConn?.connectionError ?? null,
+          instructions: serverConn?.instructions ?? null,
+          name: server.name,
+          server_url: server.server_url,
+          state: serverConn?.connectionState ?? defaultState
+        };
+      }
     }
 
     return mcpState;
@@ -1095,13 +3520,120 @@ export class Agent<Env, State = unknown> extends Server<Env> {
       callbackUrl
     );
   }
+
+  private broadcastMcpServers() {
+    this.broadcast(
+      JSON.stringify({
+        mcp: this.getMcpServers(),
+        type: MessageType.CF_AGENT_MCP_SERVERS
+      })
+    );
+  }
+
+  /**
+   * Handle MCP OAuth callback request if it's an OAuth callback.
+   *
+   * This method encapsulates the entire OAuth callback flow:
+   * 1. Checks if the request is an MCP OAuth callback
+   * 2. Processes the OAuth code exchange
+   * 3. Establishes the connection if successful
+   * 4. Broadcasts MCP server state updates
+   * 5. Returns the appropriate HTTP response
+   *
+   * @param request The incoming HTTP request
+   * @returns Response if this was an OAuth callback, null otherwise
+   */
+  private async handleMcpOAuthCallback(
+    request: Request
+  ): Promise<Response | null> {
+    // Check if this is an OAuth callback request
+    const isCallback = this.mcp.isCallbackRequest(request);
+    if (!isCallback) {
+      return null;
+    }
+
+    // Handle the OAuth callback (exchanges code for token, clears OAuth credentials from storage)
+    // This fires onServerStateChanged event which triggers broadcast
+    const result = await this.mcp.handleCallbackRequest(request);
+
+    // If auth was successful, establish the connection in the background
+    if (result.authSuccess) {
+      this.mcp.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
+          error
+        );
+      });
+    }
+
+    this.broadcastMcpServers();
+
+    // Return the HTTP response for the OAuth callback
+    return this.handleOAuthCallbackResponse(result, request);
+  }
+
+  /**
+   * Handle OAuth callback response using MCPClientManager configuration
+   * @param result OAuth callback result
+   * @param request The original request (needed for base URL)
+   * @returns Response for the OAuth callback
+   */
+  private handleOAuthCallbackResponse(
+    result: MCPClientOAuthResult,
+    request: Request
+  ): Response {
+    const config = this.mcp.getOAuthCallbackConfig();
+
+    // Use custom handler if configured
+    if (config?.customHandler) {
+      return config.customHandler(result);
+    }
+
+    const baseOrigin = new URL(request.url).origin;
+
+    // Redirect to success URL if configured
+    if (config?.successRedirect && result.authSuccess) {
+      try {
+        return Response.redirect(
+          new URL(config.successRedirect, baseOrigin).href
+        );
+      } catch (e) {
+        console.error(
+          "Invalid successRedirect URL:",
+          config.successRedirect,
+          e
+        );
+        return Response.redirect(baseOrigin);
+      }
+    }
+
+    // Redirect to error URL if configured
+    if (config?.errorRedirect && !result.authSuccess) {
+      try {
+        const errorUrl = `${config.errorRedirect}?error=${encodeURIComponent(
+          result.authError || "Unknown error"
+        )}`;
+        return Response.redirect(new URL(errorUrl, baseOrigin).href);
+      } catch (e) {
+        console.error("Invalid errorRedirect URL:", config.errorRedirect, e);
+        return Response.redirect(baseOrigin);
+      }
+    }
+
+    // Default: redirect to base URL
+    return Response.redirect(baseOrigin);
+  }
 }
+
+// A set of classes that have been wrapped with agent context
+const wrappedClasses = new Set<typeof Agent.prototype.constructor>();
 
 /**
  * Namespace for creating Agent instances
  * @template Agentic Type of the Agent class
+ * @deprecated Use DurableObjectNamespace instead
  */
-export type AgentNamespace<Agentic extends Agent<unknown>> =
+export type AgentNamespace<Agentic extends Agent<Cloudflare.Env>> =
   DurableObjectNamespace<Agentic>;
 
 /**
@@ -1137,14 +3669,14 @@ export async function routeAgentRequest<Env>(
           "Access-Control-Allow-Credentials": "true",
           "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
           "Access-Control-Allow-Origin": "*",
-          "Access-Control-Max-Age": "86400",
+          "Access-Control-Max-Age": "86400"
         }
       : options?.cors;
 
   if (request.method === "OPTIONS") {
     if (corsHeaders) {
       return new Response(null, {
-        headers: corsHeaders,
+        headers: corsHeaders
       });
     }
     console.warn(
@@ -1157,7 +3689,7 @@ export async function routeAgentRequest<Env>(
     env as Record<string, unknown>,
     {
       prefix: "agents",
-      ...(options as PartyServerOptions<Record<string, unknown>>),
+      ...(options as PartyServerOptions<Record<string, unknown>>)
     }
   );
 
@@ -1167,27 +3699,151 @@ export async function routeAgentRequest<Env>(
     request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
     request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
   ) {
+    const newHeaders = new Headers(response.headers);
+
+    // Add CORS headers
+    for (const [key, value] of Object.entries(corsHeaders)) {
+      newHeaders.set(key, value);
+    }
+
     response = new Response(response.body, {
-      headers: {
-        ...response.headers,
-        ...corsHeaders,
-      },
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders
     });
   }
   return response;
 }
 
+// Email routing - deprecated resolver kept in root for upgrade discoverability
+// Other email utilities moved to agents/email subpath
+export { createHeaderBasedEmailResolver } from "./email";
+
+import type { EmailResolver } from "./email";
+
+export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
+  resolver: EmailResolver<Env>;
+  /**
+   * Callback invoked when no routing information is found for an email.
+   * Use this to reject the email or perform custom handling.
+   * If not provided, a warning is logged and the email is dropped.
+   */
+  onNoRoute?: (email: ForwardableEmailMessage) => void | Promise<void>;
+};
+
+// Cache the agent namespace map for email routing
+// This maps both kebab-case and original names to namespaces
+const agentMapCache = new WeakMap<
+  Record<string, unknown>,
+  Record<string, unknown>
+>();
+
 /**
  * Route an email to the appropriate Agent
- * @param email Email message to route
- * @param env Environment containing Agent bindings
- * @param options Routing options
+ * @param email The email to route
+ * @param env The environment containing the Agent bindings
+ * @param options The options for routing the email
+ * @returns A promise that resolves when the email has been routed
  */
-export async function routeAgentEmail<Env>(
-  _email: ForwardableEmailMessage,
-  _env: Env,
-  _options?: AgentOptions<Env>
-): Promise<void> {}
+export async function routeAgentEmail<
+  Env extends Cloudflare.Env = Cloudflare.Env
+>(
+  email: ForwardableEmailMessage,
+  env: Env,
+  options: EmailRoutingOptions<Env>
+): Promise<void> {
+  const routingInfo = await options.resolver(email, env);
+
+  if (!routingInfo) {
+    if (options.onNoRoute) {
+      await options.onNoRoute(email);
+    } else {
+      console.warn("No routing information found for email, dropping message");
+    }
+    return;
+  }
+
+  // Build a map that includes both original names and kebab-case versions
+  if (!agentMapCache.has(env as Record<string, unknown>)) {
+    const map: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
+      if (
+        value &&
+        typeof value === "object" &&
+        "idFromName" in value &&
+        typeof value.idFromName === "function"
+      ) {
+        // Add both the original name and kebab-case version
+        map[key] = value;
+        map[camelCaseToKebabCase(key)] = value;
+      }
+    }
+    agentMapCache.set(env as Record<string, unknown>, map);
+  }
+
+  const agentMap = agentMapCache.get(env as Record<string, unknown>)!;
+  const namespace = agentMap[routingInfo.agentName];
+
+  if (!namespace) {
+    // Provide helpful error message listing available agents
+    const availableAgents = Object.keys(agentMap)
+      .filter((key) => !key.includes("-")) // Show only original names, not kebab-case duplicates
+      .join(", ");
+    throw new Error(
+      `Agent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
+    );
+  }
+
+  const agent = await getAgentByName(
+    namespace as unknown as DurableObjectNamespace<Agent<Env>>,
+    routingInfo.agentId
+  );
+
+  // let's make a serialisable version of the email
+  const serialisableEmail: AgentEmail = {
+    getRaw: async () => {
+      const reader = email.raw.getReader();
+      const chunks: Uint8Array[] = [];
+
+      let done = false;
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        done = readerDone;
+        if (value) {
+          chunks.push(value);
+        }
+      }
+
+      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const combined = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      return combined;
+    },
+    headers: email.headers,
+    rawSize: email.rawSize,
+    setReject: (reason: string) => {
+      email.setReject(reason);
+    },
+    forward: (rcptTo: string, headers?: Headers) => {
+      return email.forward(rcptTo, headers);
+    },
+    reply: (replyOptions: { from: string; to: string; raw: string }) => {
+      return email.reply(
+        new EmailMessage(replyOptions.from, replyOptions.to, replyOptions.raw)
+      );
+    },
+    from: email.from,
+    to: email.to,
+    _secureRouted: routingInfo._secureRouted
+  };
+
+  await agent._onEmail(serialisableEmail);
+}
 
 /**
  * Get or create an Agent by name
@@ -1198,12 +3854,17 @@ export async function routeAgentEmail<Env>(
  * @param options Options for Agent creation
  * @returns Promise resolving to an Agent instance stub
  */
-export async function getAgentByName<Env, T extends Agent<Env>>(
-  namespace: AgentNamespace<T>,
+export async function getAgentByName<
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  T extends Agent<Env> = Agent<Env>,
+  Props extends Record<string, unknown> = Record<string, unknown>
+>(
+  namespace: DurableObjectNamespace<T>,
   name: string,
   options?: {
     jurisdiction?: DurableObjectJurisdiction;
     locationHint?: DurableObjectLocationHint;
+    props?: Props;
   }
 ) {
   return getServerByName<Env, T>(namespace, name, options);
@@ -1223,30 +3884,43 @@ export class StreamingResponse {
   }
 
   /**
+   * Whether the stream has been closed (via end() or error())
+   */
+  get isClosed(): boolean {
+    return this._closed;
+  }
+
+  /**
    * Send a chunk of data to the client
    * @param chunk The data to send
+   * @returns false if stream is already closed (no-op), true if sent
    */
-  send(chunk: unknown) {
+  send(chunk: unknown): boolean {
     if (this._closed) {
-      throw new Error("StreamingResponse is already closed");
+      console.warn(
+        "StreamingResponse.send() called after stream was closed - data not sent"
+      );
+      return false;
     }
     const response: RPCResponse = {
       done: false,
       id: this._id,
       result: chunk,
       success: true,
-      type: "rpc",
+      type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
+    return true;
   }
 
   /**
    * End the stream and send the final chunk (if any)
    * @param finalChunk Optional final chunk of data to send
+   * @returns false if stream is already closed (no-op), true if sent
    */
-  end(finalChunk?: unknown) {
+  end(finalChunk?: unknown): boolean {
     if (this._closed) {
-      throw new Error("StreamingResponse is already closed");
+      return false;
     }
     this._closed = true;
     const response: RPCResponse = {
@@ -1254,8 +3928,29 @@ export class StreamingResponse {
       id: this._id,
       result: finalChunk,
       success: true,
-      type: "rpc",
+      type: MessageType.RPC
     };
     this._connection.send(JSON.stringify(response));
+    return true;
+  }
+
+  /**
+   * Send an error to the client and close the stream
+   * @param message Error message to send
+   * @returns false if stream is already closed (no-op), true if sent
+   */
+  error(message: string): boolean {
+    if (this._closed) {
+      return false;
+    }
+    this._closed = true;
+    const response: RPCResponse = {
+      error: message,
+      id: this._id,
+      success: false,
+      type: MessageType.RPC
+    };
+    this._connection.send(JSON.stringify(response));
+    return true;
   }
 }

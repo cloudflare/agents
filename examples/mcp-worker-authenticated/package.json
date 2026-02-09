@@ -1,0 +1,16 @@
+{
+  "name": "@cloudflare/agents-authenticated-mcp-worker",
+  "description": "The simplest way to run a stateless authenticated MCP Server on Cloudflare",
+  "author": "Matt Carey <mcarey@cloudflare.com>",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "agents": "*",
+    "hono": "^4.11.9"
+  }
+}
