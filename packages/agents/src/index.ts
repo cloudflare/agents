@@ -3666,12 +3666,7 @@ export type AgentContext = DurableObjectState;
 /**
  * Configuration options for Agent routing
  */
-export type AgentOptions<Env> = PartyServerOptions<Env> & {
-  /**
-   * Whether to enable CORS for the Agent
-   */
-  cors?: boolean | HeadersInit | undefined;
-};
+export type AgentOptions<Env> = PartyServerOptions<Env>;
 
 /**
  * Route a request to the appropriate Agent
@@ -3685,56 +3680,10 @@ export async function routeAgentRequest<Env>(
   env: Env,
   options?: AgentOptions<Env>
 ) {
-  const corsHeaders =
-    options?.cors === true
-      ? {
-          "Access-Control-Allow-Credentials": "true",
-          "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Max-Age": "86400"
-        }
-      : options?.cors;
-
-  if (request.method === "OPTIONS") {
-    if (corsHeaders) {
-      return new Response(null, {
-        headers: corsHeaders
-      });
-    }
-    console.warn(
-      "Received an OPTIONS request, but cors was not enabled. Pass `cors: true` or `cors: { ...custom cors headers }` to routeAgentRequest to enable CORS."
-    );
-  }
-
-  let response = await routePartykitRequest(
-    request,
-    env as Record<string, unknown>,
-    {
-      prefix: "agents",
-      ...(options as PartyServerOptions<Record<string, unknown>>)
-    }
-  );
-
-  if (
-    response &&
-    corsHeaders &&
-    request.headers.get("upgrade")?.toLowerCase() !== "websocket" &&
-    request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
-  ) {
-    const newHeaders = new Headers(response.headers);
-
-    // Add CORS headers
-    for (const [key, value] of Object.entries(corsHeaders)) {
-      newHeaders.set(key, value);
-    }
-
-    response = new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: newHeaders
-    });
-  }
-  return response;
+  return routePartykitRequest(request, env as Record<string, unknown>, {
+    prefix: "agents",
+    ...(options as PartyServerOptions<Record<string, unknown>>)
+  });
 }
 
 // Email routing - deprecated resolver kept in root for upgrade discoverability
