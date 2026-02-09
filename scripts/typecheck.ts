@@ -1,5 +1,9 @@
-import { type ExecException, execSync } from "node:child_process";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 import fg from "fast-glob";
+import os from "node:os";
+
+const execAsync = promisify(exec);
 
 const tsconfigs: string[] = [];
 
@@ -8,7 +12,10 @@ for await (const file of await fg.glob("**/tsconfig.json")) {
   tsconfigs.push(file);
 }
 
-console.log(`Typechecking ${tsconfigs.length} projects...`);
+const concurrency = Math.max(os.cpus().length, 2);
+console.log(
+  `Typechecking ${tsconfigs.length} projects (${concurrency} concurrent)...`
+);
 
 type Result = {
   tsconfig: string;
@@ -16,35 +23,53 @@ type Result = {
   output: string;
 };
 
-const results: Result[] = [];
-
-for (const tsconfig of tsconfigs) {
-  console.log(`Checking ${tsconfig}...`);
+async function checkProject(tsconfig: string): Promise<Result> {
   try {
-    const output = execSync(`tsc -p ${tsconfig}`, {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-    results.push({ tsconfig, success: true, output });
-    console.log(`✅ ${tsconfig} - OK`);
+    await execAsync(`tsc -p ${tsconfig}`);
+    return { tsconfig, success: true, output: "" };
   } catch (rawError: unknown) {
-    const error = rawError as ExecException;
-
-    const output =
-      error.stdout?.toString() || `${error.stderr?.toString()}` || "";
-    results.push({ tsconfig, success: false, output });
-    console.error(`❌ ${tsconfig} - Failed:`);
-    console.error(output);
+    const error = rawError as { stdout?: string; stderr?: string };
+    const output = error.stdout || error.stderr || "";
+    return { tsconfig, success: false, output };
   }
 }
+
+// Run with concurrency limit
+const results: Result[] = [];
+const queue = [...tsconfigs];
+const active: Promise<void>[] = [];
+
+async function runNext(): Promise<void> {
+  while (queue.length > 0) {
+    const tsconfig = queue.shift()!;
+    const result = await checkProject(tsconfig);
+    results.push(result);
+    if (result.success) {
+      console.log(`  ✅ ${result.tsconfig}`);
+    } else {
+      console.error(`  ❌ ${result.tsconfig}`);
+    }
+  }
+}
+
+for (let i = 0; i < concurrency; i++) {
+  active.push(runNext());
+}
+
+await Promise.all(active);
 
 const failed = results.filter((r) => !r.success);
 
 if (failed.length > 0) {
   console.error(
-    `\n${failed.length} of ${tsconfigs.length} projects failed to typecheck!`
+    `\n${failed.length} of ${tsconfigs.length} projects failed to typecheck:\n`
   );
+  for (const f of failed) {
+    console.error(`--- ${f.tsconfig} ---`);
+    console.error(f.output);
+    console.error("");
+  }
   process.exit(1);
 }
 
-console.log("All projects typecheck successfully!");
+console.log(`\nAll ${tsconfigs.length} projects typecheck successfully!`);
