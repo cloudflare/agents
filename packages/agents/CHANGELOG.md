@@ -1,5 +1,109 @@
 # @cloudflare/agents
 
+## 0.4.0
+
+### Minor Changes
+
+- [#848](https://github.com/cloudflare/agents/pull/848) [`a167344`](https://github.com/cloudflare/agents/commit/a167344aab6960a51901886539c206a2c937bb1e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Upgrade MCP SDK to 1.26.0 to prevent cross-client response leakage. Updated examples for stateless MCP Servers create new `McpServer` instance per request instead of sharing a single instance. A guard is added in this version of the MCP SDK which will prevent connection to a Server instance that has already been connected to a transport. Developers will need to modify their code if they declare their `McpServer` instance as a global variable.
+
+- [#298](https://github.com/cloudflare/agents/pull/298) [`27f4e3e`](https://github.com/cloudflare/agents/commit/27f4e3ef4471f5c523a7e2f8a0ce548daa5738f5) Thanks [@jaredhanson](https://github.com/jaredhanson)! - Add `createMcpOAuthProvider` method to the `Agent` class, allowing subclasses to override the default OAuth provider used when connecting to MCP servers. This enables custom authentication strategies such as pre-registered client credentials or mTLS, beyond the built-in dynamic client registration.
+
+- [#610](https://github.com/cloudflare/agents/pull/610) [`f59f305`](https://github.com/cloudflare/agents/commit/f59f30533121e6e9fd41e9a2e22184d2fa9bdb1b) Thanks [@threepointone](https://github.com/threepointone)! - Deprecate `onStateUpdate` server-side hook in favor of `onStateChanged`
+  - `onStateChanged` is a drop-in rename of `onStateUpdate` (same signature, same behavior)
+  - `onStateUpdate` still works but emits a one-time console warning per class
+  - Throws if a class overrides both hooks simultaneously
+  - `validateStateChange` rejections now propagate a `CF_AGENT_STATE_ERROR` message back to the client
+
+- [#871](https://github.com/cloudflare/agents/pull/871) [`27f8f75`](https://github.com/cloudflare/agents/commit/27f8f755f04e23a71e7a0748c48a2e7ec25cede6) Thanks [@threepointone](https://github.com/threepointone)! - Migrate x402 MCP integration from legacy `x402` package to `@x402/core` and `@x402/evm` v2
+
+  **Breaking changes for x402 users:**
+  - Peer dependencies changed: replace `x402` with `@x402/core` and `@x402/evm`
+  - `PaymentRequirements` type now uses v2 fields (e.g. `amount` instead of `maxAmountRequired`)
+  - `X402ClientConfig.account` type changed from `viem.Account` to `ClientEvmSigner` (structurally compatible with `privateKeyToAccount()`)
+
+  **Migration guide:**
+  1. Update dependencies:
+
+     ```bash
+     npm uninstall x402
+     npm install @x402/core @x402/evm
+     ```
+
+  2. Update network identifiers — both legacy names and CAIP-2 format are accepted:
+
+     ```typescript
+     // Before
+     {
+       network: "base-sepolia";
+     }
+     // After (either works)
+     {
+       network: "base-sepolia";
+     } // legacy name, auto-converted
+     {
+       network: "eip155:84532";
+     } // CAIP-2 format (preferred)
+     ```
+
+  3. If you access `PaymentRequirements` fields in callbacks, update to v2 field names (see `@x402/core` docs).
+  4. The `version` field on `X402Config` and `X402ClientConfig` is now deprecated and ignored — the protocol version is determined automatically.
+
+  **Other changes:**
+  - `X402ClientConfig.network` is now optional — the client auto-selects from available payment requirements
+  - Server-side lazy initialization: facilitator connection is deferred until the first paid tool invocation
+  - Payment tokens support both v2 (`PAYMENT-SIGNATURE`) and v1 (`X-PAYMENT`) HTTP headers
+  - Added `normalizeNetwork` export for converting legacy network names to CAIP-2 format
+  - Re-exports `PaymentRequirements`, `PaymentRequired`, `Network`, `FacilitatorConfig`, and `ClientEvmSigner` from `agents/x402`
+
+### Patch Changes
+
+- [#610](https://github.com/cloudflare/agents/pull/610) [`f59f305`](https://github.com/cloudflare/agents/commit/f59f30533121e6e9fd41e9a2e22184d2fa9bdb1b) Thanks [@threepointone](https://github.com/threepointone)! - Add readonly connections: restrict WebSocket clients from modifying agent state
+  - New hooks: `shouldConnectionBeReadonly`, `setConnectionReadonly`, `isConnectionReadonly`
+  - Blocks both client-side `setState()` and mutating `@callable()` methods for readonly connections
+  - Readonly flag stored in a namespaced connection attachment (`_cf_readonly`), surviving hibernation without extra SQL
+  - Connection state wrapping hides the internal flag from user code and preserves it across `connection.setState()` calls
+  - Client-side `onStateUpdateError` callback for handling rejected state updates
+
+- [#855](https://github.com/cloudflare/agents/pull/855) [`271a3cf`](https://github.com/cloudflare/agents/commit/271a3cffd769d646b1d6498f5676662ced94cf27) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgent` and `AgentClient` crashing when using `basePath` routing.
+
+- [#868](https://github.com/cloudflare/agents/pull/868) [`b3e2dc1`](https://github.com/cloudflare/agents/commit/b3e2dc1c389b0d874eee5407099d8c20fe684b8b) Thanks [@threepointone](https://github.com/threepointone)! - Fix MCP OAuth callback URL leaking instance name
+
+  Add `callbackPath` option to `addMcpServer` to prevent instance name leakage in MCP OAuth callback URLs. When `sendIdentityOnConnect` is `false`, `callbackPath` is now required — the default callback URL would expose the instance name, undermining the security intent. Also fixes callback request detection to match via the `state` parameter instead of a loose `/callback` URL substring check, enabling custom callback paths.
+
+- [#872](https://github.com/cloudflare/agents/pull/872) [`de71f9e`](https://github.com/cloudflare/agents/commit/de71f9ecfae019061651716cb7d2a350a4283ada) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [`8893fbe`](https://github.com/cloudflare/agents/commit/8893fbef32bea9581dd308d5b6d9c066e135feef) Thanks [@threepointone](https://github.com/threepointone)! - partykit releases
+
+  ## partyserver
+
+  ### `0.1.3` (Feb 8, 2026)
+  - [#319](https://github.com/cloudflare/partykit/pull/319) — Add `configurable: true` to the `state`, `setState`, `serializeAttachment`, and `deserializeAttachment` property descriptors on connection objects. This allows downstream consumers (like the Cloudflare Agents SDK) to redefine these properties with `Object.defineProperty` for namespacing or wrapping internal state storage. Default behavior is unchanged.
+
+  ### `0.1.4` (Feb 9, 2026)
+  - [#320](https://github.com/cloudflare/partykit/pull/320) — **Add CORS support to `routePartykitRequest`**. Pass `cors: true` for permissive defaults or `cors: { ...headers }` for custom CORS headers. Preflight (OPTIONS) requests are handled automatically for matched routes, and CORS headers are appended to all non-WebSocket responses — including responses returned by `onBeforeRequest`.
+  - [#260](https://github.com/cloudflare/partykit/pull/260) — Remove redundant initialize code as `setName` takes care of it, along with the nested `blockConcurrencyWhile` call.
+
+  ***
+
+  ## partysocket
+
+  ### `1.1.12` (Feb 8, 2026)
+  - [#317](https://github.com/cloudflare/partykit/pull/317) — Fix `PartySocket.reconnect()` crashing when using `basePath` without `room`. The reconnect guard now accepts either `room` or `basePath` as sufficient context to construct a connection URL.
+  - [#319](https://github.com/cloudflare/partykit/pull/319) — Throw a clear error when constructing a `PartySocket` without `room` or `basePath` (and without `startClosed: true`), instead of silently connecting to a malformed URL containing `"undefined"` as the room name.
+
+  ### `1.1.13` (Feb 9, 2026)
+  - [#322](https://github.com/cloudflare/partykit/pull/322) — Fix `reconnect()` not working after `maxRetries` has been exhausted. The `_connectLock` was not released when the max retries early return was hit in `_connect()`, preventing any subsequent `reconnect()` call from initiating a new connection.
+
+- [#869](https://github.com/cloudflare/agents/pull/869) [`fc17506`](https://github.com/cloudflare/agents/commit/fc17506a1d6fb8f6b7fed56be98ab1729d338c2c) Thanks [@threepointone](https://github.com/threepointone)! - Remove `room`/`party` workaround for `basePath` routing now that partysocket handles reconnect without requiring `room` to be set.
+
+- [#873](https://github.com/cloudflare/agents/pull/873) [`d0579fa`](https://github.com/cloudflare/agents/commit/d0579fa13a60e47395a2dde199be3197299b8668) Thanks [@threepointone](https://github.com/threepointone)! - Remove CORS wrapping from `routeAgentRequest` and delegate to partyserver's native CORS support. The `cors` option is now passed directly through to `routePartykitRequest`, which handles preflight and response headers automatically since partyserver 0.1.4.
+
+- [#865](https://github.com/cloudflare/agents/pull/865) [`c3211d0`](https://github.com/cloudflare/agents/commit/c3211d0b0cc36aa294c15569ae650d3afeab9926) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- Updated dependencies [[`21a7977`](https://github.com/cloudflare/agents/commit/21a79778f5150aecd890f55a164d397f70db681e), [`3de98a3`](https://github.com/cloudflare/agents/commit/3de98a398d55aeca51c7b845ed4c5d6051887d6d), [`c3211d0`](https://github.com/cloudflare/agents/commit/c3211d0b0cc36aa294c15569ae650d3afeab9926)]:
+  - @cloudflare/codemode@0.0.7
+  - @cloudflare/ai-chat@0.0.7
+
 ## 0.3.10
 
 ### Patch Changes
@@ -116,7 +220,7 @@ const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
   maxAge: 7 * 24 * 60 * 60, // Optional: 7 days (default: 30 days)
   onInvalidSignature: (email, reason) => {
     console.warn(`Invalid signature from ${email.from}: ${reason}`);
-  }
+  },
 });
 ```
 
@@ -126,7 +230,7 @@ const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
 await this.replyToEmail(email, {
   fromName: "My Agent",
   body: "Thanks!",
-  secret: this.env.EMAIL_SECRET // Signs headers for secure reply routing
+  secret: this.env.EMAIL_SECRET, // Signs headers for secure reply routing
 });
 ```
 
@@ -210,7 +314,7 @@ await this.scheduleEvery(300, "syncData", { source: "api" });
 ```typescript
 await agent.call("method", [args], {
   timeout: 5000,
-  stream: { onChunk, onDone, onError }
+  stream: { onChunk, onDone, onError },
 });
 ```
 
@@ -231,7 +335,7 @@ Options-based `addMcpServer()` overload for cleaner configuration:
 ```typescript
 await this.addMcpServer("server", url, {
   callbackHost: "https://my-worker.workers.dev",
-  transport: { headers: { Authorization: "Bearer ..." } }
+  transport: { headers: { Authorization: "Bearer ..." } },
 });
 ```
 
@@ -247,7 +351,7 @@ await this.addMcpServer("server", url, {
 ```typescript
 const agent = useAgent({
   basePath: "user",
-  onIdentity: (name, agentType) => console.log(`Connected to ${name}`)
+  onIdentity: (name, agentType) => console.log(`Connected to ${name}`),
 });
 ```
 
@@ -281,7 +385,7 @@ import { createAddressBasedEmailResolver, signAgentHeaders } from "agents";
 // After
 import {
   createAddressBasedEmailResolver,
-  signAgentHeaders
+  signAgentHeaders,
 } from "agents/email";
 ```
 
@@ -299,7 +403,7 @@ When using `scheduleSchema` with OpenAI models via the AI SDK, pass `providerOpt
 ```typescript
 await generateObject({
   // ... other options
-  providerOptions: { openai: { strictJsonSchema: false } }
+  providerOptions: { openai: { strictJsonSchema: false } },
 });
 ```
 
@@ -335,7 +439,7 @@ await generateObject({
       await this.reportProgress({
         step: "process",
         percent: 0.5,
-        message: "Halfway done"
+        message: "Halfway done",
       });
       this.broadcastToClients({ type: "update", taskId: params.taskId });
 
@@ -510,7 +614,7 @@ await generateObject({
   // New format (preferred, supports timeout)
   await agent.call("method", [args], {
     timeout: 5000,
-    stream: { onChunk, onDone, onError }
+    stream: { onChunk, onDone, onError },
   });
 
   // Legacy format (still fully supported for backward compatibility)
@@ -638,7 +742,7 @@ await generateObject({
   ```typescript
   // Awkward when you only need transport options
   await this.addMcpServer("server", url, undefined, undefined, {
-    transport: { headers: { Authorization: "Bearer ..." } }
+    transport: { headers: { Authorization: "Bearer ..." } },
   });
   ```
 
@@ -647,13 +751,13 @@ await generateObject({
   ```typescript
   // Clean options object
   await this.addMcpServer("server", url, {
-    transport: { headers: { Authorization: "Bearer ..." } }
+    transport: { headers: { Authorization: "Bearer ..." } },
   });
 
   // With callback host
   await this.addMcpServer("server", url, {
     callbackHost: "https://my-worker.workers.dev",
-    transport: { type: "sse" }
+    transport: { type: "sse" },
   });
   ```
 
@@ -683,7 +787,7 @@ await generateObject({
   // Client connects to /user instead of /agents/user-agent/...
   const agent = useAgent({
     agent: "UserAgent",
-    basePath: "user"
+    basePath: "user",
   });
   ```
 
@@ -704,7 +808,7 @@ await generateObject({
         (await routeAgentRequest(request, env)) ??
         new Response("Not found", { status: 404 })
       );
-    }
+    },
   };
   ```
 
@@ -720,7 +824,7 @@ await generateObject({
     basePath: "user",
     onIdentity: (name, agentType) => {
       console.log(`Connected to ${agentType} instance: ${name}`);
-    }
+    },
   });
   ```
 
@@ -747,7 +851,7 @@ await generateObject({
     basePath: "user",
     onIdentityChange: (oldName, newName, oldAgent, newAgent) => {
       console.log(`Session changed: ${oldName} → ${newName}`);
-    }
+    },
   });
   ```
 
@@ -795,7 +899,7 @@ await generateObject({
   // After
   import {
     createAddressBasedEmailResolver,
-    signAgentHeaders
+    signAgentHeaders,
   } from "agents/email";
   ```
 
@@ -822,7 +926,7 @@ await generateObject({
       // Optional: log failures for debugging
       // reason: "missing_headers" | "expired" | "invalid" | "malformed_timestamp"
       console.warn(`Invalid signature from ${email.from}: ${reason}`);
-    }
+    },
   });
   ```
 
@@ -839,7 +943,7 @@ await generateObject({
   await this.replyToEmail(email, {
     fromName: "My Agent",
     body: "Thanks!",
-    secret: this.env.EMAIL_SECRET // Signs headers for secure reply routing
+    secret: this.env.EMAIL_SECRET, // Signs headers for secure reply routing
   });
   ```
 
@@ -852,7 +956,7 @@ await generateObject({
     resolver,
     onNoRoute: (email) => {
       email.setReject("Unknown recipient");
-    }
+    },
   });
   ```
 
@@ -2136,7 +2240,7 @@ await generateObject({
     initialState = {
       counter: 0,
       text: "",
-      color: "#3B82F6"
+      color: "#3B82F6",
     };
 
     doSomething() {
@@ -2153,7 +2257,7 @@ await generateObject({
     agent: "my-agent",
     onStateUpdate: (state) => {
       setState(state);
-    }
+    },
   });
   ```
 
