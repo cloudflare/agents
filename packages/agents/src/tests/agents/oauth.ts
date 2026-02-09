@@ -1,6 +1,6 @@
 import { Agent } from "../../index.ts";
 import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
-import type { AgentsOAuthProvider } from "../../mcp/do-oauth-client-provider";
+import type { AgentMcpOAuthProvider } from "../../mcp/do-oauth-client-provider";
 import type { MCPClientConnection } from "../../mcp/client-connection";
 
 // Test Agent for OAuth client side flows
@@ -214,11 +214,11 @@ export class TestOAuthAgent extends Agent<Record<string, unknown>> {
     this._mcpConnectionsInitialized = false;
   }
 
-  testCreateOAuthProvider(callbackUrl: string): {
+  testCreateMcpOAuthProvider(callbackUrl: string): {
     isDurableObjectProvider: boolean;
     callbackUrl: string;
   } {
-    const provider = this.createOAuthProvider(callbackUrl);
+    const provider = this.createMcpOAuthProvider(callbackUrl);
     return {
       isDurableObjectProvider:
         provider instanceof DurableObjectOAuthClientProvider,
@@ -227,13 +227,13 @@ export class TestOAuthAgent extends Agent<Record<string, unknown>> {
   }
 }
 
-// Test Agent that overrides createOAuthProvider with a custom implementation
+// Test Agent that overrides createMcpOAuthProvider with a custom implementation
 export class TestCustomOAuthAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
 
   private _customProviderCallbackUrl: string | undefined;
 
-  createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+  createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
     this._customProviderCallbackUrl = callbackUrl;
     // Return a minimal mock that satisfies the interface
     return {
@@ -259,15 +259,15 @@ export class TestCustomOAuthAgent extends Agent<Record<string, unknown>> {
       invalidateCredentials: async () => {},
       saveCodeVerifier: async () => {},
       codeVerifier: async () => "mock-verifier"
-    } as AgentsOAuthProvider;
+    } as AgentMcpOAuthProvider;
   }
 
-  testCreateOAuthProvider(callbackUrl: string): {
+  testCreateMcpOAuthProvider(callbackUrl: string): {
     isDurableObjectProvider: boolean;
     clientId: string | undefined;
     callbackUrl: string | undefined;
   } {
-    const provider = this.createOAuthProvider(callbackUrl);
+    const provider = this.createMcpOAuthProvider(callbackUrl);
     return {
       isDurableObjectProvider:
         provider instanceof DurableObjectOAuthClientProvider,

@@ -26,7 +26,7 @@ import {
 import { toErrorMessage } from "./errors";
 import type { TransportType } from "./types";
 import type { MCPServerRow } from "./client-storage";
-import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import { DurableObjectOAuthClientProvider } from "./do-oauth-client-provider";
 
 const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
@@ -219,7 +219,7 @@ export class MCPClientManager {
     callbackUrl: string,
     clientName: string,
     clientId?: string
-  ): AgentsOAuthProvider {
+  ): AgentMcpOAuthProvider {
     if (!this._storage) {
       throw new Error(
         "Cannot create auth provider: storage is not initialized"

@@ -36,7 +36,7 @@ import type {
 import { MCPConnectionState } from "./mcp/client-connection";
 import {
   DurableObjectOAuthClientProvider,
-  type AgentsOAuthProvider
+  type AgentMcpOAuthProvider
 } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
@@ -235,6 +235,11 @@ function getNextCronTime(cron: string) {
 }
 
 export type { TransportType } from "./mcp/types";
+export type {
+  AgentMcpOAuthProvider,
+  /** @deprecated Use {@link AgentMcpOAuthProvider} instead. */
+  AgentsOAuthProvider
+} from "./mcp/do-oauth-client-provider";
 
 /**
  * MCP Server state update message from server -> Client
@@ -3409,7 +3414,7 @@ export class Agent<
 
     const id = nanoid(8);
 
-    const authProvider = this.createOAuthProvider(callbackUrl);
+    const authProvider = this.createMcpOAuthProvider(callbackUrl);
     authProvider.serverId = id;
 
     // Use the transport type specified in options, or default to "auto"
@@ -3523,7 +3528,7 @@ export class Agent<
    * @example
    * // Custom OAuth provider
    * class MyAgent extends Agent {
-   *   createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+   *   createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
    *     return new MyCustomOAuthProvider(
    *       this.ctx.storage,
    *       this.name,
@@ -3533,9 +3538,9 @@ export class Agent<
    * }
    *
    * @param callbackUrl The OAuth callback URL for the authorization flow
-   * @returns An {@link AgentsOAuthProvider} instance used by {@link addMcpServer}
+   * @returns An {@link AgentMcpOAuthProvider} instance used by {@link addMcpServer}
    */
-  createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+  createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
     return new DurableObjectOAuthClientProvider(
       this.ctx.storage,
       this.name,

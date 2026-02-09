@@ -6,14 +6,14 @@ declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
 
-describe("createOAuthProvider", () => {
+describe("createMcpOAuthProvider", () => {
   it("should return a DurableObjectOAuthClientProvider by default", async () => {
     const agentId = env.TestOAuthAgent.idFromName("test-default-provider");
     const agentStub = env.TestOAuthAgent.get(agentId);
 
     await agentStub.setName("default");
 
-    const result = await agentStub.testCreateOAuthProvider(
+    const result = await agentStub.testCreateMcpOAuthProvider(
       "http://example.com/callback"
     );
 
@@ -27,7 +27,7 @@ describe("createOAuthProvider", () => {
 
     await agentStub.setName("default");
 
-    const result = await agentStub.testCreateOAuthProvider(
+    const result = await agentStub.testCreateMcpOAuthProvider(
       "http://example.com/custom-callback"
     );
 

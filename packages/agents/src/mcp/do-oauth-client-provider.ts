@@ -17,7 +17,7 @@ interface StoredState {
 
 // A slight extension to the standard OAuthClientProvider interface because `redirectToAuthorization` doesn't give us the interface we need
 // This allows us to track authentication for a specific server and associated dynamic client registration
-export interface AgentsOAuthProvider extends OAuthClientProvider {
+export interface AgentMcpOAuthProvider extends OAuthClientProvider {
   authUrl: string | undefined;
   clientId: string | undefined;
   serverId: string | undefined;
@@ -28,7 +28,12 @@ export interface AgentsOAuthProvider extends OAuthClientProvider {
   deleteCodeVerifier(): Promise<void>;
 }
 
-export class DurableObjectOAuthClientProvider implements AgentsOAuthProvider {
+/**
+ * @deprecated Use {@link AgentMcpOAuthProvider} instead.
+ */
+export type AgentsOAuthProvider = AgentMcpOAuthProvider;
+
+export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
   private _authUrl_: string | undefined;
   private _serverId_: string | undefined;
   private _clientId_: string | undefined;

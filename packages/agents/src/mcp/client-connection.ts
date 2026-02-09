@@ -31,7 +31,7 @@ import {
 import { nanoid } from "nanoid";
 import { Emitter, type Event } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
-import type { AgentsOAuthProvider } from "./do-oauth-client-provider";
+import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
 import {
   isTransportNotImplemented,
   isUnauthorized,
@@ -72,7 +72,7 @@ export type MCPTransportOptions = (
   | SSEClientTransportOptions
   | StreamableHTTPClientTransportOptions
 ) & {
-  authProvider?: AgentsOAuthProvider;
+  authProvider?: AgentMcpOAuthProvider;
   type?: TransportType;
 };
 
