@@ -32,8 +32,8 @@
     "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.6",
-    "partyserver": "^0.1.3",
-    "partysocket": "1.1.12",
+    "partyserver": "^0.1.4",
+    "partysocket": "1.1.13",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
