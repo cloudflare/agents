@@ -198,6 +198,27 @@ export class TestWorkflowAgent extends Agent<WorkflowEnv> {
     this._workflowResults.push({ taskId, result });
   }
 
+  // Test helper: call a method that's expected to throw, returning the error message.
+  // This avoids unhandled rejections in workerd when testing error paths via RPC.
+  async expectThrow(
+    method: string,
+    ...args: unknown[]
+  ): Promise<{ threw: boolean; message: string }> {
+    try {
+      const self = this as unknown as Record<
+        string,
+        (...a: unknown[]) => unknown
+      >;
+      await self[method](...args);
+      return { threw: false, message: "" };
+    } catch (e) {
+      return {
+        threw: true,
+        message: e instanceof Error ? e.message : String(e)
+      };
+    }
+  }
+
   // Start a workflow using the Agent's runWorkflow method
   async runWorkflowTest(
     workflowId: string,

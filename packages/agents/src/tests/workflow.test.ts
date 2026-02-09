@@ -254,9 +254,13 @@ describe("workflow operations", () => {
       await agentStub.insertWorkflowTracking("duplicate-id", "TEST_WORKFLOW");
 
       // Try to insert again - should get friendly error
-      await expect(
-        agentStub.insertWorkflowTracking("duplicate-id", "TEST_WORKFLOW")
-      ).rejects.toThrow(
+      const result = await agentStub.expectThrow(
+        "insertWorkflowTracking",
+        "duplicate-id",
+        "TEST_WORKFLOW"
+      );
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         'Workflow with ID "duplicate-id" is already being tracked'
       );
     });
@@ -304,9 +308,15 @@ describe("workflow operations", () => {
     it("should throw error when new binding does not exist", async () => {
       const agentStub = await getTestAgent("workflow-migrate-invalid-test");
 
-      await expect(
-        agentStub.migrateWorkflowBindingTest("OLD_WORKFLOW", "INVALID_BINDING")
-      ).rejects.toThrow("Workflow binding 'INVALID_BINDING' not found");
+      const result = await agentStub.expectThrow(
+        "migrateWorkflowBindingTest",
+        "OLD_WORKFLOW",
+        "INVALID_BINDING"
+      );
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
+        "Workflow binding 'INVALID_BINDING' not found"
+      );
     });
   });
 
@@ -590,9 +600,12 @@ describe("workflow operations", () => {
     it("should throw error when workflow not found in tracking table", async () => {
       const agentStub = await getTestAgent("terminate-workflow-test-1");
 
-      await expect(
-        agentStub.terminateWorkflow("non-existent-workflow-id")
-      ).rejects.toThrow(
+      const result = await agentStub.expectThrow(
+        "terminateWorkflow",
+        "non-existent-workflow-id"
+      );
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow non-existent-workflow-id not found in tracking table"
       );
     });
@@ -608,7 +621,12 @@ describe("workflow operations", () => {
         "running"
       );
 
-      await expect(agentStub.terminateWorkflow(workflowId)).rejects.toThrow(
+      const result = await agentStub.expectThrow(
+        "terminateWorkflow",
+        workflowId
+      );
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow binding 'NON_EXISTENT_BINDING' not found in environment"
       );
     });
@@ -618,9 +636,12 @@ describe("workflow operations", () => {
     it("should throw error when workflow not found in tracking table", async () => {
       const agentStub = await getTestAgent("pause-workflow-test-1");
 
-      await expect(
-        agentStub.pauseWorkflow("non-existent-workflow-id")
-      ).rejects.toThrow(
+      const result = await agentStub.expectThrow(
+        "pauseWorkflow",
+        "non-existent-workflow-id"
+      );
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow non-existent-workflow-id not found in tracking table"
       );
     });
@@ -635,7 +656,9 @@ describe("workflow operations", () => {
         "running"
       );
 
-      await expect(agentStub.pauseWorkflow(workflowId)).rejects.toThrow(
+      const result = await agentStub.expectThrow("pauseWorkflow", workflowId);
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow binding 'NON_EXISTENT_BINDING' not found in environment"
       );
     });
@@ -645,9 +668,12 @@ describe("workflow operations", () => {
     it("should throw error when workflow not found in tracking table", async () => {
       const agentStub = await getTestAgent("resume-workflow-test-1");
 
-      await expect(
-        agentStub.resumeWorkflow("non-existent-workflow-id")
-      ).rejects.toThrow(
+      const result = await agentStub.expectThrow(
+        "resumeWorkflow",
+        "non-existent-workflow-id"
+      );
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow non-existent-workflow-id not found in tracking table"
       );
     });
@@ -662,7 +688,9 @@ describe("workflow operations", () => {
         "paused"
       );
 
-      await expect(agentStub.resumeWorkflow(workflowId)).rejects.toThrow(
+      const result = await agentStub.expectThrow("resumeWorkflow", workflowId);
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow binding 'NON_EXISTENT_BINDING' not found in environment"
       );
     });
@@ -672,9 +700,12 @@ describe("workflow operations", () => {
     it("should throw error when workflow not found in tracking table", async () => {
       const agentStub = await getTestAgent("restart-workflow-test-1");
 
-      await expect(
-        agentStub.restartWorkflow("non-existent-workflow-id")
-      ).rejects.toThrow(
+      const result = await agentStub.expectThrow(
+        "restartWorkflow",
+        "non-existent-workflow-id"
+      );
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow non-existent-workflow-id not found in tracking table"
       );
     });
@@ -689,7 +720,9 @@ describe("workflow operations", () => {
         "complete"
       );
 
-      await expect(agentStub.restartWorkflow(workflowId)).rejects.toThrow(
+      const result = await agentStub.expectThrow("restartWorkflow", workflowId);
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain(
         "Workflow binding 'NON_EXISTENT_BINDING' not found in environment"
       );
     });
@@ -833,21 +866,25 @@ describe("workflow operations", () => {
       await agentStub.insertTestWorkflow("wf-1", "TEST_WORKFLOW", "complete");
 
       // Try with malformed cursor
-      await expect(
-        agentStub.getWorkflowsPageForTest({ cursor: "not-valid-base64!" })
-      ).rejects.toThrow("Invalid pagination cursor");
+      let result = await agentStub.expectThrow("getWorkflowsPageForTest", {
+        cursor: "not-valid-base64!"
+      });
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain("Invalid pagination cursor");
 
       // Try with valid base64 but invalid JSON
-      await expect(
-        agentStub.getWorkflowsPageForTest({ cursor: btoa("not-json") })
-      ).rejects.toThrow("Invalid pagination cursor");
+      result = await agentStub.expectThrow("getWorkflowsPageForTest", {
+        cursor: btoa("not-json")
+      });
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain("Invalid pagination cursor");
 
       // Try with valid JSON but wrong structure
-      await expect(
-        agentStub.getWorkflowsPageForTest({
-          cursor: btoa(JSON.stringify({ wrong: "structure" }))
-        })
-      ).rejects.toThrow("Invalid pagination cursor");
+      result = await agentStub.expectThrow("getWorkflowsPageForTest", {
+        cursor: btoa(JSON.stringify({ wrong: "structure" }))
+      });
+      expect(result.threw).toBe(true);
+      expect(result.message).toContain("Invalid pagination cursor");
     });
   });
 
@@ -939,10 +976,14 @@ describe("workflow operations", () => {
 
       // The sendApprovalEvent helper wraps sendWorkflowEvent
       // We can't fully test without a real workflow, but we can verify
-      // the method exists and can be called
-      await expect(
-        agentStub.sendApprovalEvent("non-existent-wf", true, "test reason")
-      ).rejects.toThrow(); // Will throw because workflow doesn't exist
+      // the method exists and throws when workflow doesn't exist
+      const result = await agentStub.expectThrow(
+        "sendApprovalEvent",
+        "non-existent-wf",
+        true,
+        "test reason"
+      );
+      expect(result.threw).toBe(true);
     });
   });
 });
