@@ -43,10 +43,11 @@
     "@types/escape-html": "^1.0.4",
     "@types/react": "^19.2.13",
     "@types/yargs": "^17.0.35",
+    "@x402/core": "^2.3.0",
+    "@x402/evm": "^2.3.0",
     "ai": "^6.0.77",
     "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
-    "x402": "^1.1.0",
     "zod": "^4.3.6"
   },
   "peerDependencies": {
@@ -54,10 +55,11 @@
     "@ai-sdk/react": "^3.0.0",
     "@cloudflare/ai-chat": "^0.0.6",
     "@cloudflare/codemode": "^0.0.6",
+    "@x402/core": "^2.0.0",
+    "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",
     "react": "^19.0.0",
     "viem": ">=2.0.0",
-    "x402": "^0.7.1",
     "zod": "^3.25.0 || ^4.0.0"
   },
   "peerDependenciesMeta": {
@@ -67,10 +69,13 @@
     "@ai-sdk/react": {
       "optional": true
     },
-    "viem": {
+    "@x402/core": {
       "optional": true
     },
-    "x402": {
+    "@x402/evm": {
+      "optional": true
+    },
+    "viem": {
       "optional": true
     }
   },
@@ -176,15 +181,12 @@
   ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "check:test": "npm run check:test:workers && npm run check:test:react && npm run check:test:cli",
-    "check:test:cli": "vitest -r src/cli-tests --watch false",
-    "check:test:react": "vitest -r src/react-tests --watch false",
-    "check:test:workers": "vitest -r src/tests --watch false",
     "evals": "(cd evals; evalite)",
-    "test": "npm run test:workers && npm run test:react && npm run test:cli",
+    "test": "vitest --run -r src/tests && vitest --run -r src/react-tests && vitest --run -r src/cli-tests && vitest --run -r src/x402-tests",
     "test:cli": "vitest -r src/cli-tests",
-    "test:react": "vitest -r src/react-tests",
     "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent",
-    "test:workers": "vitest -r src/tests"
+    "test:react": "vitest -r src/react-tests",
+    "test:workers": "vitest -r src/tests",
+    "test:x402": "vitest -r src/x402-tests"
   }
 }

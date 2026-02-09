@@ -1,5 +1,5 @@
 /**
- * X402 MCP Integration
+ * X402 MCP Integration (v2)
  *
  * Based on:
  * - Coinbase's x402 (Apache 2.0): https://github.com/coinbase/x402
@@ -20,30 +20,67 @@ import type {
   ToolAnnotations
 } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodRawShape } from "zod";
-import { base, baseSepolia, type Chain } from "viem/chains";
+import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 
-import { processPriceToAtomicAmount } from "x402/shared";
-import { exact } from "x402/schemes";
-import { useFacilitator } from "x402/verify";
+// v2 imports from @x402/core
+import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
+import type { FacilitatorConfig, ResourceConfig } from "@x402/core/server";
+import { x402Client } from "@x402/core/client";
 import type {
-  FacilitatorConfig,
-  Network,
   PaymentPayload,
   PaymentRequirements,
-  Wallet
-} from "x402/types";
-import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import { createWalletClient, http, type Account } from "viem";
-import { createPaymentHeader } from "x402/client";
+  PaymentRequired,
+  Network
+} from "@x402/core/types";
+
+// v2 imports from @x402/evm
+import { registerExactEvmScheme as registerServerEvmScheme } from "@x402/evm/exact/server";
+import { registerExactEvmScheme as registerClientEvmScheme } from "@x402/evm/exact/client";
+import type { ClientEvmSigner } from "@x402/evm";
+
+// Re-export commonly used types for consumer convenience
+export type {
+  PaymentRequirements,
+  PaymentRequired,
+  Network
+} from "@x402/core/types";
+export type { FacilitatorConfig } from "@x402/core/server";
+export type { ClientEvmSigner } from "@x402/evm";
+
+/**
+ * Map of legacy v1 network names to CAIP-2 identifiers.
+ * Allows backward compatibility with v1 config.
+ */
+const LEGACY_NETWORK_MAP: Record<string, string> = {
+  "base-sepolia": "eip155:84532",
+  base: "eip155:8453",
+  ethereum: "eip155:1",
+  sepolia: "eip155:11155111"
+};
+
+/**
+ * Normalize a network identifier to CAIP-2 format.
+ * Accepts both legacy v1 names ("base-sepolia") and CAIP-2 ("eip155:84532").
+ */
+export function normalizeNetwork(network: string): Network {
+  return (LEGACY_NETWORK_MAP[network] ?? network) as Network;
+}
 
 /*
   ======= SERVER SIDE =======
 */
 
 export type X402Config = {
-  network: Network;
+  /**
+   * Network identifier.
+   * Accepts both legacy names ("base-sepolia") and CAIP-2 format ("eip155:84532").
+   */
+  network: string;
+  /** Payment recipient address */
   recipient: `0x${string}`;
-  facilitator: FacilitatorConfig;
+  /** Facilitator configuration. Defaults to https://x402.org/facilitator */
+  facilitator?: FacilitatorConfig;
+  /** @deprecated No longer used in v2. The protocol version is determined automatically. */
   version?: number;
 };
 
@@ -59,11 +96,30 @@ export interface X402AugmentedServer {
 }
 
 export function withX402<T extends McpServer>(
-  server: McpServer,
+  server: T,
   cfg: X402Config
 ): T & X402AugmentedServer {
-  const { verify, settle } = useFacilitator(cfg.facilitator);
-  const x402Version = cfg.version ?? 1;
+  const network = normalizeNetwork(cfg.network);
+  const facilitatorConfig: FacilitatorConfig = cfg.facilitator ?? {
+    url: "https://x402.org/facilitator"
+  };
+
+  // Create v2 resource server with facilitator client
+  const facilitatorClient = new HTTPFacilitatorClient(facilitatorConfig);
+  const resourceServer = new x402ResourceServer(facilitatorClient);
+  registerServerEvmScheme(resourceServer);
+
+  // Lazy initialization: fetch supported kinds from facilitator on first use
+  let initPromise: Promise<void> | null = null;
+  function ensureInitialized(): Promise<void> {
+    if (!initPromise) {
+      initPromise = resourceServer.initialize().catch((err) => {
+        initPromise = null; // allow retry on failure
+        throw err;
+      });
+    }
+    return initPromise;
+  }
 
   function paidTool<Args extends ZodRawShape>(
     name: string,
@@ -85,34 +141,42 @@ export function withX402<T extends McpServer>(
         }
       },
       (async (args, extra) => {
-        // Build PaymentRequirements for this call
-        const atomic = processPriceToAtomicAmount(priceUSD, cfg.network);
-        if ("error" in atomic) {
-          const payload = { x402Version, error: "PRICE_COMPUTE_FAILED" };
+        await ensureInitialized();
+
+        // Build v2 payment requirements for this tool call
+        const resourceConfig: ResourceConfig = {
+          scheme: "exact",
+          payTo: cfg.recipient,
+          price: priceUSD,
+          network,
+          maxTimeoutSeconds: 300
+        };
+
+        let requirements: PaymentRequirements[];
+        try {
+          requirements =
+            await resourceServer.buildPaymentRequirements(resourceConfig);
+        } catch {
+          const payload = { x402Version: 2, error: "PRICE_COMPUTE_FAILED" };
           return {
             isError: true,
             _meta: { "x402/error": payload },
             content: [{ type: "text", text: JSON.stringify(payload) }]
           } as const;
         }
-        const { maxAmountRequired, asset } = atomic;
-        const requirements = {
-          scheme: "exact" as const,
-          network: cfg.network,
-          maxAmountRequired,
-          payTo: cfg.recipient,
-          asset: asset.address,
-          maxTimeoutSeconds: 300,
-          resource: `x402://${name}`,
-          mimeType: "application/json" as const,
+
+        const resourceInfo = {
+          url: `x402://${name}`,
           description,
-          extra: "eip712" in asset ? asset.eip712 : undefined
+          mimeType: "application/json"
         };
 
-        // Get token either from MCP _meta or from header
+        // Get payment token from MCP _meta or HTTP headers
+        // Support both v2 (PAYMENT-SIGNATURE) and v1 (X-PAYMENT) header names
         const headers = extra?.requestInfo?.headers ?? {};
         const token =
           (extra?._meta?.["x402/payment"] as string | undefined) ??
+          headers["PAYMENT-SIGNATURE"] ??
           headers["X-PAYMENT"];
 
         const paymentRequired = (
@@ -120,9 +184,10 @@ export function withX402<T extends McpServer>(
           extraFields: Record<string, unknown> = {}
         ) => {
           const payload = {
-            x402Version,
+            x402Version: 2,
             error: reason,
-            accepts: [requirements],
+            resource: resourceInfo,
+            accepts: requirements,
             ...extraFields
           };
           return {
@@ -134,23 +199,39 @@ export function withX402<T extends McpServer>(
 
         if (!token || typeof token !== "string") return paymentRequired();
 
-        // Decode & verify
-        let decoded: PaymentPayload;
+        // Decode the payment payload (base64-encoded JSON)
+        let paymentPayload: PaymentPayload;
         try {
-          decoded = exact.evm.decodePayment(token);
-          decoded.x402Version = x402Version;
+          paymentPayload = JSON.parse(atob(token));
         } catch {
           return paymentRequired("INVALID_PAYMENT");
         }
 
-        const vr = await verify(decoded, requirements);
-        if (!vr.isValid) {
-          return paymentRequired(vr.invalidReason ?? "INVALID_PAYMENT", {
-            payer: vr.payer
-          });
+        // Find matching requirements for this payment
+        const matchingReq = resourceServer.findMatchingRequirements(
+          requirements,
+          paymentPayload
+        );
+        if (!matchingReq) {
+          return paymentRequired("INVALID_PAYMENT");
         }
 
-        // Execute tool
+        // Verify payment with facilitator
+        try {
+          const vr = await resourceServer.verifyPayment(
+            paymentPayload,
+            matchingReq
+          );
+          if (!vr.isValid) {
+            return paymentRequired(vr.invalidReason ?? "INVALID_PAYMENT", {
+              payer: vr.payer
+            });
+          }
+        } catch {
+          return paymentRequired("INVALID_PAYMENT");
+        }
+
+        // Execute the tool callback
         let result: CallToolResult;
         let failed = false;
         try {
@@ -173,10 +254,13 @@ export function withX402<T extends McpServer>(
           };
         }
 
-        // Settle only on success
+        // Settle payment only on success
         if (!failed) {
           try {
-            const s = await settle(decoded, requirements);
+            const s = await resourceServer.settlePayment(
+              paymentPayload,
+              matchingReq
+            );
             if (s.success) {
               result._meta ??= {};
               result._meta["x402/payment-response"] = {
@@ -213,17 +297,6 @@ export function withX402<T extends McpServer>(
   ======= CLIENT SIDE =======
 */
 
-const toChain = (network: Network): Chain => {
-  switch (network) {
-    case "base":
-      return base;
-    case "base-sepolia":
-      return baseSepolia;
-    default:
-      throw new Error(`Unsupported network: ${network}`);
-  }
-};
-
 export interface X402AugmentedClient {
   callTool(
     x402ConfirmationCallback:
@@ -238,49 +311,69 @@ export interface X402AugmentedClient {
 }
 
 export type X402ClientConfig = {
-  network: Network; // we only support base and base-sepolia for now
-  account: Account;
+  /**
+   * EVM account/signer for signing payment authorizations.
+   * Use `privateKeyToAccount()` from viem/accounts to create one.
+   */
+  account: ClientEvmSigner;
+  /**
+   * Preferred network identifier (optional).
+   * Accepts both legacy names ("base-sepolia") and CAIP-2 format ("eip155:84532").
+   * When set, the client prefers payment requirements matching this network.
+   * If omitted, the client automatically selects from available requirements.
+   */
+  network?: string;
+  /** Maximum payment value in atomic units (default: 0.10 USDC = 100000) */
   maxPaymentValue?: bigint;
+  /** @deprecated No longer used in v2. The protocol version is determined automatically. */
   version?: number;
-  confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>; // Confirmation callback for payment
+  /** Confirmation callback for payment approval */
+  confirmationCallback?: (payment: PaymentRequirements[]) => Promise<boolean>;
 };
 
 export function withX402Client<T extends MCPClient>(
   client: T,
   x402Config: X402ClientConfig
 ): X402AugmentedClient & T {
-  const { network, account, version } = x402Config;
-  const wallet = createWalletClient({
-    account,
-    transport: http(),
-    chain: toChain(network)
-  });
+  const { account } = x402Config;
 
-  const maxPaymentValue = x402Config.maxPaymentValue ?? BigInt(0.1 * 10 ** 6); // 0.10 USDC
+  const maxPaymentValue = x402Config.maxPaymentValue ?? BigInt(100_000); // 0.10 USDC
+
+  // Create v2 x402 payment client with EVM scheme support
+  const paymentClient = new x402Client();
+  registerClientEvmScheme(paymentClient, { signer: account });
+
+  // If a preferred network is specified, register a policy to prefer it
+  if (x402Config.network) {
+    const preferredNetwork = normalizeNetwork(x402Config.network);
+    paymentClient.registerPolicy((_version, reqs) => {
+      const matching = reqs.filter((r) => r.network === preferredNetwork);
+      return matching.length > 0 ? matching : reqs;
+    });
+  }
 
   const _listTools = client.listTools.bind(client);
 
   // Wrap the original method to include payment information in the description
   const listTools: typeof _listTools = async (params, options) => {
     const toolsRes = await _listTools(params, options);
-    toolsRes.tools = toolsRes.tools.map((tool) => {
-      let description = tool.description;
-      // Check _meta for payment information (agents-x402/ is our extension for pre-advertising prices)
-      if (tool._meta?.["agents-x402/paymentRequired"]) {
-        const cost = tool._meta?.["agents-x402/priceUSD"]
-          ? `$${tool._meta?.["agents-x402/priceUSD"]}`
-          : "an unknown amount";
-        description += ` (This is a paid tool, you will be charged ${cost} for its execution)`;
-      }
-      return {
-        ...tool,
-        description
-      };
-    });
-
-    // Wrap each tool to add payment support
-
-    return toolsRes;
+    return {
+      ...toolsRes,
+      tools: toolsRes.tools.map((tool) => {
+        let description = tool.description;
+        // Check _meta for payment information (agents-x402/ is our extension for pre-advertising prices)
+        if (tool._meta?.["agents-x402/paymentRequired"]) {
+          const cost = tool._meta?.["agents-x402/priceUSD"]
+            ? `$${tool._meta?.["agents-x402/priceUSD"]}`
+            : "an unknown amount";
+          description += ` (This is a paid tool, you will be charged ${cost} for its execution)`;
+        }
+        return {
+          ...tool,
+          description
+        };
+      })
+    };
   };
 
   const _callTool = client.callTool.bind(client);
@@ -295,13 +388,12 @@ export function withX402Client<T extends MCPClient>(
       | typeof CompatibilityCallToolResultSchema,
     options?: RequestOptions
   ): ReturnType<typeof client.callTool> => {
-    // call the tool
+    // Call the tool
     const res = await _callTool(params, resultSchema, options);
-    console.log("res", res);
 
-    // If it errored and returned accepts, we need to confirm payment
+    // Check for x402 payment required error in response metadata
     const maybeX402Error = res._meta?.["x402/error"] as
-      | { accepts: PaymentRequirements[] }
+      | (PaymentRequired & Record<string, unknown>)
       | undefined;
 
     if (
@@ -315,7 +407,7 @@ export function withX402Client<T extends MCPClient>(
       const confirmationCallback =
         x402ConfirmationCallback ?? x402Config.confirmationCallback;
 
-      // Use the x402 confirmation callback if provided
+      // Use the confirmation callback if provided
       if (confirmationCallback && !(await confirmationCallback(accepts))) {
         return {
           isError: true,
@@ -323,35 +415,59 @@ export function withX402Client<T extends MCPClient>(
         };
       }
 
-      // Pick the first exact-scheme requirement that matches our network
-      // (we're only setting one on the McpAgent side for now)
-      const req =
-        accepts.find((a) => a?.scheme === "exact" && a?.network === network) ??
-        accepts[0];
+      // Check max payment value against the first requirement's amount
+      const selectedReq = accepts[0];
+      if (!selectedReq || selectedReq.scheme !== "exact") return res;
 
-      if (!req || req.scheme !== "exact") return res;
-
-      const maxAmountRequired = BigInt(req.maxAmountRequired);
-      if (maxAmountRequired > maxPaymentValue) {
+      let amount: bigint;
+      try {
+        amount = BigInt(selectedReq.amount);
+      } catch {
+        return res; // malformed amount — return original error
+      }
+      if (amount > maxPaymentValue) {
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `Payment exceeds client cap: ${maxAmountRequired} > ${maxPaymentValue}`
+              text: `Payment exceeds client cap: ${amount} > ${maxPaymentValue}`
             }
           ]
         };
       }
 
-      // Use x402/client to get the X-PAYMENT token
-      const token = await createPaymentHeader(
-        wallet as Wallet,
-        version ?? 1,
-        req
-      );
+      // Reconstruct the PaymentRequired response for the v2 x402 client
+      const paymentRequiredResponse: PaymentRequired = {
+        x402Version: (maybeX402Error.x402Version as number) ?? 2,
+        resource: (maybeX402Error.resource as PaymentRequired["resource"]) ?? {
+          url: "",
+          description: "",
+          mimeType: "application/json"
+        },
+        accepts,
+        extensions: maybeX402Error.extensions as
+          | Record<string, unknown>
+          | undefined
+      };
 
-      // Call the tool with the payment token
+      // Create the payment payload using the v2 x402 client
+      let paymentPayload: PaymentPayload;
+      try {
+        paymentPayload = await paymentClient.createPaymentPayload(
+          paymentRequiredResponse
+        );
+      } catch {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "Failed to create payment payload" }]
+        };
+      }
+
+      // Encode the payment payload as a base64 JSON token for MCP transport
+      const token = btoa(JSON.stringify(paymentPayload));
+
+      // Retry the tool call with the payment token
       return _callTool(
         {
           ...params,
@@ -369,7 +485,12 @@ export function withX402Client<T extends MCPClient>(
   };
 
   const _client = client as X402AugmentedClient & T;
-  _client.listTools = listTools;
+  Object.defineProperty(_client, "listTools", {
+    value: listTools,
+    writable: false,
+    enumerable: false,
+    configurable: true
+  });
   Object.defineProperty(_client, "callTool", {
     value: callToolWithPayment,
     writable: false,

@@ -1,9 +1,13 @@
 import { Agent, getAgentByName, type Connection, type WSMessage } from "agents";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
-import { withX402, withX402Client, type X402Config } from "agents/x402";
+import {
+  withX402,
+  withX402Client,
+  type X402Config,
+  type PaymentRequirements
+} from "agents/x402";
 import { z } from "zod";
-import type { PaymentRequirements } from "x402/types";
 import { privateKeyToAccount } from "viem/accounts";
 import ui from "./ui";
 
@@ -36,9 +40,9 @@ export class PayAgent extends Agent<Env> {
 
     const { id } = await this.mcp.connect("http://localhost:8787/mcp");
 
-    // Build the x402 MCP client
+    // Build the x402 MCP client (v2 — network auto-selected from payment requirements)
     this.x402Client = withX402Client(this.mcp.mcpConnections[id].client, {
-      network: "base-sepolia",
+      network: "eip155:84532",
       account
     });
   }
@@ -46,7 +50,7 @@ export class PayAgent extends Agent<Env> {
   async onMessage(conn: Connection, message: WSMessage) {
     if (typeof message === "string") {
       try {
-        const parsed = JSON.parse(message as string);
+        const parsed = JSON.parse(message);
         if (parsed?.type) {
           switch (parsed.type) {
             case "confirm":
@@ -94,7 +98,7 @@ export class PayAgent extends Agent<Env> {
 
 // Create an MCP server with paid tools
 const X402_CONFIG: X402Config = {
-  network: "base-sepolia",
+  network: "eip155:84532", // Base Sepolia (CAIP-2 format)
   recipient: process.env.MCP_ADDRESS as `0x${string}`,
   facilitator: { url: "https://x402.org/facilitator" } // Payment facilitator URL
 };

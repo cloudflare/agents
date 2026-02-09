@@ -57,10 +57,7 @@
   "license": "MIT",
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "check:test": "npm run check:test:workers && npm run check:test:react",
-    "check:test:react": "vitest -r src/react-tests --watch false",
-    "check:test:workers": "vitest -r src/tests --watch false",
-    "test": "npm run test:workers && npm run test:react",
+    "test": "vitest --run -r src/tests && vitest --run -r src/react-tests",
     "test:react": "vitest -r src/react-tests",
     "test:workers": "vitest -r src/tests"
   }

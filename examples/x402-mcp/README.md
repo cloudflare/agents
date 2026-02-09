@@ -1,6 +1,6 @@
 # x402 MCP Example
 
-This example demonstrates how to create paid MCP tools using the [x402 payment protocol](https://x402.org) with Cloudflare Agents.
+This example demonstrates how to create paid MCP tools using the [x402 payment protocol](https://x402.org) v2 with Cloudflare Agents.
 
 ## Overview
 
@@ -39,7 +39,7 @@ import { withX402 } from "agents/x402";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
 const server = withX402(new McpServer({ name: "PayMCP", version: "1.0.0" }), {
-  network: "base-sepolia",
+  network: "eip155:84532", // Base Sepolia (CAIP-2 format; legacy "base-sepolia" also accepted)
   recipient: "0x...",
   facilitator: { url: "https://x402.org/facilitator" }
 });
@@ -66,7 +66,7 @@ import { privateKeyToAccount } from "viem/accounts";
 const account = privateKeyToAccount(env.PRIVATE_KEY);
 
 const x402Client = withX402Client(mcpClient, {
-  network: "base-sepolia",
+  network: "eip155:84532", // optional — auto-selects from payment requirements
   account
 });
 
