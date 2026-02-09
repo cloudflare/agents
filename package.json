@@ -89,7 +89,7 @@
     "esbuild": "^0.25.1"
   },
   "lint-staged": {
-    "*": [
+    "*.{js,mjs,cjs,jsx,ts,mts,cts,tsx,vue,astro,svelte,css}": [
       "oxfmt --write"
     ]
   },
