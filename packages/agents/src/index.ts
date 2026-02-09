@@ -3513,6 +3513,28 @@ export class Agent<
     return mcpState;
   }
 
+  /**
+   * Create the OAuth provider used when connecting to MCP servers that require authentication.
+   *
+   * Override this method in a subclass to supply a custom OAuth provider implementation,
+   * for example to use pre-registered client credentials, mTLS-based authentication,
+   * or any other OAuth flow beyond dynamic client registration.
+   *
+   * @example
+   * // Custom OAuth provider
+   * class MyAgent extends Agent {
+   *   createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+   *     return new MyCustomOAuthProvider(
+   *       this.ctx.storage,
+   *       this.name,
+   *       callbackUrl
+   *     );
+   *   }
+   * }
+   *
+   * @param callbackUrl The OAuth callback URL for the authorization flow
+   * @returns An {@link AgentsOAuthProvider} instance used by {@link addMcpServer}
+   */
   createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
     return new DurableObjectOAuthClientProvider(
       this.ctx.storage,

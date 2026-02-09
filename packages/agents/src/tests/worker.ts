@@ -20,6 +20,7 @@ export {
   TestScheduleAgent,
   TestWorkflowAgent,
   TestOAuthAgent,
+  TestCustomOAuthAgent,
   TestReadonlyAgent,
   TestCallableAgent,
   TestParentAgent,
@@ -42,6 +43,7 @@ import type {
   TestCaseSensitiveAgent,
   TestUserNotificationAgent,
   TestOAuthAgent,
+  TestCustomOAuthAgent,
   TestMcpJurisdiction,
   TestDestroyScheduleAgent,
   TestReadonlyAgent,
@@ -64,6 +66,7 @@ export type Env = {
   CaseSensitiveAgent: DurableObjectNamespace<TestCaseSensitiveAgent>;
   UserNotificationAgent: DurableObjectNamespace<TestUserNotificationAgent>;
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
+  TestCustomOAuthAgent: DurableObjectNamespace<TestCustomOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;

@@ -192,6 +192,23 @@ this.mcp.configureOAuthCallback({
 });
 ```
 
+### Custom OAuth Provider
+
+By default, agents use dynamic client registration to authenticate with MCP servers. If you need to use a different OAuth strategy — such as pre-registered client credentials, mTLS-based authentication, or other mechanisms — override the `createOAuthProvider` method in your agent subclass:
+
+```typescript
+import { Agent } from "agents";
+import type { AgentsOAuthProvider } from "agents";
+
+class MyAgent extends Agent {
+  createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+    return new MyCustomOAuthProvider(this.ctx.storage, this.name, callbackUrl);
+  }
+}
+```
+
+Your custom class must implement the `AgentsOAuthProvider` interface, which extends the MCP SDK's `OAuthClientProvider` with additional properties (`authUrl`, `clientId`, `serverId`) and methods (`checkState`, `consumeState`, `deleteCodeVerifier`) used by the agent's MCP connection lifecycle.
+
 ## Using MCP Capabilities
 
 Once connected, access the server's capabilities:

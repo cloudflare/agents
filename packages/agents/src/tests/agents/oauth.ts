@@ -1,4 +1,6 @@
 import { Agent } from "../../index.ts";
+import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
+import type { AgentsOAuthProvider } from "../../mcp/do-oauth-client-provider";
 import type { MCPClientConnection } from "../../mcp/client-connection";
 
 // Test Agent for OAuth client side flows
@@ -210,5 +212,67 @@ export class TestOAuthAgent extends Agent<Record<string, unknown>> {
   resetMcpStateRestoredFlag(): void {
     // @ts-expect-error - accessing private property for testing
     this._mcpConnectionsInitialized = false;
+  }
+
+  testCreateOAuthProvider(callbackUrl: string): {
+    isDurableObjectProvider: boolean;
+    callbackUrl: string;
+  } {
+    const provider = this.createOAuthProvider(callbackUrl);
+    return {
+      isDurableObjectProvider:
+        provider instanceof DurableObjectOAuthClientProvider,
+      callbackUrl: String(provider.redirectUrl ?? "")
+    };
+  }
+}
+
+// Test Agent that overrides createOAuthProvider with a custom implementation
+export class TestCustomOAuthAgent extends Agent<Record<string, unknown>> {
+  observability = undefined;
+
+  private _customProviderCallbackUrl: string | undefined;
+
+  createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+    this._customProviderCallbackUrl = callbackUrl;
+    // Return a minimal mock that satisfies the interface
+    return {
+      authUrl: undefined,
+      clientId: "custom-client-id",
+      serverId: undefined,
+      redirectUrl: callbackUrl,
+      get clientMetadata() {
+        return { redirect_uris: [callbackUrl] };
+      },
+      get clientUri() {
+        return callbackUrl;
+      },
+      checkState: async () => ({ valid: false }),
+      consumeState: async () => {},
+      deleteCodeVerifier: async () => {},
+      clientInformation: async () => undefined,
+      saveClientInformation: async () => {},
+      tokens: async () => undefined,
+      saveTokens: async () => {},
+      state: async () => "mock-state",
+      redirectToAuthorization: async () => {},
+      invalidateCredentials: async () => {},
+      saveCodeVerifier: async () => {},
+      codeVerifier: async () => "mock-verifier"
+    } as AgentsOAuthProvider;
+  }
+
+  testCreateOAuthProvider(callbackUrl: string): {
+    isDurableObjectProvider: boolean;
+    clientId: string | undefined;
+    callbackUrl: string | undefined;
+  } {
+    const provider = this.createOAuthProvider(callbackUrl);
+    return {
+      isDurableObjectProvider:
+        provider instanceof DurableObjectOAuthClientProvider,
+      clientId: provider.clientId,
+      callbackUrl: this._customProviderCallbackUrl
+    };
   }
 }

@@ -32,6 +32,10 @@
         "name": "TestOAuthAgent"
       },
       {
+        "class_name": "TestCustomOAuthAgent",
+        "name": "TestCustomOAuthAgent"
+      },
+      {
         "class_name": "TestMcpJurisdiction",
         "name": "TEST_MCP_JURISDICTION"
       },
@@ -111,6 +115,7 @@
         "TestUserNotificationAgent",
         "TestRaceAgent",
         "TestOAuthAgent",
+        "TestCustomOAuthAgent",
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
         "TestReadonlyAgent",
