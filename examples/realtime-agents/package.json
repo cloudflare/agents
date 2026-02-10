@@ -9,5 +9,9 @@
     "start": "wrangler dev",
     "test": "vitest",
     "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "ai": "^6.0.78",
+    "workers-ai-provider": "^3.0.4"
   }
 }

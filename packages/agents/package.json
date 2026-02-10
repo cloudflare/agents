@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
+    "@cloudflare/realtimekit": "^1.1.7-agent.1",
     "@modelcontextprotocol/sdk": "1.25.2",
     "cron-schedule": "^6.0.0",
     "json-schema": "^0.4.0",

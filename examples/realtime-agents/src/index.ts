@@ -1,56 +1,66 @@
 import {
-  DataKind,
   DeepgramSTT,
   ElevenLabsTTS,
   RealtimeAgent,
   RealtimeKitTransport,
-  RealtimePipelineComponent,
-  SpeakResponse
+  type RealtimeKitClient
 } from "agents/realtime";
 
 import { type AgentContext, routeAgentRequest } from "agents";
-import RealtimeKitClient from "@cloudflare/realtimekit";
 import { env } from "cloudflare:workers";
+import { streamText } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
 
-const GATEWAY_ID = "aig-worker-testing";
+const workersai = createWorkersAI({ binding: env.AI });
 
-export class RealtimeVoiceAgent extends RealtimeAgent {
+export class RealtimeVoiceAgent extends RealtimeAgent<Env> {
   constructor(ctx: AgentContext, env: Env) {
-    const rtk = new RealtimeKitTransport({
-      meetingId: "bbb9e53e-c839-4c84-b0cd-b8ef18ed8da2"
+    super(ctx, env);
+    const rtk = new RealtimeKitTransport();
+
+    // The keys for Elevenlabs and Deepgram can also be stored inside the AI Gateway with BYOK.
+    const tts = new ElevenLabsTTS({
+      apiKey: env.ELEVENLABS_API_KEY,
+      voice_id: env.ELEVENLABS_VOICE_ID
     });
+    const stt = new DeepgramSTT({ apiKey: env.DEEPGRAM_API_KEY });
 
-    // The keys for Elevenlabs and Deepgram are stored inside the AIGateway BYOK.
-    // You can also pass the keys as parameters to the constructors if needed.
-    const tts = new ElevenLabsTTS();
-    const stt = new DeepgramSTT();
-
-    super(ctx, env, env.AI, GATEWAY_ID);
-
-    this.setPipeline([rtk, stt, this, tts, rtk]);
+    this.setPipeline([rtk, stt, this, tts, rtk], env.AI, env.AI_GATEWAY_ID); // AI_GATEWAY_ID is optional
   }
 
   onRealtimeMeeting(meeting: RealtimeKitClient): void | Promise<void> {
-    meeting.participants.joined.on("participantJoined", (participant) => {
-      this.speak(`Participant Joined ${participant.name}`);
+    // Set the agent's name in the meeting
+    meeting.self.setName("Agent");
+
+    // Speak when the agent joins the room
+    meeting.self.on("roomJoined", () => {
+      this.speak("Hello, I'm your AI assistant!");
     });
   }
 
-  async onRealtimeTranscript(text: string): Promise<SpeakResponse | undefined> {
-    // Get conversation history to provide context to the LLM
-    const history = this.getFormattedHistory(10); // Last 10 exchanges
-
-    // Build prompt with conversation context
-    const prompt = history
-      ? `Previous conversation:\n${history}\n\nUser: ${text}\nAssistant:`
-      : `User: ${text}\nAssistant:`;
-
-    const response = await env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-      prompt,
-      stream: true
+  async onRealtimeTranscript(text: string) {
+    const history = this.getTranscriptHistory();
+    const { textStream } = streamText({
+      model: workersai("@cf/meta/llama-3-8b-instruct"),
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a helpful assistant, responding to the user with their speech transcribed as text."
+        },
+        ...history.map((entry) => ({
+          role: entry.role,
+          content: entry.text
+        })),
+        {
+          role: "user",
+          content: text
+        }
+      ]
     });
+
     return {
-      text: response,
+      text: textStream,
       canInterrupt: true
     };
   }

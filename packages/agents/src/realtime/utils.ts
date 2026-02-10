@@ -21,8 +21,8 @@ export type RealtimeWebsocketMessage = {
 export function isRealtimeWebsocketMessage(
   msg: unknown
 ): msg is RealtimeWebsocketMessage {
-  const m = msg as any;
-  const p = m?.payload as any;
+  const m = msg as RealtimeWebsocketMessage;
+  const p = m?.payload;
   return (
     typeof msg === "object" &&
     msg !== null &&

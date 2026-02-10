@@ -3,9 +3,8 @@ export {
   DataKind,
   DeepgramSTT,
   ElevenLabsTTS,
-  MediaProcessor,
   RealtimeKitTransport,
-  TextProcessor,
+  type RealtimeKitClient,
   type RealtimeKitMediaFilter,
   type RealtimeKitMeetingConfig,
   type RealtimePipelineComponent
