@@ -664,6 +664,12 @@ export function useAgentChat<
 
   const processedToolCalls = useRef(new Set<string>());
   const isResolvingToolsRef = useRef(false);
+  // Counter to force the tool resolution effect to re-run after completing
+  // a batch of tool calls. Without this, if new tool calls arrive while
+  // isResolvingToolsRef is true (e.g. server auto-continuation), the effect
+  // exits early and never retriggers because the ref reset doesn't cause
+  // a re-render.
+  const [toolResolutionTrigger, setToolResolutionTrigger] = useState(0);
 
   // Fix for issue #728: Track client-side tool results in local state
   // to ensure tool parts show output-available immediately after execution.
@@ -807,6 +813,9 @@ export function useAgentChat<
             // The server will continue the conversation after applying tool results.
           } finally {
             isResolvingToolsRef.current = false;
+            // Trigger a re-run so any tool calls that arrived while we were
+            // busy (e.g. from server auto-continuation) get picked up.
+            setToolResolutionTrigger((c) => c + 1);
           }
         })();
       }
@@ -816,7 +825,8 @@ export function useAgentChat<
     experimental_automaticToolResolution,
     useChatHelpers.addToolResult,
     toolsRequiringConfirmation,
-    autoContinueAfterToolResult
+    autoContinueAfterToolResult,
+    toolResolutionTrigger
   ]);
 
   // Helper function to send tool output to server

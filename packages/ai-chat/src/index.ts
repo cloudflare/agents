@@ -243,6 +243,13 @@ export class AIChatAgent<
    */
   private _pendingResumeConnections: Set<string> = new Set();
 
+  /**
+   * Client tool schemas from the most recent chat request.
+   * Stored so they can be passed to onChatMessage during tool continuations.
+   * @internal
+   */
+  private _lastClientTools: ClientToolSchema[] | undefined;
+
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
 
@@ -332,6 +339,11 @@ export class AIChatAgent<
             messages: ChatMessage[];
             clientTools?: ClientToolSchema[];
           };
+
+          // Store client tools for use during tool continuations
+          if (clientTools && clientTools.length > 0) {
+            this._lastClientTools = clientTools;
+          }
 
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
@@ -509,7 +521,8 @@ export class AIChatAgent<
                             );
                           },
                           {
-                            abortSignal
+                            abortSignal,
+                            clientTools: this._lastClientTools
                           }
                         );
 
