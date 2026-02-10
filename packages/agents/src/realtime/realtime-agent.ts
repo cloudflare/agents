@@ -24,7 +24,10 @@ import { camelCaseToKebabCase } from "../client";
 import { randomUUID } from "node:crypto";
 
 export type SpeakResponse = {
-  text: string | ReadableStream<Uint8Array>;
+  text:
+    | string
+    | ReadableStream<Uint8Array>
+    | (AsyncIterable<string> & ReadableStream<string>);
   canInterrupt?: boolean;
 };
 
@@ -595,12 +598,36 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       return;
     }
 
-    // Handle streaming response
+    // Handle AI SDK streamText output (AsyncIterable<string>)
+    // Check if it's an AsyncIterable that yields strings directly (AI SDK textStream)
+    if (Symbol.asyncIterator in response.text) {
+      let fullResponse = "";
+      for await (const chunk of response.text as AsyncIterable<string>) {
+        if (typeof chunk === "string" && chunk) {
+          fullResponse += chunk;
+          this.speak(chunk, contextId);
+        }
+      }
+      if (fullResponse) {
+        await this.addTranscript("assistant", fullResponse);
+      }
+      return;
+    }
+
+    // Handle ReadableStream<Uint8Array> (NDJSON format)
     let fullResponse = "";
-    for await (const chunk of processNDJSONStream(response.text.getReader())) {
-      if (!chunk.response) continue;
-      fullResponse += chunk.response;
-      this.speak(chunk.response, contextId);
+    const stream = response.text as ReadableStream<Uint8Array>;
+    for await (const chunk of processNDJSONStream(stream.getReader())) {
+      if (chunk.response) {
+        fullResponse += chunk.response;
+        this.speak(chunk.response, contextId);
+      } else if (chunk.choices && chunk.choices.length > 0) {
+        const choice = chunk.choices[0];
+        if (choice.delta?.content && choice.delta?.role === "assistant") {
+          fullResponse += choice.delta.content;
+          this.speak(choice.delta.content, contextId);
+        }
+      }
     }
 
     // Store the complete assistant response after streaming
