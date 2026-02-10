@@ -152,7 +152,7 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
 });
 
 describe("OAuth2 MCP Client - Error Handling", () => {
-  it("should reject callback without code parameter", async () => {
+  it("should redirect to origin on callback without code parameter", async () => {
     const agentId = env.TestOAuthAgent.newUniqueId();
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
@@ -168,10 +168,14 @@ describe("OAuth2 MCP Client - Error Handling", () => {
 
     const response = await agentStub.fetch(
       new Request(
-        `${callbackUrl}?state=${createStateWithSetup(agentStub, serverId)}`
+        `${callbackUrl}?state=${createStateWithSetup(agentStub, serverId)}`,
+        { redirect: "manual" }
       )
     );
-    expect(response.status).toBeGreaterThanOrEqual(400);
+
+    // Missing code triggers an auth error, surfaced via WebSocket not an error page
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("http://example.com/");
   });
 
   it("should not recognize callback without state parameter", async () => {
@@ -196,7 +200,7 @@ describe("OAuth2 MCP Client - Error Handling", () => {
 });
 
 describe("OAuth2 MCP Client - Error Surfacing", () => {
-  it("should return HTML error page when no callback config and auth fails", async () => {
+  it("should redirect to origin when no callback config and auth fails", async () => {
     const agentId = env.TestOAuthAgent.newUniqueId();
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
@@ -222,18 +226,17 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
 
     const response = await agentStub.fetch(
       new Request(
-        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access&state=${createStateWithSetup(agentStub, serverId)}`
+        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access&state=${createStateWithSetup(agentStub, serverId)}`,
+        { redirect: "manual" }
       )
     );
 
-    expect(response.status).toBe(400);
-    expect(response.headers.get("content-type")).toContain("text/html");
-    const body = await response.text();
-    expect(body).toContain("MCP Authentication Failed");
-    expect(body).toContain("User denied access");
+    // Errors are surfaced via WebSocket broadcast (onMcpUpdate), not a server-rendered page
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("http://example.com/");
   });
 
-  it("should return HTML error page when only successRedirect is configured and auth fails", async () => {
+  it("should redirect to origin when only successRedirect is configured and auth fails", async () => {
     const agentId = env.TestOAuthAgent.newUniqueId();
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
@@ -259,18 +262,18 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
 
     const response = await agentStub.fetch(
       new Request(
-        `${callbackUrl}?error=access_denied&state=${createStateWithSetup(agentStub, serverId)}`
+        `${callbackUrl}?error=access_denied&state=${createStateWithSetup(agentStub, serverId)}`,
+        { redirect: "manual" }
       )
     );
 
-    // Should show HTML error page, NOT silently redirect to origin
-    expect(response.status).toBe(400);
-    expect(response.headers.get("content-type")).toContain("text/html");
-    const body = await response.text();
-    expect(body).toContain("MCP Authentication Failed");
+    // No errorRedirect configured, so falls through to default redirect.
+    // Errors are surfaced via WebSocket broadcast (onMcpUpdate), not a server-rendered page.
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("http://example.com/");
   });
 
-  it("should return proper error when connection is not in memory (not a raw 500)", async () => {
+  it("should redirect to origin when connection is not in memory (not a raw 500)", async () => {
     const agentId = env.TestOAuthAgent.newUniqueId();
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
@@ -287,16 +290,14 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
 
     const response = await agentStub.fetch(
       new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`
+        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`,
+        { redirect: "manual" }
       )
     );
 
-    // Should be a 400 with HTML error page, not a raw 500
-    expect(response.status).toBe(400);
-    expect(response.headers.get("content-type")).toContain("text/html");
-    const body = await response.text();
-    expect(body).toContain("MCP Authentication Failed");
-    expect(body).toContain(serverId);
+    // Should redirect to origin, not a raw 500. Errors reach the client via WebSocket.
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe("http://example.com/");
   });
 
   it("should return proper error via customHandler when connection is not in memory", async () => {
