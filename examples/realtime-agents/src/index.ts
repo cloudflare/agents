@@ -8,6 +8,10 @@ import {
 
 import { type AgentContext, routeAgentRequest } from "agents";
 import { env } from "cloudflare:workers";
+import { streamText } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
+
+const workersai = createWorkersAI({ binding: env.AI });
 
 export class RealtimeVoiceAgent extends RealtimeAgent<Env> {
   constructor(ctx: AgentContext, env: Env) {
@@ -15,32 +19,48 @@ export class RealtimeVoiceAgent extends RealtimeAgent<Env> {
     const rtk = new RealtimeKitTransport();
 
     // The keys for Elevenlabs and Deepgram can also be stored inside the AI Gateway with BYOK.
-    const tts = new ElevenLabsTTS({ apiKey: env.ELEVENLABS_API_KEY });
+    const tts = new ElevenLabsTTS({
+      apiKey: env.ELEVENLABS_API_KEY,
+      voice_id: env.ELEVENLABS_VOICE_ID
+    });
     const stt = new DeepgramSTT({ apiKey: env.DEEPGRAM_API_KEY });
 
-    this.setPipeline([rtk, stt, this, tts, rtk], env.AI, env.AI_GATEWAY_ID);
+    this.setPipeline([rtk, stt, this, tts, rtk], env.AI, env.AI_GATEWAY_ID); // AI_GATEWAY_ID is optional
   }
 
   onRealtimeMeeting(meeting: RealtimeKitClient): void | Promise<void> {
-    meeting.participants.joined.on("participantJoined", (participant) => {
-      this.speak(`Participant Joined ${participant.name}`);
+    // Set the agent's name in the meeting
+    meeting.self.setName("Agent");
+
+    // Speak when the agent joins the room
+    meeting.self.on("roomJoined", () => {
+      this.speak("Hello, I'm your AI assistant!");
     });
   }
 
   async onRealtimeTranscript(text: string) {
     const history = this.getTranscriptHistory();
-
-    const response = await env.AI.run("@cf/openai/gpt-oss-20b", {
-      instructions:
-        "You are a helpful assistant, provide a response to the user.",
-      input: history
-        .map((h) => ({ role: h.role, content: h.text }))
-        .concat({ role: "user", content: text }),
-      stream: true
+    const { textStream } = streamText({
+      model: workersai("@cf/meta/llama-3-8b-instruct"),
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a helpful assistant, responding to the user with their speech transcribed as text."
+        },
+        ...history.map((entry) => ({
+          role: entry.role,
+          content: entry.text
+        })),
+        {
+          role: "user",
+          content: text
+        }
+      ]
     });
 
     return {
-      text: response,
+      text: textStream,
       canInterrupt: true
     };
   }
