@@ -156,6 +156,21 @@
       "import": "./dist/ai-chat-v5-migration.js",
       "require": "./dist/ai-chat-v5-migration.js"
     },
+    "./voice": {
+      "types": "./dist/voice.d.ts",
+      "import": "./dist/voice.js",
+      "require": "./dist/voice.js"
+    },
+    "./voice-client": {
+      "types": "./dist/voice-client.d.ts",
+      "import": "./dist/voice-client.js",
+      "require": "./dist/voice-client.js"
+    },
+    "./voice-react": {
+      "types": "./dist/voice-react.d.ts",
+      "import": "./dist/voice-react.js",
+      "require": "./dist/voice-react.js"
+    },
     "./ai-react": {
       "types": "./dist/ai-react.d.ts",
       "import": "./dist/ai-react.js",

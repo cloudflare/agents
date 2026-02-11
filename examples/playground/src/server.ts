@@ -33,6 +33,9 @@ export { ApprovalWorkflow } from "./demos/workflow/approval-workflow";
 export { ReceiveEmailAgent } from "./demos/email/receive-email-agent";
 export { SecureEmailAgent } from "./demos/email/secure-email-agent";
 
+// Voice agents
+export { PlaygroundVoiceAgent } from "./demos/voice/voice-agent";
+
 export default {
   /**
    * Email handler for Cloudflare Email Routing

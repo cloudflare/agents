@@ -25,6 +25,7 @@ These docs are complete and should be added to the official Cloudflare docs site
 | [resumable-streaming.md](./resumable-streaming.md)                 | Handling interrupted streams                                             | Low                |
 | [migration-to-ai-sdk-v5.md](./migration-to-ai-sdk-v5.md)           | AI SDK v5 migration guide                                                | Low                |
 | [migration-to-ai-sdk-v6.md](./migration-to-ai-sdk-v6.md)           | AI SDK v6 migration guide                                                | Low                |
+| [voice.md](./voice.md)                                             | Voice agents: VoiceAgent, VoiceClient, useVoiceAgent, protocol reference | High               |
 
 ## Partially Covered on CF Docs
 

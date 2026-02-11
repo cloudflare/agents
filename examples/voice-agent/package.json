@@ -7,11 +7,16 @@
     "start": "vite dev",
     "build": "vite build",
     "deploy": "vite build && wrangler deploy",
-    "types": "wrangler types env.d.ts --include-runtime false"
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest run"
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "agents": "*"
+    "@cloudflare/agents-voice-elevenlabs": "*",
+    "agents": "*",
+    "ai": "^6.0.78",
+    "workers-ai-provider": "^3.0.5",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

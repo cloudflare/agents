@@ -114,6 +114,16 @@ const features = [
     ]
   },
   {
+    category: "Voice",
+    items: [
+      {
+        name: "Voice Chat",
+        path: "/voice/chat",
+        description: "Real-time voice conversation with STT/TTS"
+      }
+    ]
+  },
+  {
     category: "Email",
     items: [
       {

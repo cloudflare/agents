@@ -24,7 +24,8 @@ import {
   StackIcon,
   GitMergeIcon,
   ShieldIcon,
-  PaletteIcon
+  PaletteIcon,
+  MicrophoneIcon
 } from "@phosphor-icons/react";
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
@@ -166,6 +167,17 @@ const navigation: NavCategory[] = [
         label: "Pipeline",
         path: "/multi-agent/pipeline",
         icon: <GitMergeIcon size={16} />
+      }
+    ]
+  },
+  {
+    label: "Voice",
+    icon: <MicrophoneIcon size={16} />,
+    items: [
+      {
+        label: "Voice Chat",
+        path: "/voice/chat",
+        icon: <MicrophoneIcon size={16} />
       }
     ]
   },

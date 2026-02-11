@@ -10,14 +10,14 @@
   "durable_objects": {
     "bindings": [
       {
-        "class_name": "VoiceAgent",
-        "name": "VoiceAgent"
+        "class_name": "MyVoiceAgent",
+        "name": "MyVoiceAgent"
       }
     ]
   },
   "migrations": [
     {
-      "new_sqlite_classes": ["VoiceAgent"],
+      "new_sqlite_classes": ["MyVoiceAgent"],
       "tag": "v1"
     }
   ],

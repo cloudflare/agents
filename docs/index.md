@@ -24,7 +24,7 @@
 - [Email Routing](./email.md) - Receiving and responding to emails
 - [Webhooks](./webhooks.md) - Receiving and sending webhook events
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)
-- TODO: [Voice & Audio](./voice-audio.md) - Voice calls, audio streaming, and speech-to-text
+- [Voice Agents](./voice.md) - Build voice agents with real-time speech-to-text, text-to-speech, and conversation persistence
 - TODO: [Messengers](./messengers.md) - Slack, Discord, Telegram, and other chat platforms
 
 ## Background Processing

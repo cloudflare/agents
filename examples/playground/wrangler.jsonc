@@ -4,6 +4,9 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
+  "ai": {
+    "binding": "AI"
+  },
   "durable_objects": {
     "bindings": [
       // Core demo agents
@@ -27,7 +30,9 @@
       { "name": "ApprovalAgent", "class_name": "ApprovalAgent" },
       // Email demo agents
       { "name": "ReceiveEmailAgent", "class_name": "ReceiveEmailAgent" },
-      { "name": "SecureEmailAgent", "class_name": "SecureEmailAgent" }
+      { "name": "SecureEmailAgent", "class_name": "SecureEmailAgent" },
+      // Voice demo agents
+      { "name": "PlaygroundVoiceAgent", "class_name": "PlaygroundVoiceAgent" }
     ]
   },
   "workflows": [
@@ -67,7 +72,9 @@
         "ApprovalAgent",
         // Email demo agents
         "ReceiveEmailAgent",
-        "SecureEmailAgent"
+        "SecureEmailAgent",
+        // Voice demo agents
+        "PlaygroundVoiceAgent"
       ]
     }
   ],
