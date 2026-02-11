@@ -22,6 +22,7 @@ export {
   TestOAuthAgent,
   TestCustomOAuthAgent,
   TestReadonlyAgent,
+  TestProtocolMessagesAgent,
   TestCallableAgent,
   TestParentAgent,
   TestChildAgent,
@@ -48,6 +49,7 @@ import type {
   TestMcpJurisdiction,
   TestDestroyScheduleAgent,
   TestReadonlyAgent,
+  TestProtocolMessagesAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
   TestAddMcpServerAgent,
@@ -72,6 +74,7 @@ export type Env = {
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
+  TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
