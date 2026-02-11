@@ -33,13 +33,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
   } | null = null;
   // Store captured body from onChatMessage options for testing
   private _capturedBody: Record<string, unknown> | undefined = undefined;
+  // Store captured clientTools from onChatMessage options for testing
+  private _capturedClientTools: unknown[] | undefined = undefined;
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
-    // Capture the body from options for testing
+    // Capture the body and clientTools from options for testing
     this._capturedBody = options?.body;
+    this._capturedClientTools = options?.clientTools;
 
     // Capture getCurrentAgent() context for testing
     const { agent, connection } = getCurrentAgent();
@@ -96,11 +99,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._capturedContext = null;
     this._nestedContext = null;
     this._capturedBody = undefined;
+    this._capturedClientTools = undefined;
   }
 
   @callable()
   getCapturedBody(): Record<string, unknown> | undefined {
     return this._capturedBody;
+  }
+
+  @callable()
+  getCapturedClientTools(): unknown[] | undefined {
+    return this._capturedClientTools;
   }
 
   @callable()
