@@ -24,13 +24,13 @@ export interface RealtimeKitMeetingConfig {
 export type RealtimeKitMediaFilter =
   | {
       media_kind: "audio";
-      stream_kind: "screenshare" | "microphone";
-      preset_name: string;
+      stream_kind: "screen_share" | "microphone";
+      preset_name?: string;
     }
   | {
       media_kind: "video";
-      stream_kind: "screenshare" | "webcam";
-      preset_name: string;
+      stream_kind: "screen_share" | "webcam";
+      preset_name?: string;
     };
 
 export class RealtimeKitTransport implements RealtimePipelineComponent {
@@ -44,7 +44,10 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
 
     this.#authToken = config?.authToken;
     this.filters =
-      config?.filters ??
+      config?.filters?.map((filter) => ({
+        ...filter,
+        preset_name: filter.preset_name ?? "*"
+      })) ??
       ([
         { media_kind: "audio", stream_kind: "microphone", preset_name: "*" }
       ] as const);

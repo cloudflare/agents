@@ -51,11 +51,14 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   private api?: RealtimeAPI;
   private pipeline: RealtimePipelineComponent[] = [];
   private agentUrl?: string;
-  private flowId?: string;
   private token?: string;
   private agentName: string;
   /** Array of transcript entries for the current conversation */
   public transcriptHistory: TranscriptEntry[];
+  /** Last video frame received from the client */
+  public lastVideoFrame: Uint8Array | null = null;
+  /** Current flow ID for the conversation */
+  public flowId?: string;
 
   #meeting?: RealtimeKitClient;
 
@@ -105,12 +108,15 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     };
   }
 
+  private gatewayId?: string;
+
   public setPipeline(
     pipeline: RealtimePipelineComponent[],
     ai: Ai,
     gatewayId?: string
   ) {
     const gatewayIdOrDefault = gatewayId ?? ":default";
+    this.gatewayId = gatewayIdOrDefault;
     this.api = new RealtimeAPI(ai, gatewayIdOrDefault);
 
     for (const component of pipeline) {
@@ -232,8 +238,9 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * @returns Response containing text to speak and whether it can be interrupted
    */
   async onRealtimeVideoFrame(
-    frame: string
-  ): Promise<SpeakResponse | undefined> {
+    frame: Uint8Array
+    // biome-ignore lint/suspicious/noConfusingVoidType: Users need not return a response
+  ): Promise<SpeakResponse | undefined | void> {
     return;
   }
 
@@ -315,33 +322,30 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     );
 
     // Create pipeline
-    try {
-      const {
-        id,
-        token,
-        elements: newElements
-      } = await this.api.createPipeline({
-        elements,
-        layers
+
+    const {
+      id,
+      token,
+      elements: newElements
+    } = await this.api.createPipeline({
+      elements,
+      layers
+    });
+    console.log(`[Pipeline provisioned] flowId: ${id}, token: ${token}`);
+
+    this.flowId = id;
+    this.token = token;
+
+    if (realtimeKitComponent) {
+      const realtimeKitElement = newElements.filter((e) => {
+        return e.name === realtimeKitComponent.name;
       });
-      console.log(`[Pipeline provisioned] flowId: ${id}, token: ${token}`);
-
-      this.flowId = id;
-      this.token = token;
-
-      if (realtimeKitComponent) {
-        const realtimeKitElement = newElements.filter((e) => {
-          return e.name === realtimeKitComponent.name;
-        });
-        if (!realtimeKitElement) {
-          throw new Error("RealtimeKit element not found in pipeline");
-        }
-        realtimeKitComponent.authToken = (
-          realtimeKitElement[0] as { auth_token: string }
-        ).auth_token;
+      if (!realtimeKitElement) {
+        throw new Error("RealtimeKit element not found in pipeline");
       }
-    } catch (e) {
-      console.log(e);
+      realtimeKitComponent.authToken = (
+        realtimeKitElement[0] as { auth_token: string }
+      ).auth_token;
     }
   }
 
@@ -479,11 +483,12 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
         }
       });
     }
-    const path = request.url.split(
+
+    const path = requestUrl.pathname.split(
       `agents/${this.agentName}/${this.name}/realtime`
     )[1];
 
-    switch (path.split("?")[0]) {
+    switch (path) {
       case "/rtk/produce": {
         const payload = await request.json<{
           producingTransportId: string;
@@ -662,7 +667,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
 
     // For now, audio frames are not handled by default
     // Users can override onMediaFrame if needed
-    console.warn("Audio frame received but not handled");
+    // TODO: Implement audio frame handling if needed
   }
 
   async #handleVideoMessage(message: RealtimeWebsocketMessage) {
@@ -689,9 +694,8 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       return;
     }
 
-    // For now, video frames are not handled by default
-    // Users can override onMediaFrame if needed
-    console.warn("Video frame received but not handled");
+    this.lastVideoFrame = frameData;
+    this.onRealtimeVideoFrame(frameData);
   }
 
   override getConnectionTags(
