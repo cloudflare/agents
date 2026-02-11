@@ -14,6 +14,7 @@ import type {
 import { tool, jsonSchema } from "ai";
 import {
   Agent,
+  agentContext,
   type AgentContext,
   type Connection,
   type ConnectionContext,
@@ -27,8 +28,6 @@ import {
 } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
 import { nanoid } from "nanoid";
-
-import { agentContext } from "agents/internal_context";
 
 /**
  * Schema for a client-defined tool sent from the browser.

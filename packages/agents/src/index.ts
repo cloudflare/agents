@@ -1,5 +1,6 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { agentContext, type AgentEmail } from "./internal_context";
+export { agentContext } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
 
