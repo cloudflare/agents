@@ -350,9 +350,7 @@ export class AIChatAgent<
           };
 
           // Store client tools for use during tool continuations
-          if (clientTools && clientTools.length > 0) {
-            this._lastClientTools = clientTools;
-          }
+          this._lastClientTools = clientTools?.length ? clientTools : undefined;
 
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
@@ -443,6 +441,7 @@ export class AIChatAgent<
           this._activeRequestId = null;
           this._streamChunkIndex = 0;
           this._pendingResumeConnections.clear();
+          this._lastClientTools = undefined;
           this.messages = [];
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
