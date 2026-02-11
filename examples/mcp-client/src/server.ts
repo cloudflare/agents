@@ -13,22 +13,10 @@ export class MyAgent extends Agent {
         }
         // Show error briefly, then close the popup
         const error = result.authError || "Unknown error";
-        return new Response(
-          `<!DOCTYPE html>
-<html>
-<head><title>Authentication Failed</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:400px;margin:80px auto;padding:0 20px;text-align:center;">
-  <h2 style="color:#c00;">Authentication Failed</h2>
-  <p style="color:#666;">${error}</p>
-  <p style="color:#999;font-size:0.85em;">This window will close automatically...</p>
-  <script>setTimeout(() => window.close(), 3000);</script>
-</body>
-</html>`,
-          {
-            headers: { "content-type": "text/html" },
-            status: 400
-          }
-        );
+        return new Response(`Authentication Failed: ${error}`, {
+          headers: { "content-type": "text/html" },
+          status: 400
+        });
       }
     });
   }
