@@ -1,5 +1,5 @@
 ---
-"@cloudflare/ai-chat": minor
+"@cloudflare/ai-chat": patch
 ---
 
 Forward custom body fields from client requests to `onChatMessage` options
