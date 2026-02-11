@@ -25,6 +25,7 @@ export {
   TestCallableAgent,
   TestParentAgent,
   TestChildAgent,
+  TestQueueAgent,
   TestRaceAgent
 } from "./agents";
 
@@ -57,7 +58,8 @@ import type {
   TestBothHooksAgent,
   TestNoIdentityAgent,
   TestCallableAgent,
-  TestChildAgent
+  TestChildAgent,
+  TestQueueAgent
 } from "./agents";
 
 export type Env = {
@@ -81,6 +83,7 @@ export type Env = {
   TestNoIdentityAgent: DurableObjectNamespace<TestNoIdentityAgent>;
   TestCallableAgent: DurableObjectNamespace<TestCallableAgent>;
   TestChildAgent: DurableObjectNamespace<TestChildAgent>;
+  TestQueueAgent: DurableObjectNamespace<TestQueueAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;

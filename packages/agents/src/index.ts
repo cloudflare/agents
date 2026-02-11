@@ -1557,44 +1557,56 @@ export class Agent<
       return;
     }
     this._flushingQueue = true;
-    while (true) {
-      const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues
-      ORDER BY created_at ASC
-    `;
+    try {
+      while (true) {
+        const result = this.sql<QueueItem<string>>`
+        SELECT * FROM cf_agents_queues
+        ORDER BY created_at ASC
+      `;
 
-      if (!result || result.length === 0) {
-        break;
-      }
-
-      for (const row of result || []) {
-        const callback = this[row.callback as keyof Agent<Env>];
-        if (!callback) {
-          console.error(`callback ${row.callback} not found`);
-          continue;
+        if (!result || result.length === 0) {
+          break;
         }
-        const { connection, request, email } = agentContext.getStore() || {};
-        await agentContext.run(
-          {
-            agent: this,
-            connection,
-            request,
-            email
-          },
-          async () => {
-            // TODO: add retries and backoff
-            await (
-              callback as (
-                payload: unknown,
-                queueItem: QueueItem<string>
-              ) => Promise<void>
-            ).bind(this)(JSON.parse(row.payload as string), row);
+
+        for (const row of result || []) {
+          const callback = this[row.callback as keyof Agent<Env>];
+          if (!callback) {
+            console.error(`callback ${row.callback} not found`);
+            await this.dequeue(row.id);
+            continue;
+          }
+          const { connection, request, email } = agentContext.getStore() || {};
+          try {
+            await agentContext.run(
+              {
+                agent: this,
+                connection,
+                request,
+                email
+              },
+              async () => {
+                // TODO: add retries and backoff
+                await (
+                  callback as (
+                    payload: unknown,
+                    queueItem: QueueItem<string>
+                  ) => Promise<void>
+                ).bind(this)(JSON.parse(row.payload as string), row);
+              }
+            );
+          } catch (e) {
+            console.error(
+              `Queue callback ${String(row.callback)} failed for row ${row.id}:`,
+              e
+            );
+          } finally {
             await this.dequeue(row.id);
           }
-        );
+        }
       }
+    } finally {
+      this._flushingQueue = false;
     }
-    this._flushingQueue = false;
   }
 
   /**

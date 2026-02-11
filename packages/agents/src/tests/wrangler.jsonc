@@ -90,6 +90,10 @@
       {
         "class_name": "TestChildAgent",
         "name": "TestChildAgent"
+      },
+      {
+        "class_name": "TestQueueAgent",
+        "name": "TestQueueAgent"
       }
     ]
   },
@@ -129,7 +133,8 @@
         "TestBothHooksAgent",
         "TestNoIdentityAgent",
         "TestCallableAgent",
-        "TestChildAgent"
+        "TestChildAgent",
+        "TestQueueAgent"
       ],
       "tag": "v1"
     }
