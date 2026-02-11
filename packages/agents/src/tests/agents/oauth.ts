@@ -2,6 +2,7 @@ import { Agent } from "../../index.ts";
 import { DurableObjectOAuthClientProvider } from "../../mcp/do-oauth-client-provider";
 import type { AgentMcpOAuthProvider } from "../../mcp/do-oauth-client-provider";
 import type { MCPClientConnection } from "../../mcp/client-connection";
+import type { MCPClientOAuthResult } from "../../mcp/client.ts";
 
 // Test Agent for OAuth client side flows
 export class TestOAuthAgent extends Agent<Record<string, unknown>> {
@@ -19,11 +20,7 @@ export class TestOAuthAgent extends Agent<Record<string, unknown>> {
   }): void {
     if (config.useJsonHandler) {
       this.mcp.configureOAuthCallback({
-        customHandler: (result: {
-          serverId: string;
-          authSuccess: boolean;
-          authError?: string;
-        }) => {
+        customHandler: (result: MCPClientOAuthResult) => {
           return new Response(
             JSON.stringify({
               custom: true,
