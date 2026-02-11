@@ -14,7 +14,7 @@ import type {
 import { tool, jsonSchema } from "ai";
 import {
   Agent,
-  agentContext,
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
   type AgentContext,
   type Connection,
   type ConnectionContext,
