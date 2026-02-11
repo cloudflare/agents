@@ -136,11 +136,6 @@
       "import": "./dist/workflows.js",
       "require": "./dist/workflows.js"
     },
-    "./internal_context": {
-      "types": "./dist/internal_context.d.ts",
-      "import": "./dist/internal_context.js",
-      "require": "./dist/internal_context.js"
-    },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",

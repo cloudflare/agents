@@ -32,9 +32,3 @@ export type AgentContextStore = {
  */
 export const __DO_NOT_USE_WILL_BREAK__agentContext =
   new AsyncLocalStorage<AgentContextStore>();
-
-/**
- * @deprecated Use {@link __DO_NOT_USE_WILL_BREAK__agentContext} — kept only for
- * backward compatibility with the `agents/internal_context` subpath export.
- */
-export const agentContext = __DO_NOT_USE_WILL_BREAK__agentContext;
