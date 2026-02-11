@@ -13,7 +13,7 @@
   "author": "Sunil Pai <spai@cloudflare.com>",
   "private": true,
   "scripts": {
-    "build": "npm run build -w agents -w hono-agents -w @cloudflare/ai-chat -w @cloudflare/codemode -w @cloudflare/agents-voice-elevenlabs",
+    "build": "npm run build -w agents -w hono-agents -w @cloudflare/ai-chat -w @cloudflare/codemode -w @cloudflare/agents-voice-elevenlabs -w @cloudflare/agents-voice-twilio",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint examples/ packages/ guides/ openai-sdk/ site/ai-playground/",

@@ -294,6 +294,17 @@ export class VoiceClient {
     this.#emit("mutechange");
   }
 
+  /**
+   * Send a text message to the agent. The agent processes it through
+   * `onTurn()` (bypassing STT) and responds with text transcript and
+   * TTS audio (if in a call) or text-only (if not).
+   */
+  sendText(text: string): void {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
+      this.#socket.send(JSON.stringify({ type: "text_message", text }));
+    }
+  }
+
   // --- Voice protocol handler ---
 
   #handleJSONMessage(data: string): void {

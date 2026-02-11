@@ -29,6 +29,7 @@ export interface UseVoiceAgentReturn {
   startCall: () => Promise<void>;
   endCall: () => void;
   toggleMute: () => void;
+  sendText: (text: string) => void;
 }
 
 /**
@@ -93,6 +94,10 @@ export function useVoiceAgent(
   const startCall = useCallback(() => clientRef.current!.startCall(), []);
   const endCall = useCallback(() => clientRef.current!.endCall(), []);
   const toggleMute = useCallback(() => clientRef.current!.toggleMute(), []);
+  const sendText = useCallback(
+    (text: string) => clientRef.current!.sendText(text),
+    []
+  );
 
   return {
     status,
@@ -104,6 +109,7 @@ export function useVoiceAgent(
     error,
     startCall,
     endCall,
-    toggleMute
+    toggleMute,
+    sendText
   };
 }

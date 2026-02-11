@@ -14,11 +14,11 @@
     "@cloudflare/ai-chat": "*",
     "agents": "*",
     "ai": "^6.0.77",
-    "workers-ai-provider": "^3.0.4",
     "cronstrue": "^3.11.0",
     "nanoid": "^5.1.6",
     "postal-mime": "^2.7.3",
-    "react-router-dom": "^7.13.0"
+    "react-router-dom": "^7.13.0",
+    "workers-ai-provider": "^3.0.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

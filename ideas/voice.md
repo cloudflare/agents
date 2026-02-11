@@ -2,7 +2,7 @@
 
 ## The opportunity
 
-There is no voice agent framework in JavaScript. Pipecat is Python. LiveKit agents are Go/Python. Vapi is hosted and opaque. The JS/TS developer population — the largest in the world — has zero options for building voice agents.
+There is no voice agent framework in JavaScript that runs on the edge. Pipecat is Python-only. LiveKit has a Node.js SDK, but it requires a long-running server process, native WebRTC bindings, and persistent connections to a LiveKit SFU — it does not work in Workers or any edge runtime. Vapi is hosted and opaque. The JS/TS developer population building on serverless and edge platforms has zero options for building voice agents.
 
 The Agents SDK is uniquely positioned to fill this gap because it already has the primitives that turn a voice _pipeline_ into a voice _agent_: persistent state, SQL, scheduling, MCP tool use, workflows, React hooks, and bidirectional state sync. No other voice framework has any of these. They treat conversations as ephemeral. We don't.
 
@@ -377,17 +377,40 @@ async speakReminder(payload: { message: string }) {
 
 **Timeline:** Ongoing, community-driven.
 
-### Layer 4: SFU, video, telephony (future, optional)
+### Layer 4: Telephony, SFU, handoffs — STARTED
 
-**Goal:** Advanced use cases for those who need them. Explicitly separate.
+**Goal:** Multi-channel distribution. The same agent answers web, phone, text, and email.
 
-- **SFU transport**: WebRTC-grade audio, multi-participant. Same transport interface, backed by Cloudflare SFU WebSocket Adapter instead of direct WebSocket. Separate package (`agents/voice-sfu` or similar).
-- **Video ingestion**: SFU JPEG egress at ~1 FPS → feed to vision model. "Show me the product."
-- **Telephony**: SIP/PSTN bridge for phone calls. RealtimeKit has SIP interconnect.
-- **Agent-to-agent voice**: One agent calls another. Handoffs.
-- **RealtimeKit integration**: Agent joins an existing video meeting as a participant. Niche but valid.
+**What has been built:**
 
-**Timeline:** After Layers 0-2 are solid and there are real users. Don't build until someone asks.
+- `@cloudflare/agents-voice-twilio` — Twilio Media Streams adapter. Bridges Twilio's bidirectional WebSocket protocol (mulaw 8kHz, base64 JSON) to VoiceAgent's binary PCM protocol (16kHz, 16-bit LE). Handles mulaw decode/encode and sample rate conversion. Phone calls are routed to the same VoiceAgent Durable Object that handles web voice and text chat.
+- Agent handoff documentation — two patterns (client-side reconnect, server-side context transfer) documented in `docs/voice.md`.
+- SFU WebSocket adapter guide — documented how to bridge Cloudflare Realtime SFU WebRTC audio to VoiceAgent for use cases that need WebRTC-grade quality.
+
+**Decisions on what is IN scope:**
+
+1. **Telephony adapters** — thin packages that bridge provider WebSocket audio to VoiceAgent. Twilio is the first. Telnyx, Vonage, Plivo follow the same pattern. The SDK does NOT provision phone numbers — users bring their own from the telephony provider.
+2. **Agent handoff patterns** — documented, not built into SDK. Client-side handoff (disconnect/reconnect) and server-side context transfer (DO-to-DO RPC) are both viable. No special SDK machinery needed.
+3. **SFU integration** — documented as a guide, not SDK code. For the 5% of use cases that need WebRTC, use Cloudflare SFU with WebSocket adapter. The SDK stays WebSocket-native.
+
+**Decisions on what is OUT of scope:**
+
+1. **Video** — different modality, different models, different compute requirements. If built, it should be a separate feature (`VisionAgent`?), not bolted onto VoiceAgent.
+2. **RealtimeKit integration** — RTK is a meetings product. Coupling to it requires meeting creation, auth tokens, participant management, and destroys the "zero infrastructure" story. If someone needs AI in a meeting, they bridge RTK audio to VoiceAgent via SFU WebSocket adapter.
+3. **Agent-to-agent audio** — agents talking to each other via audio is wasteful. Use text/RPC for inter-agent communication. "Voice handoffs" are actually client reconnects, not audio-to-audio between DOs.
+4. **Phone number provisioning** — not the SDK's job. Twilio/Telnyx/Vonage handle this.
+
+**The multi-channel story:**
+
+```
+Web browser    →  VoiceClient (WebSocket)     →  ┐
+Phone call     →  Twilio adapter (WebSocket)  →  ├→  VoiceAgent (Durable Object)
+Text chat      →  sendText (WebSocket)        →  ┤     • same state
+Email          →  routeAgentEmail (HTTP)      →  ┘     • same conversation history
+                                                        • same tools / scheduling
+```
+
+No other platform can tell this story. One agent, every channel, same instance.
 
 ---
 
@@ -399,7 +422,7 @@ async speakReminder(payload: { message: string }) {
 | **1** | Client-side audio utilities       | Zero          | **Done**    | `agents/voice-client`, `agents/voice-react`  |
 | **2** | Server-side pipeline + hooks      | Zero          | **Done**    | `agents/voice` export                        |
 | **3** | Provider ecosystem, multi-modal   | User's choice | **Started** | `@cloudflare/agents-voice-elevenlabs` + docs |
-| **4** | SFU, video, telephony             | SFU API       | When needed | `agents/voice-sfu` export                    |
+| **4** | Telephony, SFU, handoffs          | User's choice | **Started** | `@cloudflare/agents-voice-twilio` + guides   |
 
 **Layers 0 through 2 added zero npm dependencies to the Agents SDK.** Workers AI models are bindings, audio handling is Web APIs and pure JS, the pipeline is TypeScript.
 
@@ -424,11 +447,40 @@ Detailed competitive analyses with architecture comparisons, gap assessments, an
 
 ## Open questions
 
-### Punted (independent of Layer 1/2 work, can answer later)
+### Punted
 
 - **Wire protocol**: What's the right format for audio frames over WebSocket? Raw PCM? Opus-encoded? What sample rate and chunk size minimize latency while keeping bandwidth reasonable? _Punted: this is a transport detail. Whatever format audio arrives in, the pipeline does the same thing. Can swap later without touching pipeline logic._
-- **Hibernation**: How does hibernation interact with active voice sessions? The DO hibernates when no JS is executing — do we need to keep the connection "warm" during pauses in conversation? _Punted: this is a Workers runtime behavior question. If it's a problem, fix is likely a keepalive ping (one-liner). Doesn't affect pipeline/hooks/client SDK design._
 - **Latency budget**: Competitive voice agents target <500ms end-to-end (user stops speaking → agent starts speaking). Is that achievable with Workers AI models + WebSocket transport? _Punted: the number matters for tuning, but the architecture that improves it is streaming TTS, which we're building anyway. Measure after streaming is in._
+
+### Analyzed: Hibernation and voice sessions
+
+Hibernation is ON by default (`static options = { hibernate: true }`). The DO evicts from memory when no JS is executing, but WebSocket connections and SQLite data survive.
+
+**What survives hibernation:** WebSocket connections (platform-managed), SQLite (`cf_voice_messages`), scheduled alarms.
+
+**What is lost on eviction:** `#audioBuffers` (accumulated PCM chunks), `#activePipeline` (AbortControllers for in-flight pipelines), any in-progress TTS synthesis or LLM streams.
+
+**When can hibernation happen during a voice call?** Only during pauses — when the pipeline finishes and the agent is "listening" but no audio chunks are arriving (user is silent, muted, or thinking). The window is small because even silence produces low-level audio data from the mic, but it is possible with a muted mic or very long pause.
+
+**Edge cases identified:**
+
+1. **Audio buffer loss during silence gaps.** User speaks, pauses mid-thought (no `end_of_speech` yet), DO hibernates, `#audioBuffers` evicted. When user resumes, pre-pause audio is gone. Worst case: one missed utterance. Unlikely in practice because the 500ms silence timer fires quickly.
+
+2. **Orphaned fetch requests.** If the DO hibernates while an LLM stream or TTS fetch is in-flight (very unlikely — JS is actively executing during pipeline), the AbortController is lost and the fetch is orphaned. No way to cancel it on wake.
+
+3. **`onConnect` sends wrong status on wake.** When the DO wakes from hibernation, partyserver calls `onConnect` for the connection that triggered it. Our `onConnect` sends `{ type: "status", status: "idle" }`. If the user was mid-call, this incorrectly tells the client the call ended. **This is a real bug** — the client receives "idle" while audio is still flowing from the mic.
+
+4. **`onStart` re-runs on wake.** Our `onStart` is idempotent (`CREATE TABLE IF NOT EXISTS`), so this is fine. But user overrides that are not idempotent (e.g., sending a greeting, incrementing a counter) would re-fire.
+
+5. **PartySocket reconnect does not restore call state.** `VoiceClient` uses `PartySocket` (auto-reconnecting WebSocket). If the connection drops and reconnects, the client does not re-send `start_call` — it just sets `connected = true`. The user must manually restart the call.
+
+**Recommended fixes (in order of priority):**
+
+1. **Keepalive during active calls.** Start a `setInterval` on `start_call` (e.g., every 5 seconds, execute a no-op) to keep JS running and prevent hibernation. Stop on `end_call`/`onClose`. This is the most robust solution — prevents all hibernation edge cases during active calls. Cost: DO stays alive (billable) for the duration of the call, which it should be anyway.
+
+2. **Smarter `onConnect` status.** Track active call state in SQLite (survives hibernation). On `onConnect`, check if the connection was previously in a call and restore the correct status instead of always sending "idle". Alternatively, use partyserver's per-connection `.state` (also survives hibernation) to store call status.
+
+3. **Accept buffer loss gracefully.** Even with the keepalive, there may be edge cases. The pipeline already handles empty/short buffers (returns to "listening" if audio is too short). No additional code needed — just document that mid-pause audio may be lost in extreme hibernation scenarios.
 
 ### Resolved
 

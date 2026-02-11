@@ -6,10 +6,11 @@ import {
   PhoneDisconnectIcon,
   WaveformIcon,
   SpinnerGapIcon,
-  SpeakerHighIcon
+  SpeakerHighIcon,
+  PaperPlaneRightIcon
 } from "@phosphor-icons/react";
-import { Button, Surface, Text } from "@cloudflare/kumo";
-import { useEffect, useRef } from "react";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
+import { useEffect, useRef, useState } from "react";
 import { DemoWrapper } from "../../layout/DemoWrapper";
 import { ConnectionStatus } from "../../components/ConnectionStatus";
 
@@ -61,10 +62,12 @@ export function VoiceDemo() {
     error,
     startCall,
     endCall,
-    toggleMute
+    toggleMute,
+    sendText
   } = useVoiceAgent({ agent: "playground-voice-agent" });
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const [textInput, setTextInput] = useState("");
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -225,6 +228,34 @@ export function VoiceDemo() {
             </>
           )}
         </div>
+
+        {/* Text input — type to the agent */}
+        <form
+          className="flex gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (textInput.trim() && connected) {
+              sendText(textInput.trim());
+              setTextInput("");
+            }
+          }}
+        >
+          <Input
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            placeholder={connected ? "Type a message..." : "Connecting..."}
+            disabled={!connected || status === "thinking"}
+            className="flex-1"
+          />
+          <Button
+            type="submit"
+            variant="secondary"
+            disabled={!connected || !textInput.trim() || status === "thinking"}
+            icon={<PaperPlaneRightIcon size={16} weight="fill" />}
+          >
+            Send
+          </Button>
+        </form>
       </div>
     </DemoWrapper>
   );

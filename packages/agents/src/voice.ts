@@ -280,6 +280,12 @@ export class VoiceAgent<
       case "interrupt":
         this.#handleInterrupt(connection);
         break;
+      case "text_message":
+        this.#handleTextMessage(
+          connection,
+          (parsed as unknown as { text: string }).text
+        );
+        break;
       default:
         // Non-voice JSON message — pass to user hook
         this.onNonVoiceMessage(connection, message);
@@ -598,6 +604,119 @@ export class VoiceAgent<
     this.#sendJSON(connection, { type: "status", status: "listening" });
 
     this.onInterrupt(connection);
+  }
+
+  // --- Internal: text message handling ---
+
+  /**
+   * Handle a text message — bypass STT, go straight to onTurn.
+   * If a voice call is active (audio buffers exist), responds with TTS audio.
+   * If no call is active, responds with text-only transcript.
+   */
+  async #handleTextMessage(connection: Connection, text: string) {
+    if (!text || text.trim().length === 0) return;
+
+    const userText = text.trim();
+    console.log(`[VoiceAgent] Text message: "${userText}"`);
+
+    // Cancel any in-flight pipeline
+    this.#activePipeline.get(connection.id)?.abort();
+    this.#activePipeline.delete(connection.id);
+
+    const abortController = new AbortController();
+    this.#activePipeline.set(connection.id, abortController);
+    const { signal } = abortController;
+
+    const pipelineStart = Date.now();
+    this.#sendJSON(connection, { type: "status", status: "thinking" });
+
+    // Save user message and send transcript
+    this.saveMessage("user", userText);
+    this.#sendJSON(connection, {
+      type: "transcript",
+      role: "user",
+      text: userText
+    });
+
+    try {
+      const context: VoiceTurnContext = {
+        connection,
+        messages: this.getConversationHistory(),
+        signal
+      };
+
+      const llmStart = Date.now();
+      const turnResult = await this.onTurn(userText, context);
+
+      if (signal.aborted) return;
+
+      // Determine if we should produce audio (call is active)
+      const isInCall = this.#audioBuffers.has(connection.id);
+
+      if (isInCall) {
+        // In a call — respond with TTS audio (same as voice pipeline)
+        this.#sendJSON(connection, { type: "status", status: "speaking" });
+
+        const { text: fullText } = await this.#streamResponse(
+          connection,
+          turnResult,
+          llmStart,
+          pipelineStart,
+          signal
+        );
+
+        if (signal.aborted) return;
+        this.saveMessage("assistant", fullText);
+        this.#sendJSON(connection, { type: "status", status: "listening" });
+      } else {
+        // Not in a call — respond with text only (no TTS)
+        if (typeof turnResult === "string") {
+          this.#sendJSON(connection, {
+            type: "transcript_start",
+            role: "assistant"
+          });
+          this.#sendJSON(connection, {
+            type: "transcript_end",
+            text: turnResult
+          });
+          this.saveMessage("assistant", turnResult);
+        } else {
+          // Stream text tokens without TTS
+          this.#sendJSON(connection, {
+            type: "transcript_start",
+            role: "assistant"
+          });
+          let fullText = "";
+          for await (const token of turnResult) {
+            if (signal.aborted) break;
+            fullText += token;
+            this.#sendJSON(connection, {
+              type: "transcript_delta",
+              text: token
+            });
+          }
+          this.#sendJSON(connection, {
+            type: "transcript_end",
+            text: fullText
+          });
+          this.saveMessage("assistant", fullText);
+        }
+        this.#sendJSON(connection, { type: "status", status: "idle" });
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      console.error("[VoiceAgent] Text pipeline error:", error);
+      this.#sendJSON(connection, {
+        type: "error",
+        message: error instanceof Error ? error.message : "Text pipeline failed"
+      });
+      this.#sendJSON(connection, {
+        type: "status",
+        status: this.#audioBuffers.has(connection.id) ? "listening" : "idle"
+      });
+    } finally {
+      this.#activePipeline.delete(connection.id);
+    }
   }
 
   // --- Internal: audio pipeline ---
