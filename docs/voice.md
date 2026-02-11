@@ -332,7 +332,8 @@ const {
   error, // string | null
   startCall, // () => Promise<void>
   endCall, // () => void
-  toggleMute // () => void
+  toggleMute, // () => void
+  sendText // (text: string) => void
 } = useVoiceAgent({
   agent: "my-agent", // Agent class name (kebab-cased)
   name: "default", // Instance name (optional)
@@ -372,6 +373,7 @@ client.disconnect();
 await client.startCall();
 client.endCall();
 client.toggleMute();
+client.sendText("Hello from text!"); // Multi-modal: send text instead of speech
 
 // Events
 client.addEventListener("statuschange", () => {
@@ -403,13 +405,14 @@ The voice protocol uses the same WebSocket connection as the Agent. Binary frame
 
 ### Client to server
 
-| Message                     | Description                                             |
-| --------------------------- | ------------------------------------------------------- |
-| `{ type: "start_call" }`    | Begin a voice session                                   |
-| `{ type: "end_call" }`      | End the voice session                                   |
-| `{ type: "end_of_speech" }` | Client detected silence — process the audio buffer      |
-| `{ type: "interrupt" }`     | User spoke during playback — abort the current pipeline |
-| Binary (ArrayBuffer)        | Raw PCM audio (16 kHz, mono, 16-bit signed LE)          |
+| Message                          | Description                                                   |
+| -------------------------------- | ------------------------------------------------------------- |
+| `{ type: "start_call" }`         | Begin a voice session                                         |
+| `{ type: "end_call" }`           | End the voice session                                         |
+| `{ type: "end_of_speech" }`      | Client detected silence — process the audio buffer            |
+| `{ type: "interrupt" }`          | User spoke during playback — abort the current pipeline       |
+| `{ type: "text_message", text }` | Send a text message — bypasses STT, goes to `onTurn` directly |
+| Binary (ArrayBuffer)             | Raw PCM audio (16 kHz, mono, 16-bit signed LE)                |
 
 ### Server to client
 
@@ -424,6 +427,51 @@ The voice protocol uses the same WebSocket connection as the Agent. Binary frame
 | `{ type: "error", message }`         | Pipeline error                                                                         |
 | Binary (ArrayBuffer)                 | MP3 audio for playback (streamed per-sentence)                                         |
 
+## Multi-modal: voice + text
+
+The same `VoiceAgent` can handle both voice and text input on the same connection. Use `sendText()` on the client to send a text message — the server bypasses STT and feeds the text directly to `onTurn()`.
+
+### How it works
+
+- **During a call**: text messages are processed through `onTurn()` and the response is spoken aloud (TTS audio) AND sent as transcript text.
+- **Outside a call**: text messages are processed through `onTurn()` and the response is sent as transcript text only (no TTS audio).
+- **Conversation history is shared** — voice and text messages go into the same SQLite conversation history, so the agent has full context regardless of modality.
+
+### Client usage
+
+```tsx
+const { sendText, transcript, connected } = useVoiceAgent({
+  agent: "my-agent"
+});
+
+// Send a text message (works with or without an active call)
+sendText("What is the weather like today?");
+```
+
+Or with the vanilla `VoiceClient`:
+
+```ts
+client.sendText("What is the weather like today?");
+```
+
+### Server — no changes needed
+
+The `VoiceAgent` handles `text_message` automatically. Your `onTurn()` method receives both voice transcripts and text messages — it does not need to distinguish between them.
+
+### Custom handling
+
+If you need different behavior for text vs voice, override `onNonVoiceMessage`:
+
+```ts
+class MyAgent extends VoiceAgent<Env> {
+  onNonVoiceMessage(connection, message) {
+    // Handle custom message types that are not text_message
+  }
+}
+```
+
+Note that `text_message` is handled by the voice protocol before `onNonVoiceMessage` is called. To intercept text messages specifically, override the `afterTranscribe` hook — text messages pass through it with the text content.
+
 ## Workers AI models
 
 The default pipeline uses these Workers AI models, all accessed via the `AI` binding (no API keys):
@@ -435,3 +483,135 @@ The default pipeline uses these Workers AI models, all accessed via the `AI` bin
 | VAD   | `@cf/pipecat-ai/smart-turn-v2` | Turn detection / end-of-speech validation |
 
 Override any model via `voiceOptions` or by overriding the corresponding method (`transcribe`, `synthesize`, `checkEndOfTurn`).
+
+## Telephony (phone calls)
+
+Connect phone calls to your VoiceAgent using the `@cloudflare/agents-voice-twilio` adapter. The same agent that handles web voice and text chat can answer the phone.
+
+```ts
+import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
+import { routeAgentRequest } from "agents";
+import { TwilioAdapter } from "@cloudflare/agents-voice-twilio";
+
+export class MyAgent extends VoiceAgent<Env> {
+  async onTurn(transcript: string, context: VoiceTurnContext) {
+    return "Hello! How can I help you today?";
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    // Twilio sends WebSocket connections to this path
+    if (url.pathname === "/twilio") {
+      return TwilioAdapter.handleRequest(request, env, "MyAgent");
+    }
+
+    // Normal agent routing for web clients
+    return (
+      (await routeAgentRequest(request, env)) ??
+      new Response("Not found", { status: 404 })
+    );
+  }
+};
+```
+
+In Twilio, configure a TwiML webhook that streams media to your Worker:
+
+```xml
+<Response>
+  <Connect>
+    <Stream url="wss://your-worker.your-subdomain.workers.dev/twilio" />
+  </Connect>
+</Response>
+```
+
+The adapter bridges Twilio's mulaw 8kHz audio to VoiceAgent's 16kHz PCM protocol automatically. Conversation history, state, tools, and scheduling are shared across all channels.
+
+## Agent handoffs
+
+Transfer a voice call from one agent to another mid-conversation. Two patterns:
+
+### Client-side handoff
+
+The simplest approach. Agent A tells the client to reconnect to Agent B:
+
+1. Agent A sends a custom message: `{ type: "handoff", agent: "billing-agent", context: {...} }`
+2. The client disconnects from Agent A
+3. The client connects to Agent B, optionally passing context via query parameters
+4. Agent B picks up the conversation
+
+On the server, use `onNonVoiceMessage` or a tool to trigger the handoff:
+
+```ts
+class ReceptionistAgent extends VoiceAgent<Env> {
+  async onTurn(transcript: string, context: VoiceTurnContext) {
+    // LLM decides a handoff is needed
+    if (needsBilling(transcript)) {
+      // Send handoff instruction to client
+      context.connection.send(
+        JSON.stringify({
+          type: "handoff",
+          agent: "billing-agent",
+          reason: "billing inquiry"
+        })
+      );
+      return "Let me connect you to our billing team.";
+    }
+    return "How can I help you?";
+  }
+}
+```
+
+On the client, handle the handoff message:
+
+```ts
+client.addEventListener("message", (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === "handoff") {
+    client.disconnect();
+    // Connect to the new agent
+    const newClient = new VoiceClient({ agent: msg.agent });
+    newClient.connect();
+    newClient.startCall();
+  }
+});
+```
+
+### Server-side context transfer
+
+For seamless handoffs where conversation history needs to transfer, use DO-to-DO communication:
+
+1. Agent A fetches Agent B's DO stub via `env.BillingAgent`
+2. Agent A passes conversation context to Agent B (e.g., via a callable method)
+3. Agent A instructs the client to reconnect
+
+The conversation history in SQLite is per-agent-instance. To share history, either:
+
+- Pass recent messages as context when connecting to the new agent
+- Use a shared external data store
+- Copy relevant messages between agent instances via RPC
+
+## WebRTC via SFU
+
+For use cases that require WebRTC-grade audio quality (bad mobile networks, NAT traversal, packet loss concealment), you can use the Cloudflare Realtime SFU with a WebSocket adapter to bridge WebRTC audio to your VoiceAgent.
+
+This is an advanced setup that most applications do not need. The default WebSocket transport works well for 1:1 conversations on reasonable networks.
+
+### Architecture
+
+```
+Browser (WebRTC) → Cloudflare SFU → WebSocket Adapter → VoiceAgent (Durable Object)
+```
+
+The SFU handles:
+
+- WebRTC negotiation (ICE, STUN/TURN, DTLS)
+- Codec transcoding
+- Jitter buffering and packet loss concealment
+- NAT traversal
+
+The WebSocket Adapter bridges SFU audio tracks to WebSocket frames that your VoiceAgent can process. See the [Cloudflare Realtime SFU documentation](https://developers.cloudflare.com/realtime/sfu/) and the [WebSocket Adapter guide](https://developers.cloudflare.com/realtime/sfu/media-transport-adapters/websocket-adapter/) for setup instructions.
+
+Note that the SFU sends 48kHz stereo PCM (protobuf framed), which differs from the VoiceAgent's expected 16kHz mono PCM. You will need a resampling layer similar to the Twilio adapter.
