@@ -65,6 +65,14 @@ export type OnChatMessageOptions = {
    * in `useAgentChat` for client-side execution.
    */
   clientTools?: ClientToolSchema[];
+  /**
+   * Custom body data sent from the client via `prepareSendMessagesRequest`
+   * or the AI SDK's `body` option in `sendMessage`.
+   *
+   * Contains all fields from the request body except `messages` and `clientTools`,
+   * which are handled separately.
+   */
+  body?: Record<string, unknown>;
 };
 
 /**
@@ -335,9 +343,10 @@ export class AIChatAgent<
         ) {
           const { body } = data.init;
           const parsed = JSON.parse(body as string);
-          const { messages, clientTools } = parsed as {
+          const { messages, clientTools, ...customBody } = parsed as {
             messages: ChatMessage[];
             clientTools?: ClientToolSchema[];
+            [key: string]: unknown;
           };
 
           // Store client tools for use during tool continuations
@@ -395,7 +404,11 @@ export class AIChatAgent<
                   },
                   {
                     abortSignal,
-                    clientTools
+                    clientTools,
+                    body:
+                      Object.keys(customBody).length > 0
+                        ? customBody
+                        : undefined
                   }
                 );
 

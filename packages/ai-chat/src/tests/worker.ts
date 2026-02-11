@@ -1,5 +1,9 @@
-import { AIChatAgent } from "../";
-import type { UIMessage as ChatMessage } from "ai";
+import { AIChatAgent, type OnChatMessageOptions } from "../";
+import type {
+  UIMessage as ChatMessage,
+  StreamTextOnFinishCallback,
+  ToolSet
+} from "ai";
 import { callable, getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 
@@ -27,8 +31,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
     hasConnection: boolean;
     connectionId: string | undefined;
   } | null = null;
+  // Store captured body from onChatMessage options for testing
+  private _capturedBody: Record<string, unknown> | undefined = undefined;
 
-  async onChatMessage() {
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: OnChatMessageOptions
+  ) {
+    // Capture the body from options for testing
+    this._capturedBody = options?.body;
+
     // Capture getCurrentAgent() context for testing
     const { agent, connection } = getCurrentAgent();
     this._capturedContext = {
@@ -83,6 +95,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
   clearCapturedContext(): void {
     this._capturedContext = null;
     this._nestedContext = null;
+    this._capturedBody = undefined;
+  }
+
+  @callable()
+  getCapturedBody(): Record<string, unknown> | undefined {
+    return this._capturedBody;
   }
 
   @callable()
