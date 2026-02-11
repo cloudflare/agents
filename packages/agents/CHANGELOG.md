@@ -1,5 +1,26 @@
 # @cloudflare/agents
 
+## 0.4.1
+
+### Patch Changes
+
+- [#890](https://github.com/cloudflare/agents/pull/890) [`22dbd2c`](https://github.com/cloudflare/agents/commit/22dbd2c70445be185bd106abb1638c2071419c11) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Fix `_flushQueue()` permanently blocking when a queued callback throws
+
+  A throwing callback in `_flushQueue()` previously caused the failing row to never be dequeued, creating an infinite retry loop that blocked all subsequent queued tasks. Additionally, `_flushingQueue` was never reset to `false` on error, permanently locking the queue for the lifetime of the Durable Object instance.
+
+  The fix wraps each callback invocation in try-catch-finally so that failing items are always dequeued and subsequent items continue processing. The `_flushingQueue` flag is now reset in a top-level finally block. Missing callbacks are also dequeued instead of being skipped indefinitely.
+
+  **Note for existing stuck Durable Objects:** This fix is self-healing for poison rows — they will be properly dequeued on the next `_flushQueue()` call. However, `_flushQueue()` is only triggered by a new `queue()` call, not on DO initialization. If you have DOs stuck in production, you can either trigger a new `queue()` call on affected DOs, or call `dequeueAll()`/`dequeueAllByCallback()` to clear the poison rows manually. A future improvement may add a `_flushQueue()` call to `onStart()` so stuck DOs self-heal on wake.
+
+- [#891](https://github.com/cloudflare/agents/pull/891) [`0723b99`](https://github.com/cloudflare/agents/commit/0723b9909f037d494e0c7db43e031c952578c82e) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Fix `getCurrentAgent()` returning `undefined` connection when used with `@cloudflare/ai-chat` and Vite SSR
+
+  Re-export `agentContext` as `__DO_NOT_USE_WILL_BREAK__agentContext` from the main `agents` entry point and update `@cloudflare/ai-chat` to import it from `agents` instead of the `agents/internal_context` subpath export. This prevents Vite SSR pre-bundling from creating two separate `AsyncLocalStorage` instances, which caused `getCurrentAgent().connection` to be `undefined` inside `onChatMessage` and tool `execute` functions.
+
+  The `agents/internal_context` subpath export has been removed from `package.json` and the deprecated `agentContext` alias has been removed from `internal_context.ts`. This was never a public API.
+
+- Updated dependencies [[`584cebe`](https://github.com/cloudflare/agents/commit/584cebe882f437a685b96b26b15200dc50ba70e1), [`0723b99`](https://github.com/cloudflare/agents/commit/0723b9909f037d494e0c7db43e031c952578c82e), [`4292f6b`](https://github.com/cloudflare/agents/commit/4292f6ba6d49201c88b09553452c3b243620f35b)]:
+  - @cloudflare/ai-chat@0.0.8
+
 ## 0.4.0
 
 ### Minor Changes
