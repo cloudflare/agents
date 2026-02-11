@@ -6,17 +6,12 @@ import {
   PhoneDisconnectIcon,
   WaveformIcon,
   SpinnerGapIcon,
-  SpeakerHighIcon,
-  ChatCircleDotsIcon,
-  WifiHighIcon,
-  WifiSlashIcon
+  SpeakerHighIcon
 } from "@phosphor-icons/react";
 import { Button, Surface, Text } from "@cloudflare/kumo";
 import { useEffect, useRef } from "react";
-import { createRoot } from "react-dom/client";
-import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
-import { ModeToggle, PoweredByAgents } from "@cloudflare/agents-ui";
-import "./styles.css";
+import { DemoWrapper } from "../../layout/DemoWrapper";
+import { ConnectionStatus } from "../../components/ConnectionStatus";
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString([], {
@@ -55,9 +50,7 @@ function getStatusDisplay(status: VoiceStatus) {
   }
 }
 
-// --- Main App ---
-
-function App() {
+export function VoiceDemo() {
   const {
     status,
     transcript,
@@ -69,11 +62,10 @@ function App() {
     startCall,
     endCall,
     toggleMute
-  } = useVoiceAgent({ agent: "my-voice-agent" });
+  } = useVoiceAgent({ agent: "playground-voice-agent" });
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll transcript
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript]);
@@ -83,43 +75,23 @@ function App() {
   const StatusIcon = statusDisplay.icon;
 
   return (
-    <div className="min-h-full flex items-center justify-center p-6">
-      <Surface className="w-full max-w-lg rounded-2xl p-8 ring ring-kumo-line">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
-            <ChatCircleDotsIcon
-              size={28}
-              weight="duotone"
-              className="text-kumo-brand"
-            />
-            <Text variant="heading1">Voice Agent</Text>
-          </div>
-          <div className="flex items-center gap-3">
-            {/* Connection status */}
-            <span
-              className={`flex items-center gap-1.5 text-xs ${connected ? "text-kumo-success" : "text-kumo-secondary"}`}
-            >
-              {connected ? (
-                <WifiHighIcon size={14} weight="bold" />
-              ) : (
-                <WifiSlashIcon size={14} weight="bold" />
-              )}
-              {connected ? "Connected" : "Connecting..."}
-            </span>
-            <ModeToggle />
-          </div>
-        </div>
-
+    <DemoWrapper
+      title="Voice Chat"
+      description="Real-time voice conversation with STT, LLM, and streaming TTS. Speak to the agent and it responds with natural speech."
+      statusIndicator={
+        <ConnectionStatus status={connected ? "connected" : "connecting"} />
+      }
+    >
+      <div className="max-w-lg mx-auto space-y-4">
         {/* Error banner */}
         {error && (
-          <div className="mb-4 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+          <div className="px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
             {error}
           </div>
         )}
 
         {/* Status indicator */}
-        <Surface className="rounded-xl px-4 py-3 text-center ring ring-kumo-line mb-4">
+        <Surface className="rounded-xl px-4 py-3 text-center ring ring-kumo-line">
           <div
             className={`flex items-center justify-center gap-2 ${statusDisplay.color}`}
           >
@@ -132,7 +104,6 @@ function App() {
               {statusDisplay.text}
             </span>
           </div>
-          {/* Audio level meter */}
           {isInCall && status === "listening" && (
             <div className="mt-2 h-1.5 bg-kumo-fill rounded-full overflow-hidden">
               <div
@@ -145,7 +116,7 @@ function App() {
 
         {/* Latency metrics */}
         {metrics && (
-          <div className="mb-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
+          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
             <span>
               VAD <span className="text-kumo-default">{metrics.vad_ms}ms</span>
             </span>
@@ -172,14 +143,14 @@ function App() {
         )}
 
         {/* Transcript */}
-        <Surface className="rounded-xl ring ring-kumo-line mb-6 h-72 overflow-y-auto">
+        <Surface className="rounded-xl ring ring-kumo-line h-72 overflow-y-auto">
           {transcript.length === 0 ? (
             <div className="h-full flex items-center justify-center text-kumo-secondary">
               <Text size="sm">
                 {isInCall
                   ? "Start speaking..."
                   : connected
-                    ? "Click Call to start a conversation"
+                    ? "Click Start Call to begin"
                     : "Connecting to agent..."}
               </Text>
             </div>
@@ -254,19 +225,7 @@ function App() {
             </>
           )}
         </div>
-
-        {/* Footer */}
-        <div className="mt-6 flex justify-center">
-          <PoweredByAgents />
-        </div>
-      </Surface>
-    </div>
+      </div>
+    </DemoWrapper>
   );
 }
-
-const root = createRoot(document.getElementById("root")!);
-root.render(
-  <ThemeProvider>
-    <App />
-  </ThemeProvider>
-);

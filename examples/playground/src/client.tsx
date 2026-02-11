@@ -49,6 +49,9 @@ import { McpServerDemo, McpClientDemo, McpOAuthDemo } from "./demos/mcp";
 // Workflow demos
 import { WorkflowBasicDemo, WorkflowApprovalDemo } from "./demos/workflow";
 
+// Voice demos
+import { VoiceDemo } from "./demos/voice";
+
 // Email demos
 import { ReceiveDemo, SecureDemo } from "./demos/email";
 
@@ -105,6 +108,9 @@ function App() {
               <Route path="multi-agent/rooms" element={<ChatRoomsDemo />} />
               <Route path="multi-agent/workers" element={<WorkersDemo />} />
               <Route path="multi-agent/pipeline" element={<PipelineDemo />} />
+
+              {/* Voice */}
+              <Route path="voice/chat" element={<VoiceDemo />} />
 
               {/* Email */}
               <Route path="email/receive" element={<ReceiveDemo />} />

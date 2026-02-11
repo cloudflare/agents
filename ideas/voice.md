@@ -4,7 +4,7 @@
 
 There is no voice agent framework in JavaScript. Pipecat is Python. LiveKit agents are Go/Python. Vapi is hosted and opaque. The JS/TS developer population — the largest in the world — has zero options for building voice agents.
 
-The Agents SDK is uniquely positioned to fill this gap because it already has the primitives that turn a voice *pipeline* into a voice *agent*: persistent state, SQL, scheduling, MCP tool use, workflows, React hooks, and bidirectional state sync. No other voice framework has any of these. They treat conversations as ephemeral. We don't.
+The Agents SDK is uniquely positioned to fill this gap because it already has the primitives that turn a voice _pipeline_ into a voice _agent_: persistent state, SQL, scheduling, MCP tool use, workflows, React hooks, and bidirectional state sync. No other voice framework has any of these. They treat conversations as ephemeral. We don't.
 
 The pitch: **"The Agent you already have can now talk."**
 
@@ -36,7 +36,7 @@ https://github.com/cloudflare/realtime-examples/tree/main/ai-tts-stt — A refer
 ### Workers AI models available
 
 - **STT**: `@cf/deepgram/nova-3` — speech-to-text via `env.AI.run()`, no API key needed
-- **TTS**: `@cf/deepgram/aura-1` — text-to-speech via `env.AI.run()`, no API key needed  
+- **TTS**: `@cf/deepgram/aura-1` — text-to-speech via `env.AI.run()`, no API key needed
 - **VAD/Turn detection**: `@cf/pipecat-ai/smart-turn-v2` — detects when user has stopped speaking, returns `is_complete` boolean and `probability` score. $0.00034 per audio minute.
 - **LLMs**: Full catalog of models via Workers AI binding
 
@@ -68,6 +68,7 @@ A Selective Forwarding Unit sits in the middle of WebRTC connections. Each parti
 ### WebSocket Adapter (beta)
 
 Bridges WebRTC and WebSocket. Lets a DO act as a "headless participant":
+
 - **Ingest** (WebSocket → WebRTC): DO sends PCM audio → SFU converts to WebRTC track → users hear it
 - **Stream** (WebRTC → WebSocket): User's mic via WebRTC → SFU sends PCM frames to DO
 - Video egress: JPEG frames at ~1 FPS (added Nov 2025)
@@ -78,6 +79,7 @@ Bridges WebRTC and WebSocket. Lets a DO act as a "headless participant":
 A voice agent is a 1:1 conversation — one user, one agent. The browser has `getUserMedia()` for the mic and Web Audio API for playback. Audio can flow as binary WebSocket frames over the connection the Agent already has via partyserver. No SFU needed.
 
 What you give up without the SFU:
+
 - Multi-participant (doesn't apply to 1:1)
 - WebRTC-grade network resilience (TCP head-of-line blocking on bad networks)
 - Tightly coupled echo cancellation (browser AEC constraints on mic input still work)
@@ -97,19 +99,19 @@ RealtimeKit could be a Layer 4 transport adapter for "AI participant in an exist
 
 ## What the Agents SDK already has
 
-| Capability | What exists | Why it matters for voice |
-|---|---|---|
-| Durable Object base class | `Agent` extends partyserver `Server` — full DO lifecycle, hibernation | Agent's "brain" persists across conversations |
-| Bidirectional state sync | `setState()` broadcasts to all clients, clients can push back | Real-time UI updates (transcripts, status, voice indicators) |
-| RPC | `@callable` methods, streaming via `StreamingResponse` | Call agent methods from UI (start/stop, change settings) |
-| Scheduling | Cron, delays, intervals in SQLite | "Remind me tomorrow", session timeouts, proactive agents |
-| SQL | `this.sql` template tag with SQLite | Conversation history, user preferences, knowledge base |
-| MCP client | `MCPClientManager` with OAuth, auto-reconnect | Tool use during voice — agent can actually DO things |
-| Workflows | `AgentWorkflow` for multi-step orchestration | Complex voice-driven processes |
-| WebSocket connections | Connection management, broadcast, hibernation | The transport already exists |
-| React hooks | `useAgent` with typed RPC stubs, state sync | Extend to `useVoiceAgent` for voice UI |
-| Observability | Event emission system | Track latency, model usage, conversation quality |
-| Email routing | `routeAgentEmail()`, `onEmail()` | Multi-channel: same agent, voice + email + chat |
+| Capability                | What exists                                                           | Why it matters for voice                                     |
+| ------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Durable Object base class | `Agent` extends partyserver `Server` — full DO lifecycle, hibernation | Agent's "brain" persists across conversations                |
+| Bidirectional state sync  | `setState()` broadcasts to all clients, clients can push back         | Real-time UI updates (transcripts, status, voice indicators) |
+| RPC                       | `@callable` methods, streaming via `StreamingResponse`                | Call agent methods from UI (start/stop, change settings)     |
+| Scheduling                | Cron, delays, intervals in SQLite                                     | "Remind me tomorrow", session timeouts, proactive agents     |
+| SQL                       | `this.sql` template tag with SQLite                                   | Conversation history, user preferences, knowledge base       |
+| MCP client                | `MCPClientManager` with OAuth, auto-reconnect                         | Tool use during voice — agent can actually DO things         |
+| Workflows                 | `AgentWorkflow` for multi-step orchestration                          | Complex voice-driven processes                               |
+| WebSocket connections     | Connection management, broadcast, hibernation                         | The transport already exists                                 |
+| React hooks               | `useAgent` with typed RPC stubs, state sync                           | Extend to `useVoiceAgent` for voice UI                       |
+| Observability             | Event emission system                                                 | Track latency, model usage, conversation quality             |
+| Email routing             | `routeAgentEmail()`, `onEmail()`                                      | Multi-channel: same agent, voice + email + chat              |
 
 ---
 
@@ -117,7 +119,7 @@ RealtimeKit could be a Layer 4 transport adapter for "AI participant in an exist
 
 ### What makes this special vs. Pipecat, LiveKit, Vapi
 
-**1. Stateful voice agents.** Every existing framework treats conversations as ephemeral. Here, the DO *is* the agent's long-term memory. Conversations survive disconnects. The agent remembers what you talked about yesterday. Transformative for customer service, personal assistants, workflows that span sessions.
+**1. Stateful voice agents.** Every existing framework treats conversations as ephemeral. Here, the DO _is_ the agent's long-term memory. Conversations survive disconnects. The agent remembers what you talked about yesterday. Transformative for customer service, personal assistants, workflows that span sessions.
 
 **2. Tool use during conversation (MCP).** The agent can actually do things mid-call. "Book me a table at Ocean Prime for 7pm" → MCP tool call → real booking → "Done, confirmed for 7pm." Not "I'll send you a link." Actual execution.
 
@@ -131,57 +133,68 @@ RealtimeKit could be a Layer 4 transport adapter for "AI participant in an exist
 
 **7. Edge-native latency.** DO, SFU (if used), and AI models all on Cloudflare's edge. The entire roundtrip stays within the network. For voice, every 100ms matters.
 
-### Target developer experience
+### Actual developer experience (implemented)
 
 Server side:
 
 ```typescript
-import { Agent } from "agents";
-import { voicePipeline } from "agents/voice";
+import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
+import { streamText } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
 
-class RestaurantAgent extends Agent {
-  voice = voicePipeline({
-    stt: "workers-ai/deepgram-nova-3",
-    tts: "workers-ai/deepgram-aura",
-    turnDetection: "workers-ai/smart-turn-v2",
-    interruptible: true,
-  });
-
-  initialState = { reservations: [], preferences: {} };
-
-  onVoiceConnect(connection) {
-    this.voice.speak("Hi! I can help you find a restaurant.");
+class RestaurantAgent extends VoiceAgent<Env> {
+  async onTurn(transcript: string, context: VoiceTurnContext) {
+    const ai = createWorkersAI({ binding: this.env.AI });
+    const result = streamText({
+      model: ai("@cf/meta/llama-4-scout-17b-16e-instruct"),
+      system: "You are a restaurant booking assistant...",
+      messages: [
+        ...context.messages.map(m => ({
+          role: m.role as "user" | "assistant",
+          content: m.content
+        })),
+        { role: "user" as const, content: transcript }
+      ],
+      tools: { book_table: tool({...}) },
+      abortSignal: context.signal
+    });
+    return result.textStream; // streamed through sentence chunker → TTS
   }
 
-  async onTurn(transcript: string, context: ConversationContext) {
-    // Full access to this.state, this.sql, this.schedule(), MCP tools
-    const response = await this.generateResponse(transcript);
-    return response; // automatically spoken via TTS
-  }
-
-  onInterrupt() {
-    // user started speaking while agent was talking
+  async onCallStart(connection) {
+    await this.speak(connection, "Hi! I can help you find a restaurant.");
   }
 }
 ```
 
-Client side:
+Client side (React):
 
 ```tsx
-import { useVoiceAgent } from "agents/react";
+import { useVoiceAgent } from "agents/voice-react";
 
 function VoiceUI() {
   const {
-    status,       // "idle" | "listening" | "thinking" | "speaking"
-    transcript,   // live transcript
-    isMicActive,
+    status, // "idle" | "listening" | "thinking" | "speaking"
+    transcript, // TranscriptMessage[]
+    connected,
     startCall,
     endCall,
-    state,        // synced agent state
-  } = useVoiceAgent<RestaurantAgent>({ agent: "restaurant" });
+    toggleMute
+  } = useVoiceAgent({ agent: "restaurant-agent" });
 
   return <div>...</div>;
 }
+```
+
+Client side (vanilla JS):
+
+```typescript
+import { VoiceClient } from "agents/voice-client";
+
+const client = new VoiceClient({ agent: "restaurant-agent" });
+client.addEventListener("statuschange", () => console.log(client.status));
+client.connect();
+await client.startCall();
 ```
 
 ### Architecture
@@ -235,157 +248,134 @@ One WebSocket carries everything: audio frames (binary), state updates (JSON), R
 
 Each layer is a complete, shippable product. Later layers add power, not fix gaps.
 
-### Layer 0: Proof of concept (example, not SDK code)
+### Layer 0: Proof of concept — DONE
 
-**Goal:** Prove the architecture works with zero SDK changes. Build conviction before committing to API design.
+**Goal:** Prove the architecture works with zero SDK changes.
 
-**What:** An example in `examples/voice-agent`.
+**What was built:** `examples/voice-agent` — a fully working voice agent running inside a single Durable Object. Features: streaming TTS (sentence-level chunking), server-side VAD (smart-turn-v2), interruption handling, conversation persistence (SQLite), AI SDK tools (time, reminders, weather), proactive scheduling (spoken reminders).
 
-- Browser: `getUserMedia()` → AudioWorklet → PCM → binary WebSocket frames to Agent
-- Agent: `onMessage` handles binary frames, buffers audio, calls `env.AI.run()` for VAD/STT/TTS, sends audio back as binary frames
-- Browser: receives binary frames → AudioWorklet → speakers
+**Key artifacts:**
 
-**Dependencies added to SDK: zero.** Workers AI models are bindings. Binary WebSocket messages already work. This is an example, not a package change.
+- `examples/voice-agent/src/server.ts` — now ~130 lines (uses `VoiceAgent` from Layer 2)
+- `examples/voice-agent/src/client.tsx` — ~270 lines (uses `useVoiceAgent` from Layer 1)
+- `examples/voice-agent/src/sentence-chunker.ts` — moved to SDK in Layer 2
 
-**Proves:** Entire voice loop runs inside a single DO. State, scheduling, MCP, SQL all available from day one.
+### Layer 1: Client-side audio utilities — DONE
 
-**Timeline:** 1-2 weeks. This is Mark's demo, cleaned up.
+**Goal:** Make the browser-side audio code reusable.
 
-### Layer 1: Client-side audio utilities
+**What was built:** Two SDK exports with zero npm dependencies:
 
-**Goal:** Make the browser-side audio code reusable. Layer 0's AudioWorklet/PCM/playback code is gnarly — nobody should write it from scratch.
+- `agents/voice-client` — `VoiceClient` class (~520 lines). Framework-agnostic. Handles `getUserMedia()` with AEC constraints, AudioWorklet PCM encoding/downsampling, binary WebSocket framing via PartySocket, audio playback queue with `AudioContext.decodeAudioData`, silence detection (configurable threshold + duration), interruption detection (configurable threshold + chunk count), and the full voice protocol (status, transcript streaming, metrics, error). Event-based API (`addEventListener`).
 
-**What:** Client-side utilities exported from `agents/voice-client` (or similar).
+- `agents/voice-react` — `useVoiceAgent` hook (~100 lines). Thin React wrapper around `VoiceClient` that syncs state into `useState`. Returns `{ status, transcript, metrics, audioLevel, isMuted, connected, error, startCall, endCall, toggleMute }`.
 
-```typescript
-import { VoiceClient } from "agents/voice-client";
+**Tests:** 23 tests for `useVoiceAgent` (mocks PartySocket, tests protocol handling, state machine, actions).
 
-const voice = new VoiceClient({
-  agent: "voice-agent",
-  onStateChange(status) { /* idle | listening | thinking | speaking */ },
-  onTranscript(text, role) { /* live transcript updates */ },
-});
+### Layer 2: Server-side pipeline helpers — DONE
 
-voice.start();
-voice.stop();
-voice.mute();
-voice.unmute();
-```
+**Goal:** Extract the voice pipeline from the example into a reusable SDK base class.
 
-And a React hook:
+**What was built:** `agents/voice` export (~830 lines):
 
-```tsx
-const { status, transcript, start, stop, mute } = useVoiceAgent({
-  agent: "voice-agent",
-});
-```
+- `VoiceAgent<Env, State>` extends `Agent` — handles the full pipeline:
+  - `onMessage` intercept — routes binary (audio) vs JSON (voice protocol) vs non-voice messages
+  - Audio buffer management — per-connection `Map<string, ArrayBuffer[]>` with cleanup on disconnect
+  - VAD gate — `checkEndOfTurn()` with configurable threshold and window
+  - STT — `transcribe()` with Workers AI default
+  - Streaming TTS pipeline — `SentenceChunker` + concurrent TTS queue + ordered drain loop
+  - Interruption handling — `AbortController` per connection, propagated to `onTurn` via `context.signal`
+  - Conversation persistence — auto-creates SQLite table, auto-saves user/assistant messages
+  - Protocol messages — status, transcript (streaming), metrics, error
 
-Handles: `getUserMedia()` with AEC constraints, AudioWorklet PCM encoding, binary WebSocket framing, audio playback queue with proper scheduling, interruption detection (user speaks while audio playing → stop playback, signal agent).
+- Provider interfaces: `STTProvider`, `TTSProvider`, `VADProvider` — defaults use Workers AI, override methods for custom providers
 
-**Dependencies added: zero npm dependencies.** All Web Audio API (browser-native) + existing `AgentClient`/`useAgent` infrastructure.
+- User hooks: `onTurn()` (required — returns `string | AsyncIterable<string>`), `onCallStart()`, `onCallEnd()`, `onInterrupt()`, `onNonVoiceMessage()`
 
-**Timeline:** 2-3 weeks after Layer 0 (need Layer 0 to validate the wire protocol).
+- Convenience: `speak(connection, text)`, `speakAll(text)`, `saveMessage()`, `getConversationHistory()`
 
-### Layer 2: Server-side pipeline helpers
+- `SentenceChunker` — moved from example to `packages/agents/src/sentence-chunker.ts` with 14 tests
 
-**Goal:** Extract the messy `onMessage` audio buffering/VAD/STT/TTS orchestration into clean abstractions.
+**Design decision: class extension, not composition.** `VoiceAgent extends Agent` follows the `AIChatAgent` pattern. The `voicePipeline()` config approach from the original roadmap was replaced with method overrides — simpler, more TypeScript-native, and consistent with the existing codebase.
 
-**What:** Server-side voice pipeline exported from `agents/voice`.
+**Design decision: `onTurn` return type.** Accepts both `string` (simple) and `AsyncIterable<string>` (streaming). The SDK detects the type: strings get synthesized as one TTS call, async iterables get piped through the sentence chunker for streaming TTS with low time-to-first-audio.
 
-```typescript
-import { Agent } from "agents";
-import { voicePipeline } from "agents/voice";
+**Zero npm dependencies added.** Workers AI models are bindings, audio handling is pure TS, pipeline logic is TypeScript.
 
-class MyAgent extends Agent {
-  voice = voicePipeline({
-    stt: "workers-ai/deepgram-nova-3",
-    tts: "workers-ai/deepgram-aura",
-    turnDetection: "workers-ai/smart-turn-v2",
-    interruptible: true,
-  });
+**Post-Layer 2 additions:**
 
-  async onTurn(transcript, context) {
-    // your logic, full Agent access
-    return response;
-  }
-}
-```
+- **Pipeline hooks** — four overridable methods between pipeline stages: `beforeTranscribe(audio, connection)`, `afterTranscribe(transcript, connection)`, `beforeSynthesize(text, connection)`, `afterSynthesize(audio, text, connection)`. Return `null` to skip a stage. Runs in both streaming and non-streaming paths, and in `speak()`/`speakAll()`. Inspired by Pipecat's frame processor model — gives advanced users pipeline composability without a full frame/processor architecture.
+- **Language configuration** — `voiceOptions.language` (default `"en"`) passed to STT. No longer hardcoded.
+- **AudioContext lifecycle fix** — VoiceClient now uses a single shared `AudioContext` for playback and mic capture, properly closed on `endCall()`.
+- **`speak()`/`speakAll()` hook consistency** — convenience methods now route through `beforeSynthesize`/`afterSynthesize` so recording hooks, pronunciation filters, etc. apply to greetings and reminders.
 
-**Key design decisions:**
-
-1. **Provider interface** — clean `STTProvider` / `TTSProvider` / `VADProvider` interfaces. Ship Workers AI implementations built-in (just `env.AI.run()` calls). Third-party providers are classes that implement the interface — users bring their own.
-
-2. **Conversation context** — automatic transcript accumulation. Rolling window stored in SQLite, survives hibernation. Available in `onTurn`. No other voice framework has this because they don't have persistence.
-
-3. **Interruption state machine** — the hard problem. When user speaks while agent is mid-sentence: cancel TTS, flush audio buffer, emit `onInterrupt()`, switch to listening. `smart-turn-v2` detects turn boundaries. Getting this right with low latency is what makes it feel natural.
-
-4. **Audio format handling** — resampling between client format and model format. Pure JS, no native deps.
-
-**State machine:**
-
-```
-IDLE → LISTENING → PROCESSING → SPEAKING → LISTENING
-                                    ↑          │
-                                    └──────────┘
-                                  (interruption)
-```
-
-**Dependencies added: still zero npm dependencies.** STT/TTS/VAD are `env.AI.run()`. Pipeline logic is pure TypeScript.
-
-**Timeline:** 3-4 weeks. API design matters most here.
-
-### Layer 3: Provider ecosystem and advanced patterns
+### Layer 3: Provider ecosystem and advanced patterns — IN PROGRESS
 
 **Goal:** Open it up without adding complexity to the core.
 
-**Third-party providers** (separate packages, not SDK dependencies):
+**What has been built:**
+
+- `@cloudflare/agents-voice-elevenlabs` — reference TTS provider package. Implements `TTSProvider` with the ElevenLabs API. Published as a standalone npm package. Pattern: override `synthesize()` on `VoiceAgent` and delegate to the provider class.
+- Pipeline hooks enable custom processing without provider packages (e.g., `beforeSynthesize` for pronunciation fixes).
+
+**Provider pattern (actual, implemented):**
 
 ```typescript
-import { ElevenLabsTTS } from "agents-voice-elevenlabs";
-import { OpenAISTT } from "agents-voice-openai";
+import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
+import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
 
-class MyAgent extends Agent {
-  voice = voicePipeline({
-    stt: new OpenAISTT({ model: "whisper-1" }),
-    tts: new ElevenLabsTTS({ voice: "rachel" }),
-    turnDetection: "workers-ai/smart-turn-v2",
-  });
+class MyAgent extends VoiceAgent<Env> {
+  #tts: ElevenLabsTTS | null = null;
+
+  #getTTS() {
+    if (!this.#tts) {
+      this.#tts = new ElevenLabsTTS({ apiKey: this.env.ELEVENLABS_API_KEY });
+    }
+    return this.#tts;
+  }
+
+  async synthesize(text: string) {
+    return this.#getTTS().synthesize(text);
+  }
+
+  async onTurn(transcript: string, context: VoiceTurnContext) { ... }
 }
 ```
 
-**Multi-modal** — voice + text on the same agent:
+**Multi-modal** — voice + text on the same agent (implemented via `onNonVoiceMessage`):
 
 ```typescript
-class MyAgent extends Agent {
-  voice = voicePipeline({ ... });
-
-  onMessage(connection, message) {
-    if (typeof message === "string") {
-      // text chat — same agent, same state
-    }
-    // binary messages handled by voice pipeline automatically
+class MyAgent extends VoiceAgent<Env> {
+  onNonVoiceMessage(connection, message) {
+    // text chat — same agent, same state, same conversation history
   }
+
+  async onTurn(transcript, context) { ... }
 }
 ```
 
 Client connects via `useVoiceAgent()` for voice or `useAgent()` for text. Same instance, same state, same tools.
 
-**Proactive voice** (scheduling + voice):
+**Proactive voice** (scheduling + voice, implemented):
 
 ```typescript
-async onTurn(transcript) {
-  if (shouldSetReminder(transcript)) {
-    this.schedule(reminderTime, "remind", { message: "..." });
-    return "Got it, I'll remind you.";
-  }
+async onTurn(transcript, context) {
+  // schedule() and speakAll() are built into VoiceAgent
+  return "Got it, I'll remind you.";
 }
 
-async remind(payload) {
-  this.voice.speak(`Reminder: ${payload.message}`);
+async speakReminder(payload: { message: string }) {
+  await this.speakAll(`Reminder: ${payload.message}`);
 }
 ```
 
-**Timeline:** Ongoing, community-driven. Ship provider interface in Layer 2, build reference providers, let ecosystem fill in.
+**Still needed:**
+
+- More provider packages: Deepgram STT (direct API), OpenAI Whisper STT, Cartesia TTS
+- Documented multi-modal pattern (voice + text chat on same agent)
+- Structured conversation flows (Pipecat Flows equivalent)
+
+**Timeline:** Ongoing, community-driven.
 
 ### Layer 4: SFU, video, telephony (future, optional)
 
@@ -403,26 +393,32 @@ async remind(payload) {
 
 ## Summary
 
-| Layer | What | New deps | Timeframe | Ships as |
-|---|---|---|---|---|
-| **0** | Working example, proof of concept | Zero | 1-2 weeks | `examples/voice-agent` |
-| **1** | Client-side audio utilities | Zero | 2-3 weeks | `agents/voice-client` export |
-| **2** | Server-side pipeline + hooks | Zero | 3-4 weeks | `agents/voice` export |
-| **3** | Provider ecosystem, multi-modal | User's choice | Ongoing | Separate packages + docs |
-| **4** | SFU, video, telephony | SFU API | When needed | `agents/voice-sfu` export |
+| Layer | What                              | New deps      | Status      | Ships as                                     |
+| ----- | --------------------------------- | ------------- | ----------- | -------------------------------------------- |
+| **0** | Working example, proof of concept | Zero          | **Done**    | `examples/voice-agent`                       |
+| **1** | Client-side audio utilities       | Zero          | **Done**    | `agents/voice-client`, `agents/voice-react`  |
+| **2** | Server-side pipeline + hooks      | Zero          | **Done**    | `agents/voice` export                        |
+| **3** | Provider ecosystem, multi-modal   | User's choice | **Started** | `@cloudflare/agents-voice-elevenlabs` + docs |
+| **4** | SFU, video, telephony             | SFU API       | When needed | `agents/voice-sfu` export                    |
 
-**Layers 0 through 2 add zero npm dependencies to the Agents SDK.** Workers AI models are bindings, audio handling is Web APIs and pure JS, the pipeline is TypeScript.
+**Layers 0 through 2 added zero npm dependencies to the Agents SDK.** Workers AI models are bindings, audio handling is Web APIs and pure JS, the pipeline is TypeScript.
 
 ---
 
 ## Competitive landscape
 
-| Framework | Language | Transport | State | Tool use | Scheduling | Infra required |
-|---|---|---|---|---|---|---|
-| **Pipecat** | Python | WebRTC (via Daily/LiveKit), WebSocket | None | Limited | None | Python server |
-| **LiveKit Agents** | Go/Python | WebRTC (LiveKit SFU) | None | Limited | None | LiveKit server/cloud |
-| **Vapi** | Hosted API | WebRTC | None (API calls) | Limited | None | Vapi subscription |
-| **Agents SDK (proposed)** | JavaScript/TypeScript | WebSocket (built-in) | SQLite + bidirectional sync | MCP (built-in) | Cron/delays/intervals | `wrangler deploy` |
+| Framework          | Language              | Transport                             | State                       | Tool use       | Scheduling            | Infra required       |
+| ------------------ | --------------------- | ------------------------------------- | --------------------------- | -------------- | --------------------- | -------------------- |
+| **Pipecat**        | Python                | WebRTC (via Daily/LiveKit), WebSocket | None                        | Limited        | None                  | Python server        |
+| **LiveKit Agents** | Go/Python/Node.js     | WebRTC (LiveKit SFU)                  | None                        | Limited        | None                  | LiveKit server/cloud |
+| **Vapi**           | Hosted API            | WebRTC                                | None (API calls)            | Limited        | None                  | Vapi subscription    |
+| **Agents SDK**     | JavaScript/TypeScript | WebSocket (built-in)                  | SQLite + bidirectional sync | MCP (built-in) | Cron/delays/intervals | `wrangler deploy`    |
+
+Detailed competitive analyses with architecture comparisons, gap assessments, and strategic recommendations:
+
+- [design/voice-livekit.md](/design/voice-livekit.md) — LiveKit Agents: process-per-session model, 80+ provider plugins, telephony, speech-to-speech. Our structural advantage: Durable Object persistence.
+- [design/voice-pipecat.md](/design/voice-pipecat.md) — Pipecat: frame/processor pipeline model (more composable), 80+ integrations, telephony depth. Python-only, no persistence. Best idea to steal: pipeline composability.
+- [design/voice-vapi.md](/design/voice-vapi.md) — Vapi: managed service (not a framework), proprietary orchestration models (endpointing, backchanneling, emotion detection, filler injection). Best idea to steal: conversation quality via orchestration.
 
 ---
 
@@ -430,15 +426,164 @@ async remind(payload) {
 
 ### Punted (independent of Layer 1/2 work, can answer later)
 
-- **Wire protocol**: What's the right format for audio frames over WebSocket? Raw PCM? Opus-encoded? What sample rate and chunk size minimize latency while keeping bandwidth reasonable? *Punted: this is a transport detail. Whatever format audio arrives in, the pipeline does the same thing. Can swap later without touching pipeline logic.*
-- **Hibernation**: How does hibernation interact with active voice sessions? The DO hibernates when no JS is executing — do we need to keep the connection "warm" during pauses in conversation? *Punted: this is a Workers runtime behavior question. If it's a problem, fix is likely a keepalive ping (one-liner). Doesn't affect pipeline/hooks/client SDK design.*
-- **Latency budget**: Competitive voice agents target <500ms end-to-end (user stops speaking → agent starts speaking). Is that achievable with Workers AI models + WebSocket transport? *Punted: the number matters for tuning, but the architecture that improves it is streaming TTS, which we're building anyway. Measure after streaming is in.*
+- **Wire protocol**: What's the right format for audio frames over WebSocket? Raw PCM? Opus-encoded? What sample rate and chunk size minimize latency while keeping bandwidth reasonable? _Punted: this is a transport detail. Whatever format audio arrives in, the pipeline does the same thing. Can swap later without touching pipeline logic._
+- **Hibernation**: How does hibernation interact with active voice sessions? The DO hibernates when no JS is executing — do we need to keep the connection "warm" during pauses in conversation? _Punted: this is a Workers runtime behavior question. If it's a problem, fix is likely a keepalive ping (one-liner). Doesn't affect pipeline/hooks/client SDK design._
+- **Latency budget**: Competitive voice agents target <500ms end-to-end (user stops speaking → agent starts speaking). Is that achievable with Workers AI models + WebSocket transport? _Punted: the number matters for tuning, but the architecture that improves it is streaming TTS, which we're building anyway. Measure after streaming is in._
+
+### Resolved
+
+- ~~What's the right abstraction boundary for the voice pipeline?~~ **Resolved.** `VoiceAgent` class extension with `onTurn()` hook. The `voicePipeline()` config approach was replaced with method overrides — simpler and more consistent with the `AIChatAgent` pattern.
+- ~~How should conversation history be managed?~~ **Resolved.** Automatic rolling window in SQLite (`cf_voice_messages` table), configurable limit (default 20), loaded into `context.messages` for every `onTurn()` call.
+- ~~Can we support streaming TTS?~~ **Done.** See "Streaming TTS implementation" below.
+- ~~Interruption handling?~~ **Done.** See "Interruption handling implementation" below.
+- ~~Server-side VAD?~~ **Done.** See "Server-side VAD implementation" below.
+
+### Resolved (post-Layer 2)
+
+- ~~Should there be lower-level hooks for partial transcripts or audio-level events on the server side?~~ **Resolved.** Added four pipeline hooks: `beforeTranscribe(audio)`, `afterTranscribe(transcript)`, `beforeSynthesize(text)`, `afterSynthesize(audio, text)`. Each can modify data or return `null` to skip. Hooks run in both the streaming and non-streaming paths, and in `speak()`/`speakAll()` convenience methods.
+- ~~What does the third-party provider packaging story look like?~~ **Resolved.** Built `@cloudflare/agents-voice-elevenlabs` as the reference implementation. Pattern: standalone npm package implementing `TTSProvider`, used via method override delegation in `VoiceAgent.synthesize()`. Same pattern works for STT and VAD.
 
 ### Active
 
-- What's the right abstraction boundary for the voice pipeline? The current thinking is `voicePipeline()` config + `onTurn()` hook, but should there be lower-level hooks for partial transcripts, audio-level events, etc.?
-- How should conversation history be managed? Automatic rolling window in SQLite? User-controlled? What's the right default context window?
-- Can we support streaming TTS (start speaking before the full LLM response is generated) to minimize time-to-first-audio? This requires chunking LLM output into sentence-sized pieces and pipelining TTS calls. **← Working on this next.**
+- How should multi-modal (voice + text on the same agent) work? The `onNonVoiceMessage` hook exists but there is no built-in text-to-voice bridging.
+- Should `VoiceAgent` support speech-to-speech models (OpenAI Realtime API, Gemini Live)? Current decision: punt — users who want this can wire it up manually, and `call-my-agent` example already covers the pattern.
+- Interruption classification: distinguishing "stop" from "uh-huh" before aborting the pipeline. No Workers AI model for this currently. Heuristic (keyword list) is the likely first approach when we get to it.
+
+## Streaming TTS implementation
+
+Implemented in `examples/voice-agent` — the key improvement for time-to-first-audio.
+
+### Architecture
+
+```
+LLM (streaming) → SentenceChunker → TTS (per sentence, concurrent) → audio to client
+```
+
+**Timeline visualization:**
+
+```
+LLM:   [--tok--tok--SENT1--tok--tok--SENT2--tok--DONE]
+TTS:            [----TTS(S1)----]  [----TTS(S2)----] [--TTS(flush)--]
+Audio:                          [send S1]          [send S2]       [send flush]
+```
+
+The user hears the first sentence while the LLM is still generating the rest.
+
+### Key components
+
+1. **`sentence-chunker.ts`** — isolated, testable module. Accumulates streaming tokens and emits complete sentences. Splits on `.` `!` `?` followed by space, with a minimum length threshold (20 chars) to avoid splitting on abbreviations. Intentionally simple — optimize later.
+
+2. **`streamingPipeline()` in server.ts** — orchestrates the flow:
+   - Streams LLM tokens via `{ stream: true }` option to Workers AI
+   - Feeds tokens into `SentenceChunker`
+   - Starts TTS for each sentence eagerly (promises execute concurrently)
+   - A concurrent drain loop sends audio to the client in order
+   - Uses a notify/wake pattern to avoid polling
+
+3. **Streaming transcript on client** — new message types:
+   - `transcript_start` — adds empty assistant message
+   - `transcript_delta` — appends token to current message (user sees text appear token-by-token)
+   - `transcript_end` — finalizes with full text
+
+### Protocol changes
+
+New Server → Client messages:
+
+```
+{ type: "transcript_start", role: "assistant" }   // stream begins
+{ type: "transcript_delta", text: "token" }         // each LLM token
+{ type: "transcript_end", text: "full response" }   // stream ends
+[binary MP3]                                         // audio per sentence (multiple)
+```
+
+### Future optimisation (sentence chunking)
+
+The current chunker is deliberately naive — split on sentence-ending punctuation. Known limitations:
+
+- Abbreviations like "Dr." or "U.S." can cause false splits if the preceding text is long enough
+- No special handling for quotes, parentheses, or lists
+- No consideration of prosody-friendly splitting (e.g. splitting on commas for long clauses)
+
+The chunker is a standalone module with 14 tests (`sentence-chunker.test.ts`), so it can be improved without touching the pipeline.
+
+## Interruption handling implementation
+
+Implemented in `examples/voice-agent` — lets the user cut off the agent mid-sentence.
+
+### How it works
+
+```
+User speaks during agent playback
+  → Client detects sustained speech (RMS > 0.02 for ≥2 chunks / ~200ms)
+  → Client stops active AudioBufferSourceNode, clears playback queue
+  → Client sends { type: "interrupt" } to server
+  → Server aborts active pipeline (LLM stream, in-flight TTS), clears audio buffer
+  → Server sets status to "listening"
+  → User's new speech is captured normally
+```
+
+### Client changes (`client.tsx`)
+
+- `activeSourceRef` tracks the currently playing `AudioBufferSourceNode` so it can be `.stop()`'d
+- `interruptChunkCountRef` counts consecutive high-RMS audio chunks during playback — requires `INTERRUPT_CHUNKS_NEEDED` (2) consecutive chunks above `INTERRUPT_THRESHOLD` (0.02) to trigger, preventing false triggers from audio artifacts leaking through echo cancellation
+- On interrupt: stop source, clear queue, reset `isPlayingRef`, send `{ type: "interrupt" }` to server
+
+### Server changes (`server.ts`)
+
+- New `"interrupt"` case in `onMessage` switch
+- `handleInterrupt(connection)`: aborts the active pipeline via `AbortController`, clears audio buffers, sends status "listening" — reuses the same abort pattern as `handleEndCall`
+
+### Design decisions
+
+- **Higher threshold for interrupt vs silence detection** (0.02 vs 0.01): the mic picks up some of the agent's audio even with echo cancellation enabled. A higher bar avoids the agent interrupting itself.
+- **Chunk-count debounce instead of timer**: simpler, no setTimeout, and naturally adapts to the audio chunk rate (~100ms/chunk).
+- **Server abort is fire-and-forget**: no acknowledgment needed. The `AbortController` signal propagates through the LLM stream and any in-flight TTS requests.
+
+## Server-side VAD implementation
+
+Implemented in `examples/voice-agent` — uses `@cf/pipecat-ai/smart-turn-v2` to validate end-of-speech before starting the pipeline.
+
+### Approach: hybrid client + server
+
+```
+Client detects 500ms silence → sends end_of_speech
+  → Server receives end_of_speech, concatenates audio buffer
+  → Server runs smart-turn-v2 on last ~2s of audio
+  → If is_complete OR probability > 0.5 → proceed with STT + LLM + TTS
+  → If not → push audio back to buffer, send status "listening", keep accumulating
+```
+
+The client silence timer (500ms) acts as a free pre-filter. The VAD model only runs when the client thinks speech ended — not continuously. This keeps costs low ($0.00034/audio-min, but only called on silence events, not every frame).
+
+### `checkEndOfTurn()` method
+
+- Extracts the last ~2 seconds of audio from the buffer (64KB at 16kHz mono 16-bit)
+- Wraps in WAV header (same `pcmToWav` helper used by STT)
+- Sends to `@cf/pipecat-ai/smart-turn-v2` as a ReadableStream
+- Returns `{ isComplete, probability }`
+- On error, fails open (returns `isComplete: true`) — never blocks the pipeline due to a VAD failure
+
+### Latency tuning
+
+- Silence timer reduced from 800ms to 500ms (VAD compensates for the lower confidence of a shorter silence)
+- Total pre-pipeline latency: ~500ms silence + ~100-200ms VAD ≈ 600-700ms
+- Net improvement: slightly faster than the original 800ms, with better accuracy (fewer false triggers on mid-sentence pauses)
+- VAD probability threshold: 0.5 — proceed if `is_complete` is true OR probability exceeds 0.5. The model sometimes returns `is_complete: false` with high probability on short utterances.
+- `vad_ms` is included in the metrics sent to the client for visibility
+
+### Protocol changes
+
+New Client → Server message:
+
+```
+{ type: "interrupt" }  // user spoke during playback
+```
+
+Updated metrics message:
+
+```
+{ type: "metrics", vad_ms, stt_ms, llm_ms, tts_ms, first_audio_ms, total_ms }
+```
 
 ## References
 

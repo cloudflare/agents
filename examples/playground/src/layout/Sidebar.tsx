@@ -182,6 +182,17 @@ const navigation: NavCategory[] = [
     ]
   },
   {
+    label: "Voice",
+    icon: <MicrophoneIcon size={16} />,
+    items: [
+      {
+        label: "Voice Chat",
+        path: "/voice/chat",
+        icon: <MicrophoneIcon size={16} />
+      }
+    ]
+  },
+  {
     label: "Email",
     icon: <EnvelopeIcon size={16} />,
     items: [

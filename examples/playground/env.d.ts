@@ -31,7 +31,8 @@ declare namespace Cloudflare {
       | "BasicWorkflowAgent"
       | "ApprovalAgent"
       | "ReceiveEmailAgent"
-      | "SecureEmailAgent";
+      | "SecureEmailAgent"
+      | "PlaygroundVoiceAgent";
   }
   interface Env {
     LOADER: WorkerLoader;
@@ -91,6 +92,9 @@ declare namespace Cloudflare {
     >;
     SecureEmailAgent: DurableObjectNamespace<
       import("./src/server").SecureEmailAgent
+    >;
+    PlaygroundVoiceAgent: DurableObjectNamespace<
+      import("./src/server").PlaygroundVoiceAgent
     >;
     ProcessingWorkflow: Workflow<
       Parameters<import("./src/server").ProcessingWorkflow["run"]>[0]["payload"]
