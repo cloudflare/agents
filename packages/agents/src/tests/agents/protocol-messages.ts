@@ -53,4 +53,45 @@ export class TestProtocolMessagesAgent extends Agent<
     );
     return conn ? this.isConnectionProtocolEnabled(conn) : null;
   }
+
+  /**
+   * Simulate a post-hibernation scenario: clear the in-memory
+   * _rawStateAccessors cache and restore the original state getter,
+   * then check isConnectionProtocolEnabled.
+   *
+   * After hibernation, the WeakMap is empty AND the connection objects
+   * are brand new (not wrapped), so `connection.state` returns the raw
+   * serialized attachment including internal flags. We simulate this by
+   * clearing the accessor cache and restoring the original `state` getter
+   * that reads from the WebSocket attachment.
+   */
+  @callable()
+  async checkProtocolEnabledAfterCacheClear(connectionId: string) {
+    const conn = Array.from(this.getConnections()).find(
+      (c) => c.id === connectionId
+    );
+    if (!conn) return null;
+
+    // Delete the cached accessors to simulate post-hibernation state
+    // where the in-memory WeakMap has been cleared.
+    // biome-ignore lint: accessing private field for testing
+    (
+      this as unknown as { _rawStateAccessors: WeakMap<Connection, unknown> }
+    )._rawStateAccessors.delete(conn);
+
+    // Restore the original `state` getter to simulate a fresh connection
+    // after hibernation wake. After hibernation, createLazyConnection
+    // defines `state` as a getter reading from deserializeAttachment()
+    // (which includes internal flags). Our _ensureConnectionWrapped
+    // overrides this with a filtering getter that hides them.
+    // Restore the raw getter to match post-hibernation behavior.
+    Object.defineProperty(conn, "state", {
+      configurable: true,
+      get() {
+        return conn.deserializeAttachment();
+      }
+    });
+
+    return this.isConnectionProtocolEnabled(conn);
+  }
 }

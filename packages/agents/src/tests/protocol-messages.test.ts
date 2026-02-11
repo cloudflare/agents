@@ -404,4 +404,43 @@ describe("Protocol Messages", () => {
       wsProto.close();
     }, 10000);
   });
+
+  describe("hibernation wake correctness", () => {
+    it("should read protocol flag from serialized attachment when _rawStateAccessors is empty", async () => {
+      const room = crypto.randomUUID();
+      const { ws: wsNoProto } = await connectNoProtocol(room);
+      const { ws: wsProto } = await connectProtocol(room);
+
+      // Get both connection IDs
+      const noProtoIdMsg = await sendRpc(wsNoProto, "getMyConnectionId");
+      expect(noProtoIdMsg.success).toBe(true);
+      const noProtoConnId = noProtoIdMsg.result as string;
+
+      const protoIdMsg = await sendRpc(wsProto, "getMyConnectionId");
+      expect(protoIdMsg.success).toBe(true);
+      const protoConnId = protoIdMsg.result as string;
+
+      // Simulate post-hibernation: clear _rawStateAccessors and check
+      // that isConnectionProtocolEnabled still reads the flag correctly
+      // from the serialized WebSocket attachment.
+      const checkNoProto = await sendRpc(
+        wsProto,
+        "checkProtocolEnabledAfterCacheClear",
+        [noProtoConnId]
+      );
+      expect(checkNoProto.success).toBe(true);
+      expect(checkNoProto.result).toBe(false);
+
+      const checkProto = await sendRpc(
+        wsProto,
+        "checkProtocolEnabledAfterCacheClear",
+        [protoConnId]
+      );
+      expect(checkProto.success).toBe(true);
+      expect(checkProto.result).toBe(true);
+
+      wsNoProto.close();
+      wsProto.close();
+    }, 15000);
+  });
 });

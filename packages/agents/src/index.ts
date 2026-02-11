@@ -1323,8 +1323,15 @@ export class Agent<
         CF_READONLY_KEY
       ];
     }
-    // Connection hasn't been wrapped yet — the flag can't have been set via
-    // setConnectionReadonly (which always wraps first), so default to false.
+    // Connection hasn't been wrapped yet — this happens after hibernation wake
+    // when _rawStateAccessors (an in-memory WeakMap) has been cleared but the
+    // flag is still persisted in the WebSocket's serialized attachment.
+    // Before _ensureConnectionWrapped overrides connection.state, the getter
+    // returns the raw state including internal keys, so we can read it directly.
+    const raw = connection.state as Record<string, unknown> | null;
+    if (raw != null && typeof raw === "object") {
+      return !!raw[CF_READONLY_KEY];
+    }
     return false;
   }
 
@@ -1378,7 +1385,15 @@ export class Agent<
         CF_NO_PROTOCOL_KEY
       ];
     }
-    // Connection hasn't been wrapped yet — default to protocol enabled.
+    // Connection hasn't been wrapped yet — this happens after hibernation wake
+    // when _rawStateAccessors (an in-memory WeakMap) has been cleared but the
+    // flag is still persisted in the WebSocket's serialized attachment.
+    // Before _ensureConnectionWrapped overrides connection.state, the getter
+    // returns the raw state including internal keys, so we can read it directly.
+    const raw = connection.state as Record<string, unknown> | null;
+    if (raw != null && typeof raw === "object") {
+      return !raw[CF_NO_PROTOCOL_KEY];
+    }
     return true;
   }
 
