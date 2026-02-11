@@ -24,3 +24,4 @@ export { TestReadonlyAgent } from "./readonly";
 export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";
 export { TestQueueAgent } from "./queue";
 export { TestRaceAgent } from "./race";
+export { TestFiberAgent } from "./fiber";

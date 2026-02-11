@@ -94,6 +94,10 @@
       {
         "class_name": "TestQueueAgent",
         "name": "TestQueueAgent"
+      },
+      {
+        "class_name": "TestFiberAgent",
+        "name": "TestFiberAgent"
       }
     ]
   },
@@ -134,7 +138,8 @@
         "TestNoIdentityAgent",
         "TestCallableAgent",
         "TestChildAgent",
-        "TestQueueAgent"
+        "TestQueueAgent",
+        "TestFiberAgent"
       ],
       "tag": "v1"
     }

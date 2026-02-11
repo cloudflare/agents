@@ -69,9 +69,10 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 ## Current contents
 
-| File         | Type       | Scope                                                                        |
-| ------------ | ---------- | ---------------------------------------------------------------------------- |
-| `visuals.md` | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration |
+| File              | Type       | Scope                                                                        |
+| ----------------- | ---------- | ---------------------------------------------------------------------------- |
+| `visuals.md`      | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration |
+| `long-running.md` | design doc | Durable long-running execution (fibers), alarm keep-alive, LLM recovery      |
 
 ## Relationship to `/docs`
 
