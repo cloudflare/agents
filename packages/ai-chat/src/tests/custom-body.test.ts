@@ -106,9 +106,7 @@ describe("Custom body forwarding to onChatMessage", () => {
           method: "POST",
           body: JSON.stringify({
             messages: [userMessage],
-            clientTools: [
-              { name: "testTool", description: "A test tool" }
-            ],
+            clientTools: [{ name: "testTool", description: "A test tool" }],
             extraData: "should-be-in-body"
           })
         }

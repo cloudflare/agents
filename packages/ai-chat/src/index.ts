@@ -336,11 +336,7 @@ export class AIChatAgent<
         ) {
           const { body } = data.init;
           const parsed = JSON.parse(body as string);
-          const {
-            messages,
-            clientTools,
-            ...customBody
-          } = parsed as {
+          const { messages, clientTools, ...customBody } = parsed as {
             messages: ChatMessage[];
             clientTools?: ClientToolSchema[];
             [key: string]: unknown;

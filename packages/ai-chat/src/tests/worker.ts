@@ -1,5 +1,9 @@
 import { AIChatAgent, type OnChatMessageOptions } from "../";
-import type { UIMessage as ChatMessage, StreamTextOnFinishCallback, ToolSet } from "ai";
+import type {
+  UIMessage as ChatMessage,
+  StreamTextOnFinishCallback,
+  ToolSet
+} from "ai";
 import { callable, getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 
