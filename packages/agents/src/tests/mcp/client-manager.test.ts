@@ -349,14 +349,14 @@ describe("MCPClientManager OAuth Integration", () => {
       );
     });
 
-    it("should throw error for callback without matching URL", async () => {
+    it("should return auth error for callback without matching URL", async () => {
       const callbackRequest = new Request(
         "http://localhost:3000/unknown?code=test&state=invalid.format"
       );
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("No server found with id");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("No server found with id");
     });
 
     it("should handle OAuth error response from provider", async () => {
@@ -434,25 +434,25 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.authError).toBe("Unauthorized: no code provided");
     });
 
-    it("should throw error for callback without state", async () => {
+    it("should return auth error for callback without state", async () => {
       const callbackUrl = "http://localhost:3000/callback";
       const callbackRequest = new Request(`${callbackUrl}?code=test`);
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("Unauthorized: no state provided");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("Unauthorized: no state provided");
     });
 
-    it("should throw error for callback with non-existent server", async () => {
+    it("should return auth error for callback with non-existent server", async () => {
       const stateStorage = createMockStateStorage();
       const state = stateStorage.createState("non-existent");
       const callbackRequest = new Request(
         `http://localhost:3000/callback?code=test&state=${state}`
       );
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("No server found with id");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("No server found with id");
     });
 
     it("should handle duplicate callback when already in ready state", async () => {

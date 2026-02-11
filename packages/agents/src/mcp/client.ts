@@ -795,6 +795,10 @@ export class MCPClientManager {
     const validation = this.validateCallbackRequest(req);
 
     if (!validation.valid) {
+      if (validation.serverId && this.mcpConnections[validation.serverId]) {
+        return this.failConnection(validation.serverId, validation.error);
+      }
+
       return {
         serverId: validation.serverId,
         authSuccess: false,
