@@ -777,6 +777,7 @@ export function useAgentChat<
 
             if (toolResults.length > 0) {
               // Send tool results to server first (server is source of truth)
+              const clientToolSchemas = extractClientToolSchemas(currentTools);
               for (const result of toolResults) {
                 agentRef.current.send(
                   JSON.stringify({
@@ -784,7 +785,8 @@ export function useAgentChat<
                     toolCallId: result.toolCallId,
                     toolName: result.toolName,
                     output: result.output,
-                    autoContinue: autoContinueAfterToolResult
+                    autoContinue: autoContinueAfterToolResult,
+                    clientTools: clientToolSchemas
                   })
                 );
               }
@@ -838,7 +840,8 @@ export function useAgentChat<
           toolCallId,
           toolName,
           output,
-          autoContinue: autoContinueAfterToolResult
+          autoContinue: autoContinueAfterToolResult,
+          clientTools: extractClientToolSchemas(toolsRef.current)
         })
       );
 
@@ -1267,7 +1270,8 @@ export function useAgentChat<
           toolCallId,
           toolName,
           output,
-          autoContinue: autoContinueAfterToolResult
+          autoContinue: autoContinueAfterToolResult,
+          clientTools: extractClientToolSchemas(toolsRef.current)
         })
       );
 

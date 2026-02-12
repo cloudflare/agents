@@ -121,6 +121,12 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       output: unknown;
       /** Whether server should auto-continue the conversation after applying result */
       autoContinue?: boolean;
+      /** Client tool schemas for continuation (client is source of truth) */
+      clientTools?: Array<{
+        name: string;
+        description?: string;
+        parameters?: Record<string, unknown>;
+      }>;
     }
   | {
       /** Client sends tool approval response to server (for tools with needsApproval) */
