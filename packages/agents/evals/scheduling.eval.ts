@@ -48,9 +48,7 @@ const getsDetail = createScorer<string, Schedule>({
           output.when.type === "scheduled",
           "Output is not a scheduled task"
         );
-        return output.when?.date?.getTime() === expected.when?.date?.getTime()
-          ? 1
-          : 0;
+        return output.when?.date === expected.when?.date ? 1 : 0;
       }
       case "delayed": {
         assert(output.when.type === "delayed", "Output is not a delayed task");
@@ -106,7 +104,7 @@ evalite<string, Schedule>("Evals for scheduling", {
               const date = new Date();
               date.setDate(date.getDate() + 1);
               date.setHours(14, 0, 0, 0);
-              return date;
+              return date.toISOString();
             })(),
             type: "scheduled"
           }
@@ -145,7 +143,15 @@ evalite<string, Schedule>("Evals for scheduling", {
         expected: {
           description: "quarterly review",
           when: {
-            date: new Date(new Date().getFullYear(), 2, 15, 9, 0, 0, 0),
+            date: new Date(
+              new Date().getFullYear(),
+              2,
+              15,
+              9,
+              0,
+              0,
+              0
+            ).toISOString(),
             type: "scheduled"
           }
         },
@@ -188,7 +194,7 @@ evalite<string, Schedule>("Evals for scheduling", {
               const daysUntilFriday = (5 - date.getDay() + 7) % 7;
               date.setDate(date.getDate() + daysUntilFriday);
               date.setHours(15, 30, 0, 0);
-              return date;
+              return date.toISOString();
             })(),
             type: "scheduled"
           }

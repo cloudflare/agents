@@ -84,21 +84,29 @@ export function unstable_getSchedulePrompt(event: { date: Date }) {
  *   model,
  *   prompt: `${getSchedulePrompt({ date: new Date() })} Input: "${userInput}"`,
  *   schema: scheduleSchema,
+ *   // Required for OpenAI to avoid strict JSON schema validation errors
+ *   providerOptions: {
+ *     openai: { strictJsonSchema: false }
+ *   }
  * });
  * ```
- * Uses a discriminated union on the `when.type` field so each scheduling
- * variant only contains the fields it needs. This avoids optional fields
- * and is compatible with OpenAI's strict structured outputs mode without
- * needing `providerOptions`.
+ *
+ * @remarks
+ * When using this schema with OpenAI models via the AI SDK, you must pass
+ * `providerOptions: { openai: { strictJsonSchema: false } }` to `generateObject`.
+ * This is because the schema uses a discriminated union which is not compatible
+ * with OpenAI's strict structured outputs mode.
  */
 export const scheduleSchema = z.object({
   description: z.string().describe("A description of the task"),
   when: z.discriminatedUnion("type", [
     z.object({
       type: z.literal("scheduled"),
-      date: z.coerce
-        .date()
-        .describe("Execute task at the specified date and time")
+      date: z
+        .string()
+        .describe(
+          "Execute task at the specified date and time in ISO 8601 format"
+        )
     }),
     z.object({
       type: z.literal("delayed"),
