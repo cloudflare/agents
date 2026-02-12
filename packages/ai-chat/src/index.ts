@@ -70,6 +70,10 @@ export type OnChatMessageOptions = {
    *
    * Contains all fields from the request body except `messages` and `clientTools`,
    * which are handled separately.
+   *
+   * This value is persisted from the most recent chat request and automatically
+   * forwarded during tool continuation calls (when a client tool result triggers
+   * auto-continue). It is cleared when the chat is cleared.
    */
   body?: Record<string, unknown>;
 };
@@ -257,6 +261,13 @@ export class AIChatAgent<
    */
   private _lastClientTools: ClientToolSchema[] | undefined;
 
+  /**
+   * Custom body fields from the most recent chat request.
+   * Stored so they can be passed to onChatMessage during tool continuations.
+   * @internal
+   */
+  private _lastBody: Record<string, unknown> | undefined;
+
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
 
@@ -351,6 +362,10 @@ export class AIChatAgent<
           // Store client tools for use during tool continuations
           this._lastClientTools = clientTools?.length ? clientTools : undefined;
 
+          // Store custom body for use during tool continuations
+          this._lastBody =
+            Object.keys(customBody).length > 0 ? customBody : undefined;
+
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
 
@@ -441,6 +456,7 @@ export class AIChatAgent<
           this._streamChunkIndex = 0;
           this._pendingResumeConnections.clear();
           this._lastClientTools = undefined;
+          this._lastBody = undefined;
           this.messages = [];
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
@@ -533,7 +549,8 @@ export class AIChatAgent<
                           },
                           {
                             abortSignal,
-                            clientTools: this._lastClientTools
+                            clientTools: this._lastClientTools,
+                            body: this._lastBody
                           }
                         );
 
