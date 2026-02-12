@@ -5,12 +5,17 @@ export {
   ElevenLabsTTS,
   RealtimeKitTransport,
   type RealtimeKitClient,
-  type RealtimeKitMediaFilter,
+  type RealtimeKitLayerFilter,
+  type RealtimeKitMediaConfig,
   type RealtimeKitMeetingConfig,
   type RealtimePipelineComponent
 } from "./components";
 export {
   RealtimeAgent,
+  buildPipelineSchema,
+  type PipelineLayer,
+  type PipelineSchemaConfig,
+  type PipelineSchemaResult,
   type RealtimeSnapshot,
   type SpeakResponse,
   type TranscriptEntry

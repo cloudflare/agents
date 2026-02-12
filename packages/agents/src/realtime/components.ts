@@ -15,42 +15,57 @@ export type RealtimePipelineComponent = {
   schema(): { name: string; type: string; [K: string]: unknown };
 } & { setGatewayId?: (gatewayId: string) => void };
 
+/**
+ * Configuration for media consumption in RealtimeKit
+ */
+export interface RealtimeKitMediaConfig {
+  /** Whether to consume audio from participants (defaults to true) */
+  consumeAudio?: boolean;
+  /** Whether to consume video from participants' webcams */
+  consumeVideo?: boolean;
+  /** Whether to consume screen share streams */
+  consumeScreenshare?: boolean;
+}
+
 export interface RealtimeKitMeetingConfig {
   meetingId?: string;
   authToken?: string;
-  filters?: RealtimeKitMediaFilter[];
+  /** Media consumption configuration. If not provided, only audio is consumed by default. */
+  media?: RealtimeKitMediaConfig;
 }
 
-export type RealtimeKitMediaFilter =
+/**
+ * Internal filter type used by the RealtimeKit pipeline layers
+ * @internal
+ */
+export type RealtimeKitLayerFilter =
   | {
       media_kind: "audio";
       stream_kind: "screen_share" | "microphone";
-      preset_name?: string;
+      preset_name: string;
     }
   | {
       media_kind: "video";
       stream_kind: "screen_share" | "webcam";
-      preset_name?: string;
+      preset_name: string;
     };
 
 export class RealtimeKitTransport implements RealtimePipelineComponent {
   #meeting?: RealtimeKitClient;
   meetingId?: string;
   #authToken?: string;
-  readonly filters: RealtimeKitMediaFilter[];
+  /** Media consumption configuration */
+  readonly media: RealtimeKitMediaConfig;
 
   constructor(config?: RealtimeKitMeetingConfig) {
     this.meetingId = config?.meetingId;
-
     this.#authToken = config?.authToken;
-    this.filters =
-      config?.filters?.map((filter) => ({
-        ...filter,
-        preset_name: filter.preset_name ?? "*"
-      })) ??
-      ([
-        { media_kind: "audio", stream_kind: "microphone", preset_name: "*" }
-      ] as const);
+    // Store media config with defaults applied
+    this.media = {
+      consumeAudio: config?.media?.consumeAudio ?? true,
+      consumeVideo: config?.media?.consumeVideo ?? false,
+      consumeScreenshare: config?.media?.consumeScreenshare ?? false
+    };
   }
 
   async init(streamlineToken: string) {
@@ -98,8 +113,7 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
     const schema: Record<string, unknown> = {
       name: this.name,
       type: "rtk",
-      meeting_id: this.meetingId,
-      filters: this.filters
+      meeting_id: this.meetingId
     };
 
     if (this.authToken) {

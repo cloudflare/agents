@@ -23,6 +23,17 @@ import {
 import { camelCaseToKebabCase } from "../client";
 import { randomUUID } from "node:crypto";
 
+// Re-export pipeline schema types and function from separate file for testability
+export {
+  buildPipelineSchema,
+  type PipelineSchemaConfig,
+  type PipelineLayer,
+  type PipelineSchemaResult
+} from "./pipeline-schema";
+
+// Import for internal use
+import { buildPipelineSchema } from "./pipeline-schema";
+
 export type SpeakResponse = {
   text:
     | string
@@ -108,15 +119,12 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     };
   }
 
-  private gatewayId?: string;
-
   public setPipeline(
     pipeline: RealtimePipelineComponent[],
     ai: Ai,
     gatewayId?: string
   ) {
     const gatewayIdOrDefault = gatewayId ?? ":default";
-    this.gatewayId = gatewayIdOrDefault;
     this.api = new RealtimeAPI(ai, gatewayIdOrDefault);
 
     for (const component of pipeline) {
@@ -253,76 +261,21 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       throw new Error("setPipeline must be called before init");
     }
 
-    // Validate component chain
-    let last_component: RealtimePipelineComponent | undefined;
-    for (const component of this.pipeline) {
-      if (
-        last_component &&
-        last_component.output_kind() !== component.input_kind()
-      ) {
-        throw new Error(
-          `Cannot link component of output kind ${last_component.output_kind()} with input kind ${component.input_kind()}`
-        );
-      }
-      last_component = component;
-    }
-
-    // Build layers and elements
-    const layers: { id: number; name: string; elements: string[] }[] = [
-      { id: 1, name: "default", elements: [] }
-    ];
-    let elements: { name: string; [K: string]: unknown }[] = [];
-    let realtimeKitComponent: RealtimeKitTransport | undefined = undefined;
-
     const parentName = Object.getPrototypeOf(this).constructor.name;
 
-    for (const component of this.pipeline) {
-      const schema = component.schema();
-
-      // Handle Agent as websocket element
-      if (component.constructor.name === parentName) {
-        schema.type = "websocket";
-        schema.send_events = true;
-        schema.url = `wss://${agentURL}/ws`;
-
-        layers[layers.length - 1].elements.push(schema.name);
-        layers.push({
-          id: layers.length + 1,
-          name: `default-${layers.length + 1}`,
-          elements: []
-        });
-      }
-
-      // Handle RealtimeKit transport
-      if (component instanceof RealtimeKitTransport) {
-        schema.worker_url = `https://${agentURL}`;
-        if (!component.authToken) {
-          realtimeKitComponent = component;
-        }
-        if (meetingId) {
-          component.meetingId = meetingId;
-          schema.meeting_id = meetingId;
-        }
-        if (!component.meetingId) {
-          throw new Error("Meeting ID not set for RealtimeKit transport");
-        }
-      }
-
-      elements.push(schema);
-      layers[layers.length - 1].elements.push(schema.name);
-    }
-
-    // Deduplicate elements by name
-    elements = elements.filter(
-      (v, idx, arr) => idx === arr.findIndex((v1) => v1.name === v.name)
-    );
+    // Build pipeline schema using the extracted pure function
+    const { layers, elements, realtimeKitComponent } = buildPipelineSchema({
+      pipeline: this.pipeline,
+      agentUrl: agentURL,
+      parentClassName: parentName,
+      meetingId
+    });
 
     console.log(
       `[Pipeline configuration]: layers: ${JSON.stringify(layers)}, elements: ${JSON.stringify(elements)}`
     );
 
     // Create pipeline
-
     const {
       id,
       token,
@@ -559,6 +512,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * @returns true if the message was handled, false otherwise
    */
   private async handleWebsocketMessage(message: unknown): Promise<boolean> {
+    console.log("got message", JSON.stringify(message, null, 2));
     if (!isRealtimeWebsocketMessage(message)) {
       return false;
     }
