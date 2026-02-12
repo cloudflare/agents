@@ -6,7 +6,8 @@ export default defineConfig({
       "src/tests/vitest.config.ts",
       "src/react-tests/vitest.config.ts",
       "src/cli-tests/vitest.config.ts",
-      "src/x402-tests/vitest.config.ts"
+      "src/x402-tests/vitest.config.ts",
+      "src/e2e-tests/vitest.config.ts"
     ]
   }
 });

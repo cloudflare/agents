@@ -558,6 +558,8 @@ Power users override `onFiberRecovered` to use provider-specific optimizations (
 
 ### Integration with existing `AIChatAgent` streaming
 
+**Status: NOT YET IMPLEMENTED.** The changes below are planned. The AIChatAgent code is being refactored in a separate branch first. This section documents the design and the concrete code changes to make when ready.
+
 `AIChatAgent` already has significant infrastructure for stream persistence:
 
 | Existing feature         | Table                        | Purpose                                         |
@@ -567,43 +569,82 @@ Power users override `onFiberRecovered` to use provider-specific optimizations (
 | Message persistence      | `cf_ai_chat_agent_messages`  | Full conversation history                       |
 | Client resumption        | (in-memory + WebSocket)      | Replays buffered chunks to reconnecting clients |
 
-What fibers add:
+What the Layer 3 integration will add:
 
-| New capability              | Mechanism                            | Purpose                                              |
-| --------------------------- | ------------------------------------ | ---------------------------------------------------- |
-| Keep-alive during streaming | Heartbeat alarm via fiber            | DO doesn't go idle during long generations           |
-| Interruption detection      | Fiber status check on restart        | Framework knows a generation was interrupted         |
-| Automatic retry             | `onFiberRecovered` default           | Re-invokes `onChatMessage` with persisted messages   |
-| Checkpoint metadata         | `stashFiber` with stream/request IDs | Recovery hook can find the right chunks and messages |
+| New capability              | Mechanism                              | Purpose                                                   |
+| --------------------------- | -------------------------------------- | --------------------------------------------------------- |
+| Keep-alive during streaming | `keepAlive()` in `_reply()`            | DO doesn't go idle during long generations                |
+| Interruption detection      | `_restoreActiveStream()` + stale check | Detects streams left in 'streaming' status after eviction |
+| Recovery hook               | `onStreamInterrupted(context)`         | User implements recovery strategy (prefill, retry, etc.)  |
+| Partial text extraction     | `getPartialStreamText()`               | Public method to reconstruct partial response from chunks |
 
-The key insight is that `AIChatAgent` already persists chunks and messages — fibers don't duplicate that data. The fiber's `stashFiber` call stores lightweight metadata (stream ID, request ID, message count) that the recovery hook uses to locate the persisted data.
+### Design decision: hooks over fiber wrapping
 
-### Recovery in `AIChatAgent` — detailed flow
+We chose NOT to wrap the `onChatMessage` + `_reply` flow in a fiber. The reasons:
+
+1. **The `Response` object isn't serializable** — `spawnFiber` stores its payload in SQLite as JSON. A `Response` with a `ReadableStream` body can't be serialized. The fiber would need to call `onChatMessage` fresh on recovery, but `onChatMessage` requires `onFinish` callbacks and options (abort signals, client tools) that are difficult to reconstruct.
+
+2. **`_reply` is deeply coupled to connection state** — it tracks streaming messages, broadcasts to WebSocket connections, manages abort controllers. A fiber running in the background without a connection context would miss all of this.
+
+3. **`keepAlive()` solves the immediate problem** — the most common failure mode is "DO goes idle during a long LLM stream." `keepAlive()` in `_reply` prevents this with zero API changes.
+
+4. **`onStreamInterrupted` gives users control** — different providers need different recovery strategies (OpenAI background mode vs. Anthropic prefill vs. plain retry). A hook with the partial text and messages is more useful than an opinionated default.
+
+### Concrete code changes to make in `packages/ai-chat/src/index.ts`
+
+#### 1. Add `keepAlive()` in `_reply()`
+
+Call `await this.keepAlive()` at the top of `_reply` and dispose in `.finally()`. This is the single biggest win — prevents idle eviction during streaming with no API changes.
+
+#### 2. Add `getPartialStreamText()` public method
+
+Extracts partial response from the most recent stream's persisted chunks by parsing SSE `text-delta` events and concatenating them.
+
+#### 3. Add `onStreamInterrupted(context)` hook
+
+Overridable hook called when `_restoreActiveStream()` detects a stale stream (older than threshold). Context provides `partialText`, `messages`, `streamId`, `requestId`.
+
+#### 4. Modify `_restoreActiveStream()` stale handling
+
+Change from deleting stale streams to marking as `'error'` and firing `onStreamInterrupted`. The existing test `"deletes stale streams on restore"` in `resumable-streaming.test.ts` will need updating to expect `status = 'error'` instead of `null`.
+
+### Prerequisites: AIChatAgent improvements needed first
+
+These changes should be made to AIChatAgent before implementing the Layer 3 integration. Being worked on in a separate branch.
+
+1. **Store the last user message ID separately** — currently, recovery has to scan `this.messages` to find what triggered the interrupted generation. A dedicated field would make this trivial.
+
+2. **Make `onChatMessage` easier to re-call programmatically** — currently it requires an `onFinish` callback and options (abort signal, client tools, custom body). A simpler `retryLastGeneration()` method that reconstructs these internally would make recovery hooks much easier to write.
+
+3. **Configurable stale threshold** — the 5-minute `STREAM_STALE_THRESHOLD_MS` is hardcoded. Some LLM calls (deep reasoning) can legitimately run longer. Making this configurable via `static options` would help.
+
+4. **Separate chunk persistence from broadcast** — currently `_storeStreamChunk` and the WebSocket broadcast are interleaved in the streaming loop. Separating them would make it easier to replay chunks to clients after recovery without re-generating.
+
+5. **Provider-specific recovery helpers** — utility functions like `createPrefillMessages(partialText, originalMessages)` that construct the right message format for Anthropic-style prefill, or `retrieveOpenAIResponse(responseId)` for OpenAI background mode retrieval.
+
+### How recovery will work
 
 ```
 [DO evicted during AIChatAgent streaming]
   │
-  ├─ Heartbeat alarm fires → DO restarts
+  ├─ SQLite persists:
+  │    - cf_ai_chat_agent_messages (full conversation)
+  │    - cf_ai_chat_stream_chunks (partial response chunks)
+  │    - cf_ai_chat_stream_metadata (status = 'streaming')
   │
-  ├─ alarm() detects fiber with status = 'running'
-  │    └─ Marks as 'interrupted', increments retry_count
+  ├─ DO restarts (from alarm, HTTP request, or WebSocket)
   │
-  ├─ onFibersRecovered([interruptedFiber])
-  │    └─ onFiberRecovered(ctx)
-  │         │
-  │         ├─ Load messages from cf_ai_chat_agent_messages
-  │         ├─ Load partial text from cf_ai_chat_stream_chunks
-  │         │    (using stream_id from ctx.snapshot)
-  │         │
-  │         ├─ Reconstruct messages with partial prefill
-  │         ├─ Update cf_ai_chat_stream_metadata: mark old stream as 'error'
-  │         │
-  │         ├─ Call onChatMessage(reconstructedMessages, onFinish)
-  │         │    └─ Developer's LLM call runs with full context
-  │         │         └─ New stream starts → chunks persisted as normal
-  │         │
-  │         └─ Connected clients receive new stream via existing
-  │              WebSocket broadcast (or resumption on reconnect)
+  ├─ Constructor calls _restoreActiveStream()
+  │    ├─ Finds stream with status = 'streaming'
+  │    ├─ Stream is older than 5 minutes → marks as 'error'
+  │    ├─ Calls getPartialStreamText() → extracts text from chunks
+  │    └─ Fires onStreamInterrupted({ partialText, messages, streamId, requestId })
+  │
+  └─ User's onStreamInterrupted implementation:
+       ├─ Constructs prefill: [...messages, { role: "assistant", content: partialText }]
+       ├─ Adds continuation prompt: { role: "user", content: "Continue." }
+       ├─ Calls this.onChatMessage() → new LLM generation starts
+       └─ Response streams to connected clients as normal
 ```
 
 ## External session reconnection
@@ -720,3 +761,13 @@ A TTL-based approach (default: 24 hours for completed, 7 days for failed) with a
 ### Debug logging
 
 Fiber lifecycle events are logged via `console.debug` when `static options = { debugFibers: true }` is set on the Agent subclass. This covers: spawn, stash, complete, fail, cancel, retry, recovery, heartbeat cleanup. No observability events are emitted — debug logging is the sole mechanism for now, to keep the implementation simple while the API stabilizes.
+
+### Local dev: alarms don't fire after process restart
+
+In production on Cloudflare's infrastructure, Durable Object alarms persist and fire automatically after DO eviction or runtime restarts. The heartbeat schedule in SQLite survives, and the alarm fires on restart, triggering fiber recovery.
+
+In **local development** (wrangler dev / miniflare), persisted alarms do **not** automatically fire after the wrangler process is killed and restarted. The heartbeat schedule is in SQLite and survives the restart, but miniflare doesn't scan for pending alarms on startup. The DO must be accessed (e.g., via a WebSocket connection or HTTP request) and the alarm triggered manually.
+
+**Workaround for testing:** The e2e test in `packages/agents/src/e2e-tests/` works around this by calling `this.alarm()` via RPC after restarting wrangler. This triggers the same recovery path that would fire automatically in production. The test still validates the important part: SQLite persistence of fiber state, checkpoint data, and heartbeat schedules across a real process kill (SIGKILL).
+
+**Workaround for local demos:** The example in `examples/long-running-agent/` uses a "Simulate Kill & Recover" button that does cancel + status reset + alarm trigger as a single action, since we can't kill a running async function from JavaScript and can't rely on alarms firing automatically in local dev.
