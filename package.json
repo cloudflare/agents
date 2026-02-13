@@ -52,6 +52,7 @@
     "@vitest/runner": "^3.2.4",
     "ai": "^6.0.77",
     "autoevals": "^0.0.131",
+    "babel-plugin-react-compiler": "^1.0.0",
     "concurrently": "^9.2.1",
     "evalite": "^0.19.0",
     "fast-glob": "^3.3.3",
