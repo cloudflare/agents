@@ -4,8 +4,7 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": [
     "nodejs_compat",
-    "experimental",
-    "enable_ctx_exports"
+    "experimental"
   ],
   "assets": {
     "directory": "public"
