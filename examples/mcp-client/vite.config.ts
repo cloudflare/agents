@@ -4,7 +4,11 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [
-    react(),
+    react({
+      babel: {
+        plugins: ["babel-plugin-react-compiler"]
+      }
+    }),
     cloudflare({
       // ensure that we can run two instances of the dev server
       inspectorPort: 9230
