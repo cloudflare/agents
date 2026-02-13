@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
@@ -29,7 +29,7 @@ export function SupervisorDemo() {
     onError: () => addLog("error", "error", "Connection error")
   });
 
-  const refreshStats = async () => {
+  const refreshStats = useCallback(async () => {
     try {
       const result = await agent.call("getStats");
       setChildren(result.children);
@@ -41,7 +41,7 @@ export function SupervisorDemo() {
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
     }
-  };
+  }, [agent, addLog]);
 
   const handleCreateChild = async () => {
     const childId = `child-${nanoid(6)}`;
@@ -102,7 +102,7 @@ export function SupervisorDemo() {
     if (agent.readyState === WebSocket.OPEN) {
       refreshStats();
     }
-  }, [agent.readyState]);
+  }, [agent.readyState, refreshStats]);
 
   return (
     <DemoWrapper

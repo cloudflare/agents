@@ -1,0 +1,23 @@
+{
+  "ai": { "binding": "AI" },
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "ChatAgent", "name": "ChatAgent" },
+      { "class_name": "LlmChatAgent", "name": "LlmChatAgent" },
+      { "class_name": "ClientToolAgent", "name": "ClientToolAgent" },
+      { "class_name": "SlowAgent", "name": "SlowAgent" },
+      { "class_name": "BadKeyAgent", "name": "BadKeyAgent" }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    { "new_sqlite_classes": ["ChatAgent"], "tag": "v1" },
+    { "new_sqlite_classes": ["LlmChatAgent"], "tag": "v2" },
+    {
+      "new_sqlite_classes": ["ClientToolAgent", "SlowAgent", "BadKeyAgent"],
+      "tag": "v3"
+    }
+  ]
+}

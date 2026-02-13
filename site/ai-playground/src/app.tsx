@@ -157,7 +157,7 @@ const App = () => {
       }
     };
     getModels();
-  }, []);
+  }, [agent.stub]);
 
   const handleAgentSubmit = async (
     e: React.FormEvent | React.KeyboardEvent | React.MouseEvent,

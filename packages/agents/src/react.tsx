@@ -319,6 +319,9 @@ export function useAgent<State>(
 
   // Get or create the query promise
   const queryPromise = useMemo(() => {
+    // Re-run when cache is invalidated after TTL expiry
+    void cacheInvalidatedAt;
+
     if (!query || typeof query !== "function") {
       return null;
     }

@@ -19,6 +19,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/react": "^19.2.13",
     "ai": "^6.0.77",
     "react": "^19.2.4",
@@ -59,6 +60,7 @@
     "build": "tsx ./scripts/build.ts",
     "test": "vitest --run",
     "test:react": "vitest --project react",
-    "test:workers": "vitest --project workers"
+    "test:workers": "vitest --project workers",
+    "test:e2e": "npx playwright test --config e2e/playwright.config.ts"
   }
 }

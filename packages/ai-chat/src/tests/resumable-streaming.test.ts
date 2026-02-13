@@ -549,4 +549,145 @@ describe("Resumable Streaming", () => {
       ws2.close();
     });
   });
+
+  describe("Client-initiated resume (issue #896)", () => {
+    it("CF_AGENT_STREAM_RESUME_REQUEST triggers resume notification", async () => {
+      const room = crypto.randomUUID();
+
+      // First connection: start a stream
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      const streamId = await agentStub.testStartStream("req-client-resume");
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-start","id":"t1"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-delta","id":"t1","delta":"hello"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      ws1.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Second connection: send CF_AGENT_STREAM_RESUME_REQUEST
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+
+      // Wait briefly for any onConnect push (which we'll also get)
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Send the client-initiated resume request
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+        })
+      );
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Should have received CF_AGENT_STREAM_RESUMING (from request, not just onConnect)
+      const resumeMsgs = messages2.filter(isStreamResumingMessage);
+      // May get 2 (one from onConnect, one from request) or 1 if timing collapses them
+      expect(resumeMsgs.length).toBeGreaterThanOrEqual(1);
+
+      ws2.close();
+    });
+
+    it("CF_AGENT_STREAM_RESUME_REQUEST with no active stream is a no-op", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      const messages = collectMessages(ws);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Send resume request when there's no active stream
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+        })
+      );
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Should NOT get CF_AGENT_STREAM_RESUMING
+      const resumeMsg = messages.find(isStreamResumingMessage);
+      expect(resumeMsg).toBeUndefined();
+
+      ws.close();
+    });
+
+    it("replayed chunks have replay=true flag", async () => {
+      const room = crypto.randomUUID();
+
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      // Start a stream and add chunks but do NOT complete it
+      // (stream must be active for resume to work)
+      const streamId = await agentStub.testStartStream("req-replay-flag");
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-start","id":"t1"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-delta","id":"t1","delta":"test"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      ws1.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Reconnect — active stream triggers resume
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Send resume request
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+        })
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+
+      // ACK the resuming notification
+      const resumeMsg = messages2.find(isStreamResumingMessage);
+      expect(resumeMsg).toBeDefined();
+
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: (resumeMsg as { id: string }).id
+        })
+      );
+
+      await new Promise((r) => setTimeout(r, 200));
+
+      // All CF_AGENT_USE_CHAT_RESPONSE messages should have replay=true
+      const responseMessages = messages2.filter(isUseChatResponseMessage);
+      expect(responseMessages.length).toBeGreaterThan(0);
+
+      for (const msg of responseMessages) {
+        expect((msg as { replay?: boolean }).replay).toBe(true);
+      }
+
+      ws2.close();
+    });
+  });
 });

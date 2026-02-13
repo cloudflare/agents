@@ -38,11 +38,12 @@
 
 - TODO: [AI SDK Integration](./ai-sdk.md) - Using Vercel AI SDK with agents
 - TODO: [TanStack Integration](./tanstack.md) - Using TanStack AI with agents
-- TODO: [Chat Agents](./chat-agents.md) - `AIChatAgent` class and `useAgentChat` React hook
+- [Chat Agents](./chat-agents.md) - `AIChatAgent` class and `useAgentChat` React hook
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
 - [Codemode (Experimental)](./codemode.md) - LLM-generated executable code for tool orchestration
 - [Client Tools Continuation](./client-tools-continuation.md) - Handling tool calls across client/server
+- [Resumable Streaming](./resumable-streaming.md) - Automatic stream resumption on disconnect
 
 ## MCP (Model Context Protocol)
 
@@ -54,7 +55,6 @@
 
 - TODO: [Securing your Agents](./securing-agents.md) - Authentication, authorization, and access control
 - [Cross-Domain Authentication](./cross-domain-authentication.md) - Auth across different domains
-- [Resumable Streaming](./resumable-streaming.md) - Handling interrupted streams
 
 ## Observability & Debugging
 
