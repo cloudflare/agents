@@ -700,12 +700,12 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       throw new Error("no connections to realtime agent found");
   }
 
-  input_kind(): DataKind {
-    return DataKind.Text;
+  input_kind(): DataKind[] {
+    return [DataKind.Text, DataKind.Audio, DataKind.Video];
   }
 
-  output_kind(): DataKind {
-    return DataKind.Text;
+  output_kind(): DataKind[] {
+    return [DataKind.Text, DataKind.Audio, DataKind.Video];
   }
   schema() {
     return {

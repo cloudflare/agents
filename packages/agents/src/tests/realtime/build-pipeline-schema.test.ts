@@ -14,8 +14,8 @@ import {
  */
 function createMockComponent(
   name: string,
-  inputKind: DataKind,
-  outputKind: DataKind,
+  inputKind: DataKind[],
+  outputKind: DataKind[],
   type = "mock"
 ): RealtimePipelineComponent {
   return {
@@ -32,8 +32,8 @@ function createMockComponent(
 function createMockSTT(name = "mock_stt"): RealtimePipelineComponent {
   return createMockComponent(
     name,
-    DataKind.Audio,
-    DataKind.Text,
+    [DataKind.Audio],
+    [DataKind.Text],
     "speech_to_text"
   );
 }
@@ -44,8 +44,8 @@ function createMockSTT(name = "mock_stt"): RealtimePipelineComponent {
 function createMockTTS(name = "mock_tts"): RealtimePipelineComponent {
   return createMockComponent(
     name,
-    DataKind.Text,
-    DataKind.Audio,
+    [DataKind.Text],
+    [DataKind.Audio],
     "text_to_speech"
   );
 }
@@ -57,10 +57,10 @@ function createMockTTS(name = "mock_tts"): RealtimePipelineComponent {
 class MockAgent implements RealtimePipelineComponent {
   name = "agent";
   input_kind() {
-    return DataKind.Text;
+    return [DataKind.Text];
   }
   output_kind() {
-    return DataKind.Text;
+    return [DataKind.Text];
   }
   schema() {
     return { name: this.name, type: "websocket" };
@@ -74,8 +74,8 @@ class MockAgent implements RealtimePipelineComponent {
 class MockMediaAgent implements RealtimePipelineComponent {
   name = "agent";
   constructor(
-    private inputDataKind: DataKind = DataKind.Audio,
-    private outputDataKind: DataKind = DataKind.Audio
+    private inputDataKind: DataKind[] = [DataKind.Audio],
+    private outputDataKind: DataKind[] = [DataKind.Audio]
   ) {}
   input_kind() {
     return this.inputDataKind;
@@ -98,8 +98,8 @@ describe("buildPipelineSchema", () => {
   describe("component chain validation", () => {
     it("should throw error when component output doesn't match next component input", () => {
       const pipeline = [
-        createMockComponent("comp1", DataKind.Audio, DataKind.Audio),
-        createMockComponent("comp2", DataKind.Text, DataKind.Text) // Mismatch: expects Text but previous outputs Audio
+        createMockComponent("comp1", [DataKind.Audio], [DataKind.Audio]),
+        createMockComponent("comp2", [DataKind.Text], [DataKind.Text]) // Mismatch: expects Text but previous outputs Audio
       ];
 
       expect(() => buildPipelineSchema({ ...defaultConfig, pipeline })).toThrow(
@@ -109,8 +109,8 @@ describe("buildPipelineSchema", () => {
 
     it("should not throw when component chain is valid", () => {
       const pipeline = [
-        createMockComponent("comp1", DataKind.Audio, DataKind.Text),
-        createMockComponent("comp2", DataKind.Text, DataKind.Audio)
+        createMockComponent("comp1", [DataKind.Audio], [DataKind.Text]),
+        createMockComponent("comp2", [DataKind.Text], [DataKind.Audio])
       ];
 
       expect(() =>
@@ -120,7 +120,7 @@ describe("buildPipelineSchema", () => {
 
     it("should allow single component pipeline", () => {
       const pipeline = [
-        createMockComponent("comp1", DataKind.Audio, DataKind.Audio)
+        createMockComponent("comp1", [DataKind.Audio], [DataKind.Audio])
       ];
 
       expect(() =>
@@ -264,8 +264,8 @@ describe("buildPipelineSchema", () => {
       const stt = createMockSTT();
       const middleComponent = createMockComponent(
         "middle",
-        DataKind.Text,
-        DataKind.Text
+        [DataKind.Text],
+        [DataKind.Text]
       );
       const agent = new MockAgent();
 
@@ -283,7 +283,7 @@ describe("buildPipelineSchema", () => {
     it("should NOT add audio input layer when no STT component exists", () => {
       const rtk = new RealtimeKitTransport({ meetingId: "test" });
       // Use media agent that accepts Audio input (like RTK output)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       const pipeline = [rtk, agent];
 
@@ -323,7 +323,7 @@ describe("buildPipelineSchema", () => {
     it("should add audio output layer when Agent is immediately followed by TTS", () => {
       const rtk = new RealtimeKitTransport({ meetingId: "test" });
       // Agent that accepts Audio (from RTK) and outputs Text (for TTS)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Text);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Text]);
       const tts = createMockTTS();
 
       const pipeline = [rtk, agent, tts, rtk];
@@ -350,11 +350,11 @@ describe("buildPipelineSchema", () => {
     it("should NOT add audio output layer when Agent is not immediately followed by TTS", () => {
       const rtk = new RealtimeKitTransport({ meetingId: "test" });
       // Agent that accepts Audio (from RTK) and outputs Text
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Text);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Text]);
       const middleComponent = createMockComponent(
         "middle",
-        DataKind.Text,
-        DataKind.Text
+        [DataKind.Text],
+        [DataKind.Text]
       );
       const tts = createMockTTS();
 
@@ -375,7 +375,7 @@ describe("buildPipelineSchema", () => {
     it("should NOT add audio output layer when no TTS component exists", () => {
       const rtk = new RealtimeKitTransport({ meetingId: "test" });
       // Agent that accepts and outputs Audio (no TTS)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       const pipeline = [rtk, agent, rtk];
 
@@ -397,7 +397,7 @@ describe("buildPipelineSchema", () => {
         media: { consumeAudio: false }
       });
       // Agent that accepts Audio and outputs Text
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Text);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Text]);
       const tts = createMockTTS();
 
       const pipeline = [rtk, agent, tts, rtk];
@@ -456,7 +456,7 @@ describe("buildPipelineSchema", () => {
         media: { consumeVideo: true }
       });
       // Agent that accepts Audio (RTK output type)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       const pipeline = [rtk, agent];
 
@@ -479,7 +479,7 @@ describe("buildPipelineSchema", () => {
     it("should NOT add video layer when consumeVideo is false (default)", () => {
       const rtk = new RealtimeKitTransport({ meetingId: "test" });
       // Agent that accepts Audio (RTK output type)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       const pipeline = [rtk, agent];
 
@@ -503,7 +503,7 @@ describe("buildPipelineSchema", () => {
         media: { consumeScreenshare: true }
       });
       // Agent that accepts Audio (RTK output type)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       const pipeline = [rtk, agent];
 
@@ -523,7 +523,7 @@ describe("buildPipelineSchema", () => {
     it("should NOT add screenshare layer when consumeScreenshare is false (default)", () => {
       const rtk = new RealtimeKitTransport({ meetingId: "test" });
       // Agent that accepts Audio (RTK output type)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       const pipeline = [rtk, agent];
 
@@ -584,7 +584,7 @@ describe("buildPipelineSchema", () => {
         }
       });
       // Agent that accepts Audio (RTK output type)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       // No STT or TTS, just rtk -> agent
       const pipeline = [rtk, agent];
@@ -714,7 +714,7 @@ describe("buildPipelineSchema", () => {
         }
       });
       // Agent that accepts Audio (RTK output type)
-      const agent = new MockMediaAgent(DataKind.Audio, DataKind.Audio);
+      const agent = new MockMediaAgent([DataKind.Audio], [DataKind.Audio]);
 
       const pipeline = [rtk, agent];
 

@@ -4,14 +4,14 @@ export type { RealtimeKitClient };
 
 export enum DataKind {
   Text = "TEXT",
-  Media = "MEDIA",
-  Audio = "AUDIO"
+  Audio = "AUDIO",
+  Video = "VIDEO"
 }
 
 export type RealtimePipelineComponent = {
   name: string;
-  input_kind(): DataKind;
-  output_kind(): DataKind;
+  input_kind(): DataKind[];
+  output_kind(): DataKind[];
   schema(): { name: string; type: string; [K: string]: unknown };
 } & { setGatewayId?: (gatewayId: string) => void };
 
@@ -102,11 +102,11 @@ export class RealtimeKitTransport implements RealtimePipelineComponent {
   }
 
   input_kind() {
-    return DataKind.Audio;
+    return [DataKind.Audio, DataKind.Video];
   }
 
   output_kind() {
-    return DataKind.Audio;
+    return [DataKind.Audio, DataKind.Video];
   }
 
   schema() {
@@ -151,11 +151,11 @@ export class DeepgramSTT implements RealtimePipelineComponent {
   }
 
   input_kind() {
-    return DataKind.Audio;
+    return [DataKind.Audio];
   }
 
   output_kind() {
-    return DataKind.Text;
+    return [DataKind.Text];
   }
 
   schema() {
@@ -202,11 +202,11 @@ export class ElevenLabsTTS implements RealtimePipelineComponent {
   }
 
   input_kind() {
-    return DataKind.Text;
+    return [DataKind.Text];
   }
 
   output_kind() {
-    return DataKind.Audio;
+    return [DataKind.Audio];
   }
 
   schema() {

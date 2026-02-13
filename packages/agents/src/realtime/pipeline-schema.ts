@@ -26,7 +26,9 @@ export type PipelineLayer = {
   id: number;
   name: string;
   elements: string[];
-  filters?: RealtimeKitLayerFilter[];
+  filters?: Array<{
+    media_kind: "audio" | "video";
+  }>;
 };
 
 /**
@@ -55,16 +57,18 @@ export function buildPipelineSchema(
 ): PipelineSchemaResult {
   const { pipeline, agentUrl, parentClassName, meetingId } = config;
 
-  // Validate component chain
+  // Validate component chain - check that adjacent components share at least one common DataKind
   let lastComponent: RealtimePipelineComponent | undefined;
   for (const component of pipeline) {
-    if (
-      lastComponent &&
-      lastComponent.output_kind() !== component.input_kind()
-    ) {
-      throw new Error(
-        `Cannot link component of output kind ${lastComponent.output_kind()} with input kind ${component.input_kind()}`
-      );
+    if (lastComponent) {
+      const outputKinds = lastComponent.output_kind();
+      const inputKinds = component.input_kind();
+      const hasOverlap = outputKinds.some((kind) => inputKinds.includes(kind));
+      if (!hasOverlap) {
+        throw new Error(
+          `Cannot link component of output kind ${outputKinds.join(",")} with input kind ${inputKinds.join(",")}`
+        );
+      }
     }
     lastComponent = component;
   }
@@ -153,13 +157,13 @@ export function buildPipelineSchema(
 
   // Helper to check if a component is STT (Audio -> Text)
   const isSTT = (component: RealtimePipelineComponent) =>
-    component.input_kind() === DataKind.Audio &&
-    component.output_kind() === DataKind.Text;
+    component.input_kind().includes(DataKind.Audio) &&
+    component.output_kind().includes(DataKind.Text);
 
   // Helper to check if a component is TTS (Text -> Audio)
   const isTTS = (component: RealtimePipelineComponent) =>
-    component.input_kind() === DataKind.Text &&
-    component.output_kind() === DataKind.Audio;
+    component.input_kind().includes(DataKind.Text) &&
+    component.output_kind().includes(DataKind.Audio);
 
   // Helper to check if a component is the Agent
   const isAgent = (component: RealtimePipelineComponent) =>
@@ -219,7 +223,7 @@ export function buildPipelineSchema(
       id: layerId++,
       name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
       elements: audioInputElements,
-      filters: [audioFilter]
+      filters: [{ media_kind: "audio" }]
     });
   }
 
@@ -241,7 +245,7 @@ export function buildPipelineSchema(
       id: layerId++,
       name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
       elements: audioOutputElements,
-      filters: [audioFilter]
+      filters: [{ media_kind: "audio" }]
     });
   }
 
@@ -251,7 +255,7 @@ export function buildPipelineSchema(
       id: layerId++,
       name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
       elements: [rtkElementName, agentElementName],
-      filters: [videoFilter]
+      filters: [{ media_kind: "video" }]
     });
   }
 
@@ -261,7 +265,7 @@ export function buildPipelineSchema(
       id: layerId++,
       name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
       elements: [rtkElementName, agentElementName],
-      filters: [screenshareFilter]
+      filters: [{ media_kind: "video" }]
     });
   }
 
