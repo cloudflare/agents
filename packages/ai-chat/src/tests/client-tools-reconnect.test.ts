@@ -87,7 +87,7 @@ describe("Client tools after reconnect", () => {
     expect(capturedClientTools![0].name).toBe("changeBackgroundColor");
     expect(capturedClientTools![1].name).toBe("changeTextColor");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("should work without clientTools in CF_AGENT_TOOL_RESULT (backwards compat)", async () => {
@@ -138,6 +138,6 @@ describe("Client tools after reconnect", () => {
     const capturedClientTools = await agentStub.getCapturedClientTools();
     expect(capturedClientTools).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 });
