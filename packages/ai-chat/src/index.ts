@@ -225,9 +225,12 @@ export class AIChatAgent<
   /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
   private static ROW_MAX_BYTES = 1_800_000;
 
+  /** Cached encoder for UTF-8 byte length measurement. */
+  private static _encoder = new TextEncoder();
+
   /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
   private static _byteLength(s: string): number {
-    return new TextEncoder().encode(s).byteLength;
+    return AIChatAgent._encoder.encode(s).byteLength;
   }
 
   /**
@@ -381,10 +384,7 @@ export class AIChatAgent<
                   {
                     abortSignal,
                     clientTools,
-                    body:
-                      Object.keys(customBody).length > 0
-                        ? customBody
-                        : undefined
+                    body: this._lastBody
                   }
                 );
 
@@ -1640,22 +1640,24 @@ export class AIChatAgent<
           this._streamCompletionPromise = null;
         }
 
-        // Framework-level cleanup: remove abort controller and emit observability.
-        // This ensures cleanup happens even if the user does not pass onFinish to streamText.
+        // Framework-level cleanup: always remove abort controller.
+        // Only emit observability on success (not on error path).
         if (chatMessageId) {
           this._removeAbortController(chatMessageId);
-          this.observability?.emit(
-            {
-              displayMessage: continuation
-                ? "Chat message response (tool continuation)"
-                : "Chat message response",
-              id: chatMessageId,
-              payload: {},
-              timestamp: Date.now(),
-              type: "message:response"
-            },
-            this.ctx
-          );
+          if (streamCompleted.value) {
+            this.observability?.emit(
+              {
+                displayMessage: continuation
+                  ? "Chat message response (tool continuation)"
+                  : "Chat message response",
+                id: chatMessageId,
+                payload: {},
+                timestamp: Date.now(),
+                type: "message:response"
+              },
+              this.ctx
+            );
+          }
         }
       }
 
