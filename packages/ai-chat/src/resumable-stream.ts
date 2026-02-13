@@ -24,6 +24,8 @@ const STREAM_STALE_THRESHOLD_MS = 5 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /** Default age threshold for cleaning up completed streams (ms) - 24 hours */
 const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+/** Shared encoder for UTF-8 byte length measurement */
+const textEncoder = new TextEncoder();
 
 /**
  * Stored stream chunk for resumable streaming
@@ -190,8 +192,7 @@ export class ResumableStream {
   storeChunk(streamId: string, body: string) {
     // Guard against chunks that would exceed SQLite row limit.
     // The chunk is still broadcast to live clients; only replay storage is skipped.
-    // Use TextEncoder for accurate UTF-8 byte measurement.
-    const bodyBytes = new TextEncoder().encode(body).byteLength;
+    const bodyBytes = textEncoder.encode(body).byteLength;
     if (bodyBytes > ResumableStream.CHUNK_MAX_BYTES) {
       console.warn(
         `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +

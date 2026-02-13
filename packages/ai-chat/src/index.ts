@@ -29,6 +29,9 @@ import { applyChunkToParts } from "./message-builder";
 import { ResumableStream } from "./resumable-stream";
 import { nanoid } from "nanoid";
 
+/** Shared encoder for UTF-8 byte length measurement */
+const textEncoder = new TextEncoder();
+
 /**
  * One-shot deprecation warnings (warns once per key per session).
  */
@@ -225,12 +228,9 @@ export class AIChatAgent<
   /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
   private static ROW_MAX_BYTES = 1_800_000;
 
-  /** Cached encoder for UTF-8 byte length measurement. */
-  private static _encoder = new TextEncoder();
-
   /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
   private static _byteLength(s: string): number {
-    return AIChatAgent._encoder.encode(s).byteLength;
+    return textEncoder.encode(s).byteLength;
   }
 
   /**
