@@ -1,10 +1,11 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * E2E tests that make real LLM calls via OpenAI gpt-4o-mini.
+ * E2E tests that make real LLM calls via Workers AI (@cf/openai/gpt-oss-120b).
  * These verify the full streaming pipeline: streamText → SSE → WebSocket → client.
  *
- * Requires OPENAI_API_KEY in .dev.vars (symlinked from ../.env).
+ * Uses the AI binding configured in wrangler.jsonc -- no API key needed.
+ * The only OpenAI usage is BadKeyAgent, which tests error handling with an invalid key.
  */
 
 const MessageType = {
@@ -106,7 +107,7 @@ function extractChunkBodies(
     .map((m) => JSON.parse(m.body as string));
 }
 
-test.describe("LLM e2e (OpenAI gpt-4o-mini)", () => {
+test.describe("LLM e2e (Workers AI)", () => {
   // Longer timeout for real LLM calls
   test.setTimeout(30_000);
 

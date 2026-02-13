@@ -470,7 +470,10 @@ export class AIChatAgent<
                   if (this._streamCompletionPromise) {
                     await this._streamCompletionPromise;
                   } else {
-                    // If no promise, wait a bit for the stream to finish
+                    // TODO: The completion promise can be null if the stream finished
+                    // before the tool result arrived (race between stream end and tool
+                    // apply). The 500ms fallback is a pragmatic workaround — consider
+                    // a more deterministic signal (e.g. always setting the promise).
                     await new Promise((resolve) => setTimeout(resolve, 500));
                   }
                 };

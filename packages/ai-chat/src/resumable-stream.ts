@@ -252,13 +252,14 @@ export class ResumableStream {
    * @param requestId - The original request ID
    */
   replayChunks(connection: Connection, requestId: string) {
-    if (!this._activeStreamId) return;
+    const streamId = this._activeStreamId;
+    if (!streamId) return;
 
     this.flushBuffer();
 
     const chunks = this.sql<StreamChunk>`
       select * from cf_ai_chat_stream_chunks 
-      where stream_id = ${this._activeStreamId} 
+      where stream_id = ${streamId} 
       order by chunk_index asc
     `;
 
@@ -274,8 +275,10 @@ export class ResumableStream {
       );
     }
 
-    // If the stream is no longer active (completed), send done signal
-    if (this._activeStreamId !== this._activeStreamId) {
+    // If the stream completed between our check above and now, send done.
+    // In practice this cannot happen (DO is single-threaded and replay is
+    // synchronous), but we guard defensively in case the flow changes.
+    if (this._activeStreamId !== streamId) {
       connection.send(
         JSON.stringify({
           body: "",

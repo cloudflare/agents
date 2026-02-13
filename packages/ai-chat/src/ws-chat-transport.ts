@@ -81,6 +81,7 @@ export class WebSocketChatTransport<
   }): Promise<ReadableStream<UIMessageChunk>> {
     const requestId = nanoid(8);
     const abortController = new AbortController();
+    let completed = false;
 
     // Build the request body
     let extraBody: Record<string, unknown> = {};
@@ -106,8 +107,9 @@ export class WebSocketChatTransport<
     // Track this request so the onAgentMessage handler skips it
     this.activeRequestIds?.add(requestId);
 
-    // Handle abort from the caller
+    // Handle abort from the caller (only if the stream has not already completed)
     options.abortSignal?.addEventListener("abort", () => {
+      if (completed) return;
       this.agent.send(
         JSON.stringify({
           id: requestId,
@@ -134,6 +136,7 @@ export class WebSocketChatTransport<
             if (data.id !== requestId) return;
 
             if (data.error) {
+              completed = true;
               controller.error(new Error(data.body));
               activeIds?.delete(requestId);
               abortController.abort();
@@ -151,6 +154,7 @@ export class WebSocketChatTransport<
             }
 
             if (data.done) {
+              completed = true;
               try {
                 controller.close();
               } catch {
