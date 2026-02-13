@@ -15,7 +15,7 @@ import { z } from "zod";
  * from closing idle connections during long-running operations.
  */
 describe("WorkerTransport POST stream keepalive", () => {
-  let setIntervalSpy: ReturnType<typeof vi.spyOn>;
+  let setIntervalSpy = vi.spyOn(globalThis, "setInterval");
 
   const createSlowToolServer = () => {
     const server = new McpServer(
