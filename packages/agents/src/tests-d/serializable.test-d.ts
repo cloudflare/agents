@@ -156,7 +156,7 @@ agent.call("updateState");
 // DEEPLY NESTED TYPE TESTS
 // Verifies that deeply nested types (like AI SDK CoreMessage[])
 // don't hit TypeScript's recursion limit.
-// See: https://github.com/cloudflare/agents/issues/XXX
+// See: https://github.com/cloudflare/agents/issues/903
 // ============================================
 
 // Simulate deeply nested AI SDK-like types with discriminated unions
