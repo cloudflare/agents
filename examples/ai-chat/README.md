@@ -28,7 +28,7 @@ npm install
 npm run dev
 ```
 
-Uses Workers AI (no API key needed) with `@cf/openai/gpt-oss-120b`.
+Uses Workers AI (no API key needed) with `@cf/zai-org/glm-4.7-flash`.
 
 ## Try it
 

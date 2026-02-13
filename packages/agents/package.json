@@ -53,7 +53,7 @@
   "peerDependencies": {
     "@ai-sdk/openai": "^3.0.0",
     "@ai-sdk/react": "^3.0.0",
-    "@cloudflare/ai-chat": "^0.0.8",
+    "@cloudflare/ai-chat": "^0.0.8 || ^0.1.0",
     "@cloudflare/codemode": "^0.0.7",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",

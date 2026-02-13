@@ -23,7 +23,7 @@ export class ResumableStreamingChat extends AIChatAgent {
 
     const result = streamText({
       // @ts-expect-error — model not yet in workers-ai-provider types
-      model: workersai("@cf/openai/gpt-oss-120b"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       messages: await convertToModelMessages(this.messages)
     });
 

@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * E2E tests that make real LLM calls via Workers AI (@cf/openai/gpt-oss-120b).
+ * E2E tests that make real LLM calls via Workers AI (@cf/zai-org/glm-4.7-flash).
  * These verify the full streaming pipeline: streamText → SSE → WebSocket → client.
  *
  * Uses the AI binding configured in wrangler.jsonc -- no API key needed.

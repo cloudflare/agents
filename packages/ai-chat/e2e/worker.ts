@@ -69,7 +69,7 @@ export class LlmChatAgent extends AIChatAgent<Env> {
 
     const result = streamText({
       // @ts-expect-error — model not yet in workers-ai-provider types
-      model: workersai("@cf/openai/gpt-oss-120b"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful test assistant. Keep responses very short (1-2 sentences max). " +
         "When asked about the weather, use the getWeather tool. " +
@@ -96,7 +96,7 @@ export class ClientToolAgent extends AIChatAgent<Env> {
 
     const result = streamText({
       // @ts-expect-error — model not yet in workers-ai-provider types
-      model: workersai("@cf/openai/gpt-oss-120b"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a test assistant. Always use the getUserLocation tool when asked about location.",
       messages: await convertToModelMessages(this.messages),

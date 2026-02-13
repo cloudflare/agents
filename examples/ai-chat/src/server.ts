@@ -28,7 +28,7 @@ export class ChatAgent extends AIChatAgent {
 
     const result = streamText({
       // @ts-expect-error -- model not yet in workers-ai-provider type list
-      model: workersai("@cf/openai/gpt-oss-120b"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
         "and run calculations. For calculations over $100, you need user approval first.",

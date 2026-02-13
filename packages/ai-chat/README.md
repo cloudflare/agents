@@ -22,7 +22,7 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/openai/gpt-oss-120b"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       messages: await convertToModelMessages(this.messages)
     });
 
@@ -110,7 +110,7 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/openai/gpt-oss-120b"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       messages: await convertToModelMessages(this.messages),
       tools: {
         getWeather: tool({
@@ -233,7 +233,7 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/openai/gpt-oss-120b"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         reasoning: "before-last-message",
