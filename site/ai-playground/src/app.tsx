@@ -24,7 +24,7 @@ const STORAGE_KEY = "playground_session_id";
 const MAX_MCP_LOGS = 200;
 
 const DEFAULT_PARAMS = {
-  model: "@cf/qwen/qwen3-30b-a3b-fp8",
+  model: "@cf/zai-org/glm-4.7-flash",
   temperature: 0,
   stream: true,
   system:

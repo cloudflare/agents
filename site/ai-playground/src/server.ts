@@ -54,7 +54,7 @@ export interface PlaygroundState {
  */
 export class Playground extends AIChatAgent<Env, PlaygroundState> {
   initialState: PlaygroundState = {
-    model: "@cf/qwen/qwen3-30b-a3b-fp8",
+    model: "@cf/zai-org/glm-4.7-flash",
     temperature: 1,
     stream: true,
     system:

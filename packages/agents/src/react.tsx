@@ -633,7 +633,10 @@ export function useAgent<State>(
   agent.name = identity.name;
   agent.identified = identity.identified;
   agent.ready = readyRef.current!.promise;
-  agent.stub = createStubProxy(call);
+  // Memoize stub so it's referentially stable across renders
+  // (call is already stable via useCallback)
+  const stub = useMemo(() => createStubProxy(call), [call]);
+  agent.stub = stub;
 
   // warn if agent isn't in lowercase
   if (identity.agent !== identity.agent.toLowerCase()) {
