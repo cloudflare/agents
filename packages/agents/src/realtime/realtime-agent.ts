@@ -96,7 +96,9 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     // Load transcript history from database
     this.transcriptHistory = this._loadTranscriptsFromDb();
 
-    this.keepAlive();
+    if (!this.ctx.storage.get("keepAlive")) {
+      this.keepAlive();
+    }
 
     const _onMessage = this.onMessage.bind(this);
 
@@ -215,10 +217,12 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   }
 
   async keepAlive() {
+    this.ctx.storage.put("keepAlive", true);
     this.schedule(10, "keepAlive");
   }
 
   async cancelKeepAlive() {
+    this.ctx.storage.delete("keepAlive");
     this.cancelSchedule("keepAlive");
   }
   /**
@@ -512,7 +516,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * @returns true if the message was handled, false otherwise
    */
   private async handleWebsocketMessage(message: unknown): Promise<boolean> {
-    console.log("got message", JSON.stringify(message, null, 2));
     if (!isRealtimeWebsocketMessage(message)) {
       return false;
     }
