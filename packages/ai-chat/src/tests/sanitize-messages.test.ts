@@ -52,7 +52,7 @@ describe("Message Sanitization", () => {
         ?.someOtherField
     ).toBe("keep-me");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("strips reasoningEncryptedContent from persisted messages", async () => {
@@ -91,7 +91,7 @@ describe("Message Sanitization", () => {
     // Since no other openai fields remain, the openai key itself should be gone
     expect(textPart.providerMetadata?.openai).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("removes empty reasoning parts from persisted messages", async () => {
@@ -130,7 +130,7 @@ describe("Message Sanitization", () => {
     const textParts = persisted[0].parts.filter((p) => p.type === "text");
     expect(textParts.length).toBe(1);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("strips callProviderMetadata from tool parts", async () => {
@@ -171,7 +171,7 @@ describe("Message Sanitization", () => {
     expect(toolPart.state).toBe("output-available");
     expect(toolPart.output).toBe("Sunny");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("preserves messages without OpenAI metadata unchanged", async () => {
@@ -210,6 +210,6 @@ describe("Message Sanitization", () => {
       cacheControl: "ephemeral"
     });
 
-    ws.close();
+    ws.close(1000);
   });
 });

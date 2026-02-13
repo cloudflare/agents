@@ -62,7 +62,7 @@ describe("Client Tools Broadcast", () => {
     // which causes duplicate messages when combined with the stream response
     expect(chatMessagesReceived.length).toBe(0);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("should broadcast CF_AGENT_CHAT_MESSAGES to other connections but not the originator", async () => {
@@ -133,6 +133,6 @@ describe("Client Tools Broadcast", () => {
     expect(ws2ChatMessages.length).toBeGreaterThan(0);
 
     ws1.close();
-    ws2.close();
+    ws2.close(1000);
   });
 });

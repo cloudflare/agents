@@ -125,6 +125,30 @@ describe("applyChunkToParts", () => {
       applyChunkToParts(parts, { type: "reasoning-end", id: "r1" });
       expect((parts[0] as { state: string }).state).toBe("done");
     });
+
+    it("reasoning-delta creates fallback part when no reasoning-start received", () => {
+      const parts = makeParts();
+      // No reasoning-start — simulates stream resumption where start was missed
+      applyChunkToParts(parts, {
+        type: "reasoning-delta",
+        id: "r1",
+        delta: "resumed thinking"
+      });
+      expect(parts.length).toBe(1);
+      expect(parts[0]).toEqual({
+        type: "reasoning",
+        text: "resumed thinking",
+        state: "streaming"
+      });
+
+      // Subsequent deltas append normally
+      applyChunkToParts(parts, {
+        type: "reasoning-delta",
+        id: "r1",
+        delta: " more"
+      });
+      expect((parts[0] as { text: string }).text).toBe("resumed thinking more");
+    });
   });
 
   describe("file chunks", () => {

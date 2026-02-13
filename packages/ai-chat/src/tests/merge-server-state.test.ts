@@ -72,7 +72,7 @@ describe("Merge Incoming With Server State", () => {
     expect(toolPart.state).toBe("output-available");
     expect(toolPart.output).toBe("Rainy, 12°C");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("passes through messages unchanged when server has no tool outputs", async () => {
@@ -101,6 +101,6 @@ describe("Merge Incoming With Server State", () => {
     expect(persisted[0].id).toBe("user-no-merge");
     expect(persisted[1].id).toBe("assistant-no-merge");
 
-    ws.close();
+    ws.close(1000);
   });
 });

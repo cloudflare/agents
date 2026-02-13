@@ -12,7 +12,7 @@ describe("GET /get-messages endpoint", () => {
     // First, establish a WebSocket to create the DO instance
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
     await new Promise((r) => setTimeout(r, 50));
-    ws.close();
+    ws.close(1000);
 
     const req = new Request(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
@@ -50,7 +50,7 @@ describe("GET /get-messages endpoint", () => {
     ];
 
     await agentStub.persistMessages(messages);
-    ws.close();
+    ws.close(1000);
 
     const req = new Request(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`

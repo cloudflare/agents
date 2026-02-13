@@ -24,7 +24,7 @@ describe("maxPersistedMessages", () => {
     const count = await agentStub.getMessageCount();
     expect(count).toBe(20);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("deletes oldest messages when count exceeds limit", async () => {
@@ -56,7 +56,7 @@ describe("maxPersistedMessages", () => {
     expect(persisted[0].id).toBe("msg-limit-5");
     expect(persisted[4].id).toBe("msg-limit-9");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("keeps all messages when count is under the limit", async () => {
@@ -79,7 +79,7 @@ describe("maxPersistedMessages", () => {
     const count = await agentStub.getMessageCount();
     expect(count).toBe(5);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("enforces limit across multiple persist calls", async () => {
@@ -158,7 +158,7 @@ describe("maxPersistedMessages", () => {
       "batch2-3"
     ]);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("can be disabled by setting to null", async () => {
@@ -196,6 +196,6 @@ describe("maxPersistedMessages", () => {
     // The key assertion: count is more than 3 (limit was removed)
     expect(await agentStub.getMessageCount()).toBeGreaterThan(3);
 
-    ws.close();
+    ws.close(1000);
   });
 });

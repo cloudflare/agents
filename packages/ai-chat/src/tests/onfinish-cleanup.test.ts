@@ -93,7 +93,7 @@ describe("onFinish cleanup (framework-managed)", () => {
     const second = await secondDone;
     expect(second).toBe(true);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("cancellation still works after cleanup is moved to _reply", async () => {
@@ -172,7 +172,7 @@ describe("onFinish cleanup (framework-managed)", () => {
     const done = await donePromise;
     expect(done).toBe(true);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("multiple concurrent requests each get cleaned up", async () => {
@@ -242,7 +242,7 @@ describe("onFinish cleanup (framework-managed)", () => {
     expect(received).toContain("req-concurrent-1");
     expect(received).toContain("req-concurrent-2");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("abort controllers are cleaned up after stream completion (count returns to 0)", async () => {
@@ -298,7 +298,7 @@ describe("onFinish cleanup (framework-managed)", () => {
     // even though our test worker's onChatMessage does NOT pass onFinish to streamText
     expect(await agentStub.getAbortControllerCount()).toBe(0);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("abort controllers are cleaned up after multiple sequential requests", async () => {
@@ -357,6 +357,6 @@ describe("onFinish cleanup (framework-managed)", () => {
     // All 3 abort controllers should be cleaned up
     expect(await agentStub.getAbortControllerCount()).toBe(0);
 
-    ws.close();
+    ws.close(1000);
   });
 });

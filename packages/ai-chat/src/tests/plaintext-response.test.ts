@@ -82,6 +82,6 @@ describe("Plain text response handling", () => {
       types.filter((t: string) => t === "text-delta").length
     ).toBeGreaterThanOrEqual(1);
 
-    ws.close();
+    ws.close(1000);
   });
 });

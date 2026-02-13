@@ -49,7 +49,7 @@ describe("Resumable Streaming", () => {
       expect(metadata?.status).toBe("streaming");
       expect(metadata?.request_id).toBe("req-123");
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("stores stream chunks in batches", async () => {
@@ -86,7 +86,7 @@ describe("Resumable Streaming", () => {
       expect(chunks[2].chunk_index).toBe(2);
       expect(chunks[0].body).toBe('{"type":"text","text":"Hello"}');
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("marks stream as completed and clears active state", async () => {
@@ -113,7 +113,7 @@ describe("Resumable Streaming", () => {
       const metadata = await agentStub.getStreamMetadata(streamId);
       expect(metadata?.status).toBe("completed");
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("marks stream as error on failure", async () => {
@@ -135,7 +135,7 @@ describe("Resumable Streaming", () => {
       const metadata = await agentStub.getStreamMetadata(streamId);
       expect(metadata?.status).toBe("error");
 
-      ws.close();
+      ws.close(1000);
     });
   });
 
@@ -172,7 +172,7 @@ describe("Resumable Streaming", () => {
       expect(resumeMsg).toBeDefined();
       expect(resumeMsg?.id).toBe("req-resume");
 
-      ws2.close();
+      ws2.close(1000);
     });
 
     it("sends stream chunks after client ACK", async () => {
@@ -223,7 +223,7 @@ describe("Resumable Streaming", () => {
       expect(chunkMsgs[0].body).toBe('{"type":"text","text":"chunk1"}');
       expect(chunkMsgs[1].body).toBe('{"type":"text","text":"chunk2"}');
 
-      ws2.close();
+      ws2.close(1000);
     });
 
     it("does not deliver live chunks before ACK to resuming connections", async () => {
@@ -299,7 +299,7 @@ describe("Resumable Streaming", () => {
       );
 
       ws1.close();
-      ws2.close();
+      ws2.close(1000);
     });
 
     it("ignores ACK with wrong request ID", async () => {
@@ -344,7 +344,7 @@ describe("Resumable Streaming", () => {
       const chunkMsgs = messages2.filter(isUseChatResponseMessage);
       expect(chunkMsgs.length).toBe(0);
 
-      ws2.close();
+      ws2.close(1000);
     });
   });
 
@@ -379,7 +379,7 @@ describe("Resumable Streaming", () => {
       // Active stream should NOT be set
       expect(await agentStub.getActiveStreamId()).toBeNull();
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("restores fresh streams (under 5 minutes old)", async () => {
@@ -411,7 +411,7 @@ describe("Resumable Streaming", () => {
       expect(await agentStub.getActiveStreamId()).toBe(freshStreamId);
       expect(await agentStub.getActiveRequestId()).toBe("req-fresh");
 
-      ws.close();
+      ws.close(1000);
     });
   });
 
@@ -451,7 +451,7 @@ describe("Resumable Streaming", () => {
       // Active state should be cleared
       expect(await agentStub.getActiveStreamId()).toBeNull();
 
-      ws.close();
+      ws.close(1000);
     });
   });
 
@@ -485,7 +485,7 @@ describe("Resumable Streaming", () => {
       // Second stream is active
       expect(await agentStub.getActiveStreamId()).toBe(stream2);
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("flushes on complete", async () => {
@@ -509,7 +509,7 @@ describe("Resumable Streaming", () => {
       expect(chunks.length).toBe(1);
       expect(chunks[0].body).toBe('{"type":"text","text":"final"}');
 
-      ws.close();
+      ws.close(1000);
     });
   });
 
@@ -546,7 +546,7 @@ describe("Resumable Streaming", () => {
       const resumeMsg = messages2.find(isStreamResumingMessage);
       expect(resumeMsg).toBeUndefined();
 
-      ws2.close();
+      ws2.close(1000);
     });
   });
 
@@ -598,7 +598,7 @@ describe("Resumable Streaming", () => {
       // May get 2 (one from onConnect, one from request) or 1 if timing collapses them
       expect(resumeMsgs.length).toBeGreaterThanOrEqual(1);
 
-      ws2.close();
+      ws2.close(1000);
     });
 
     it("CF_AGENT_STREAM_RESUME_REQUEST with no active stream is a no-op", async () => {
@@ -621,7 +621,7 @@ describe("Resumable Streaming", () => {
       const resumeMsg = messages.find(isStreamResumingMessage);
       expect(resumeMsg).toBeUndefined();
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("replayed chunks have replay=true flag", async () => {
@@ -687,7 +687,72 @@ describe("Resumable Streaming", () => {
         expect((msg as { replay?: boolean }).replay).toBe(true);
       }
 
-      ws2.close();
+      ws2.close(1000);
+    });
+  });
+
+  describe("clearAll clears chunk buffer", () => {
+    it("buffered chunks are not flushed to SQLite after clearAll", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Start a stream and buffer some chunks (do NOT flush)
+      const streamId = await agentStub.testStartStream("req-buffer-clear");
+      await agentStub.testStoreStreamChunk(streamId, "chunk-1");
+      await agentStub.testStoreStreamChunk(streamId, "chunk-2");
+
+      // Chunks should be in buffer but not yet in SQLite (buffer size < 10)
+      let chunks = await agentStub.getStreamChunks(streamId);
+      expect(chunks.length).toBe(0); // Still in memory buffer
+
+      // Clear all — should discard the buffer
+      ws.send(JSON.stringify({ type: "cf_agent_chat_clear" }));
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Flush should be a no-op since buffer was cleared
+      await agentStub.testFlushChunkBuffer();
+      chunks = await agentStub.getStreamChunks(streamId);
+      expect(chunks.length).toBe(0);
+
+      // Wait before close to let the agent settle
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+  });
+
+  describe("errored stream cleanup", () => {
+    it("errored streams are cleaned up alongside completed streams", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Insert an old errored stream (25 hours old, past the 24h cleanup threshold)
+      await agentStub.testInsertOldErroredStream(
+        "old-errored",
+        "req-errored",
+        25 * 60 * 60 * 1000
+      );
+
+      // Verify the errored stream exists
+      const metadata = await agentStub.getStreamMetadata("old-errored");
+      expect(metadata?.status).toBe("error");
+
+      // Trigger cleanup by completing a dummy stream
+      // (cleanup runs periodically inside completeStream)
+      await agentStub.testTriggerStreamCleanup();
+
+      // The old errored stream should be cleaned up
+      const afterMetadata = await agentStub.getStreamMetadata("old-errored");
+      expect(afterMetadata).toBeNull();
+
+      // Wait before close to let the agent settle
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
     });
   });
 });

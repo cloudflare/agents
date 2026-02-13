@@ -190,9 +190,11 @@ export class ResumableStream {
   storeChunk(streamId: string, body: string) {
     // Guard against chunks that would exceed SQLite row limit.
     // The chunk is still broadcast to live clients; only replay storage is skipped.
-    if (body.length > ResumableStream.CHUNK_MAX_BYTES) {
+    // Use TextEncoder for accurate UTF-8 byte measurement.
+    const bodyBytes = new TextEncoder().encode(body).byteLength;
+    if (bodyBytes > ResumableStream.CHUNK_MAX_BYTES) {
       console.warn(
-        `[ResumableStream] Skipping oversized chunk (${body.length} bytes) ` +
+        `[ResumableStream] Skipping oversized chunk (${bodyBytes} bytes) ` +
           `to prevent SQLite row limit crash. Live clients still receive it.`
       );
       return;
@@ -341,6 +343,7 @@ export class ResumableStream {
    * Clear all stream data (called on chat history clear).
    */
   clearAll() {
+    this._chunkBuffer = [];
     this.sql`delete from cf_ai_chat_stream_chunks`;
     this.sql`delete from cf_ai_chat_stream_metadata`;
     this._activeStreamId = null;
@@ -373,12 +376,12 @@ export class ResumableStream {
       delete from cf_ai_chat_stream_chunks 
       where stream_id in (
         select id from cf_ai_chat_stream_metadata 
-        where status = 'completed' and completed_at < ${cutoff}
+        where status in ('completed', 'error') and completed_at < ${cutoff}
       )
     `;
     this.sql`
       delete from cf_ai_chat_stream_metadata 
-      where status = 'completed' and completed_at < ${cutoff}
+      where status in ('completed', 'error') and completed_at < ${cutoff}
     `;
   }
 

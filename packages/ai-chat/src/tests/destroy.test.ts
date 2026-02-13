@@ -24,7 +24,7 @@ describe("AIChatAgent destroy()", () => {
     const chunks = await agentStub.getStreamChunks(streamId);
     expect(chunks.length).toBe(1);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("flushes pending chunk buffer on destroy", async () => {
@@ -52,6 +52,6 @@ describe("AIChatAgent destroy()", () => {
     const chunks = await agentStub.getStreamChunks(streamId);
     expect(chunks.length).toBe(2);
 
-    ws.close();
+    ws.close(1000);
   });
 });

@@ -43,7 +43,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       expect(persisted[0].id).toBe("inc-1");
       expect(persisted[1].id).toBe("inc-2");
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("persists modified messages when content changes", async () => {
@@ -77,7 +77,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       const textPart = persisted[0].parts[0] as { text: string };
       expect(textPart.text).toBe("Updated content");
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("cache is cleared on chat clear", async () => {
@@ -122,7 +122,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
         "New message same ID"
       );
 
-      ws.close();
+      ws.close(1000);
     });
   });
 
@@ -160,7 +160,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       const part = persisted[0].parts[0] as { output: unknown };
       expect(part.output).toBe(toolOutput);
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("messages over 1.8MB have tool outputs compacted", async () => {
@@ -200,7 +200,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       expect(outputStr).toContain("bytes");
       expect(outputStr.length).toBeLessThan(hugeOutput.length);
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("compacted messages have metadata with compactedToolOutputs", async () => {
@@ -232,7 +232,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       expect(metadata).toBeDefined();
       expect(metadata.compactedToolOutputs).toEqual(["call_meta"]);
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("non-assistant messages pass through even if large", async () => {
@@ -263,7 +263,51 @@ describe("Row Size Guard and Incremental Persistence", () => {
       expect(textPart.text).toContain("truncated for storage");
       expect(textPart.text.length).toBeLessThan(largeText.length);
 
-      ws.close();
+      ws.close(1000);
+    });
+  });
+
+  describe("Unicode byte-length measurement", () => {
+    it("compacts messages with multi-byte Unicode that exceed byte limit", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // CJK character \u4e00 is 1 JS char but 3 bytes in UTF-8.
+      // 700,000 CJK chars = 700,000 JS chars (under 1.8M char limit)
+      // but 2,100,000 UTF-8 bytes (over 1.8MB byte limit).
+      // This tests that the byte-length guard catches it.
+      const cjkOutput = "\u4e00".repeat(700_000);
+
+      const message: ChatMessage = {
+        id: "unicode-test",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-cjkTool",
+            toolCallId: "call_unicode",
+            state: "output-available",
+            input: {},
+            output: cjkOutput
+          }
+        ] as ChatMessage["parts"]
+      };
+
+      await agentStub.persistMessages([message]);
+
+      const persisted =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      expect(persisted.length).toBe(1);
+
+      // The tool output should be compacted (byte size exceeds limit)
+      const part = persisted[0].parts[0] as { output: unknown };
+      expect(typeof part.output).toBe("string");
+      expect((part.output as string).length).toBeLessThan(cjkOutput.length);
+      expect(part.output as string).toContain("too large to persist");
+
+      ws.close(1000);
     });
   });
 
@@ -285,7 +329,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       const chunks = await agentStub.getStreamChunks(streamId);
       expect(chunks.length).toBe(1);
 
-      ws.close();
+      ws.close(1000);
     });
 
     it("oversized chunks are skipped without crash", async () => {
@@ -324,7 +368,7 @@ describe("Row Size Guard and Incremental Persistence", () => {
       expect(chunks[0].body).toContain("text-start");
       expect(chunks[1].body).toContain("text-end");
 
-      ws.close();
+      ws.close(1000);
     });
   });
 });

@@ -116,7 +116,7 @@ describe("Client tools continuation", () => {
     expect(continuationClientTools).toHaveLength(2);
     expect(continuationClientTools).toEqual(clientTools);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("should clear stored client tools when chat is cleared", async () => {
@@ -208,7 +208,7 @@ describe("Client tools continuation", () => {
     const continuationClientTools = await agentStub.getCapturedClientTools();
     expect(continuationClientTools).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("should clear stored client tools when new request has no client tools", async () => {
@@ -309,6 +309,6 @@ describe("Client tools continuation", () => {
     capturedTools = await agentStub.getCapturedClientTools();
     expect(capturedTools).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 });

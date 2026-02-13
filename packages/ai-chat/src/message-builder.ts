@@ -112,6 +112,13 @@ export function applyChunkToParts(
       const lastReasoningPart = findLastPartByType(parts, "reasoning");
       if (lastReasoningPart && lastReasoningPart.type === "reasoning") {
         (lastReasoningPart as { text: string }).text += chunk.delta ?? "";
+      } else {
+        // No reasoning-start received — create a new reasoning part (stream resumption fallback)
+        parts.push({
+          type: "reasoning",
+          text: chunk.delta ?? "",
+          state: "streaming"
+        } as MessagePart);
       }
       return true;
     }

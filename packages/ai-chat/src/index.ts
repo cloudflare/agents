@@ -208,6 +208,13 @@ export class AIChatAgent<
   private _lastClientTools: ClientToolSchema[] | undefined;
 
   /**
+   * Custom body data from the most recent chat request.
+   * Stored so it can be passed to onChatMessage during tool continuations.
+   * @internal
+   */
+  private _lastBody: Record<string, unknown> | undefined;
+
+  /**
    * Cache of last-persisted JSON for each message ID.
    * Used for incremental persistence: skip SQL writes for unchanged messages.
    * Lost on hibernation, repopulated from SQLite on wake.
@@ -217,6 +224,11 @@ export class AIChatAgent<
 
   /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
   private static ROW_MAX_BYTES = 1_800_000;
+
+  /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
+  private static _byteLength(s: string): number {
+    return new TextEncoder().encode(s).byteLength;
+  }
 
   /**
    * Maximum number of messages to keep in SQLite storage.
@@ -323,8 +335,10 @@ export class AIChatAgent<
             [key: string]: unknown;
           };
 
-          // Store client tools for use during tool continuations
+          // Store client tools and body for use during tool continuations
           this._lastClientTools = clientTools?.length ? clientTools : undefined;
+          this._lastBody =
+            Object.keys(customBody).length > 0 ? customBody : undefined;
 
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
@@ -404,6 +418,7 @@ export class AIChatAgent<
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
           this._lastClientTools = undefined;
+          this._lastBody = undefined;
           this._persistedMessageCache.clear();
           this.messages = [];
           this._broadcastChatMessage(
@@ -497,7 +512,8 @@ export class AIChatAgent<
                           },
                           {
                             abortSignal,
-                            clientTools: this._lastClientTools
+                            clientTools: this._lastClientTools,
+                            body: this._lastBody
                           }
                         );
 
@@ -1062,20 +1078,21 @@ export class AIChatAgent<
    */
   private _enforceRowSizeLimit(message: ChatMessage): ChatMessage {
     let json = JSON.stringify(message);
-    if (json.length <= AIChatAgent.ROW_MAX_BYTES) return message;
+    let size = AIChatAgent._byteLength(json);
+    if (size <= AIChatAgent.ROW_MAX_BYTES) return message;
 
     if (message.role !== "assistant") {
       // Non-assistant messages (user/system) are harder to compact safely.
       // Truncate the entire message JSON as a last resort.
       console.warn(
-        `[AIChatAgent] Non-assistant message ${message.id} is ${json.length} bytes, ` +
+        `[AIChatAgent] Non-assistant message ${message.id} is ${size} bytes, ` +
           `exceeds row limit. Truncating text parts.`
       );
       return this._truncateTextParts(message);
     }
 
     console.warn(
-      `[AIChatAgent] Message ${message.id} is ${json.length} bytes, ` +
+      `[AIChatAgent] Message ${message.id} is ${size} bytes, ` +
         `compacting tool outputs to fit SQLite row limit`
     );
 
@@ -1118,11 +1135,12 @@ export class AIChatAgent<
 
     // Check if tool compaction was enough
     json = JSON.stringify(result);
-    if (json.length <= AIChatAgent.ROW_MAX_BYTES) return result;
+    size = AIChatAgent._byteLength(json);
+    if (size <= AIChatAgent.ROW_MAX_BYTES) return result;
 
     // Pass 2: truncate text parts
     console.warn(
-      `[AIChatAgent] Message ${message.id} still ${json.length} bytes after tool compaction, truncating text parts`
+      `[AIChatAgent] Message ${message.id} still ${size} bytes after tool compaction, truncating text parts`
     );
     return this._truncateTextParts(result);
   }
@@ -1152,7 +1170,10 @@ export class AIChatAgent<
 
           // Check if we fit now
           const candidate = { ...message, parts };
-          if (JSON.stringify(candidate).length <= AIChatAgent.ROW_MAX_BYTES) {
+          if (
+            AIChatAgent._byteLength(JSON.stringify(candidate)) <=
+            AIChatAgent.ROW_MAX_BYTES
+          ) {
             break;
           }
         }
@@ -1608,6 +1629,34 @@ export class AIChatAgent<
         throw error;
       } finally {
         reader.releaseLock();
+
+        // Always clear the streaming message reference and resolve completion
+        // promise, even on error. Without this, tool continuations waiting on
+        // _streamCompletionPromise would hang forever after a stream error.
+        this._streamingMessage = null;
+        if (this._streamCompletionResolve) {
+          this._streamCompletionResolve();
+          this._streamCompletionResolve = null;
+          this._streamCompletionPromise = null;
+        }
+
+        // Framework-level cleanup: remove abort controller and emit observability.
+        // This ensures cleanup happens even if the user does not pass onFinish to streamText.
+        if (chatMessageId) {
+          this._removeAbortController(chatMessageId);
+          this.observability?.emit(
+            {
+              displayMessage: continuation
+                ? "Chat message response (tool continuation)"
+                : "Chat message response",
+              id: chatMessageId,
+              payload: {},
+              timestamp: Date.now(),
+              type: "message:response"
+            },
+            this.ctx
+          );
+        }
       }
 
       if (message.parts.length > 0) {
@@ -1642,32 +1691,6 @@ export class AIChatAgent<
             excludeBroadcastIds
           );
         }
-      }
-
-      // Clear the streaming message reference and resolve completion promise
-      this._streamingMessage = null;
-      if (this._streamCompletionResolve) {
-        this._streamCompletionResolve();
-        this._streamCompletionResolve = null;
-        this._streamCompletionPromise = null;
-      }
-
-      // Framework-level cleanup: remove abort controller and emit observability.
-      // This ensures cleanup happens even if the user does not pass onFinish to streamText.
-      if (chatMessageId) {
-        this._removeAbortController(chatMessageId);
-        this.observability?.emit(
-          {
-            displayMessage: continuation
-              ? "Chat message response (tool continuation)"
-              : "Chat message response",
-            id: chatMessageId,
-            payload: {},
-            timestamp: Date.now(),
-            type: "message:response"
-          },
-          this.ctx
-        );
       }
     });
   }

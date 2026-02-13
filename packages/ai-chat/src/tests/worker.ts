@@ -259,8 +259,28 @@ export class TestChatAgent extends AIChatAgent<Env> {
     `;
   }
 
+  testInsertOldErroredStream(
+    streamId: string,
+    requestId: string,
+    ageMs: number
+  ): void {
+    const createdAt = Date.now() - ageMs;
+    const completedAt = createdAt + 1000;
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
+      values (${streamId}, ${requestId}, 'error', ${createdAt}, ${completedAt})
+    `;
+  }
+
   testRestoreActiveStream(): void {
     this._restoreActiveStream();
+  }
+
+  testTriggerStreamCleanup(): void {
+    // Force the cleanup interval to 0 so the next completeStream triggers it
+    // We do this by starting and immediately completing a dummy stream
+    const dummyId = this._startStream("cleanup-trigger");
+    this._completeStream(dummyId);
   }
 
   setMaxPersistedMessages(max: number | null): void {

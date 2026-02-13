@@ -75,7 +75,7 @@ describe("Clear History", () => {
     expect(ws2ReceivedClear).toBe(true);
 
     ws1.close();
-    ws2.close();
+    ws2.close(1000);
   });
 
   it("resets abort controllers when clearing history", async () => {
@@ -127,6 +127,6 @@ describe("Clear History", () => {
     const afterMessages = await agentStub.getPersistedMessages();
     expect((afterMessages as ChatMessage[]).length).toBe(0);
 
-    ws.close();
+    ws.close(1000);
   });
 });
