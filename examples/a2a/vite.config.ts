@@ -10,12 +10,5 @@ export default defineConfig({
       express: path.resolve(__dirname, "./src/express-alias.js")
     }
   },
-  plugins: [
-    react({
-      babel: {
-        plugins: ["babel-plugin-react-compiler"]
-      }
-    }),
-    cloudflare()
-  ]
+  plugins: [cloudflare()]
 });
