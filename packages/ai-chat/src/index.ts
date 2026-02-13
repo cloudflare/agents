@@ -470,7 +470,8 @@ export class AIChatAgent<
 
         // Handle client-side tool result
         if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
-          const { toolCallId, toolName, output, autoContinue } = data;
+          const { toolCallId, toolName, output, autoContinue, clientTools } =
+            data;
 
           // Apply the tool result
           this._applyToolResult(toolCallId, toolName, output).then(
@@ -512,7 +513,7 @@ export class AIChatAgent<
                           },
                           {
                             abortSignal,
-                            clientTools: this._lastClientTools,
+                            clientTools: clientTools ?? this._lastClientTools,
                             body: this._lastBody
                           }
                         );

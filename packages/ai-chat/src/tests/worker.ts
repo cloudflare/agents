@@ -6,6 +6,7 @@ import type {
 } from "ai";
 import { getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
+import type { ClientToolSchema } from "../";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -34,7 +35,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
   // Store captured body from onChatMessage options for testing
   private _capturedBody: Record<string, unknown> | undefined = undefined;
   // Store captured clientTools from onChatMessage options for testing
-  private _capturedClientTools: unknown[] | undefined = undefined;
+  private _capturedClientTools: ClientToolSchema[] | undefined = undefined;
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
@@ -103,7 +104,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._capturedBody;
   }
 
-  getCapturedClientTools(): unknown[] | undefined {
+  getCapturedClientTools(): ClientToolSchema[] | undefined {
     return this._capturedClientTools;
   }
 
