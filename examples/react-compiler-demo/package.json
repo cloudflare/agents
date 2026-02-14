@@ -1,0 +1,10 @@
+{
+  "name": "@cloudflare/agents-react-compiler-demo",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "REACT_COMPILER=true vite dev",
+    "start:no-compiler": "vite dev"
+  }
+}
