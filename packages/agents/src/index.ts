@@ -3663,7 +3663,8 @@ export class Agent<
       }
     }
 
-    // Default: redirect to base URL
+    // Default: redirect back to the application.
+    // Auth errors are surfaced to clients via the WebSocket broadcast (onMcpUpdate / server.error).
     return Response.redirect(baseOrigin);
   }
 }
