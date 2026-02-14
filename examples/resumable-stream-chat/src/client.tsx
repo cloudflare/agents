@@ -11,11 +11,107 @@ import {
 import {
   PaperPlaneRightIcon,
   TrashIcon,
-  ArrowClockwiseIcon
+  ArrowClockwiseIcon,
+  MagnifyingGlassIcon,
+  BrainIcon,
+  ChartBarIcon
 } from "@phosphor-icons/react";
 import type { UIMessage } from "ai";
 
-/** Extract plain text from a UIMessage's parts. */
+// ── Data part type helpers ──────────────────────────────────────────
+
+type SourcesData = {
+  query: string;
+  status: "searching" | "found";
+  results: string[];
+};
+
+type ThinkingData = {
+  model: string;
+  startedAt: string;
+};
+
+type UsageData = {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+};
+
+type DataPart<T = unknown> = { type: string; id?: string; data: T };
+
+function isDataPart(part: { type: string }): part is DataPart {
+  return part.type.startsWith("data-");
+}
+
+// ── Data part renderers ─────────────────────────────────────────────
+
+function SourcesPart({
+  data,
+  isStreaming
+}: {
+  data: SourcesData;
+  isStreaming: boolean;
+}) {
+  if (data.status === "searching") {
+    return (
+      <div className="flex items-center gap-2 text-xs text-kumo-subtle py-1.5">
+        <MagnifyingGlassIcon
+          size={14}
+          className={isStreaming ? "animate-pulse-dot" : ""}
+        />
+        <span>Searching for &ldquo;{data.query}&rdquo;&hellip;</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="text-xs border border-kumo-line rounded-lg p-2.5 mb-2">
+      <div className="flex items-center gap-1.5 text-kumo-subtle mb-1.5">
+        <MagnifyingGlassIcon size={12} />
+        <span className="font-medium">Sources</span>
+      </div>
+      <ul className="space-y-0.5">
+        {data.results.map((source) => (
+          <li
+            key={source}
+            className="text-kumo-default pl-3 relative before:content-['·'] before:absolute before:left-0 before:text-kumo-subtle"
+          >
+            {source}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ThinkingPart({ data }: { data: ThinkingData }) {
+  return (
+    <div className="flex items-center gap-2 text-xs text-kumo-subtle py-1">
+      <BrainIcon size={14} className="animate-pulse-dot" />
+      <span>Thinking with {data.model}&hellip;</span>
+    </div>
+  );
+}
+
+function UsagePart({ data }: { data: UsageData }) {
+  const totalTokens = data.inputTokens + data.outputTokens;
+  const latencySec = (data.latencyMs / 1000).toFixed(1);
+
+  return (
+    <div className="flex items-center gap-3 text-[11px] text-kumo-subtle mt-2 pt-2 border-t border-kumo-line">
+      <ChartBarIcon size={12} />
+      <span>{data.model}</span>
+      <span className="opacity-40">|</span>
+      <span>{totalTokens} tokens</span>
+      <span className="opacity-40">|</span>
+      <span>{latencySec}s</span>
+    </div>
+  );
+}
+
+// ── Message helpers ─────────────────────────────────────────────────
+
 function getMessageText(message: UIMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
@@ -26,13 +122,11 @@ function getMessageText(message: UIMessage): string {
 /**
  * Resumable Streaming Chat Client
  *
- * Demonstrates automatic resumable streaming with useAgentChat.
- * When you disconnect and reconnect during streaming:
- * 1. useAgentChat automatically detects the active stream
- * 2. Sends ACK to server
- * 3. Receives all buffered chunks and continues streaming
+ * Demonstrates automatic resumable streaming with useAgentChat,
+ * plus data parts: sources (reconciled), thinking (transient), and usage (persisted).
  *
  * Try it: Start a long response, refresh the page, and watch it resume!
+ * On reload, the transient "thinking" part disappears, but sources and usage persist.
  */
 function Chat() {
   const [connectionStatus, setConnectionStatus] =
@@ -139,15 +233,44 @@ function Chat() {
               );
             }
 
+            // Collect data parts from the message
+            const dataParts = message.parts.filter(isDataPart);
+            const sourcesPart = dataParts.find(
+              (p) => p.type === "data-sources"
+            ) as DataPart<SourcesData> | undefined;
+            const thinkingPart = dataParts.find(
+              (p) => p.type === "data-thinking"
+            ) as DataPart<ThinkingData> | undefined;
+            const usagePart = dataParts.find((p) => p.type === "data-usage") as
+              | DataPart<UsageData>
+              | undefined;
+
             return (
               <div key={message.id} className="flex justify-start">
                 <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
+                  {/* Sources card (above the text) */}
+                  {sourcesPart && (
+                    <SourcesPart
+                      data={sourcesPart.data}
+                      isStreaming={isLastAssistant && isStreaming}
+                    />
+                  )}
+
+                  {/* Transient thinking indicator (only visible during streaming) */}
+                  {thinkingPart && isLastAssistant && isStreaming && (
+                    <ThinkingPart data={thinkingPart.data} />
+                  )}
+
+                  {/* Message text */}
                   <div className="whitespace-pre-wrap">
                     {text}
                     {isLastAssistant && isStreaming && (
                       <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
                     )}
                   </div>
+
+                  {/* Usage footer (below the text) */}
+                  {usagePart && <UsagePart data={usagePart.data} />}
                 </div>
               </div>
             );

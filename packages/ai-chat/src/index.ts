@@ -149,7 +149,6 @@ const STREAM_STALE_THRESHOLD_MS = 5 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /** Default age threshold for cleaning up completed streams (ms) - 24 hours */
 const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-
 const decoder = new TextDecoder();
 
 /**
@@ -1746,7 +1745,43 @@ export class AIChatAgent<
 
                 break;
               }
-              // Do we want to handle data parts?
+
+              default: {
+                // https://ai-sdk.dev/docs/ai-sdk-ui/streaming-data
+                if (data.type.startsWith("data-")) {
+                  const dataChunk = data as {
+                    type: string;
+                    id?: string;
+                    data: unknown;
+                    transient?: boolean;
+                  };
+
+                  if (!dataChunk.transient) {
+                    // If a part with the same type and id already exists,
+                    // update its data in-place instead of appending.
+                    // This matches the AI SDK client behavior for progressive updates
+                    if (dataChunk.id != null) {
+                      const existing = message.parts.find(
+                        (p) =>
+                          p.type === dataChunk.type &&
+                          "id" in p &&
+                          (p as { id?: string }).id === dataChunk.id
+                      );
+                      if (existing) {
+                        (existing as { data: unknown }).data = dataChunk.data;
+                        break;
+                      }
+                    }
+
+                    message.parts.push({
+                      type: dataChunk.type,
+                      ...(dataChunk.id != null && { id: dataChunk.id }),
+                      data: dataChunk.data
+                    } as ChatMessage["parts"][number]);
+                  }
+                }
+                break;
+              }
             }
 
             // Convert internal AI SDK stream events to valid UIMessageStreamPart format.
