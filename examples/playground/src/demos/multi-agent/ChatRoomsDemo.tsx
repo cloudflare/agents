@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import { nanoid } from "nanoid";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Input, Surface, Empty, Badge, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
@@ -88,14 +88,14 @@ export function ChatRoomsDemo() {
     }
   };
 
-  const refreshRooms = async () => {
+  const refreshRooms = useCallback(async () => {
     try {
       const result = await lobby.call("listRooms");
       setRooms(result);
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
     }
-  };
+  }, [lobby, addLog]);
 
   const refreshMembers = async () => {
     if (!currentRoom) return;
@@ -177,7 +177,7 @@ export function ChatRoomsDemo() {
     if (lobby.readyState === WebSocket.OPEN) {
       refreshRooms();
     }
-  }, [lobby.readyState]);
+  }, [lobby.readyState, refreshRooms]);
 
   return (
     <DemoWrapper

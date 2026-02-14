@@ -1,13 +1,13 @@
 {
   "author": "",
   "dependencies": {
-    "@x402/core": "^2.3.0",
-    "@x402/evm": "^2.3.0",
+    "@x402/core": "^2.3.1",
+    "@x402/evm": "^2.3.1",
     "@x402/fetch": "^2.3.0",
     "@x402/hono": "^2.3.0",
     "agents": "*",
     "hono": "^4.11.9",
-    "viem": "^2.45.2"
+    "viem": "^2.45.3"
   },
   "keywords": [],
   "name": "@cloudflare/agents-x402-example",

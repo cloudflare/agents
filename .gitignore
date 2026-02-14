@@ -145,3 +145,6 @@ dist
 .astro
 # Vitest browser test screenshots
 __screenshots__
+
+# Playwright test artifacts
+test-results/

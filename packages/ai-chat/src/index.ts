@@ -1,6 +1,5 @@
 import type {
   UIMessage as ChatMessage,
-  DynamicToolUIPart,
   JSONSchema7,
   ProviderMetadata,
   ReasoningUIPart,
@@ -8,7 +7,6 @@ import type {
   TextUIPart,
   Tool,
   ToolSet,
-  ToolUIPart,
   UIMessageChunk
 } from "ai";
 import { tool, jsonSchema } from "ai";
@@ -27,7 +25,49 @@ import {
   type OutgoingMessage
 } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
+import { applyChunkToParts } from "./message-builder";
+import { ResumableStream } from "./resumable-stream";
 import { nanoid } from "nanoid";
+
+/** Shared encoder for UTF-8 byte length measurement */
+const textEncoder = new TextEncoder();
+
+/**
+ * Validates that a parsed message has the minimum required structure.
+ * Returns false for messages that would cause runtime errors downstream
+ * (e.g. in convertToModelMessages or the UI layer).
+ *
+ * Checks:
+ * - `id` is a non-empty string
+ * - `role` is one of the valid roles
+ * - `parts` is an array (may be empty — the AI SDK enforces nonempty
+ *   on incoming messages, but we are lenient on persisted data)
+ */
+function isValidMessageStructure(msg: unknown): msg is ChatMessage {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+
+  if (typeof m.id !== "string" || m.id.length === 0) return false;
+
+  if (m.role !== "user" && m.role !== "assistant" && m.role !== "system") {
+    return false;
+  }
+
+  if (!Array.isArray(m.parts)) return false;
+
+  return true;
+}
+
+/**
+ * One-shot deprecation warnings (warns once per key per session).
+ */
+const _deprecationWarnings = new Set<string>();
+function warnDeprecated(id: string, message: string) {
+  if (!_deprecationWarnings.has(id)) {
+    _deprecationWarnings.add(id);
+    console.warn(`[@cloudflare/ai-chat] Deprecated: ${message}`);
+  }
+}
 
 /**
  * Schema for a client-defined tool sent from the browser.
@@ -70,6 +110,11 @@ export type OnChatMessageOptions = {
    *
    * Contains all fields from the request body except `messages` and `clientTools`,
    * which are handled separately.
+   *
+   * During tool continuations (auto-continue after client tool results), this
+   * contains the body from the most recent chat request. The value is persisted
+   * to SQLite so it survives Durable Object hibernation. It is cleared when the
+   * chat is cleared via `CF_AGENT_CHAT_CLEAR`.
    */
   body?: Record<string, unknown>;
 };
@@ -112,6 +157,11 @@ export type OnChatMessageOptions = {
 export function createToolsFromClientSchemas(
   clientTools?: ClientToolSchema[]
 ): ToolSet {
+  warnDeprecated(
+    "createToolsFromClientSchemas",
+    "createToolsFromClientSchemas() is deprecated. Define tools on the server using tool() from 'ai' and handle client execution via onToolCall in useAgentChat. Will be removed in the next major version."
+  );
+
   if (!clientTools || clientTools.length === 0) {
     return {};
   }
@@ -139,40 +189,7 @@ export function createToolsFromClientSchemas(
   );
 }
 
-/** Number of chunks to buffer before flushing to SQLite */
-const CHUNK_BUFFER_SIZE = 10;
-/** Maximum buffer size to prevent memory issues on rapid reconnections */
-const CHUNK_BUFFER_MAX_SIZE = 100;
-/** Maximum age for a "streaming" stream before considering it stale (ms) - 5 minutes */
-const STREAM_STALE_THRESHOLD_MS = 5 * 60 * 1000;
-/** Default cleanup interval for old streams (ms) - every 10 minutes */
-const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-/** Default age threshold for cleaning up completed streams (ms) - 24 hours */
-const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
-
 const decoder = new TextDecoder();
-
-/**
- * Stored stream chunk for resumable streaming
- */
-type StreamChunk = {
-  id: string;
-  stream_id: string;
-  body: string;
-  chunk_index: number;
-  created_at: number;
-};
-
-/**
- * Stream metadata for tracking active streams
- */
-type StreamMetadata = {
-  id: string;
-  request_id: string;
-  status: "streaming" | "completed" | "error";
-  created_at: number;
-  completed_at: number | null;
-};
 
 /**
  * Extension of Agent with built-in chat capabilities
@@ -189,17 +206,10 @@ export class AIChatAgent<
   private _chatMessageAbortControllers: Map<string, AbortController>;
 
   /**
-   * Currently active stream ID for resumable streaming.
-   * Stored in memory for quick access; persisted in stream_metadata table.
+   * Resumable stream manager -- handles chunk buffering, persistence, and replay.
    * @internal Protected for testing purposes.
    */
-  protected _activeStreamId: string | null = null;
-
-  /**
-   * Request ID associated with the active stream.
-   * @internal Protected for testing purposes.
-   */
-  protected _activeRequestId: string | null = null;
+  protected _resumableStream!: ResumableStream;
 
   /**
    * The message currently being streamed. Used to apply tool results
@@ -217,38 +227,60 @@ export class AIChatAgent<
   private _streamCompletionResolve: (() => void) | null = null;
 
   /**
-   * Current chunk index for the active stream
-   */
-  private _streamChunkIndex = 0;
-
-  /**
-   * Buffer for stream chunks pending write to SQLite.
-   * Chunks are batched and flushed when buffer reaches CHUNK_BUFFER_SIZE.
-   */
-  private _chunkBuffer: Array<{
-    id: string;
-    streamId: string;
-    body: string;
-    index: number;
-  }> = [];
-
-  /**
-   * Lock to prevent concurrent flush operations
-   */
-  private _isFlushingChunks = false;
-
-  /**
-   * Timestamp of the last cleanup operation for old streams
-   */
-  private _lastCleanupTime = 0;
-
-  /**
    * Set of connection IDs that are pending stream resume.
    * These connections have received CF_AGENT_STREAM_RESUMING but haven't sent ACK yet.
    * They should be excluded from live stream broadcasts until they ACK.
    * @internal
    */
   private _pendingResumeConnections: Set<string> = new Set();
+
+  /**
+   * Client tool schemas from the most recent chat request.
+   * Stored so they can be passed to onChatMessage during tool continuations.
+   * @internal
+   */
+  private _lastClientTools: ClientToolSchema[] | undefined;
+
+  /**
+   * Custom body data from the most recent chat request.
+   * Stored so it can be passed to onChatMessage during tool continuations.
+   * @internal
+   */
+  private _lastBody: Record<string, unknown> | undefined;
+
+  /**
+   * Cache of last-persisted JSON for each message ID.
+   * Used for incremental persistence: skip SQL writes for unchanged messages.
+   * Lost on hibernation, repopulated from SQLite on wake.
+   * @internal
+   */
+  private _persistedMessageCache: Map<string, string> = new Map();
+
+  /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
+  private static ROW_MAX_BYTES = 1_800_000;
+
+  /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
+  private static _byteLength(s: string): number {
+    return textEncoder.encode(s).byteLength;
+  }
+
+  /**
+   * Maximum number of messages to keep in SQLite storage.
+   * When the conversation exceeds this limit, oldest messages are deleted
+   * after each persist. Set to `undefined` (default) for no limit.
+   *
+   * This controls storage only — it does not affect what's sent to the LLM.
+   * Use `pruneMessages()` from the AI SDK in your `onChatMessage` to control
+   * LLM context separately.
+   *
+   * @example
+   * ```typescript
+   * class MyAgent extends AIChatAgent<Env> {
+   *   maxPersistedMessages = 100; // Keep last 100 messages in storage
+   * }
+   * ```
+   */
+  maxPersistedMessages: number | undefined = undefined;
 
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
@@ -261,40 +293,35 @@ export class AIChatAgent<
       created_at datetime default current_timestamp
     )`;
 
-    // Create tables for automatic resumable streaming
-    this.sql`create table if not exists cf_ai_chat_stream_chunks (
-      id text primary key,
-      stream_id text not null,
-      body text not null,
-      chunk_index integer not null,
-      created_at integer not null
+    // Key-value table for request context that must survive hibernation
+    // (e.g., custom body fields, client tools from the last chat request).
+    this.sql`create table if not exists cf_ai_chat_request_context (
+      key text primary key,
+      value text not null
     )`;
 
-    this.sql`create table if not exists cf_ai_chat_stream_metadata (
-      id text primary key,
-      request_id text not null,
-      status text not null,
-      created_at integer not null,
-      completed_at integer
-    )`;
+    // Restore request context from SQLite (survives hibernation)
+    this._restoreRequestContext();
 
-    this.sql`create index if not exists idx_stream_chunks_stream_id 
-      on cf_ai_chat_stream_chunks(stream_id, chunk_index)`;
+    // Initialize resumable stream manager (creates its own tables + restores state)
+    this._resumableStream = new ResumableStream(this.sql.bind(this));
 
-    // Load messages and automatically transform them to v5 format
+    // Load messages and automatically transform them to v5 format.
+    // Note: _loadMessagesFromDb() runs structural validation which requires
+    // `parts` to be an array. Legacy v4 messages (with `content` instead of
+    // `parts`) would fail this check — but that's fine because autoTransformMessages
+    // already migrated them on a previous load, and persistMessages wrote them back.
+    // Any message still without `parts` at this point is genuinely corrupt.
     const rawMessages = this._loadMessagesFromDb();
 
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
     this.messages = autoTransformMessages(rawMessages);
 
     this._chatMessageAbortControllers = new Map();
-
-    // Check for any active streams from a previous session
-    this._restoreActiveStream();
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       // Notify client about active streams that can be resumed
-      if (this._activeStreamId) {
+      if (this._resumableStream.hasActiveStream()) {
         this._notifyStreamResuming(connection);
       }
       // Call consumer's onConnect
@@ -334,12 +361,34 @@ export class AIChatAgent<
           data.init.method === "POST"
         ) {
           const { body } = data.init;
-          const parsed = JSON.parse(body as string);
+          if (!body) {
+            console.warn(
+              "[AIChatAgent] Received chat request with empty body, ignoring"
+            );
+            return;
+          }
+
+          let parsed: Record<string, unknown>;
+          try {
+            parsed = JSON.parse(body as string);
+          } catch (_parseError) {
+            console.warn(
+              "[AIChatAgent] Received chat request with invalid JSON body, ignoring"
+            );
+            return;
+          }
+
           const { messages, clientTools, ...customBody } = parsed as {
             messages: ChatMessage[];
             clientTools?: ClientToolSchema[];
             [key: string]: unknown;
           };
+
+          // Store client tools and body for use during tool continuations
+          this._lastClientTools = clientTools?.length ? clientTools : undefined;
+          this._lastBody =
+            Object.keys(customBody).length > 0 ? customBody : undefined;
+          this._persistRequestContext();
 
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
@@ -376,31 +425,20 @@ export class AIChatAgent<
               async () => {
                 const response = await this.onChatMessage(
                   async (_finishResult) => {
-                    this._removeAbortController(chatMessageId);
-
-                    this.observability?.emit(
-                      {
-                        displayMessage: "Chat message response",
-                        id: data.id,
-                        payload: {},
-                        timestamp: Date.now(),
-                        type: "message:response"
-                      },
-                      this.ctx
-                    );
+                    // User-provided hook. Cleanup is now handled by _reply,
+                    // so this is optional for the user to pass to streamText.
                   },
                   {
                     abortSignal,
                     clientTools,
-                    body:
-                      Object.keys(customBody).length > 0
-                        ? customBody
-                        : undefined
+                    body: this._lastBody
                   }
                 );
 
                 if (response) {
-                  await this._reply(data.id, response, [connection.id]);
+                  await this._reply(data.id, response, [connection.id], {
+                    chatMessageId
+                  });
                 } else {
                   console.warn(
                     `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
@@ -424,12 +462,12 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
           this._destroyAbortControllers();
           this.sql`delete from cf_ai_chat_agent_messages`;
-          this.sql`delete from cf_ai_chat_stream_chunks`;
-          this.sql`delete from cf_ai_chat_stream_metadata`;
-          this._activeStreamId = null;
-          this._activeRequestId = null;
-          this._streamChunkIndex = 0;
+          this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
+          this._lastClientTools = undefined;
+          this._lastBody = undefined;
+          this._persistRequestContext();
+          this._persistedMessageCache.clear();
           this.messages = [];
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
@@ -451,19 +489,28 @@ export class AIChatAgent<
           return;
         }
 
+        // Handle client-initiated stream resume request.
+        // The client sends this after its message handler is registered,
+        // avoiding the race condition where CF_AGENT_STREAM_RESUMING sent
+        // in onConnect arrives before the client's handler is ready.
+        if (data.type === MessageType.CF_AGENT_STREAM_RESUME_REQUEST) {
+          if (this._resumableStream.hasActiveStream()) {
+            this._notifyStreamResuming(connection);
+          }
+          return;
+        }
+
         // Handle stream resume acknowledgment
         if (data.type === MessageType.CF_AGENT_STREAM_RESUME_ACK) {
           this._pendingResumeConnections.delete(connection.id);
 
           if (
-            this._activeStreamId &&
-            this._activeRequestId &&
-            this._activeRequestId === data.id
+            this._resumableStream.hasActiveStream() &&
+            this._resumableStream.activeRequestId === data.id
           ) {
-            this._sendStreamChunks(
+            this._resumableStream.replayChunks(
               connection,
-              this._activeStreamId,
-              this._activeRequestId
+              this._resumableStream.activeRequestId
             );
           }
           return;
@@ -471,7 +518,8 @@ export class AIChatAgent<
 
         // Handle client-side tool result
         if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
-          const { toolCallId, toolName, output, autoContinue } = data;
+          const { toolCallId, toolName, output, autoContinue, clientTools } =
+            data;
 
           // Apply the tool result
           this._applyToolResult(toolCallId, toolName, output).then(
@@ -486,62 +534,65 @@ export class AIChatAgent<
                   if (this._streamCompletionPromise) {
                     await this._streamCompletionPromise;
                   } else {
-                    // If no promise, wait a bit for the stream to finish
+                    // TODO: The completion promise can be null if the stream finished
+                    // before the tool result arrived (race between stream end and tool
+                    // apply). The 500ms fallback is a pragmatic workaround — consider
+                    // a more deterministic signal (e.g. always setting the promise).
                     await new Promise((resolve) => setTimeout(resolve, 500));
                   }
                 };
 
-                waitForStream().then(() => {
-                  const continuationId = nanoid();
-                  const abortSignal = this._getAbortSignal(continuationId);
+                waitForStream()
+                  .then(() => {
+                    const continuationId = nanoid();
+                    const abortSignal = this._getAbortSignal(continuationId);
 
-                  this._tryCatchChat(async () => {
-                    return agentContext.run(
-                      {
-                        agent: this,
-                        connection,
-                        request: undefined,
-                        email: undefined
-                      },
-                      async () => {
-                        const response = await this.onChatMessage(
-                          async (_finishResult) => {
-                            this._removeAbortController(continuationId);
-
-                            this.observability?.emit(
-                              {
-                                displayMessage:
-                                  "Chat message response (tool continuation)",
-                                id: continuationId,
-                                payload: {},
-                                timestamp: Date.now(),
-                                type: "message:response"
-                              },
-                              this.ctx
-                            );
-                          },
-                          {
-                            abortSignal
-                          }
-                        );
-
-                        if (response) {
-                          // Pass continuation flag to merge parts into last assistant message
-                          // Note: We pass an empty excludeBroadcastIds array because the sender
-                          // NEEDS to receive the continuation stream. Unlike regular chat requests
-                          // where aiFetch handles the response, tool continuations have no listener
-                          // waiting - the client relies on the broadcast.
-                          await this._reply(
-                            continuationId,
-                            response,
-                            [], // Don't exclude sender - they need the continuation
-                            { continuation: true }
+                    return this._tryCatchChat(async () => {
+                      return agentContext.run(
+                        {
+                          agent: this,
+                          connection,
+                          request: undefined,
+                          email: undefined
+                        },
+                        async () => {
+                          const response = await this.onChatMessage(
+                            async (_finishResult) => {
+                              // User-provided hook. Cleanup handled by _reply.
+                            },
+                            {
+                              abortSignal,
+                              clientTools: clientTools ?? this._lastClientTools,
+                              body: this._lastBody
+                            }
                           );
+
+                          if (response) {
+                            // Pass continuation flag to merge parts into last assistant message
+                            // Note: We pass an empty excludeBroadcastIds array because the sender
+                            // NEEDS to receive the continuation stream. Unlike regular chat requests
+                            // where aiFetch handles the response, tool continuations have no listener
+                            // waiting - the client relies on the broadcast.
+                            await this._reply(
+                              continuationId,
+                              response,
+                              [], // Don't exclude sender - they need the continuation
+                              {
+                                continuation: true,
+                                chatMessageId: continuationId
+                              }
+                            );
+                          }
                         }
-                      }
+                      );
+                    });
+                  })
+                  .catch((error) => {
+                    console.error(
+                      "[AIChatAgent] Tool continuation failed:",
+                      error
                     );
                   });
-                });
               }
             }
           );
@@ -562,59 +613,12 @@ export class AIChatAgent<
   }
 
   /**
-   * Restore active stream state if the agent was restarted during streaming.
-   * Called during construction to recover any interrupted streams.
-   * Validates stream freshness to avoid sending stale resume notifications.
-   * @internal Protected for testing purposes.
-   */
-  protected _restoreActiveStream() {
-    const activeStreams = this.sql<StreamMetadata>`
-      select * from cf_ai_chat_stream_metadata 
-      where status = 'streaming' 
-      order by created_at desc 
-      limit 1
-    `;
-
-    if (activeStreams && activeStreams.length > 0) {
-      const stream = activeStreams[0];
-      const streamAge = Date.now() - stream.created_at;
-
-      // Check if stream is stale; delete to free storage
-      if (streamAge > STREAM_STALE_THRESHOLD_MS) {
-        this
-          .sql`delete from cf_ai_chat_stream_chunks where stream_id = ${stream.id}`;
-        this
-          .sql`delete from cf_ai_chat_stream_metadata where id = ${stream.id}`;
-        console.warn(
-          `[AIChatAgent] Deleted stale stream ${stream.id} (age: ${Math.round(streamAge / 1000)}s)`
-        );
-        return;
-      }
-
-      this._activeStreamId = stream.id;
-      this._activeRequestId = stream.request_id;
-
-      // Get the last chunk index
-      const lastChunk = this.sql<{ max_index: number }>`
-        select max(chunk_index) as max_index 
-        from cf_ai_chat_stream_chunks 
-        where stream_id = ${this._activeStreamId}
-      `;
-      this._streamChunkIndex =
-        lastChunk && lastChunk[0]?.max_index != null
-          ? lastChunk[0].max_index + 1
-          : 0;
-    }
-  }
-
-  /**
    * Notify a connection about an active stream that can be resumed.
    * The client should respond with CF_AGENT_STREAM_RESUME_ACK to receive chunks.
-   * Uses in-memory state for request ID - no extra DB lookup needed.
    * @param connection - The WebSocket connection to notify
    */
   private _notifyStreamResuming(connection: Connection) {
-    if (!this._activeStreamId || !this._activeRequestId) {
+    if (!this._resumableStream.hasActiveStream()) {
       return;
     }
 
@@ -626,184 +630,105 @@ export class AIChatAgent<
     connection.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUMING,
-        id: this._activeRequestId
+        id: this._resumableStream.activeRequestId
       })
     );
   }
 
-  /**
-   * Send stream chunks to a connection after receiving ACK.
-   * @param connection - The WebSocket connection
-   * @param streamId - The stream to replay
-   * @param requestId - The original request ID
-   */
-  private _sendStreamChunks(
-    connection: Connection,
-    streamId: string,
-    requestId: string
-  ) {
-    // Flush any pending chunks first to ensure we have the latest
-    this._flushChunkBuffer();
+  // ── Delegate methods for backward compatibility with tests ─────────
+  // These protected methods delegate to _resumableStream so existing
+  // test workers that call them directly continue to work.
 
-    const chunks = this.sql<StreamChunk>`
-      select * from cf_ai_chat_stream_chunks 
-      where stream_id = ${streamId} 
-      order by chunk_index asc
-    `;
-
-    // Send all stored chunks
-    for (const chunk of chunks || []) {
-      connection.send(
-        JSON.stringify({
-          body: chunk.body,
-          done: false,
-          id: requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-        })
-      );
-    }
-
-    // If the stream is no longer active (completed), send done signal
-    // We track active state in memory, no need to query DB
-    if (this._activeStreamId !== streamId) {
-      connection.send(
-        JSON.stringify({
-          body: "",
-          done: true,
-          id: requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-        })
-      );
-    }
+  /** @internal Delegate to _resumableStream */
+  protected get _activeStreamId(): string | null {
+    return this._resumableStream?.activeStreamId ?? null;
   }
 
-  /**
-   * Buffer a stream chunk for batch write to SQLite.
-   * @param streamId - The stream this chunk belongs to
-   * @param body - The serialized chunk body
-   * @internal Protected for testing purposes.
-   */
-  protected _storeStreamChunk(streamId: string, body: string) {
-    // Force flush if buffer is at max to prevent memory issues
-    if (this._chunkBuffer.length >= CHUNK_BUFFER_MAX_SIZE) {
-      this._flushChunkBuffer();
-    }
-
-    this._chunkBuffer.push({
-      id: nanoid(),
-      streamId,
-      body,
-      index: this._streamChunkIndex
-    });
-    this._streamChunkIndex++;
-
-    // Flush when buffer reaches threshold
-    if (this._chunkBuffer.length >= CHUNK_BUFFER_SIZE) {
-      this._flushChunkBuffer();
-    }
+  /** @internal Delegate to _resumableStream */
+  protected get _activeRequestId(): string | null {
+    return this._resumableStream?.activeRequestId ?? null;
   }
 
-  /**
-   * Flush buffered chunks to SQLite in a single batch.
-   * Uses a lock to prevent concurrent flush operations.
-   * @internal Protected for testing purposes.
-   */
-  protected _flushChunkBuffer() {
-    // Prevent concurrent flushes
-    if (this._isFlushingChunks || this._chunkBuffer.length === 0) {
-      return;
-    }
-
-    this._isFlushingChunks = true;
-    try {
-      const chunks = this._chunkBuffer;
-      this._chunkBuffer = [];
-
-      // Batch insert all chunks
-      const now = Date.now();
-      for (const chunk of chunks) {
-        this.sql`
-          insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
-          values (${chunk.id}, ${chunk.streamId}, ${chunk.body}, ${chunk.index}, ${now})
-        `;
-      }
-    } finally {
-      this._isFlushingChunks = false;
-    }
-  }
-
-  /**
-   * Start tracking a new stream for resumable streaming.
-   * Creates metadata entry in SQLite and sets up tracking state.
-   * @param requestId - The unique ID of the chat request
-   * @returns The generated stream ID
-   * @internal Protected for testing purposes.
-   */
+  /** @internal Delegate to _resumableStream */
   protected _startStream(requestId: string): string {
-    // Flush any pending chunks from previous streams to prevent mixing
-    this._flushChunkBuffer();
-
-    const streamId = nanoid();
-    this._activeStreamId = streamId;
-    this._activeRequestId = requestId;
-    this._streamChunkIndex = 0;
-
-    this.sql`
-      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
-      values (${streamId}, ${requestId}, 'streaming', ${Date.now()})
-    `;
-
-    return streamId;
+    return this._resumableStream.start(requestId);
   }
 
-  /**
-   * Mark a stream as completed and flush any pending chunks.
-   * @param streamId - The stream to mark as completed
-   * @internal Protected for testing purposes.
-   */
+  /** @internal Delegate to _resumableStream */
   protected _completeStream(streamId: string) {
-    // Flush any pending chunks before completing
-    this._flushChunkBuffer();
-
-    this.sql`
-      update cf_ai_chat_stream_metadata 
-      set status = 'completed', completed_at = ${Date.now()} 
-      where id = ${streamId}
-    `;
-    this._activeStreamId = null;
-    this._activeRequestId = null;
-    this._streamChunkIndex = 0;
-
-    // Clear pending resume connections - no active stream to resume
+    this._resumableStream.complete(streamId);
     this._pendingResumeConnections.clear();
+  }
 
-    // Periodically clean up old streams (not on every completion)
-    this._maybeCleanupOldStreams();
+  /** @internal Delegate to _resumableStream */
+  protected _storeStreamChunk(streamId: string, body: string) {
+    this._resumableStream.storeChunk(streamId, body);
+  }
+
+  /** @internal Delegate to _resumableStream */
+  protected _flushChunkBuffer() {
+    this._resumableStream.flushBuffer();
+  }
+
+  /** @internal Delegate to _resumableStream */
+  protected _restoreActiveStream() {
+    this._resumableStream.restore();
+  }
+
+  /** @internal Delegate to _resumableStream */
+  protected _markStreamError(streamId: string) {
+    this._resumableStream.markError(streamId);
   }
 
   /**
-   * Clean up old completed streams if enough time has passed since last cleanup.
-   * This prevents database growth while avoiding cleanup overhead on every stream completion.
+   * Restore _lastBody and _lastClientTools from SQLite.
+   * Called in the constructor so these values survive DO hibernation.
+   * @internal
    */
-  private _maybeCleanupOldStreams() {
-    const now = Date.now();
-    if (now - this._lastCleanupTime < CLEANUP_INTERVAL_MS) {
-      return;
-    }
-    this._lastCleanupTime = now;
+  private _restoreRequestContext() {
+    const rows =
+      this.sql<{ key: string; value: string }>`
+        select key, value from cf_ai_chat_request_context
+      ` || [];
 
-    const cutoff = now - CLEANUP_AGE_THRESHOLD_MS;
-    this.sql`
-      delete from cf_ai_chat_stream_chunks 
-      where stream_id in (
-        select id from cf_ai_chat_stream_metadata 
-        where status = 'completed' and completed_at < ${cutoff}
-      )
-    `;
-    this.sql`
-      delete from cf_ai_chat_stream_metadata 
-      where status = 'completed' and completed_at < ${cutoff}
-    `;
+    for (const row of rows) {
+      try {
+        if (row.key === "lastBody") {
+          this._lastBody = JSON.parse(row.value);
+        } else if (row.key === "lastClientTools") {
+          this._lastClientTools = JSON.parse(row.value);
+        }
+      } catch {
+        // Corrupted row — ignore and let the next request overwrite it
+      }
+    }
+  }
+
+  /**
+   * Persist _lastBody and _lastClientTools to SQLite so they survive hibernation.
+   * Uses upsert (INSERT OR REPLACE) so repeated calls are safe.
+   * @internal
+   */
+  private _persistRequestContext() {
+    // Persist or delete body
+    if (this._lastBody) {
+      this.sql`
+        insert or replace into cf_ai_chat_request_context (key, value)
+        values ('lastBody', ${JSON.stringify(this._lastBody)})
+      `;
+    } else {
+      this.sql`delete from cf_ai_chat_request_context where key = 'lastBody'`;
+    }
+    // Persist or delete client tools
+    if (this._lastClientTools) {
+      this.sql`
+        insert or replace into cf_ai_chat_request_context (key, value)
+        values ('lastClientTools', ${JSON.stringify(this._lastClientTools)})
+      `;
+    } else {
+      this
+        .sql`delete from cf_ai_chat_request_context where key = 'lastClientTools'`;
+    }
   }
 
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
@@ -848,10 +773,31 @@ export class AIChatAgent<
     const rows =
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
       [];
+
+    // Populate the persistence cache from DB so incremental persistence
+    // can skip SQL writes for messages already stored.
+    this._persistedMessageCache.clear();
+
     return rows
       .map((row) => {
         try {
-          return JSON.parse(row.message as string);
+          const messageStr = row.message as string;
+          const parsed = JSON.parse(messageStr) as ChatMessage;
+
+          // Structural validation: ensure required fields exist and have
+          // the correct types. This catches corrupted rows, manual tampering,
+          // or schema drift from older versions without crashing the agent.
+          if (!isValidMessageStructure(parsed)) {
+            console.warn(
+              `[AIChatAgent] Skipping invalid message ${row.id}: ` +
+                "missing or malformed id, role, or parts"
+            );
+            return null;
+          }
+
+          // Cache the raw JSON keyed by message ID
+          this._persistedMessageCache.set(parsed.id, messageStr);
+          return parsed;
         } catch (error) {
           console.error(`Failed to parse message ${row.id}:`, error);
           return null;
@@ -894,7 +840,7 @@ export class AIChatAgent<
     options?: OnChatMessageOptions
   ): Promise<Response | undefined> {
     throw new Error(
-      "recieved a chat message, override onChatMessage and return a Response to send to the client"
+      "received a chat message, override onChatMessage and return a Response to send to the client"
     );
   }
 
@@ -919,18 +865,30 @@ export class AIChatAgent<
     // tool outputs, but the server has them via _applyToolResult.
     const mergedMessages = this._mergeIncomingWithServerState(messages);
 
-    // Persist the merged messages
+    // Persist only new or changed messages (incremental persistence).
+    // Compares serialized JSON against a cache of last-persisted versions.
     for (const message of mergedMessages) {
-      // Strip OpenAI item IDs to prevent "Duplicate item found" errors
-      // when using the OpenAI Responses API. These IDs are assigned by OpenAI
-      // and if sent back in subsequent requests, cause duplicate detection.
       const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      const messageToSave = this._resolveMessageForToolMerge(sanitizedMessage);
+      const resolved = this._resolveMessageForToolMerge(sanitizedMessage);
+      const safe = this._enforceRowSizeLimit(resolved);
+      const json = JSON.stringify(safe);
+
+      // Skip SQL write if the message is identical to what's already persisted
+      if (this._persistedMessageCache.get(safe.id) === json) {
+        continue;
+      }
+
       this.sql`
         insert into cf_ai_chat_agent_messages (id, message)
-        values (${messageToSave.id}, ${JSON.stringify(messageToSave)})
+        values (${safe.id}, ${json})
         on conflict(id) do update set message = excluded.message
       `;
+      this._persistedMessageCache.set(safe.id, json);
+    }
+
+    // Enforce maxPersistedMessages: delete oldest messages if over the limit
+    if (this.maxPersistedMessages != null) {
+      this._enforceMaxPersistedMessages();
     }
 
     // refresh in-memory messages
@@ -1191,26 +1149,191 @@ export class AIChatAgent<
   }
 
   /**
-   * Applies a tool result to an existing assistant message.
-   * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
-   * The server is the source of truth, so we update the message here and broadcast
-   * the update to all clients.
-   *
-   * @param toolCallId - The tool call ID this result is for
-   * @param toolName - The name of the tool
-   * @param output - The output from the tool execution
-   * @returns true if the result was applied, false if the message was not found
+   * Deletes oldest messages from SQLite when the count exceeds maxPersistedMessages.
+   * Called after each persist to keep storage bounded.
    */
-  private async _applyToolResult(
+  private _enforceMaxPersistedMessages() {
+    if (this.maxPersistedMessages == null) return;
+
+    const countResult = this.sql<{ cnt: number }>`
+      select count(*) as cnt from cf_ai_chat_agent_messages
+    `;
+    const count = countResult?.[0]?.cnt ?? 0;
+
+    if (count <= this.maxPersistedMessages) return;
+
+    const excess = count - this.maxPersistedMessages;
+
+    // Delete the oldest messages (by created_at)
+    // Also remove them from the persistence cache
+    const toDelete = this.sql<{ id: string }>`
+      select id from cf_ai_chat_agent_messages 
+      order by created_at asc 
+      limit ${excess}
+    `;
+
+    if (toDelete && toDelete.length > 0) {
+      for (const row of toDelete) {
+        this.sql`delete from cf_ai_chat_agent_messages where id = ${row.id}`;
+        this._persistedMessageCache.delete(row.id);
+      }
+    }
+  }
+
+  /**
+   * Enforces SQLite row size limits by compacting tool outputs and text parts
+   * when a serialized message exceeds the safety threshold (1.8MB).
+   *
+   * Only fires in pathological cases (extremely large tool outputs or text).
+   * Returns the message unchanged if it fits within limits.
+   *
+   * Compaction strategy:
+   * 1. Compact tool outputs over 1KB (replace with LLM-friendly summary)
+   * 2. If still too big, truncate text parts from oldest to newest
+   * 3. Add metadata so clients can detect compaction
+   *
+   * @param message - The message to check
+   * @returns The message, compacted if necessary
+   */
+  private _enforceRowSizeLimit(message: ChatMessage): ChatMessage {
+    let json = JSON.stringify(message);
+    let size = AIChatAgent._byteLength(json);
+    if (size <= AIChatAgent.ROW_MAX_BYTES) return message;
+
+    if (message.role !== "assistant") {
+      // Non-assistant messages (user/system) are harder to compact safely.
+      // Truncate the entire message JSON as a last resort.
+      console.warn(
+        `[AIChatAgent] Non-assistant message ${message.id} is ${size} bytes, ` +
+          `exceeds row limit. Truncating text parts.`
+      );
+      return this._truncateTextParts(message);
+    }
+
+    console.warn(
+      `[AIChatAgent] Message ${message.id} is ${size} bytes, ` +
+        `compacting tool outputs to fit SQLite row limit`
+    );
+
+    // Pass 1: compact tool outputs
+    const compactedToolCallIds: string[] = [];
+    const compactedParts = message.parts.map((part) => {
+      if (
+        "output" in part &&
+        "toolCallId" in part &&
+        "state" in part &&
+        part.state === "output-available"
+      ) {
+        const outputJson = JSON.stringify((part as { output: unknown }).output);
+        if (outputJson.length > 1000) {
+          compactedToolCallIds.push(part.toolCallId as string);
+          return {
+            ...part,
+            output:
+              "This tool output was too large to persist in storage " +
+              `(${outputJson.length} bytes). ` +
+              "If the user asks about this data, suggest re-running the tool. " +
+              `Preview: ${outputJson.slice(0, 500)}...`
+          };
+        }
+      }
+      return part;
+    }) as ChatMessage["parts"];
+
+    let result: ChatMessage = {
+      ...message,
+      parts: compactedParts
+    };
+
+    if (compactedToolCallIds.length > 0) {
+      result.metadata = {
+        ...(result.metadata ?? {}),
+        compactedToolOutputs: compactedToolCallIds
+      };
+    }
+
+    // Check if tool compaction was enough
+    json = JSON.stringify(result);
+    size = AIChatAgent._byteLength(json);
+    if (size <= AIChatAgent.ROW_MAX_BYTES) return result;
+
+    // Pass 2: truncate text parts
+    console.warn(
+      `[AIChatAgent] Message ${message.id} still ${size} bytes after tool compaction, truncating text parts`
+    );
+    return this._truncateTextParts(result);
+  }
+
+  /**
+   * Truncates text parts in a message to fit within the row size limit.
+   * Truncates from the first text part forward, keeping the last text part
+   * as intact as possible (it is usually the most relevant).
+   */
+  private _truncateTextParts(message: ChatMessage): ChatMessage {
+    const compactedTextPartIndices: number[] = [];
+    const parts = [...message.parts];
+
+    // Truncate text parts from oldest to newest until we fit
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (part.type === "text" && "text" in part) {
+        const text = (part as { text: string }).text;
+        if (text.length > 1000) {
+          compactedTextPartIndices.push(i);
+          parts[i] = {
+            ...part,
+            text:
+              `[Text truncated for storage (${text.length} chars). ` +
+              `First 500 chars: ${text.slice(0, 500)}...]`
+          } as ChatMessage["parts"][number];
+
+          // Check if we fit now
+          const candidate = { ...message, parts };
+          if (
+            AIChatAgent._byteLength(JSON.stringify(candidate)) <=
+            AIChatAgent.ROW_MAX_BYTES
+          ) {
+            break;
+          }
+        }
+      }
+    }
+
+    const result: ChatMessage = { ...message, parts };
+    if (compactedTextPartIndices.length > 0) {
+      result.metadata = {
+        ...(result.metadata ?? {}),
+        compactedTextParts: compactedTextPartIndices
+      };
+    }
+    return result;
+  }
+
+  /**
+   * Shared helper for finding a tool part by toolCallId and applying an update.
+   * Handles both streaming (in-memory) and persisted (SQLite) messages.
+   *
+   * Checks _streamingMessage first (tool results/approvals can arrive while
+   * the AI is still streaming), then retries persisted messages with backoff
+   * in case streaming completes between attempts.
+   *
+   * @param toolCallId - The tool call ID to find
+   * @param callerName - Name for log messages (e.g. "_applyToolResult")
+   * @param matchStates - Which tool part states to match
+   * @param applyUpdate - Mutation to apply to the matched part (streaming: in-place, persisted: spread)
+   * @returns true if the update was applied, false if not found or state didn't match
+   */
+  private async _findAndUpdateToolPart(
     toolCallId: string,
-    _toolName: string,
-    output: unknown
+    callerName: string,
+    matchStates: string[],
+    applyUpdate: (part: Record<string, unknown>) => Record<string, unknown>
   ): Promise<boolean> {
-    // Find the message with this tool call
-    // First check the currently streaming message
+    // Find the message containing this tool call.
+    // Check streaming message first (in-memory, not yet persisted), then
+    // retry persisted messages with backoff.
     let message: ChatMessage | undefined;
 
-    // Check streaming message first
     if (this._streamingMessage) {
       for (const part of this._streamingMessage.parts) {
         if ("toolCallId" in part && part.toolCallId === toolCallId) {
@@ -1220,82 +1343,68 @@ export class AIChatAgent<
       }
     }
 
-    // If not found in streaming message, retry persisted messages
     if (!message) {
       for (let attempt = 0; attempt < 10; attempt++) {
         message = this._findMessageByToolCallId(toolCallId);
         if (message) break;
-        // Wait 100ms before retrying
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
 
     if (!message) {
-      // The tool result will be included when
-      // the client sends the follow-up message via sendMessage().
       console.warn(
-        `[AIChatAgent] _applyToolResult: Could not find message with toolCallId ${toolCallId} after retries`
+        `[AIChatAgent] ${callerName}: Could not find message with toolCallId ${toolCallId} after retries`
       );
       return false;
     }
 
-    // Check if this is the streaming message (not yet persisted)
     const isStreamingMessage = message === this._streamingMessage;
-
-    // Update the tool part with the output
     let updated = false;
+
     if (isStreamingMessage) {
-      // Update in place - the message will be persisted when streaming completes
+      // Update in place -- the message will be persisted when streaming completes
       for (const part of message.parts) {
         if (
           "toolCallId" in part &&
           part.toolCallId === toolCallId &&
           "state" in part &&
-          part.state === "input-available"
+          matchStates.includes(part.state as string)
         ) {
-          (part as { state: string; output?: unknown }).state =
-            "output-available";
-          (part as { state: string; output?: unknown }).output = output;
+          const applied = applyUpdate(part as Record<string, unknown>);
+          Object.assign(part, applied);
           updated = true;
           break;
         }
       }
     } else {
-      // For persisted messages, create updated parts
+      // For persisted messages, create updated parts immutably
       const updatedParts = message.parts.map((part) => {
         if (
           "toolCallId" in part &&
           part.toolCallId === toolCallId &&
           "state" in part &&
-          part.state === "input-available"
+          matchStates.includes(part.state as string)
         ) {
           updated = true;
-          return {
-            ...part,
-            state: "output-available" as const,
-            output
-          };
+          return applyUpdate(part as Record<string, unknown>);
         }
         return part;
       }) as ChatMessage["parts"];
 
       if (updated) {
-        // Create the updated message and strip OpenAI item IDs
         const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence(
-          {
-            ...message,
-            parts: updatedParts
-          }
+          { ...message, parts: updatedParts }
         );
+        const safe = this._enforceRowSizeLimit(updatedMessage);
+        const json = JSON.stringify(safe);
 
-        // Persist the updated message
         this.sql`
           update cf_ai_chat_agent_messages 
-          set message = ${JSON.stringify(updatedMessage)}
+          set message = ${json}
           where id = ${message.id}
         `;
+        this._persistedMessageCache.set(message.id, json);
 
-        // Reload messages to update in-memory state
         const persisted = this._loadMessagesFromDb();
         this.messages = autoTransformMessages(persisted);
       }
@@ -1303,15 +1412,21 @@ export class AIChatAgent<
 
     if (!updated) {
       console.warn(
-        `[AIChatAgent] _applyToolResult: Tool part with toolCallId ${toolCallId} not in input-available state`
+        `[AIChatAgent] ${callerName}: Tool part with toolCallId ${toolCallId} not in expected state (expected: ${matchStates.join("|")})`
       );
       return false;
     }
 
-    // Broadcast the update to all clients (only for persisted messages)
-    // For streaming messages, the update will be included when persisted
-    if (!isStreamingMessage) {
-      // Re-fetch the message for broadcast since we modified it
+    // Broadcast the update to all clients.
+    // For persisted messages, re-fetch the latest state from this.messages.
+    // For streaming messages, broadcast the in-memory snapshot so clients
+    // get immediate confirmation that the tool result/approval was applied.
+    if (isStreamingMessage) {
+      this._broadcastChatMessage({
+        type: MessageType.CF_AGENT_MESSAGE_UPDATED,
+        message
+      });
+    } else {
       const broadcastMessage = this._findMessageByToolCallId(toolCallId);
       if (broadcastMessage) {
         this._broadcastChatMessage({
@@ -1321,11 +1436,36 @@ export class AIChatAgent<
       }
     }
 
-    // Note: We don't automatically continue the conversation here.
-    // The client is responsible for sending a follow-up request if needed.
-    // This avoids re-entering onChatMessage with unexpected state.
-
     return true;
+  }
+
+  /**
+   * Applies a tool result to an existing assistant message.
+   * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
+   * The server is the source of truth, so we update the message here and broadcast
+   * the update to all clients.
+   *
+   * @param toolCallId - The tool call ID this result is for
+   * @param _toolName - The name of the tool (unused, kept for API compat)
+   * @param output - The output from the tool execution
+   * @returns true if the result was applied, false if the message was not found
+   */
+  private async _applyToolResult(
+    toolCallId: string,
+    _toolName: string,
+    output: unknown
+  ): Promise<boolean> {
+    return this._findAndUpdateToolPart(
+      toolCallId,
+      "_applyToolResult",
+      ["input-available"],
+      (part) => ({
+        ...part,
+        state: "output-available",
+        output,
+        preliminary: false
+      })
+    );
   }
 
   private async _streamSSEReply(
@@ -1336,29 +1476,12 @@ export class AIChatAgent<
     streamCompleted: { value: boolean },
     continuation = false
   ) {
-    let activeTextParts: Record<string, TextUIPart> = {};
-    let activeReasoningParts: Record<string, ReasoningUIPart> = {};
-    const partialToolCalls: Record<
-      string,
-      { text: string; index: number; toolName: string; dynamic?: boolean }
-    > = {};
-
-    /* Lazy loading ai sdk, because putting it in module scope is
-     * causing issues with startup time.
-     * The only place it's used is in _reply, which only matters after
-     * a chat message is received.
-     * So it's safe to delay loading it until a chat message is received.
-     */
-    const { getToolName, isToolUIPart, parsePartialJson } = await import("ai");
-
     streamCompleted.value = false;
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        // Mark the stream as completed
         this._completeStream(streamId);
         streamCompleted.value = true;
-        // Send final completion signal
         this._broadcastChatMessage({
           body: "",
           done: true,
@@ -1370,370 +1493,56 @@ export class AIChatAgent<
       }
 
       const chunk = decoder.decode(value);
-
-      // After streaming is complete, persist the complete assistant's response
-
-      // Parse AI SDK v5 SSE format and extract text deltas
       const lines = chunk.split("\n");
+
       for (const line of lines) {
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
           try {
-            const data: UIMessageChunk = JSON.parse(line.slice(6)); // Remove 'data: ' prefix
-            switch (data.type) {
-              case "text-start": {
-                const textPart: TextUIPart = {
-                  type: "text",
-                  text: "",
-                  providerMetadata: data.providerMetadata,
-                  state: "streaming"
-                };
-                activeTextParts[data.id] = textPart;
-                message.parts.push(textPart);
-                break;
-              }
+            const data: UIMessageChunk = JSON.parse(line.slice(6));
 
-              case "text-delta": {
-                const textPart = activeTextParts[data.id];
-                textPart.text += data.delta;
-                textPart.providerMetadata =
-                  data.providerMetadata ?? textPart.providerMetadata;
-                break;
-              }
+            // Delegate message building to the shared parser.
+            // It handles: text, reasoning, file, source, tool lifecycle,
+            // step boundaries — all the part types needed for UIMessage.
+            const handled = applyChunkToParts(message.parts, data);
 
-              case "text-end": {
-                const textPart = activeTextParts[data.id];
-                textPart.state = "done";
-                textPart.providerMetadata =
-                  data.providerMetadata ?? textPart.providerMetadata;
-                delete activeTextParts[data.id];
-                break;
-              }
-
-              case "reasoning-start": {
-                const reasoningPart: ReasoningUIPart = {
-                  type: "reasoning",
-                  text: "",
-                  providerMetadata: data.providerMetadata,
-                  state: "streaming"
-                };
-                activeReasoningParts[data.id] = reasoningPart;
-                message.parts.push(reasoningPart);
-                break;
-              }
-
-              case "reasoning-delta": {
-                const reasoningPart = activeReasoningParts[data.id];
-                reasoningPart.text += data.delta;
-                reasoningPart.providerMetadata =
-                  data.providerMetadata ?? reasoningPart.providerMetadata;
-                break;
-              }
-
-              case "reasoning-end": {
-                const reasoningPart = activeReasoningParts[data.id];
-                reasoningPart.providerMetadata =
-                  data.providerMetadata ?? reasoningPart.providerMetadata;
-                reasoningPart.state = "done";
-                delete activeReasoningParts[data.id];
-
-                break;
-              }
-
-              case "file": {
-                message.parts.push({
-                  type: "file",
-                  mediaType: data.mediaType,
-                  url: data.url
-                });
-
-                break;
-              }
-
-              case "source-url": {
-                message.parts.push({
-                  type: "source-url",
-                  sourceId: data.sourceId,
-                  url: data.url,
-                  title: data.title,
-                  providerMetadata: data.providerMetadata
-                });
-
-                break;
-              }
-
-              case "source-document": {
-                message.parts.push({
-                  type: "source-document",
-                  sourceId: data.sourceId,
-                  mediaType: data.mediaType,
-                  title: data.title,
-                  filename: data.filename,
-                  providerMetadata: data.providerMetadata
-                });
-
-                break;
-              }
-
-              case "tool-input-start": {
-                const toolInvocations = message.parts.filter(isToolUIPart);
-
-                // add the partial tool call to the map
-                partialToolCalls[data.toolCallId] = {
-                  text: "",
-                  toolName: data.toolName,
-                  index: toolInvocations.length,
-                  dynamic: data.dynamic
-                };
-
-                if (data.dynamic) {
-                  this.updateDynamicToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: data.toolName,
-                    state: "input-streaming",
-                    input: undefined
-                  });
-                } else {
-                  await this.updateToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: data.toolName,
-                    state: "input-streaming",
-                    input: undefined
-                  });
+            // Handle server-specific chunk types not covered by the shared parser
+            if (!handled) {
+              switch (data.type) {
+                case "start": {
+                  if (data.messageId != null) {
+                    message.id = data.messageId;
+                  }
+                  if (data.messageMetadata != null) {
+                    message.metadata = message.metadata
+                      ? { ...message.metadata, ...data.messageMetadata }
+                      : data.messageMetadata;
+                  }
+                  break;
                 }
-
-                break;
-              }
-
-              case "tool-input-delta": {
-                const partialToolCall = partialToolCalls[data.toolCallId];
-
-                partialToolCall.text += data.inputTextDelta;
-
-                const partialArgsResult = await parsePartialJson(
-                  partialToolCall.text
-                );
-                const partialArgs = (
-                  partialArgsResult as { value: Record<string, unknown> }
-                ).value;
-
-                if (partialToolCall.dynamic) {
-                  this.updateDynamicToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: partialToolCall.toolName,
-                    state: "input-streaming",
-                    input: partialArgs
-                  });
-                } else {
-                  await this.updateToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: partialToolCall.toolName,
-                    state: "input-streaming",
-                    input: partialArgs
-                  });
+                case "finish":
+                case "message-metadata": {
+                  if (data.messageMetadata != null) {
+                    message.metadata = message.metadata
+                      ? { ...message.metadata, ...data.messageMetadata }
+                      : data.messageMetadata;
+                  }
+                  break;
                 }
-
-                break;
-              }
-
-              case "tool-input-available": {
-                if (data.dynamic) {
-                  this.updateDynamicToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: data.toolName,
-                    state: "input-available",
-                    input: data.input,
-                    providerMetadata: data.providerMetadata
-                  });
-                } else {
-                  await this.updateToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: data.toolName,
-                    state: "input-available",
-                    input: data.input,
-                    providerExecuted: data.providerExecuted,
-                    providerMetadata: data.providerMetadata
-                  });
+                case "finish-step": {
+                  // No-op for message building (shared parser handles step-start)
+                  break;
                 }
-
-                // TODO: Do we want to expose onToolCall?
-
-                // invoke the onToolCall callback if it exists. This is blocking.
-                // In the future we should make this non-blocking, which
-                // requires additional state management for error handling etc.
-                // Skip calling onToolCall for provider-executed tools since they are already executed
-                // if (onToolCall && !data.providerExecuted) {
-                //   await onToolCall({
-                //     toolCall: data
-                //   });
-                // }
-                break;
-              }
-
-              case "tool-input-error": {
-                if (data.dynamic) {
-                  this.updateDynamicToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: data.toolName,
-                    state: "output-error",
-                    input: data.input,
-                    errorText: data.errorText,
-                    providerMetadata: data.providerMetadata
+                case "error": {
+                  this._broadcastChatMessage({
+                    error: true,
+                    body: data.errorText ?? JSON.stringify(data),
+                    done: false,
+                    id,
+                    type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
                   });
-                } else {
-                  await this.updateToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: data.toolName,
-                    state: "output-error",
-                    input: undefined,
-                    rawInput: data.input,
-                    errorText: data.errorText,
-                    providerExecuted: data.providerExecuted,
-                    providerMetadata: data.providerMetadata
-                  });
+                  break;
                 }
-
-                break;
               }
-
-              case "tool-output-available": {
-                if (data.dynamic) {
-                  const toolInvocations = message.parts.filter(
-                    (part) => part.type === "dynamic-tool"
-                  ) as DynamicToolUIPart[];
-
-                  const toolInvocation = toolInvocations.find(
-                    (invocation) => invocation.toolCallId === data.toolCallId
-                  );
-
-                  if (!toolInvocation)
-                    throw new Error("Tool invocation not found");
-
-                  this.updateDynamicToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: toolInvocation.toolName,
-                    state: "output-available",
-                    input: toolInvocation.input,
-                    output: data.output,
-                    preliminary: data.preliminary
-                  });
-                } else {
-                  const toolInvocations = message.parts.filter(
-                    isToolUIPart
-                  ) as ToolUIPart[];
-
-                  const toolInvocation = toolInvocations.find(
-                    (invocation) => invocation.toolCallId === data.toolCallId
-                  );
-
-                  if (!toolInvocation)
-                    throw new Error("Tool invocation not found");
-
-                  await this.updateToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: getToolName(toolInvocation),
-                    state: "output-available",
-                    input: toolInvocation.input,
-                    output: data.output,
-                    providerExecuted: data.providerExecuted,
-                    preliminary: data.preliminary
-                  });
-                }
-
-                break;
-              }
-
-              case "tool-output-error": {
-                if (data.dynamic) {
-                  const toolInvocations = message.parts.filter(
-                    (part) => part.type === "dynamic-tool"
-                  ) as DynamicToolUIPart[];
-
-                  const toolInvocation = toolInvocations.find(
-                    (invocation) => invocation.toolCallId === data.toolCallId
-                  );
-
-                  if (!toolInvocation)
-                    throw new Error("Tool invocation not found");
-
-                  this.updateDynamicToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: toolInvocation.toolName,
-                    state: "output-error",
-                    input: toolInvocation.input,
-                    errorText: data.errorText
-                  });
-                } else {
-                  const toolInvocations = message.parts.filter(
-                    isToolUIPart
-                  ) as ToolUIPart[];
-
-                  const toolInvocation = toolInvocations.find(
-                    (invocation) => invocation.toolCallId === data.toolCallId
-                  );
-
-                  if (!toolInvocation)
-                    throw new Error("Tool invocation not found");
-                  await this.updateToolPart(message, {
-                    toolCallId: data.toolCallId,
-                    toolName: getToolName(toolInvocation),
-                    state: "output-error",
-                    input: toolInvocation.input,
-                    rawInput:
-                      "rawInput" in toolInvocation
-                        ? toolInvocation.rawInput
-                        : undefined,
-                    errorText: data.errorText
-                  });
-                }
-
-                break;
-              }
-
-              case "start-step": {
-                // add a step boundary part to the message
-                message.parts.push({ type: "step-start" });
-                break;
-              }
-
-              case "finish-step": {
-                // reset the current text and reasoning parts
-                activeTextParts = {};
-                activeReasoningParts = {};
-                break;
-              }
-
-              case "start": {
-                if (data.messageId != null) {
-                  message.id = data.messageId;
-                }
-
-                await this.updateMessageMetadata(message, data.messageMetadata);
-
-                break;
-              }
-
-              case "finish": {
-                await this.updateMessageMetadata(message, data.messageMetadata);
-                break;
-              }
-
-              case "message-metadata": {
-                await this.updateMessageMetadata(message, data.messageMetadata);
-                break;
-              }
-
-              case "error": {
-                this._broadcastChatMessage({
-                  error: true,
-                  body: data.errorText ?? JSON.stringify(data),
-                  done: false,
-                  id,
-                  type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                });
-
-                break;
-              }
-              // Do we want to handle data parts?
             }
 
             // Convert internal AI SDK stream events to valid UIMessageStreamPart format.
@@ -1753,11 +1562,9 @@ export class AIChatAgent<
               };
             }
 
-            // Store chunk for replay on reconnection
+            // Store chunk for replay and broadcast to clients
             const chunkBody = JSON.stringify(eventToSend);
             this._storeStreamChunk(streamId, chunkBody);
-
-            // Forward the converted event to the client
             this._broadcastChatMessage({
               body: chunkBody,
               done: false,
@@ -1789,9 +1596,16 @@ export class AIChatAgent<
       continuation
     );
 
+    // Use a single text part and accumulate into it, so the persisted message
+    // has one text part regardless of how many network chunks the response spans.
+    const textPart: TextUIPart = { type: "text", text: "", state: "streaming" };
+    message.parts.push(textPart);
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
+        textPart.state = "done";
+
         this._broadcastTextEvent(
           streamId,
           { type: "text-end", id },
@@ -1814,180 +1628,15 @@ export class AIChatAgent<
 
       const chunk = decoder.decode(value);
 
-      // Treat the entire chunk as a text delta to preserve exact formatting
+      // Accumulate into the single text part to preserve exact formatting
       if (chunk.length > 0) {
-        message.parts.push({ type: "text", text: chunk });
+        textPart.text += chunk;
         this._broadcastTextEvent(
           streamId,
           { type: "text-delta", id, delta: chunk },
           continuation
         );
       }
-    }
-  }
-
-  private updateDynamicToolPart(
-    message: ChatMessage,
-    options: {
-      toolName: string;
-      toolCallId: string;
-      providerExecuted?: boolean;
-    } & (
-      | {
-          state: "input-streaming";
-          input: unknown;
-        }
-      | {
-          state: "input-available";
-          input: unknown;
-          providerMetadata?: ProviderMetadata;
-        }
-      | {
-          state: "output-available";
-          input: unknown;
-          output: unknown;
-          preliminary: boolean | undefined;
-        }
-      | {
-          state: "output-error";
-          input: unknown;
-          errorText: string;
-          providerMetadata?: ProviderMetadata;
-        }
-    )
-  ) {
-    const part = message.parts.find(
-      (part) =>
-        part.type === "dynamic-tool" && part.toolCallId === options.toolCallId
-    ) as DynamicToolUIPart | undefined;
-
-    const anyOptions = options as Record<string, unknown>;
-    const anyPart = part as Record<string, unknown>;
-
-    if (part != null) {
-      part.state = options.state;
-      anyPart.toolName = options.toolName;
-      anyPart.input = anyOptions.input;
-      anyPart.output = anyOptions.output;
-      anyPart.errorText = anyOptions.errorText;
-      anyPart.rawInput = anyOptions.rawInput ?? anyPart.rawInput;
-      anyPart.preliminary = anyOptions.preliminary;
-
-      if (
-        anyOptions.providerMetadata != null &&
-        part.state === "input-available"
-      ) {
-        part.callProviderMetadata =
-          anyOptions.providerMetadata as ProviderMetadata;
-      }
-    } else {
-      message.parts.push({
-        type: "dynamic-tool",
-        toolName: options.toolName,
-        toolCallId: options.toolCallId,
-        state: options.state,
-        input: anyOptions.input,
-        output: anyOptions.output,
-        errorText: anyOptions.errorText,
-        preliminary: anyOptions.preliminary,
-        ...(anyOptions.providerMetadata != null
-          ? { callProviderMetadata: anyOptions.providerMetadata }
-          : {})
-      } as DynamicToolUIPart);
-    }
-  }
-
-  private async updateToolPart(
-    message: ChatMessage,
-    options: {
-      toolName: string;
-      toolCallId: string;
-      providerExecuted?: boolean;
-    } & (
-      | {
-          state: "input-streaming";
-          input: unknown;
-          providerExecuted?: boolean;
-        }
-      | {
-          state: "input-available";
-          input: unknown;
-          providerExecuted?: boolean;
-          providerMetadata?: ProviderMetadata;
-        }
-      | {
-          state: "output-available";
-          input: unknown;
-          output: unknown;
-          providerExecuted?: boolean;
-          preliminary?: boolean;
-        }
-      | {
-          state: "output-error";
-          input: unknown;
-          rawInput?: unknown;
-          errorText: string;
-          providerExecuted?: boolean;
-          providerMetadata?: ProviderMetadata;
-        }
-    )
-  ) {
-    const { isToolUIPart } = await import("ai");
-
-    const part = message.parts.find(
-      (part) =>
-        isToolUIPart(part) &&
-        (part as ToolUIPart).toolCallId === options.toolCallId
-    ) as ToolUIPart | undefined;
-
-    const anyOptions = options as Record<string, unknown>;
-    const anyPart = part as Record<string, unknown>;
-
-    if (part != null) {
-      part.state = options.state;
-      anyPart.input = anyOptions.input;
-      anyPart.output = anyOptions.output;
-      anyPart.errorText = anyOptions.errorText;
-      anyPart.rawInput = anyOptions.rawInput;
-      anyPart.preliminary = anyOptions.preliminary;
-
-      // once providerExecuted is set, it stays for streaming
-      anyPart.providerExecuted =
-        anyOptions.providerExecuted ?? part.providerExecuted;
-
-      if (
-        anyOptions.providerMetadata != null &&
-        part.state === "input-available"
-      ) {
-        part.callProviderMetadata =
-          anyOptions.providerMetadata as ProviderMetadata;
-      }
-    } else {
-      message.parts.push({
-        type: `tool-${options.toolName}`,
-        toolCallId: options.toolCallId,
-        state: options.state,
-        input: anyOptions.input,
-        output: anyOptions.output,
-        rawInput: anyOptions.rawInput,
-        errorText: anyOptions.errorText,
-        providerExecuted: anyOptions.providerExecuted,
-        preliminary: anyOptions.preliminary,
-        ...(anyOptions.providerMetadata != null
-          ? { callProviderMetadata: anyOptions.providerMetadata }
-          : {})
-      } as ToolUIPart);
-    }
-  }
-
-  private async updateMessageMetadata(message: ChatMessage, metadata: unknown) {
-    if (metadata != null) {
-      const mergedMetadata =
-        message.metadata != null
-          ? { ...message.metadata, ...metadata } // TODO: do proper merging
-          : metadata;
-
-      message.metadata = mergedMetadata;
     }
   }
 
@@ -2004,138 +1653,25 @@ export class AIChatAgent<
     toolCallId: string,
     approved: boolean
   ): Promise<boolean> {
-    // Find the message with this tool call.
-    // We check two locations:
-    // 1. _streamingMessage: in-memory message being actively built during AI response
-    //    (not yet persisted to SQLite or available in this.messages)
-    // 2. this.messages: persisted messages loaded from SQLite database
-    //
-    // The user can approve before streaming finishes (e.g., approval UI appears
-    // while AI is still generating text), so we must check _streamingMessage first.
-
-    let message: ChatMessage | undefined;
-
-    // Check streaming message first (in-memory, not yet persisted)
-    if (this._streamingMessage) {
-      for (const part of this._streamingMessage.parts) {
-        if ("toolCallId" in part && part.toolCallId === toolCallId) {
-          message = this._streamingMessage;
-          break;
-        }
-      }
-    }
-
-    // If not found in streaming message, check persisted messages (in SQLite).
-    // Retry with backoff in case streaming completes and persists between attempts.
-    if (!message) {
-      for (let attempt = 0; attempt < 10; attempt++) {
-        message = this._findMessageByToolCallId(toolCallId);
-        if (message) break;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
-
-    if (!message) {
-      console.warn(
-        `[AIChatAgent] _applyToolApproval: Could not find message with toolCallId ${toolCallId} after retries`
-      );
-      return false;
-    }
-
-    // Check if this is the streaming message (not yet persisted)
-    const isStreamingMessage = message === this._streamingMessage;
-
-    // Update the tool part with the approval
-    let updated = false;
-    if (isStreamingMessage) {
-      // Update in place - the message will be persisted when streaming completes
-      for (const part of message.parts) {
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          "state" in part &&
-          (part.state === "input-available" ||
-            part.state === "approval-requested")
-        ) {
-          (part as { state: string; approval?: { approved: boolean } }).state =
-            "approval-responded";
-          (
-            part as { state: string; approval?: { approved: boolean } }
-          ).approval = { approved };
-          updated = true;
-          break;
-        }
-      }
-    } else {
-      // For persisted messages, create updated parts
-      const updatedParts = message.parts.map((part) => {
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          "state" in part &&
-          (part.state === "input-available" ||
-            part.state === "approval-requested")
-        ) {
-          updated = true;
-          return {
-            ...part,
-            state: "approval-responded" as const,
-            approval: { approved }
-          };
-        }
-        return part;
-      }) as ChatMessage["parts"];
-
-      if (updated) {
-        // Create the updated message and strip OpenAI item IDs
-        const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence(
-          {
-            ...message,
-            parts: updatedParts
-          }
-        );
-
-        // Persist the updated message
-        this.sql`
-          update cf_ai_chat_agent_messages 
-          set message = ${JSON.stringify(updatedMessage)}
-          where id = ${message.id}
-        `;
-
-        // Reload messages to update in-memory state
-        const persisted = this._loadMessagesFromDb();
-        this.messages = autoTransformMessages(persisted);
-      }
-    }
-
-    if (!updated) {
-      console.warn(
-        `[AIChatAgent] _applyToolApproval: Tool part with toolCallId ${toolCallId} not in input-available or approval-requested state`
-      );
-      return false;
-    }
-
-    // Broadcast the update to all clients (only for persisted messages)
-    if (!isStreamingMessage) {
-      const broadcastMessage = this._findMessageByToolCallId(toolCallId);
-      if (broadcastMessage) {
-        this._broadcastChatMessage({
-          type: MessageType.CF_AGENT_MESSAGE_UPDATED,
-          message: broadcastMessage
-        });
-      }
-    }
-
-    return true;
+    return this._findAndUpdateToolPart(
+      toolCallId,
+      "_applyToolApproval",
+      ["input-available", "approval-requested"],
+      (part) => ({
+        ...part,
+        state: "approval-responded",
+        approval: { approved }
+      })
+    );
   }
 
   private async _reply(
     id: string,
     response: Response,
     excludeBroadcastIds: string[] = [],
-    options: { continuation?: boolean } = {}
+    options: { continuation?: boolean; chatMessageId?: string } = {}
   ) {
-    const { continuation = false } = options;
+    const { continuation = false, chatMessageId } = options;
 
     return this._tryCatchChat(async () => {
       if (!response.body) {
@@ -2212,6 +1748,36 @@ export class AIChatAgent<
         throw error;
       } finally {
         reader.releaseLock();
+
+        // Always clear the streaming message reference and resolve completion
+        // promise, even on error. Without this, tool continuations waiting on
+        // _streamCompletionPromise would hang forever after a stream error.
+        this._streamingMessage = null;
+        if (this._streamCompletionResolve) {
+          this._streamCompletionResolve();
+          this._streamCompletionResolve = null;
+          this._streamCompletionPromise = null;
+        }
+
+        // Framework-level cleanup: always remove abort controller.
+        // Only emit observability on success (not on error path).
+        if (chatMessageId) {
+          this._removeAbortController(chatMessageId);
+          if (streamCompleted.value) {
+            this.observability?.emit(
+              {
+                displayMessage: continuation
+                  ? "Chat message response (tool continuation)"
+                  : "Chat message response",
+                id: chatMessageId,
+                payload: {},
+                timestamp: Date.now(),
+                type: "message:response"
+              },
+              this.ctx
+            );
+          }
+        }
       }
 
       if (message.parts.length > 0) {
@@ -2247,34 +1813,7 @@ export class AIChatAgent<
           );
         }
       }
-
-      // Clear the streaming message reference and resolve completion promise
-      this._streamingMessage = null;
-      if (this._streamCompletionResolve) {
-        this._streamCompletionResolve();
-        this._streamCompletionResolve = null;
-        this._streamCompletionPromise = null;
-      }
     });
-  }
-
-  /**
-   * Mark a stream as errored and clean up state.
-   * @param streamId - The stream to mark as errored
-   * @internal Protected for testing purposes.
-   */
-  protected _markStreamError(streamId: string) {
-    // Flush any pending chunks before marking error
-    this._flushChunkBuffer();
-
-    this.sql`
-      update cf_ai_chat_stream_metadata 
-      set status = 'error', completed_at = ${Date.now()} 
-      where id = ${streamId}
-    `;
-    this._activeStreamId = null;
-    this._activeRequestId = null;
-    this._streamChunkIndex = 0;
   }
 
   /**
@@ -2328,18 +1867,7 @@ export class AIChatAgent<
    */
   async destroy() {
     this._destroyAbortControllers();
-
-    // Flush any remaining chunks before cleanup
-    this._flushChunkBuffer();
-
-    // Clean up stream tables
-    this.sql`drop table if exists cf_ai_chat_stream_chunks`;
-    this.sql`drop table if exists cf_ai_chat_stream_metadata`;
-
-    // Clear active stream state
-    this._activeStreamId = null;
-    this._activeRequestId = null;
-
+    this._resumableStream.destroy();
     await super.destroy();
   }
 }

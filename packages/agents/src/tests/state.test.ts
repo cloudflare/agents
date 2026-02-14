@@ -716,12 +716,13 @@ describe("state management", () => {
 
     it("should throw if both onStateUpdate and onStateChanged are overridden on the same class", async () => {
       const room = `both-hooks-${crypto.randomUUID()}`;
-      const agentStub = await getAgentByName(env.TestBothHooksAgent, room);
 
-      // Calling setState triggers _callStatePersistenceHook, which should throw
+      // The error is thrown at construction time (in the Agent constructor),
+      // so getAgentByName itself will reject.
       let threw = false;
       let errorMessage = "";
       try {
+        const agentStub = await getAgentByName(env.TestBothHooksAgent, room);
         await agentStub.updateState({
           count: 1,
           items: [],

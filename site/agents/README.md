@@ -43,8 +43,8 @@ npm run deploy
 
 # Agents MCP Server
 
-[![Add to Cursor](https://img.shields.io/badge/Add%20to-Cursor-blue)](https://cursor.com/en-US/install-mcp?name=cloudflare-agents&config=eyJ1cmwiOiJodHBzOi8vYWdlbnRzLm1jcC5jbG91ZGZsYXJlLmNvbS9tY3AifQ%3D%3D)
-[![Add to VS Code](https://img.shields.io/badge/Add%20to-VS%20Code-blue)](vscode:mcp/install?%7B%22name%22%3A%22cloudflare-agents%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fagents.mcp.cloudflare.com%2Fmcp%22%7D)
+[![Add to Cursor](https://img.shields.io/badge/Add%20to-Cursor-blue)](https://cursor.com/en-US/install-mcp?name=cloudflare-agents&config=eyJ1cmwiOiJodHRwczovL2FnZW50cy5jbG91ZGZsYXJlLmNvbS9tY3AifQ%3D%3D)
+[![Add to VS Code](https://img.shields.io/badge/Add%20to-VS%20Code-blue)](vscode:mcp/install?%7B%22name%22%3A%22cloudflare-agents%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fagents.cloudflare.com%2Fmcp%22%7D)
 
 This is an MCP server for anyone building with Agents SDK. It exposes just 1 tool.
 
@@ -72,7 +72,7 @@ This is an MCP server for anyone building with Agents SDK. It exposes just 1 too
 Connect to this MCP server to any MCP Client that supports remote MCP servers.
 
 ```txt
-https://agents.mcp.cloudflare.com/mcp
+https://agents.cloudflare.com/mcp
 ```
 
 ## How it works

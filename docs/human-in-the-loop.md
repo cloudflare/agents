@@ -25,27 +25,26 @@ Human-in-the-loop (HITL) patterns allow agents to pause execution and wait for h
 
 Agents SDK supports multiple human-in-the-loop patterns. Choose based on your use case:
 
-| Use Case               | Pattern           | Best For                                               | Example                                                           |
-| ---------------------- | ----------------- | ------------------------------------------------------ | ----------------------------------------------------------------- |
-| Long-running workflows | Workflow Approval | Multi-step processes, durable approval gates           | [examples/workflows/](../examples/workflows/)                     |
-| AIChatAgent tools      | Tool Confirmation | Chat-based tool calls with `@cloudflare/ai-chat`       | [guides/human-in-the-loop/](../guides/human-in-the-loop/)         |
-| OpenAI Agents SDK      | `needsApproval`   | Using OpenAI's agent SDK with conditional approval     | [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/) |
-| AI SDK (Vercel)        | No-execute tools  | Tools without execute function require client approval | Pattern below                                                     |
-| MCP Servers            | Elicitation       | MCP tools requesting structured user input             | [examples/mcp-elicitation/](../examples/mcp-elicitation/)         |
+| Use Case               | Pattern           | Best For                                           | Example                                                           |
+| ---------------------- | ----------------- | -------------------------------------------------- | ----------------------------------------------------------------- |
+| Long-running workflows | Workflow Approval | Multi-step processes, durable approval gates       | [examples/workflows/](../examples/workflows/)                     |
+| AIChatAgent tools      | `needsApproval`   | Chat-based tool calls with `@cloudflare/ai-chat`   | [guides/human-in-the-loop/](../guides/human-in-the-loop/)         |
+| OpenAI Agents SDK      | `needsApproval`   | Using OpenAI's agent SDK with conditional approval | [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/) |
+| Client-side tools      | `onToolCall`      | Tools that need browser APIs or user interaction   | Pattern below                                                     |
+| MCP Servers            | Elicitation       | MCP tools requesting structured user input         | [examples/mcp-elicitation/](../examples/mcp-elicitation/)         |
 
 ### Decision Guide
 
 ```
 Is this part of a multi-step workflow?
-├─ Yes → Use Workflow Approval (waitForApproval)
-└─ No → Are you building an MCP server?
-         ├─ Yes → Use MCP Elicitation (elicitInput)
-         └─ No → Is this an AI chat interaction?
-                  ├─ Yes → Which SDK?
-                  │        ├─ @cloudflare/ai-chat → Tool Confirmation (requiresApproval)
-                  │        ├─ OpenAI Agents SDK → needsApproval function
-                  │        └─ Vercel AI SDK → No-execute tools pattern
-                  └─ No → Use State + WebSocket for simple confirmations
+├── Yes → Use Workflow Approval (waitForApproval)
+└── No → Are you building an MCP server?
+         ├── Yes → Use MCP Elicitation (elicitInput)
+         └── No → Is this an AI chat interaction?
+                  ├── Yes → Does the tool need browser APIs?
+                  │        ├── Yes → Use onToolCall (client-side execution)
+                  │        └── No → Use needsApproval (server-side with approval)
+                  └── No → Use State + WebSocket for simple confirmations
 ```
 
 ## Workflow-Based Approval
@@ -185,83 +184,136 @@ if (!approval) {
 
 For more details, see [Workflows Integration](./workflows.md).
 
-## AI Tool Approval Patterns
+## AI Tool Approval with `needsApproval`
 
-When building AI chat agents, you often want humans to approve certain tool calls before execution.
+When building AI chat agents, you often want humans to approve certain tool calls before execution. The AI SDK's `needsApproval` option pauses tool execution until the user approves or rejects.
 
-### AIChatAgent Pattern (`@cloudflare/ai-chat`)
+### Server
 
-Tools can require confirmation before execution:
+Define tools with `needsApproval` to require human confirmation:
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
+import { createWorkersAI } from "workers-ai-provider";
+import { streamText, tool, convertToModelMessages } from "ai";
+import { z } from "zod";
 
-export class MyAgent extends AIChatAgent<Env> {
-  async onChatMessage(onFinish: StreamTextOnFinishCallback) {
-    return createDataStreamResponse({
-      execute: async (dataStream) => {
-        const processedMessages = await processToolCalls({
-          messages: this.messages,
-          dataStream,
-          tools: {
-            getWeatherInformation: {
-              requiresApproval: true,
-              execute: async ({ city }) => {
-                return `The weather in ${city} is sunny.`;
-              }
-            },
-            getCurrentTime: {
-              // No requiresApproval = executes immediately
-              execute: async () => new Date().toISOString()
-            }
+export class MyAgent extends AIChatAgent {
+  async onChatMessage() {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const result = streamText({
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      messages: await convertToModelMessages(this.messages),
+      tools: {
+        // Tool with conditional approval
+        processPayment: tool({
+          description: "Process a payment",
+          inputSchema: z.object({
+            amount: z.number(),
+            recipient: z.string()
+          }),
+          // Approval required for amounts over $100
+          needsApproval: async ({ amount }) => amount > 100,
+          execute: async ({ amount, recipient }) => {
+            return await chargeCard(amount, recipient);
           }
-        });
+        }),
 
-        streamText({
-          model: openai("gpt-4o"),
-          messages: processedMessages,
-          onFinish
-        }).mergeIntoDataStream(dataStream);
-      }
+        // Tool that always requires approval
+        deleteAccount: tool({
+          description: "Delete a user account",
+          inputSchema: z.object({ userId: z.string() }),
+          needsApproval: true,
+          execute: async ({ userId }) => {
+            return await deleteUser(userId);
+          }
+        }),
+
+        // Tool that executes automatically (no approval)
+        getWeather: tool({
+          description: "Get weather for a city",
+          inputSchema: z.object({ city: z.string() }),
+          execute: async ({ city }) => fetchWeather(city)
+        })
+      },
+      maxSteps: 5
     });
+
+    return result.toUIMessageStreamResponse();
   }
 }
 ```
 
-**Client-side approval:**
+### Client
+
+Handle approval requests with `addToolApprovalResponse`:
 
 ```tsx
-import { useAgent, useAgentChat } from "agents/react";
+import { useAgent } from "agents/react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { isToolUIPart, getToolName } from "ai";
 
 function Chat() {
-  const agent = useAgent({ agent: "my-agent" });
-  const { messages, addToolResult } = useAgentChat({ agent });
+  const agent = useAgent({ agent: "MyAgent" });
+  const { messages, sendMessage, addToolApprovalResponse } = useAgentChat({
+    agent
+  });
 
   return (
     <div>
       {messages.map((message) => (
         <div key={message.id}>
           {message.parts?.map((part, i) => {
-            // Check for tool calls awaiting approval
-            if (
-              part.type === "tool-invocation" &&
-              part.state === "input-available"
-            ) {
-              return (
-                <div key={i} className="approval-card">
-                  <p>
-                    Approve {part.tool} for {JSON.stringify(part.args)}?
-                  </p>
-                  <button onClick={() => addToolResult(part.id, "approve")}>
-                    Yes
-                  </button>
-                  <button onClick={() => addToolResult(part.id, "reject")}>
-                    No
-                  </button>
-                </div>
-              );
+            if (part.type === "text") {
+              return <p key={i}>{part.text}</p>;
             }
-            // Render other parts...
+
+            if (isToolUIPart(part)) {
+              // Tool waiting for approval
+              if ("approval" in part && part.state === "approval-requested") {
+                const approvalId = part.approval?.id;
+                return (
+                  <div key={part.toolCallId} className="approval-card">
+                    <p>
+                      Approve <strong>{getToolName(part)}</strong> with{" "}
+                      {JSON.stringify(part.input)}?
+                    </p>
+                    <button
+                      onClick={() =>
+                        addToolApprovalResponse({
+                          id: approvalId,
+                          approved: true
+                        })
+                      }
+                    >
+                      Approve
+                    </button>
+                    <button
+                      onClick={() =>
+                        addToolApprovalResponse({
+                          id: approvalId,
+                          approved: false
+                        })
+                      }
+                    >
+                      Reject
+                    </button>
+                  </div>
+                );
+              }
+
+              // Tool completed
+              if (part.state === "output-available") {
+                return (
+                  <div key={part.toolCallId}>
+                    {getToolName(part)}: {JSON.stringify(part.output)}
+                  </div>
+                );
+              }
+            }
+
+            return null;
           })}
         </div>
       ))}
@@ -271,6 +323,59 @@ function Chat() {
 ```
 
 See the complete example: [guides/human-in-the-loop/](../guides/human-in-the-loop/)
+
+## Client-Side Tool Execution with `onToolCall`
+
+For tools that need browser APIs (geolocation, camera, clipboard) or user interaction, define the tool on the server without an `execute` function and handle it on the client with `onToolCall`:
+
+### Server
+
+```typescript
+export class MyAgent extends AIChatAgent {
+  async onChatMessage() {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const result = streamText({
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      messages: await convertToModelMessages(this.messages),
+      tools: {
+        // No execute function - client handles via onToolCall
+        getUserLocation: tool({
+          description: "Get the user's current location from their browser",
+          inputSchema: z.object({})
+        })
+      },
+      maxSteps: 3
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+### Client
+
+```tsx
+const { messages, sendMessage } = useAgentChat({
+  agent,
+  onToolCall: async ({ toolCall, addToolOutput }) => {
+    if (toolCall.toolName === "getUserLocation") {
+      const position = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject);
+      });
+      addToolOutput({
+        toolCallId: toolCall.toolCallId,
+        output: {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        }
+      });
+    }
+  }
+});
+```
+
+The server receives the tool output via `CF_AGENT_TOOL_RESULT` and can auto-continue the conversation (with `maxSteps > 1`), letting the LLM respond to the location data in the same turn.
 
 ### OpenAI Agents SDK Pattern
 
@@ -309,139 +414,7 @@ export class WeatherAgent extends Agent<Env, AgentState> {
 }
 ```
 
-**Handling interruptions on the client:**
-
-```tsx
-function WeatherChat() {
-  const { state, agent } = useAgent({ agent: "weather-agent" });
-
-  // Check for pending approval
-  if (state?.currentStep?.type === "next_step_interruption") {
-    const interruption = state.currentStep.data?.interruptions[0];
-
-    return (
-      <div className="approval-modal">
-        <h3>Approval Required</h3>
-        <p>Tool: {interruption.toolName}</p>
-        <p>Args: {JSON.stringify(interruption.args)}</p>
-        <button onClick={() => agent.stub.approve()}>Approve</button>
-        <button onClick={() => agent.stub.reject()}>Reject</button>
-      </div>
-    );
-  }
-
-  // Normal chat UI...
-}
-```
-
 See the complete example: [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/)
-
-### AI SDK Pattern (Vercel)
-
-When using the [Vercel AI SDK](https://ai-sdk.dev), tools without an `execute` function require client-side confirmation. Here's the pattern adapted for React + Cloudflare Worker:
-
-**Server (Worker):**
-
-```typescript
-import { tool, streamText, convertToModelMessages } from "ai";
-import { z } from "zod";
-
-// Tool WITHOUT execute = requires confirmation
-const weatherTool = tool({
-  description: "Get weather for a city",
-  inputSchema: z.object({ city: z.string() }),
-  outputSchema: z.string()
-  // No execute function - client must provide result
-});
-
-export class ChatAgent extends Agent<Env> {
-  @callable()
-  async chat(messages: Message[]) {
-    // Check if last message has tool approval
-    const lastMessage = messages[messages.length - 1];
-    const processedMessages = await this.processToolApprovals(messages);
-
-    const result = streamText({
-      model: openai("gpt-4o"),
-      messages: convertToModelMessages(processedMessages),
-      tools: { getWeather: weatherTool }
-    });
-
-    return result;
-  }
-
-  private async processToolApprovals(messages: Message[]) {
-    // Find tool calls with user-provided results
-    // Execute approved tools, reject denied ones
-    // Return updated messages
-  }
-}
-```
-
-**Client (React):**
-
-```tsx
-const APPROVAL = {
-  YES: "Yes, confirmed.",
-  NO: "No, denied."
-};
-
-function Chat() {
-  const { messages, sendMessage, addToolOutput } = useAgentChat({
-    agent: "chat-agent"
-  });
-
-  return (
-    <div>
-      {messages.map((message) => (
-        <div key={message.id}>
-          {message.parts?.map((part, i) => {
-            // Check for tool calls awaiting input
-            if (
-              part.type === "tool-invocation" &&
-              part.state === "input-available" &&
-              part.tool === "getWeather"
-            ) {
-              return (
-                <div key={i}>
-                  <p>Get weather for {part.input.city}?</p>
-                  <button
-                    onClick={async () => {
-                      await addToolOutput({
-                        toolCallId: part.toolCallId,
-                        tool: "getWeather",
-                        output: APPROVAL.YES
-                      });
-                      sendMessage();
-                    }}
-                  >
-                    Yes
-                  </button>
-                  <button
-                    onClick={async () => {
-                      await addToolOutput({
-                        toolCallId: part.toolCallId,
-                        tool: "getWeather",
-                        output: APPROVAL.NO
-                      });
-                      sendMessage();
-                    }}
-                  >
-                    No
-                  </button>
-                </div>
-              );
-            }
-            // Render other parts...
-          })}
-        </div>
-      ))}
-    </div>
-  );
-}
-```
-
-For the full pattern, see the [AI SDK Human-in-the-Loop cookbook](https://ai-sdk.dev/cookbook/next/human-in-the-loop).
 
 ### MCP Elicitation
 
@@ -595,95 +568,6 @@ async approveMulti(approvalId: string, userId: string): Promise<boolean> {
 }
 ```
 
-## Building Approval UIs
-
-### Pending Approvals List
-
-```tsx
-import { useAgent } from "agents/react";
-
-function PendingApprovals() {
-  const { state, agent } = useAgent<ApprovalState>({
-    agent: "approval-agent",
-    name: "main"
-  });
-
-  if (!state?.pending?.length) {
-    return <p>No pending approvals</p>;
-  }
-
-  return (
-    <div className="approval-list">
-      {state.pending.map((item) => (
-        <div key={item.id} className="approval-card">
-          <h3>{item.type}</h3>
-          <p>{item.description}</p>
-          {item.amount && <p className="amount">${item.amount}</p>}
-          <p className="meta">
-            Requested by {item.requestedBy} at{" "}
-            {new Date(item.requestedAt).toLocaleString()}
-          </p>
-
-          <div className="actions">
-            <button
-              className="approve"
-              onClick={() => agent.stub.approve(item.id)}
-            >
-              Approve
-            </button>
-            <button
-              className="reject"
-              onClick={() => agent.stub.reject(item.id, "Declined")}
-            >
-              Reject
-            </button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-```
-
-### Approval Modal for Tool Calls
-
-```tsx
-function ApprovalModal({
-  toolName,
-  args,
-  onApprove,
-  onReject
-}: {
-  toolName: string;
-  args: Record<string, unknown>;
-  onApprove: () => void;
-  onReject: () => void;
-}) {
-  return (
-    <div className="modal-overlay">
-      <div className="modal">
-        <h2>Approval Required</h2>
-        <p>The AI wants to execute:</p>
-
-        <div className="tool-details">
-          <strong>{toolName}</strong>
-          <pre>{JSON.stringify(args, null, 2)}</pre>
-        </div>
-
-        <div className="modal-actions">
-          <button className="approve" onClick={onApprove}>
-            Approve
-          </button>
-          <button className="reject" onClick={onReject}>
-            Reject
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-```
-
 ## Timeouts and Escalation
 
 ### Setting Approval Timeouts
@@ -725,97 +609,16 @@ async submitForApproval(request: ApprovalRequest): Promise<string> {
 
   return approvalId;
 }
-
-async sendReminder(payload: { approvalId: string }) {
-  const approval = this.state.pending.find(p => p.id === payload.approvalId);
-  if (approval) {
-    // Send reminder notification
-    await this.notify(approval.requestedBy, "Approval still pending");
-  }
-}
-
-async escalateApproval(payload: { approvalId: string }) {
-  const approval = this.state.pending.find(p => p.id === payload.approvalId);
-  if (approval) {
-    // Escalate to manager
-    await this.notify("manager@company.com", `Escalated: ${approval.description}`);
-  }
-}
-```
-
-## Audit and Compliance
-
-### Recording Approval Decisions
-
-Use `this.sql` to maintain an immutable audit trail:
-
-```typescript
-@callable()
-async approve(approvalId: string, userId: string, reason?: string): Promise<void> {
-  // Record the decision in SQL (immutable audit log)
-  this.sql`
-    INSERT INTO approval_audit (
-      approval_id,
-      decision,
-      decided_by,
-      decided_at,
-      reason
-    ) VALUES (
-      ${approvalId},
-      'approved',
-      ${userId},
-      ${Date.now()},
-      ${reason || null}
-    )
-  `;
-
-  // Process the approval...
-  await this.processApproval(approvalId);
-
-  // Update state
-  this.setState({
-    ...this.state,
-    pending: this.state.pending.filter(p => p.id !== approvalId),
-    history: [
-      ...this.state.history,
-      {
-        id: crypto.randomUUID(),
-        approvalId,
-        decision: "approved",
-        decidedBy: userId,
-        decidedAt: Date.now(),
-        reason
-      }
-    ]
-  });
-}
-```
-
-### Audit Table Schema
-
-```sql
-CREATE TABLE IF NOT EXISTS approval_audit (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  approval_id TEXT NOT NULL,
-  decision TEXT NOT NULL CHECK(decision IN ('approved', 'rejected')),
-  decided_by TEXT NOT NULL,
-  decided_at INTEGER NOT NULL,
-  reason TEXT,
-  metadata TEXT
-);
-
-CREATE INDEX idx_approval_audit_approval_id ON approval_audit(approval_id);
-CREATE INDEX idx_approval_audit_decided_by ON approval_audit(decided_by);
 ```
 
 ## Complete Examples
 
-| Pattern           | Location                                                          | Description                                   |
-| ----------------- | ----------------------------------------------------------------- | --------------------------------------------- |
-| Workflow approval | [examples/workflows/](../examples/workflows/)                     | Multi-step task processing with approval gate |
-| AIChatAgent tools | [guides/human-in-the-loop/](../guides/human-in-the-loop/)         | Chat tool confirmation with React UI          |
-| OpenAI Agents SDK | [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/) | Conditional tool approval with modal          |
-| MCP Elicitation   | [examples/mcp-elicitation/](../examples/mcp-elicitation/)         | MCP server requesting structured user input   |
+| Pattern           | Location                                                          | Description                                        |
+| ----------------- | ----------------------------------------------------------------- | -------------------------------------------------- |
+| Workflow approval | [examples/workflows/](../examples/workflows/)                     | Multi-step task processing with approval gate      |
+| AIChatAgent tools | [guides/human-in-the-loop/](../guides/human-in-the-loop/)         | Chat tool approval with needsApproval + onToolCall |
+| OpenAI Agents SDK | [openai-sdk/human-in-the-loop/](../openai-sdk/human-in-the-loop/) | Conditional tool approval with modal               |
+| MCP Elicitation   | [examples/mcp-elicitation/](../examples/mcp-elicitation/)         | MCP server requesting structured user input        |
 
 For detailed API documentation, see:
 

@@ -88,7 +88,7 @@ describe("Chat Agent Persistence", () => {
     const secondDone = await secondPromise;
     expect(secondDone).toBe(true);
 
-    ws.close();
+    ws.close(1000);
 
     const getMessagesReq = new Request(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
@@ -161,7 +161,7 @@ describe("Chat Agent Persistence", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    ws.close();
+    ws.close(1000);
 
     const getMessagesReq = new Request(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
@@ -238,7 +238,7 @@ describe("Chat Agent Persistence", () => {
     expect(toolPart2.output).toBe("10am");
     expect(toolPart2.input).toEqual({ location: "London" });
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("persists multiple messages with tool calls and outputs correctly", async () => {
@@ -344,7 +344,7 @@ describe("Chat Agent Persistence", () => {
     expect(finalResponse).toBeDefined();
     expect(finalResponse?.parts[0].type).toBe("text");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("maintains chronological order when tool outputs arrive after the final response", async () => {
@@ -421,6 +421,6 @@ describe("Chat Agent Persistence", () => {
       "assistant-2"
     ]);
 
-    ws.close();
+    ws.close(1000);
   });
 });

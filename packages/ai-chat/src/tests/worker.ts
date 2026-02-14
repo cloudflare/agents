@@ -4,8 +4,9 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { callable, getCurrentAgent, routeAgentRequest } from "agents";
+import { getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
+import type { ClientToolSchema } from "../";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -33,13 +34,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
   } | null = null;
   // Store captured body from onChatMessage options for testing
   private _capturedBody: Record<string, unknown> | undefined = undefined;
+  // Store captured clientTools from onChatMessage options for testing
+  private _capturedClientTools: ClientToolSchema[] | undefined = undefined;
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
-    // Capture the body from options for testing
+    // Capture the body and clientTools from options for testing
     this._capturedBody = options?.body;
+    this._capturedClientTools = options?.clientTools;
 
     // Capture getCurrentAgent() context for testing
     const { agent, connection } = getCurrentAgent();
@@ -73,7 +77,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     };
   }
 
-  @callable()
   getCapturedContext(): {
     hasAgent: boolean;
     hasConnection: boolean;
@@ -82,7 +85,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._capturedContext;
   }
 
-  @callable()
   getNestedContext(): {
     hasAgent: boolean;
     hasConnection: boolean;
@@ -91,19 +93,21 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._nestedContext;
   }
 
-  @callable()
   clearCapturedContext(): void {
     this._capturedContext = null;
     this._nestedContext = null;
     this._capturedBody = undefined;
+    this._capturedClientTools = undefined;
   }
 
-  @callable()
   getCapturedBody(): Record<string, unknown> | undefined {
     return this._capturedBody;
   }
 
-  @callable()
+  getCapturedClientTools(): ClientToolSchema[] | undefined {
+    return this._capturedClientTools;
+  }
+
   getPersistedMessages(): ChatMessage[] {
     const rawMessages = (
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
@@ -114,7 +118,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return rawMessages;
   }
 
-  @callable()
   async testPersistToolCall(messageId: string, toolName: string) {
     const toolCallPart: TestToolCallPart = {
       type: `tool-${toolName}`,
@@ -132,7 +135,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return messageWithToolCall;
   }
 
-  @callable()
   async testPersistToolResult(
     messageId: string,
     toolName: string,
@@ -157,17 +159,14 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   // Resumable streaming test helpers
 
-  @callable()
   testStartStream(requestId: string): string {
     return this._startStream(requestId);
   }
 
-  @callable()
   testStoreStreamChunk(streamId: string, body: string): void {
     this._storeStreamChunk(streamId, body);
   }
 
-  @callable()
   testBroadcastLiveChunk(
     requestId: string,
     streamId: string,
@@ -190,32 +189,26 @@ export class TestChatAgent extends AIChatAgent<Env> {
     )._broadcastChatMessage(message);
   }
 
-  @callable()
   testFlushChunkBuffer(): void {
     this._flushChunkBuffer();
   }
 
-  @callable()
   testCompleteStream(streamId: string): void {
     this._completeStream(streamId);
   }
 
-  @callable()
   testMarkStreamError(streamId: string): void {
     this._markStreamError(streamId);
   }
 
-  @callable()
   getActiveStreamId(): string | null {
     return this._activeStreamId;
   }
 
-  @callable()
   getActiveRequestId(): string | null {
     return this._activeRequestId;
   }
 
-  @callable()
   getStreamChunks(
     streamId: string
   ): Array<{ body: string; chunk_index: number }> {
@@ -228,7 +221,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     );
   }
 
-  @callable()
   getStreamMetadata(
     streamId: string
   ): { status: string; request_id: string } | null {
@@ -239,7 +231,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return result && result.length > 0 ? result[0] : null;
   }
 
-  @callable()
   getAllStreamMetadata(): Array<{
     id: string;
     status: string;
@@ -257,7 +248,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
     );
   }
 
-  @callable()
   testInsertStaleStream(
     streamId: string,
     requestId: string,
@@ -270,9 +260,63 @@ export class TestChatAgent extends AIChatAgent<Env> {
     `;
   }
 
-  @callable()
+  testInsertOldErroredStream(
+    streamId: string,
+    requestId: string,
+    ageMs: number
+  ): void {
+    const createdAt = Date.now() - ageMs;
+    const completedAt = createdAt + 1000;
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at, completed_at)
+      values (${streamId}, ${requestId}, 'error', ${createdAt}, ${completedAt})
+    `;
+  }
+
   testRestoreActiveStream(): void {
     this._restoreActiveStream();
+  }
+
+  testTriggerStreamCleanup(): void {
+    // Force the cleanup interval to 0 so the next completeStream triggers it
+    // We do this by starting and immediately completing a dummy stream
+    const dummyId = this._startStream("cleanup-trigger");
+    this._completeStream(dummyId);
+  }
+
+  /**
+   * Insert a raw JSON string as a message directly into SQLite.
+   * Used to test validation of malformed/corrupt messages.
+   */
+  insertRawMessage(rowId: string, rawJson: string): void {
+    this.sql`
+      insert into cf_ai_chat_agent_messages (id, message)
+      values (${rowId}, ${rawJson})
+    `;
+  }
+
+  setMaxPersistedMessages(max: number | null): void {
+    this.maxPersistedMessages = max ?? undefined;
+  }
+
+  getMessageCount(): number {
+    const result = this.sql<{ cnt: number }>`
+      select count(*) as cnt from cf_ai_chat_agent_messages
+    `;
+    return result?.[0]?.cnt ?? 0;
+  }
+
+  /**
+   * Returns the number of active abort controllers.
+   * Used to verify that cleanup happens after stream completion.
+   * If controllers leak, this count grows with each request.
+   */
+  getAbortControllerCount(): number {
+    return (
+      this as unknown as {
+        _chatMessageAbortControllers: Map<string, unknown>;
+      }
+    )._chatMessageAbortControllers.size;
   }
 }
 

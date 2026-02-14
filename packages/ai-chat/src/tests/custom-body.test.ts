@@ -66,7 +66,7 @@ describe("Custom body forwarding to onChatMessage", () => {
       customField: "custom-value"
     });
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("should not include messages or clientTools in body", async () => {
@@ -126,7 +126,7 @@ describe("Custom body forwarding to onChatMessage", () => {
     expect(capturedBody).not.toHaveProperty("messages");
     expect(capturedBody).not.toHaveProperty("clientTools");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("should set body to undefined when no custom fields are present", async () => {
@@ -181,6 +181,6 @@ describe("Custom body forwarding to onChatMessage", () => {
     // When there are no custom fields, body should be undefined
     expect(capturedBody).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 });

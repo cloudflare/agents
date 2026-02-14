@@ -31,6 +31,16 @@ type NonSerializable =
   | BigInt64Array
   | BigUint64Array;
 
+// Depth-limiting helpers to prevent "Type instantiation is excessively deep"
+// errors with deeply nested types (e.g. AI SDK CoreMessage[]).
+// After MaxDepth levels without hitting a NonSerializable type, we bail out
+// and assume the type is serializable.
+type MaxDepth = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // 10 levels
+type Increment<D extends unknown[]> = [0, ...D];
+type IsMaxDepth<D extends unknown[]> = D["length"] extends MaxDepth["length"]
+  ? true
+  : false;
+
 // Legacy type for backward compatibility
 export type SerializableValue =
   | undefined
@@ -44,30 +54,38 @@ export type SerializableValue =
 // Recursive type to check if a value can be serialized to JSON
 // This is more permissive than SerializableValue because it accepts
 // interfaces with named properties (not just index signatures)
-type CanSerialize<T, Seen = never> =
-  // Prevent infinite recursion with seen types
-  T extends Seen
+type CanSerialize<T, Seen = never, Depth extends unknown[] = []> =
+  // Bail out at max depth — assume serializable if we haven't hit a
+  // NonSerializable type after 10 levels of recursion
+  IsMaxDepth<Depth> extends true
     ? true
-    : // Primitives are always serializable
-      T extends SerializablePrimitive
+    : // Prevent infinite recursion with seen types
+      T extends Seen
       ? true
-      : // Functions, symbols, bigints are never serializable
-        T extends NonSerializable
-        ? false
-        : // Arrays: check if element type is serializable
-          T extends readonly (infer U)[]
-          ? CanSerialize<U, Seen | T>
-          : // Objects: check if all property values are serializable
-            T extends object
-            ? unknown extends T
-              ? true // unknown is allowed (for generic returns)
-              : {
-                    [K in keyof T]: CanSerialize<T[K], Seen | T>;
-                  } extends { [K in keyof T]: true }
-                ? true
-                : false
-            : // Anything else, be permissive
-              true;
+      : // Primitives are always serializable
+        T extends SerializablePrimitive
+        ? true
+        : // Functions, symbols, bigints are never serializable
+          T extends NonSerializable
+          ? false
+          : // Arrays: check if element type is serializable
+            T extends readonly (infer U)[]
+            ? CanSerialize<U, Seen | T, Increment<Depth>>
+            : // Objects: check if all property values are serializable
+              T extends object
+              ? unknown extends T
+                ? true // unknown is allowed (for generic returns)
+                : {
+                      [K in keyof T]: CanSerialize<
+                        T[K],
+                        Seen | T,
+                        Increment<Depth>
+                      >;
+                    } extends { [K in keyof T]: true }
+                  ? true
+                  : false
+              : // Anything else, be permissive
+                true;
 
 // Check if a return value can be serialized (including void and Promises)
 type CanSerializeReturn<T> = T extends void
@@ -84,23 +102,32 @@ export type SerializableReturnValue =
 
 // Check if a single value is serializable (for parameters)
 // Uses the same recursive logic as CanSerialize
-type IsSerializableParam<T, Seen = never> = T extends Seen
-  ? true
-  : T extends SerializablePrimitive
+type IsSerializableParam<T, Seen = never, Depth extends unknown[] = []> =
+  IsMaxDepth<Depth> extends true
     ? true
-    : T extends NonSerializable
-      ? false
-      : T extends readonly (infer U)[]
-        ? IsSerializableParam<U, Seen | T>
-        : T extends object
-          ? unknown extends T
-            ? true
-            : { [K in keyof T]: IsSerializableParam<T[K], Seen | T> } extends {
-                  [K in keyof T]: true;
-                }
-              ? true
-              : false
-          : true;
+    : T extends Seen
+      ? true
+      : T extends SerializablePrimitive
+        ? true
+        : T extends NonSerializable
+          ? false
+          : T extends readonly (infer U)[]
+            ? IsSerializableParam<U, Seen | T, Increment<Depth>>
+            : T extends object
+              ? unknown extends T
+                ? true
+                : {
+                      [K in keyof T]: IsSerializableParam<
+                        T[K],
+                        Seen | T,
+                        Increment<Depth>
+                      >;
+                    } extends {
+                      [K in keyof T]: true;
+                    }
+                  ? true
+                  : false
+              : true;
 
 type AllSerializableValues<A> = A extends [infer First, ...infer Rest]
   ? IsSerializableParam<First> extends true

@@ -633,10 +633,19 @@ export class WorkerTransport implements Transport {
       headers.set("mcp-session-id", this.sessionId);
     }
 
+    const keepAlive = setInterval(() => {
+      try {
+        writer.write(encoder.encode("event: ping\ndata: \n\n"));
+      } catch {
+        clearInterval(keepAlive);
+      }
+    }, 30000);
+
     this.streamMapping.set(streamId, {
       writer,
       encoder,
       cleanup: () => {
+        clearInterval(keepAlive);
         this.streamMapping.delete(streamId);
         writer.close().catch(() => {});
       }
