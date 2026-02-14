@@ -82,10 +82,11 @@ export function applyChunkToParts(
       if (lastTextPart && lastTextPart.type === "text") {
         (lastTextPart as { text: string }).text += chunk.delta ?? "";
       } else {
-        // No text-start received — create a new text part (plain text fallback)
+        // No text-start received — create a new text part (stream resumption fallback)
         parts.push({
           type: "text",
-          text: chunk.delta ?? ""
+          text: chunk.delta ?? "",
+          state: "streaming"
         } as MessagePart);
       }
       return true;

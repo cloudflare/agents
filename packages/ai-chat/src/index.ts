@@ -494,50 +494,57 @@ export class AIChatAgent<
                   }
                 };
 
-                waitForStream().then(() => {
-                  const continuationId = nanoid();
-                  const abortSignal = this._getAbortSignal(continuationId);
+                waitForStream()
+                  .then(() => {
+                    const continuationId = nanoid();
+                    const abortSignal = this._getAbortSignal(continuationId);
 
-                  this._tryCatchChat(async () => {
-                    return agentContext.run(
-                      {
-                        agent: this,
-                        connection,
-                        request: undefined,
-                        email: undefined
-                      },
-                      async () => {
-                        const response = await this.onChatMessage(
-                          async (_finishResult) => {
-                            // User-provided hook. Cleanup handled by _reply.
-                          },
-                          {
-                            abortSignal,
-                            clientTools: clientTools ?? this._lastClientTools,
-                            body: this._lastBody
-                          }
-                        );
-
-                        if (response) {
-                          // Pass continuation flag to merge parts into last assistant message
-                          // Note: We pass an empty excludeBroadcastIds array because the sender
-                          // NEEDS to receive the continuation stream. Unlike regular chat requests
-                          // where aiFetch handles the response, tool continuations have no listener
-                          // waiting - the client relies on the broadcast.
-                          await this._reply(
-                            continuationId,
-                            response,
-                            [], // Don't exclude sender - they need the continuation
+                    this._tryCatchChat(async () => {
+                      return agentContext.run(
+                        {
+                          agent: this,
+                          connection,
+                          request: undefined,
+                          email: undefined
+                        },
+                        async () => {
+                          const response = await this.onChatMessage(
+                            async (_finishResult) => {
+                              // User-provided hook. Cleanup handled by _reply.
+                            },
                             {
-                              continuation: true,
-                              chatMessageId: continuationId
+                              abortSignal,
+                              clientTools: clientTools ?? this._lastClientTools,
+                              body: this._lastBody
                             }
                           );
+
+                          if (response) {
+                            // Pass continuation flag to merge parts into last assistant message
+                            // Note: We pass an empty excludeBroadcastIds array because the sender
+                            // NEEDS to receive the continuation stream. Unlike regular chat requests
+                            // where aiFetch handles the response, tool continuations have no listener
+                            // waiting - the client relies on the broadcast.
+                            await this._reply(
+                              continuationId,
+                              response,
+                              [], // Don't exclude sender - they need the continuation
+                              {
+                                continuation: true,
+                                chatMessageId: continuationId
+                              }
+                            );
+                          }
                         }
-                      }
+                      );
+                    });
+                  })
+                  .catch((error) => {
+                    console.error(
+                      "[AIChatAgent] Tool continuation failed:",
+                      error
                     );
                   });
-                });
               }
             }
           );

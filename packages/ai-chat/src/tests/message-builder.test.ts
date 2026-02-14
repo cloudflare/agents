@@ -43,7 +43,7 @@ describe("applyChunkToParts", () => {
       expect((parts[0] as { text: string }).text).toBe("Hello world!");
     });
 
-    it("text-delta creates new text part if no text-start received", () => {
+    it("text-delta creates new text part with streaming state if no text-start received", () => {
       const parts = makeParts();
       applyChunkToParts(parts, {
         type: "text-delta",
@@ -52,6 +52,20 @@ describe("applyChunkToParts", () => {
       });
       expect(parts.length).toBe(1);
       expect((parts[0] as { text: string }).text).toBe("fallback");
+      expect((parts[0] as { state: string }).state).toBe("streaming");
+    });
+
+    it("text-end marks fallback text part as done", () => {
+      const parts = makeParts();
+      // No text-start — simulates stream resumption
+      applyChunkToParts(parts, {
+        type: "text-delta",
+        id: "t1",
+        delta: "resumed"
+      });
+      applyChunkToParts(parts, { type: "text-end", id: "t1" });
+      expect((parts[0] as { state: string }).state).toBe("done");
+      expect((parts[0] as { text: string }).text).toBe("resumed");
     });
 
     it("text-end marks text part as done", () => {
