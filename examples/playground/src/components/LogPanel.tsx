@@ -80,6 +80,7 @@ export function LogPanel({
           variant="ghost"
           shape="square"
           size="xs"
+          aria-label="Clear logs"
           icon={<TrashIcon size={14} />}
           onClick={onClear}
           title="Clear logs"

@@ -183,6 +183,7 @@ export function SupervisorDemo() {
                         variant="ghost"
                         shape="square"
                         size="xs"
+                        aria-label="Remove child agent"
                         onClick={() => handleRemoveChild(child.id)}
                         className="text-kumo-danger"
                       >
