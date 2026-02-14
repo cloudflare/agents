@@ -1,4 +1,4 @@
-import type { UIMessage } from "ai";
+import type { JSONSchema7, UIMessage } from "ai";
 
 /**
  * Enum for message types to improve type safety and maintainability
@@ -133,7 +133,7 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       clientTools?: Array<{
         name: string;
         description?: string;
-        parameters?: Record<string, unknown>;
+        parameters?: JSONSchema7;
       }>;
     }
   | {
