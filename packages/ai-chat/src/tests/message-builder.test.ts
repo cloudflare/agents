@@ -591,4 +591,47 @@ describe("applyChunkToParts", () => {
       expect(part.preliminary).toBeUndefined();
     });
   });
+
+  describe("metadata and message-level chunks", () => {
+    it("returns false for 'start' chunk (caller handles metadata)", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "start",
+        messageId: "msg-1",
+        messageMetadata: { model: "gpt-4o" }
+      } as StreamChunkData);
+      expect(handled).toBe(false);
+      // Should not add any parts
+      expect(parts.length).toBe(0);
+    });
+
+    it("returns false for 'finish' chunk (caller handles metadata)", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "finish",
+        messageMetadata: { totalTokens: 100 }
+      } as StreamChunkData);
+      expect(handled).toBe(false);
+      expect(parts.length).toBe(0);
+    });
+
+    it("returns false for 'message-metadata' chunk (caller handles metadata)", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "message-metadata",
+        messageMetadata: { createdAt: 1234567890 }
+      } as StreamChunkData);
+      expect(handled).toBe(false);
+      expect(parts.length).toBe(0);
+    });
+
+    it("returns false for 'finish-step' chunk", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "finish-step"
+      } as StreamChunkData);
+      expect(handled).toBe(false);
+      expect(parts.length).toBe(0);
+    });
+  });
 });

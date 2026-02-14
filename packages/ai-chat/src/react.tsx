@@ -872,13 +872,16 @@ export function useAgentChat<
   }, [chatMessages, sendToolOutputToServer, addToolResult]);
 
   /**
-   * Contains the request ID, accumulated message parts, and a unique message ID.
+   * Contains the request ID, accumulated message parts, metadata, and a unique message ID.
    * Used for both resumed streams and real-time broadcasts from other tabs.
+   * Metadata is captured from start/finish/message-metadata stream chunks
+   * so that it's included when the partial message is flushed to React state.
    */
   const activeStreamRef = useRef<{
     id: string;
     messageId: string;
     parts: ChatMessage["parts"];
+    metadata?: Record<string, unknown>;
   } | null>(null);
 
   /**
@@ -891,6 +894,7 @@ export function useAgentChat<
       id: string;
       messageId: string;
       parts: ChatMessage["parts"];
+      metadata?: Record<string, unknown>;
     }) => {
       setMessages((prevMessages: ChatMessage[]) => {
         const existingIdx = prevMessages.findIndex(
@@ -900,7 +904,8 @@ export function useAgentChat<
         const partialMessage = {
           id: activeMsg.messageId,
           role: "assistant" as const,
-          parts: [...activeMsg.parts]
+          parts: [...activeMsg.parts],
+          ...(activeMsg.metadata != null && { metadata: activeMsg.metadata })
         } as unknown as ChatMessage;
 
         if (existingIdx >= 0) {
@@ -1024,14 +1029,23 @@ export function useAgentChat<
           ) {
             let messageId = nanoid();
             let existingParts: ChatMessage["parts"] = [];
+            let existingMetadata: Record<string, unknown> | undefined;
 
-            // For continuations, use the last assistant message's ID and parts
+            // For continuations, use the last assistant message's ID, parts, and metadata
             if (isContinuation) {
               const currentMessages = messagesRef.current;
               for (let i = currentMessages.length - 1; i >= 0; i--) {
                 if (currentMessages[i].role === "assistant") {
                   messageId = currentMessages[i].id;
                   existingParts = [...currentMessages[i].parts];
+                  if (currentMessages[i].metadata != null) {
+                    existingMetadata = {
+                      ...(currentMessages[i].metadata as Record<
+                        string,
+                        unknown
+                      >)
+                    };
+                  }
                   break;
                 }
               }
@@ -1040,7 +1054,8 @@ export function useAgentChat<
             activeStreamRef.current = {
               id: data.id,
               messageId,
-              parts: existingParts
+              parts: existingParts,
+              metadata: existingMetadata
             };
           }
 
@@ -1056,7 +1071,29 @@ export function useAgentChat<
               // Unrecognized types (tool-input-start, tool-input-delta, etc.)
               // are intermediate states — the final state is captured by
               // tool-input-available / tool-output-available.
-              applyChunkToParts(activeMsg.parts as MessageParts, chunkData);
+              const handled = applyChunkToParts(
+                activeMsg.parts as MessageParts,
+                chunkData
+              );
+
+              // Capture message metadata from start/finish/message-metadata
+              // chunks. These carry metadata like timestamps, model info, and
+              // token usage that should be attached at the message level.
+              if (
+                !handled &&
+                (chunkData.type === "start" ||
+                  chunkData.type === "finish" ||
+                  chunkData.type === "message-metadata")
+              ) {
+                if (chunkData.messageId != null && chunkData.type === "start") {
+                  activeMsg.messageId = chunkData.messageId;
+                }
+                if (chunkData.messageMetadata != null) {
+                  activeMsg.metadata = activeMsg.metadata
+                    ? { ...activeMsg.metadata, ...chunkData.messageMetadata }
+                    : { ...chunkData.messageMetadata };
+                }
+              }
 
               // For replayed chunks, skip intermediate setMessages calls.
               // Replayed chunks arrive synchronously in a tight loop, so React

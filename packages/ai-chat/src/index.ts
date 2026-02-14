@@ -33,6 +33,32 @@ import { nanoid } from "nanoid";
 const textEncoder = new TextEncoder();
 
 /**
+ * Validates that a parsed message has the minimum required structure.
+ * Returns false for messages that would cause runtime errors downstream
+ * (e.g. in convertToModelMessages or the UI layer).
+ *
+ * Checks:
+ * - `id` is a non-empty string
+ * - `role` is one of the valid roles
+ * - `parts` is an array (may be empty — the AI SDK enforces nonempty
+ *   on incoming messages, but we are lenient on persisted data)
+ */
+function isValidMessageStructure(msg: unknown): msg is ChatMessage {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+
+  if (typeof m.id !== "string" || m.id.length === 0) return false;
+
+  if (m.role !== "user" && m.role !== "assistant" && m.role !== "system") {
+    return false;
+  }
+
+  if (!Array.isArray(m.parts)) return false;
+
+  return true;
+}
+
+/**
  * One-shot deprecation warnings (warns once per key per session).
  */
 const _deprecationWarnings = new Set<string>();
@@ -265,7 +291,12 @@ export class AIChatAgent<
     // Initialize resumable stream manager (creates its own tables + restores state)
     this._resumableStream = new ResumableStream(this.sql.bind(this));
 
-    // Load messages and automatically transform them to v5 format
+    // Load messages and automatically transform them to v5 format.
+    // Note: _loadMessagesFromDb() runs structural validation which requires
+    // `parts` to be an array. Legacy v4 messages (with `content` instead of
+    // `parts`) would fail this check — but that's fine because autoTransformMessages
+    // already migrated them on a previous load, and persistMessages wrote them back.
+    // Any message still without `parts` at this point is genuinely corrupt.
     const rawMessages = this._loadMessagesFromDb();
 
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
@@ -684,6 +715,18 @@ export class AIChatAgent<
         try {
           const messageStr = row.message as string;
           const parsed = JSON.parse(messageStr) as ChatMessage;
+
+          // Structural validation: ensure required fields exist and have
+          // the correct types. This catches corrupted rows, manual tampering,
+          // or schema drift from older versions without crashing the agent.
+          if (!isValidMessageStructure(parsed)) {
+            console.warn(
+              `[AIChatAgent] Skipping invalid message ${row.id}: ` +
+                "missing or malformed id, role, or parts"
+            );
+            return null;
+          }
+
           // Cache the raw JSON keyed by message ID
           this._persistedMessageCache.set(parsed.id, messageStr);
           return parsed;

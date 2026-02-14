@@ -614,6 +614,220 @@ const result = streamText({
 });
 ```
 
+## Advanced Patterns
+
+Since `onChatMessage` gives you full control over the `streamText` call, you can use any AI SDK feature directly. The patterns below all work out of the box — no special `AIChatAgent` configuration is needed.
+
+### Dynamic Model and Tool Control
+
+Use [`prepareStep`](https://ai-sdk.dev/docs/agents/loop-control) to change the model, available tools, or system prompt between steps in a multi-step agent loop:
+
+```typescript
+import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
+import { z } from "zod";
+
+async onChatMessage() {
+  const result = streamText({
+    model: cheapModel, // Default model for simple steps
+    messages: await convertToModelMessages(this.messages),
+    tools: {
+      search: searchTool,
+      analyze: analyzeTool,
+      summarize: summarizeTool
+    },
+    stopWhen: stepCountIs(10),
+    prepareStep: async ({ stepNumber, messages }) => {
+      // Phase 1: Search (steps 0-2)
+      if (stepNumber <= 2) {
+        return {
+          activeTools: ["search"],
+          toolChoice: "required" // Force tool use
+        };
+      }
+
+      // Phase 2: Analyze with a stronger model (steps 3-5)
+      if (stepNumber <= 5) {
+        return {
+          model: expensiveModel,
+          activeTools: ["analyze"]
+        };
+      }
+
+      // Phase 3: Summarize
+      return { activeTools: ["summarize"] };
+    }
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+`prepareStep` runs before each step and can return overrides for `model`, `activeTools`, `toolChoice`, `system`, and `messages`. Use it to:
+
+- **Switch models** — use a cheap model for simple steps, escalate for reasoning
+- **Phase tools** — restrict which tools are available at each step
+- **Manage context** — prune or transform messages to stay within token limits
+- **Force tool calls** — use `toolChoice: { type: "tool", toolName: "search" }` to require a specific tool
+
+### Language Model Middleware
+
+Use [`wrapLanguageModel`](https://ai-sdk.dev/docs/ai-sdk-core/middleware) to add guardrails, RAG, caching, or logging without modifying your chat logic:
+
+```typescript
+import { streamText, convertToModelMessages, wrapLanguageModel } from "ai";
+import type { LanguageModelV3Middleware } from "@ai-sdk/provider";
+
+const guardrailMiddleware: LanguageModelV3Middleware = {
+  wrapGenerate: async ({ doGenerate }) => {
+    const { text, ...rest } = await doGenerate();
+    // Filter PII or sensitive content from the response
+    const cleaned = text?.replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[REDACTED]");
+    return { text: cleaned, ...rest };
+  }
+};
+
+async onChatMessage() {
+  const model = wrapLanguageModel({
+    model: baseModel,
+    middleware: [guardrailMiddleware]
+  });
+
+  const result = streamText({
+    model,
+    messages: await convertToModelMessages(this.messages)
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+The AI SDK includes built-in middlewares:
+
+- `extractReasoningMiddleware` — surface chain-of-thought from models like DeepSeek R1
+- `defaultSettingsMiddleware` — apply default temperature, max tokens, etc.
+- `simulateStreamingMiddleware` — add streaming to non-streaming models
+
+Multiple middlewares compose in order: `middleware: [first, second]` applies as `first(second(model))`.
+
+### Structured Output
+
+Use [`generateObject`](https://ai-sdk.dev/docs/ai-sdk-core/generating-structured-data) inside tools for structured data extraction:
+
+```typescript
+import {
+  streamText, generateObject, convertToModelMessages, tool, stepCountIs
+} from "ai";
+import { z } from "zod";
+
+async onChatMessage() {
+  const result = streamText({
+    model: myModel,
+    messages: await convertToModelMessages(this.messages),
+    tools: {
+      extractContactInfo: tool({
+        description: "Extract structured contact information from the conversation",
+        inputSchema: z.object({
+          text: z.string().describe("The text to extract contact info from")
+        }),
+        execute: async ({ text }) => {
+          const { object } = await generateObject({
+            model: myModel,
+            schema: z.object({
+              name: z.string(),
+              email: z.string().email(),
+              phone: z.string().optional()
+            }),
+            prompt: `Extract contact information from: ${text}`
+          });
+          return object;
+        }
+      })
+    },
+    stopWhen: stepCountIs(5)
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+### Subagent Delegation
+
+Tools can delegate work to focused sub-calls with their own context. Use [`ToolLoopAgent`](https://ai-sdk.dev/docs/reference/ai-sdk-core/tool-loop-agent) to define a reusable agent, then call it from a tool's `execute`:
+
+```typescript
+import {
+  ToolLoopAgent, streamText, convertToModelMessages, tool, stepCountIs
+} from "ai";
+import { z } from "zod";
+
+// Define a reusable research agent with its own tools and instructions
+const researchAgent = new ToolLoopAgent({
+  model: researchModel,
+  instructions: "You are a research assistant. Be thorough and cite sources.",
+  tools: { webSearch: webSearchTool },
+  stopWhen: stepCountIs(10)
+});
+
+async onChatMessage() {
+  const result = streamText({
+    model: orchestratorModel,
+    messages: await convertToModelMessages(this.messages),
+    tools: {
+      deepResearch: tool({
+        description: "Research a topic in depth",
+        inputSchema: z.object({
+          topic: z.string().describe("The topic to research")
+        }),
+        execute: async ({ topic }) => {
+          const { text } = await researchAgent.generate({ prompt: topic });
+          return { summary: text };
+        }
+      })
+    },
+    stopWhen: stepCountIs(5)
+  });
+
+  return result.toUIMessageStreamResponse();
+}
+```
+
+The research agent runs in its own context — its token budget is separate from the orchestrator's. Only the summary goes back to the parent model.
+
+`ToolLoopAgent` is best suited for subagents, not as a replacement for `streamText` in `onChatMessage` itself. The main `onChatMessage` benefits from direct access to `this.env`, `this.messages`, and `options.body` — things that a pre-configured `ToolLoopAgent` instance cannot reference.
+
+#### Streaming progress with preliminary results
+
+By default, a tool part appears as loading until `execute` returns. Use an async generator (`async function*`) to stream progress updates to the client while the tool is still working:
+
+```typescript
+deepResearch: tool({
+  description: "Research a topic in depth",
+  inputSchema: z.object({
+    topic: z.string().describe("The topic to research")
+  }),
+  async *execute({ topic }) {
+    // Preliminary result — the client sees "searching" immediately
+    yield { status: "searching", topic, summary: undefined };
+
+    const { text } = await researchAgent.generate({ prompt: topic });
+
+    // Final result — sent to the model for its next step
+    yield { status: "done", topic, summary: text };
+  }
+});
+```
+
+Each `yield` updates the tool part on the client in real-time (with `preliminary: true`). The last yielded value becomes the final output that the model sees. This is useful for long-running tools where you want to show status (searching, analyzing, summarizing) as the work progresses.
+
+This pattern is useful when:
+
+- A task requires exploring large amounts of information that would bloat the main context
+- You want to show real-time progress for long-running tools
+- You want to parallelize independent research (multiple tool calls run concurrently)
+- You need different models or system prompts for different subtasks
+
+For more, see the [AI SDK Agents docs](https://ai-sdk.dev/docs/agents/overview), [Subagents](https://ai-sdk.dev/docs/agents/subagents), and [Preliminary Tool Results](https://ai-sdk.dev/docs/ai-sdk-core/tools-and-tool-calling#preliminary-tool-results).
+
 ## Multi-Client Sync
 
 When multiple clients connect to the same agent instance, messages are automatically broadcast to all connections. If one client sends a message, all other connected clients receive the updated message list.

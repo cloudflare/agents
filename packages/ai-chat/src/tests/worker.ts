@@ -284,6 +284,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._completeStream(dummyId);
   }
 
+  /**
+   * Insert a raw JSON string as a message directly into SQLite.
+   * Used to test validation of malformed/corrupt messages.
+   */
+  insertRawMessage(rowId: string, rawJson: string): void {
+    this.sql`
+      insert into cf_ai_chat_agent_messages (id, message)
+      values (${rowId}, ${rawJson})
+    `;
+  }
+
   setMaxPersistedMessages(max: number | null): void {
     this.maxPersistedMessages = max ?? undefined;
   }
