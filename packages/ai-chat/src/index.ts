@@ -110,6 +110,11 @@ export type OnChatMessageOptions = {
    *
    * Contains all fields from the request body except `messages` and `clientTools`,
    * which are handled separately.
+   *
+   * During tool continuations (auto-continue after client tool results), this
+   * contains the body from the most recent chat request. The value is persisted
+   * to SQLite so it survives Durable Object hibernation. It is cleared when the
+   * chat is cleared via `CF_AGENT_CHAT_CLEAR`.
    */
   body?: Record<string, unknown>;
 };
@@ -288,6 +293,16 @@ export class AIChatAgent<
       created_at datetime default current_timestamp
     )`;
 
+    // Key-value table for request context that must survive hibernation
+    // (e.g., custom body fields, client tools from the last chat request).
+    this.sql`create table if not exists cf_ai_chat_request_context (
+      key text primary key,
+      value text not null
+    )`;
+
+    // Restore request context from SQLite (survives hibernation)
+    this._restoreRequestContext();
+
     // Initialize resumable stream manager (creates its own tables + restores state)
     this._resumableStream = new ResumableStream(this.sql.bind(this));
 
@@ -373,6 +388,7 @@ export class AIChatAgent<
           this._lastClientTools = clientTools?.length ? clientTools : undefined;
           this._lastBody =
             Object.keys(customBody).length > 0 ? customBody : undefined;
+          this._persistRequestContext();
 
           // Automatically transform any incoming messages
           const transformedMessages = autoTransformMessages(messages);
@@ -450,6 +466,7 @@ export class AIChatAgent<
           this._pendingResumeConnections.clear();
           this._lastClientTools = undefined;
           this._lastBody = undefined;
+          this._persistRequestContext();
           this._persistedMessageCache.clear();
           this.messages = [];
           this._broadcastChatMessage(
@@ -661,6 +678,57 @@ export class AIChatAgent<
   /** @internal Delegate to _resumableStream */
   protected _markStreamError(streamId: string) {
     this._resumableStream.markError(streamId);
+  }
+
+  /**
+   * Restore _lastBody and _lastClientTools from SQLite.
+   * Called in the constructor so these values survive DO hibernation.
+   * @internal
+   */
+  private _restoreRequestContext() {
+    const rows =
+      this.sql<{ key: string; value: string }>`
+        select key, value from cf_ai_chat_request_context
+      ` || [];
+
+    for (const row of rows) {
+      try {
+        if (row.key === "lastBody") {
+          this._lastBody = JSON.parse(row.value);
+        } else if (row.key === "lastClientTools") {
+          this._lastClientTools = JSON.parse(row.value);
+        }
+      } catch {
+        // Corrupted row — ignore and let the next request overwrite it
+      }
+    }
+  }
+
+  /**
+   * Persist _lastBody and _lastClientTools to SQLite so they survive hibernation.
+   * Uses upsert (INSERT OR REPLACE) so repeated calls are safe.
+   * @internal
+   */
+  private _persistRequestContext() {
+    // Persist or delete body
+    if (this._lastBody) {
+      this.sql`
+        insert or replace into cf_ai_chat_request_context (key, value)
+        values ('lastBody', ${JSON.stringify(this._lastBody)})
+      `;
+    } else {
+      this.sql`delete from cf_ai_chat_request_context where key = 'lastBody'`;
+    }
+    // Persist or delete client tools
+    if (this._lastClientTools) {
+      this.sql`
+        insert or replace into cf_ai_chat_request_context (key, value)
+        values ('lastClientTools', ${JSON.stringify(this._lastClientTools)})
+      `;
+    } else {
+      this
+        .sql`delete from cf_ai_chat_request_context where key = 'lastClientTools'`;
+    }
   }
 
   private _broadcastChatMessage(message: OutgoingMessage, exclude?: string[]) {
