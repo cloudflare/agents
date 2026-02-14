@@ -499,7 +499,7 @@ export class AIChatAgent<
                     const continuationId = nanoid();
                     const abortSignal = this._getAbortSignal(continuationId);
 
-                    this._tryCatchChat(async () => {
+                    return this._tryCatchChat(async () => {
                       return agentContext.run(
                         {
                           agent: this,
