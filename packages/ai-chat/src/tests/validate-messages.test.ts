@@ -218,6 +218,24 @@ describe("Message Structural Validation", () => {
     ws.close(1000);
   });
 
+  it("filters out completely unparseable JSON", async () => {
+    const room = crypto.randomUUID();
+    const { ws, agentStub } = await setupAgent(room);
+
+    await agentStub.persistMessages([
+      { id: "valid1", role: "user", parts: [{ type: "text", text: "Hello" }] }
+    ]);
+
+    // Insert raw broken JSON that will fail JSON.parse
+    agentStub.insertRawMessage("bad-json", "{broken json!!!");
+
+    const persisted = await getValidatedMessages(room);
+    expect(persisted.length).toBe(1);
+    expect(persisted[0].id).toBe("valid1");
+
+    ws.close(1000);
+  });
+
   it("accepts all valid roles: user, assistant, system", async () => {
     const room = crypto.randomUUID();
     const { ws, agentStub } = await setupAgent(room);
