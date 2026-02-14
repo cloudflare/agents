@@ -521,6 +521,12 @@ export class AIChatAgent<
           const { toolCallId, toolName, output, autoContinue, clientTools } =
             data;
 
+          // Update cached client tools so subsequent continuations use the latest schemas
+          if (clientTools?.length) {
+            this._lastClientTools = clientTools as ClientToolSchema[];
+            this._persistRequestContext();
+          }
+
           // Apply the tool result
           this._applyToolResult(toolCallId, toolName, output).then(
             (applied) => {
