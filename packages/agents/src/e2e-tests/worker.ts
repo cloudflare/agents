@@ -6,9 +6,9 @@ import {
   Agent,
   callable,
   routeAgentRequest,
-  type FiberContext,
-  type FiberState,
-  type FiberRecoveryContext
+  type experimental_FiberContext,
+  type experimental_FiberState,
+  type experimental_FiberRecoveryContext
 } from "agents";
 
 // Env type for this worker — matches wrangler.jsonc bindings
@@ -28,7 +28,7 @@ export type SlowFiberSnapshot = {
 };
 
 export class FiberTestAgent extends Agent<Record<string, unknown>> {
-  static override options = { hibernate: true, debugFibers: true };
+  static override options = { hibernate: true, experimental_debugFibers: true };
   observability = undefined;
 
   /**
@@ -37,7 +37,7 @@ export class FiberTestAgent extends Agent<Record<string, unknown>> {
    */
   async slowSteps(
     payload: { totalSteps: number },
-    fiberCtx: FiberContext
+    fiberCtx: experimental_FiberContext
   ): Promise<{ completedSteps: StepResult[] }> {
     const snapshot = fiberCtx.snapshot as SlowFiberSnapshot | null;
     const completedSteps = snapshot?.completedSteps ?? [];
@@ -53,7 +53,7 @@ export class FiberTestAgent extends Agent<Record<string, unknown>> {
         completedAt: Date.now()
       });
 
-      this.stashFiber({
+      this.experimental_stashFiber({
         completedSteps: [...completedSteps],
         totalSteps: payload.totalSteps
       } satisfies SlowFiberSnapshot);
@@ -62,18 +62,20 @@ export class FiberTestAgent extends Agent<Record<string, unknown>> {
     return { completedSteps };
   }
 
-  override onFiberRecovered(ctx: FiberRecoveryContext) {
-    this.restartFiber(ctx.id);
+  override experimental_onFiberRecovered(
+    ctx: experimental_FiberRecoveryContext
+  ) {
+    this.experimental_restartFiber(ctx.id);
   }
 
   @callable()
   startSlowFiber(totalSteps: number): string {
-    return this.spawnFiber("slowSteps", { totalSteps });
+    return this.experimental_spawnFiber("slowSteps", { totalSteps });
   }
 
   @callable()
-  getFiberStatus(fiberId: string): FiberState | null {
-    return this.getFiber(fiberId);
+  getFiberStatus(fiberId: string): experimental_FiberState | null {
+    return this.experimental_getFiber(fiberId);
   }
 
   /**

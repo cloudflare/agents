@@ -7,7 +7,7 @@
  *
  * Unlike the unit tests that simulate eviction by manipulating SQLite,
  * this test exercises the full real path: process death → SQLite persists →
- * alarm fires on restart → _checkInterruptedFibers → onFiberRecovered.
+ * alarm fires on restart → _checkInterruptedFibers → experimental_onFiberRecovered.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";

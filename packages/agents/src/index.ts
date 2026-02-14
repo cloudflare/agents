@@ -237,14 +237,14 @@ export type Schedule<T = string> = {
 /**
  * Represents the public state of a fiber.
  */
-export type FiberState = {
+export type experimental_FiberState = {
   /** Unique identifier for the fiber */
   id: string;
   /** Name of the method to be called */
   callback: string;
   /** Data passed to the callback */
   payload: unknown;
-  /** Last checkpointed data from stashFiber() */
+  /** Last checkpointed data from experimental_stashFiber() */
   snapshot: unknown | null;
   /** Current lifecycle status */
   status: "running" | "completed" | "failed" | "interrupted" | "cancelled";
@@ -269,14 +269,14 @@ export type FiberState = {
 /**
  * Context provided to fiber recovery hooks.
  */
-export type FiberRecoveryContext = {
+export type experimental_FiberRecoveryContext = {
   /** Fiber ID */
   id: string;
   /** Name of the method that was executing */
   methodName: string;
-  /** Original payload passed to spawnFiber */
+  /** Original payload passed to experimental_spawnFiber */
   payload: unknown;
-  /** Last checkpointed data from stashFiber(), or null */
+  /** Last checkpointed data from experimental_stashFiber(), or null */
   snapshot: unknown | null;
   /** How many times this fiber has been retried */
   retryCount: number;
@@ -285,19 +285,19 @@ export type FiberRecoveryContext = {
 /**
  * Context provided to fiber methods as a second argument.
  */
-export type FiberContext = {
+export type experimental_FiberContext = {
   /** Fiber ID */
   id: string;
-  /** Last checkpointed data from stashFiber(), or null */
+  /** Last checkpointed data from experimental_stashFiber(), or null */
   snapshot: unknown | null;
   /** How many times this fiber has been retried */
   retryCount: number;
 };
 
 /**
- * Context provided to onFiberComplete.
+ * Context provided to experimental_onFiberComplete.
  */
-export type FiberCompleteContext = {
+export type experimental_FiberCompleteContext = {
   /** Fiber ID */
   id: string;
   /** Name of the method that executed */
@@ -312,7 +312,7 @@ export type FiberCompleteContext = {
  * Raw fiber row as stored in SQLite (snake_case, JSON strings).
  * @internal
  */
-type RawFiberRow = {
+type experimental_RawFiberRow = {
   id: string;
   callback: string;
   payload: string | null;
@@ -335,22 +335,22 @@ function getNextCronTime(cron: string) {
 
 /**
  * AsyncLocalStorage for tracking which fiber is currently executing.
- * Used by stashFiber() to know which fiber row to update.
+ * Used by experimental_stashFiber() to know which fiber row to update.
  * @internal
  */
-const fiberContext = new AsyncLocalStorage<{ fiberId: string }>();
+const experimental_fiberContext = new AsyncLocalStorage<{ fiberId: string }>();
 
-/** Default keepAlive heartbeat interval (10 seconds) */
-const KEEP_ALIVE_INTERVAL_MS = 10_000;
+/** Default experimental_keepAlive heartbeat interval (10 seconds) */
+const EXPERIMENTAL_KEEP_ALIVE_INTERVAL_MS = 10_000;
 
 /** How often to check for old fibers to clean up (10 minutes) */
-const FIBER_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const EXPERIMENTAL_FIBER_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 
 /** Age threshold for cleaning up completed fibers (24 hours) */
-const FIBER_CLEANUP_COMPLETED_MS = 24 * 60 * 60 * 1000;
+const EXPERIMENTAL_FIBER_CLEANUP_COMPLETED_MS = 24 * 60 * 60 * 1000;
 
 /** Age threshold for cleaning up failed fibers (7 days) */
-const FIBER_CLEANUP_FAILED_MS = 7 * 24 * 60 * 60 * 1000;
+const EXPERIMENTAL_FIBER_CLEANUP_FAILED_MS = 7 * 24 * 60 * 60 * 1000;
 
 export type { TransportType } from "./mcp/types";
 export type {
@@ -453,7 +453,7 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
    * When true, fiber spawn/stash/complete/recover/fail events are logged
    * via console.debug. Useful during development.
    */
-  debugFibers: false
+  experimental_debugFibers: false
 };
 
 type ResolvedAgentOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
@@ -555,20 +555,20 @@ export class Agent<
    * Used to distinguish "running in this process" from "was running when DO was evicted."
    * @internal Protected for testing purposes.
    */
-  protected _activeFibers = new Set<string>();
+  protected _experimental_activeFibers = new Set<string>();
 
   /**
-   * Guard to prevent _checkInterruptedFibers from running concurrently.
+   * Guard to prevent _experimental_checkInterruptedFibers from running concurrently.
    * The heartbeat callback and the alarm() fallback can both trigger it.
    */
-  private _fiberRecoveryInProgress = false;
+  private _experimental_fiberRecoveryInProgress = false;
 
   /**
    * Timestamp of the last fiber cleanup run. Used to throttle cleanup
-   * so it doesn't run on every spawnFiber call.
+   * so it doesn't run on every experimental_spawnFiber call.
    * @internal Protected for testing purposes.
    */
-  protected _lastFiberCleanupTime = 0;
+  protected _experimental_lastFiberCleanupTime = 0;
 
   /**
    * Stores raw state accessors for wrapped connections.
@@ -686,8 +686,9 @@ export class Agent<
       hungScheduleTimeoutSeconds:
         ctor.options?.hungScheduleTimeoutSeconds ??
         DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds,
-      debugFibers:
-        ctor.options?.debugFibers ?? DEFAULT_AGENT_STATIC_OPTIONS.debugFibers
+      experimental_debugFibers:
+        ctor.options?.experimental_debugFibers ??
+        DEFAULT_AGENT_STATIC_OPTIONS.experimental_debugFibers
     };
   }
 
@@ -2248,7 +2249,7 @@ export class Agent<
     if (this._destroyed) return;
 
     // Check for fibers that were interrupted by eviction
-    await this._checkInterruptedFibers();
+    await this._experimental_checkInterruptedFibers();
 
     if (this._destroyed) return;
 
@@ -2269,25 +2270,28 @@ export class Agent<
   // The `private` keyword signals to subclasses that this is internal — it
   // doesn't prevent the scheduler from invoking it.
   private async _cf_fiberHeartbeat() {
-    await this._checkInterruptedFibers();
+    await this._experimental_checkInterruptedFibers();
   }
 
   /**
    * Clean up old completed and failed fibers if enough time has passed
    * since the last cleanup. Prevents unbounded table growth.
-   * Called lazily from spawnFiber — not on every call, only when
-   * FIBER_CLEANUP_INTERVAL_MS has elapsed since the last run.
+   * Called lazily from experimental_spawnFiber — not on every call, only when
+   * EXPERIMENTAL_FIBER_CLEANUP_INTERVAL_MS has elapsed since the last run.
    * @internal
    */
-  private _maybeCleanupFibers() {
+  private _experimental_maybeCleanupFibers() {
     const now = Date.now();
-    if (now - this._lastFiberCleanupTime < FIBER_CLEANUP_INTERVAL_MS) {
+    if (
+      now - this._experimental_lastFiberCleanupTime <
+      EXPERIMENTAL_FIBER_CLEANUP_INTERVAL_MS
+    ) {
       return;
     }
-    this._lastFiberCleanupTime = now;
+    this._experimental_lastFiberCleanupTime = now;
 
-    const completedCutoff = now - FIBER_CLEANUP_COMPLETED_MS;
-    const failedCutoff = now - FIBER_CLEANUP_FAILED_MS;
+    const completedCutoff = now - EXPERIMENTAL_FIBER_CLEANUP_COMPLETED_MS;
+    const failedCutoff = now - EXPERIMENTAL_FIBER_CLEANUP_FAILED_MS;
 
     this.sql`
       DELETE FROM cf_agents_fibers
@@ -2296,17 +2300,17 @@ export class Agent<
          OR (status = 'cancelled' AND updated_at < ${completedCutoff})
     `;
 
-    this._fiberDebug(
+    this._experimental_fiberDebug(
       "cleanup: checked for old completed/failed/cancelled fibers"
     );
   }
 
   /**
-   * Log a debug message if debugFibers is enabled.
+   * Log a debug message if experimental_debugFibers is enabled.
    * @internal
    */
-  private _fiberDebug(msg: string, ...args: unknown[]) {
-    if (this._resolvedOptions.debugFibers) {
+  private _experimental_fiberDebug(msg: string, ...args: unknown[]) {
+    if (this._resolvedOptions.experimental_debugFibers) {
       console.debug(`[fiber] ${msg}`, ...args);
     }
   }
@@ -2318,22 +2322,30 @@ export class Agent<
    *
    * Use this when you have long-running work that doesn't need
    * durability/recovery semantics — you just need the DO to not
-   * go idle. For durable execution, use spawnFiber() instead.
+   * go idle. For durable execution, use experimental_spawnFiber() instead.
    */
-  async keepAlive(): Promise<() => void> {
-    const heartbeatSeconds = Math.ceil(KEEP_ALIVE_INTERVAL_MS / 1000);
+  async experimental_keepAlive(): Promise<() => void> {
+    const heartbeatSeconds = Math.ceil(
+      EXPERIMENTAL_KEEP_ALIVE_INTERVAL_MS / 1000
+    );
     const schedule = await this.scheduleEvery(
       heartbeatSeconds,
       "_cf_fiberHeartbeat" as keyof this
     );
 
-    this._fiberDebug("keepAlive started, schedule=%s", schedule.id);
+    this._experimental_fiberDebug(
+      "experimental_keepAlive started, schedule=%s",
+      schedule.id
+    );
 
     let disposed = false;
     return () => {
       if (disposed) return;
       disposed = true;
-      this._fiberDebug("keepAlive disposed, schedule=%s", schedule.id);
+      this._experimental_fiberDebug(
+        "experimental_keepAlive disposed, schedule=%s",
+        schedule.id
+      );
       void this.cancelSchedule(schedule.id);
     };
   }
@@ -2344,7 +2356,7 @@ export class Agent<
    * heartbeat schedules, so old ones must be cleaned up.
    * @internal
    */
-  private _cleanupOrphanedHeartbeats() {
+  private _experimental_cleanupOrphanedHeartbeats() {
     // Deletes ALL heartbeat schedules, including ones belonging to
     // actively running fibers. This is intentionally aggressive:
     // - Active fibers stay alive because the DO is kept awake by
@@ -2359,7 +2371,7 @@ export class Agent<
       DELETE FROM cf_agents_schedules
       WHERE callback = '_cf_fiberHeartbeat'
     `;
-    this._fiberDebug("cleaned up orphaned heartbeat schedules");
+    this._experimental_fiberDebug("cleaned up orphaned heartbeat schedules");
   }
 
   /**
@@ -2375,13 +2387,13 @@ export class Agent<
    * The method receives `(payload, fiberCtx)` where fiberCtx has
    * `{ id, snapshot, retryCount }`.
    */
-  spawnFiber(
+  experimental_spawnFiber(
     methodName: keyof this,
     payload?: unknown,
     options?: { maxRetries?: number }
   ): string {
     // Lazily clean up old completed/failed fibers
-    this._maybeCleanupFibers();
+    this._experimental_maybeCleanupFibers();
 
     const name = methodName as string;
 
@@ -2398,50 +2410,58 @@ export class Agent<
       VALUES (${id}, ${name}, ${JSON.stringify(payload ?? null)}, 'running', ${maxRetries}, 0, ${now}, ${now}, ${now})
     `;
 
-    this._activeFibers.add(id);
-    this._fiberDebug(
+    this._experimental_activeFibers.add(id);
+    this._experimental_fiberDebug(
       "spawned fiber=%s method=%s maxRetries=%d",
       id,
       name,
       maxRetries
     );
 
-    // Start keepAlive (async — schedule persists to SQLite) and then run the fiber
-    void this._startFiber(id, name, payload, maxRetries).catch((e) => {
-      console.error(`Unhandled error in fiber ${id}:`, e);
-    });
+    // Start experimental_keepAlive (async — schedule persists to SQLite) and then run the fiber
+    void this._experimental_startFiber(id, name, payload, maxRetries).catch(
+      (e) => {
+        console.error(`Unhandled error in fiber ${id}:`, e);
+      }
+    );
 
     return id;
   }
 
   /**
-   * Set up keepAlive and run the fiber. Separated from spawnFiber
-   * to handle the async keepAlive() call.
+   * Set up experimental_keepAlive and run the fiber. Separated from experimental_spawnFiber
+   * to handle the async experimental_keepAlive() call.
    * @internal
    */
-  private async _startFiber(
+  private async _experimental_startFiber(
     id: string,
     methodName: string,
     payload: unknown,
     maxRetries: number
   ): Promise<void> {
-    const disposeKeepAlive = await this.keepAlive();
-    await this._runFiber(id, methodName, payload, maxRetries, disposeKeepAlive);
+    const disposeKeepAlive = await this.experimental_keepAlive();
+    await this._experimental_runFiber(
+      id,
+      methodName,
+      payload,
+      maxRetries,
+      disposeKeepAlive
+    );
   }
 
   /**
    * Save progress for the currently executing fiber.
    * Writes to SQLite synchronously (no await needed).
    *
-   * The snapshot is available in onFiberRecovered if the
+   * The snapshot is available in experimental_onFiberRecovered if the
    * fiber is interrupted. Each call fully replaces the
    * previous snapshot (not a merge).
    */
-  stashFiber(data: unknown): void {
-    const ctx = fiberContext.getStore();
+  experimental_stashFiber(data: unknown): void {
+    const ctx = experimental_fiberContext.getStore();
     if (!ctx) {
       throw new Error(
-        "stashFiber() can only be called within a fiber execution context"
+        "experimental_stashFiber() can only be called within a fiber execution context"
       );
     }
     const now = Date.now();
@@ -2450,7 +2470,7 @@ export class Agent<
       SET snapshot = ${JSON.stringify(data)}, updated_at = ${now}
       WHERE id = ${ctx.fiberId}
     `;
-    this._fiberDebug("stash fiber=%s", ctx.fiberId);
+    this._experimental_fiberDebug("stash fiber=%s", ctx.fiberId);
   }
 
   /**
@@ -2458,13 +2478,13 @@ export class Agent<
    * and was cancelled, false if not found or already terminal.
    *
    * Note: cancellation is cooperative. The status is set to 'cancelled'
-   * in SQLite, and the _runFiber retry loop checks for this status at
+   * in SQLite, and the _experimental_runFiber retry loop checks for this status at
    * the top of each iteration. If the fiber method is mid-execution,
    * it will complete (or fail) the current attempt before the loop
    * observes the cancellation and exits.
    */
-  cancelFiber(fiberId: string): boolean {
-    const fiber = this._getRawFiber(fiberId);
+  experimental_cancelFiber(fiberId: string): boolean {
+    const fiber = this._experimental_getRawFiber(fiberId);
     if (!fiber) return false;
     if (
       fiber.status === "completed" ||
@@ -2480,8 +2500,8 @@ export class Agent<
       SET status = 'cancelled', updated_at = ${now}
       WHERE id = ${fiberId}
     `;
-    this._activeFibers.delete(fiberId);
-    this._fiberDebug("cancelled fiber=%s", fiberId);
+    this._experimental_activeFibers.delete(fiberId);
+    this._experimental_fiberDebug("cancelled fiber=%s", fiberId);
     return true;
   }
 
@@ -2489,19 +2509,19 @@ export class Agent<
    * Get the current state of a fiber by ID.
    * Returns null if the fiber doesn't exist.
    */
-  getFiber(fiberId: string): FiberState | null {
-    const raw = this._getRawFiber(fiberId);
+  experimental_getFiber(fiberId: string): experimental_FiberState | null {
+    const raw = this._experimental_getRawFiber(fiberId);
     if (!raw) return null;
-    return this._toFiberState(raw);
+    return this._experimental_toFiberState(raw);
   }
 
   /**
    * Restart an interrupted or failed fiber.
    * Restores the fiber to 'running' status and re-executes the method.
-   * Typically called from within onFiberRecovered.
+   * Typically called from within experimental_onFiberRecovered.
    */
-  restartFiber(fiberId: string): void {
-    const fiber = this._getRawFiber(fiberId);
+  experimental_restartFiber(fiberId: string): void {
+    const fiber = this._experimental_getRawFiber(fiberId);
     if (!fiber) {
       throw new Error(`Fiber ${fiberId} not found`);
     }
@@ -2513,8 +2533,8 @@ export class Agent<
       WHERE id = ${fiberId}
     `;
 
-    this._activeFibers.add(fiberId);
-    this._fiberDebug(
+    this._experimental_activeFibers.add(fiberId);
+    this._experimental_fiberDebug(
       "restarting fiber=%s method=%s retryCount=%d",
       fiberId,
       fiber.callback,
@@ -2523,7 +2543,7 @@ export class Agent<
 
     const parsedPayload = fiber.payload ? JSON.parse(fiber.payload) : undefined;
 
-    void this._startFiber(
+    void this._experimental_startFiber(
       fiberId,
       fiber.callback,
       parsedPayload,
@@ -2538,33 +2558,39 @@ export class Agent<
    * Override to handle completion (e.g. persist result, notify clients).
    */
   // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
-  onFiberComplete(_ctx: FiberCompleteContext): void | Promise<void> {
+  experimental_onFiberComplete(
+    _ctx: experimental_FiberCompleteContext
+  ): void | Promise<void> {
     // Default: no-op. Override in subclass.
   }
 
   /**
    * Called per-fiber when the agent restarts and finds interrupted fibers.
-   * Default: re-invokes the method via restartFiber().
+   * Default: re-invokes the method via experimental_restartFiber().
    *
    * Override to implement custom recovery:
    *   - Inspect the snapshot to resume from a checkpoint
    *   - Use provider-specific recovery (OpenAI background mode, Anthropic prefill)
    *   - Skip recovery and notify the user instead
    */
-  onFiberRecovered(ctx: FiberRecoveryContext): void | Promise<void> {
-    this.restartFiber(ctx.id);
+  experimental_onFiberRecovered(
+    ctx: experimental_FiberRecoveryContext
+  ): void | Promise<void> {
+    this.experimental_restartFiber(ctx.id);
   }
 
   /**
    * Called with ALL interrupted fibers when the agent restarts.
    * Default: iterates sequentially, oldest-first, calling
-   * onFiberRecovered for each.
+   * experimental_onFiberRecovered for each.
    *
    * Override for custom ordering, parallelism, or selective recovery.
    */
-  async onFibersRecovered(fibers: FiberRecoveryContext[]): Promise<void> {
+  async experimental_onFibersRecovered(
+    fibers: experimental_FiberRecoveryContext[]
+  ): Promise<void> {
     for (const fiber of fibers) {
-      await this.onFiberRecovered(fiber);
+      await this.experimental_onFiberRecovered(fiber);
     }
   }
 
@@ -2572,8 +2598,10 @@ export class Agent<
    * Get a raw fiber row from SQLite.
    * @internal
    */
-  private _getRawFiber(fiberId: string): RawFiberRow | null {
-    const result = this.sql<RawFiberRow>`
+  private _experimental_getRawFiber(
+    fiberId: string
+  ): experimental_RawFiberRow | null {
+    const result = this.sql<experimental_RawFiberRow>`
       SELECT * FROM cf_agents_fibers WHERE id = ${fiberId}
     `;
     return result && result.length > 0 ? result[0] : null;
@@ -2583,7 +2611,7 @@ export class Agent<
    * Safely parse a JSON string, returning null on failure.
    * @internal
    */
-  private _safeJsonParse(value: string | null): unknown {
+  private _experimental_safeJsonParse(value: string | null): unknown {
     if (value === null) return null;
     try {
       return JSON.parse(value);
@@ -2593,20 +2621,22 @@ export class Agent<
   }
 
   /**
-   * Convert a raw SQLite row to a public FiberState.
+   * Convert a raw SQLite row to a public experimental_FiberState.
    * Uses safe JSON parsing to handle corrupted data gracefully.
    * @internal
    */
-  private _toFiberState(raw: RawFiberRow): FiberState {
+  private _experimental_toFiberState(
+    raw: experimental_RawFiberRow
+  ): experimental_FiberState {
     return {
       id: raw.id,
       callback: raw.callback,
-      payload: this._safeJsonParse(raw.payload),
-      snapshot: this._safeJsonParse(raw.snapshot),
-      status: raw.status as FiberState["status"],
+      payload: this._experimental_safeJsonParse(raw.payload),
+      snapshot: this._experimental_safeJsonParse(raw.snapshot),
+      status: raw.status as experimental_FiberState["status"],
       retryCount: raw.retry_count,
       maxRetries: raw.max_retries,
-      result: this._safeJsonParse(raw.result),
+      result: this._experimental_safeJsonParse(raw.result),
       error: raw.error,
       startedAt: raw.started_at,
       updatedAt: raw.updated_at,
@@ -2620,7 +2650,7 @@ export class Agent<
    * Handles: fiber context tracking, completion, error retry, cleanup.
    * @internal
    */
-  private async _runFiber(
+  private async _experimental_runFiber(
     id: string,
     methodName: string,
     payload: unknown,
@@ -2631,9 +2661,9 @@ export class Agent<
       while (true) {
         if (this._destroyed) return;
 
-        const fiber = this._getRawFiber(id);
+        const fiber = this._experimental_getRawFiber(id);
         if (!fiber || fiber.status === "cancelled") {
-          this._fiberDebug(
+          this._experimental_fiberDebug(
             "fiber=%s exiting: %s",
             id,
             !fiber ? "not found" : "cancelled"
@@ -2642,8 +2672,8 @@ export class Agent<
         }
 
         try {
-          await fiberContext.run({ fiberId: id }, async () => {
-            const snapshot = this._safeJsonParse(fiber.snapshot);
+          await experimental_fiberContext.run({ fiberId: id }, async () => {
+            const snapshot = this._experimental_safeJsonParse(fiber.snapshot);
             const retryCount = fiber.retry_count;
 
             const callback = this[methodName as keyof this];
@@ -2652,7 +2682,10 @@ export class Agent<
             }
 
             const result = await (
-              callback as (p: unknown, ctx: FiberContext) => Promise<unknown>
+              callback as (
+                p: unknown,
+                ctx: experimental_FiberContext
+              ) => Promise<unknown>
             ).call(this, payload, { id, snapshot, retryCount });
 
             const now = Date.now();
@@ -2665,24 +2698,28 @@ export class Agent<
               WHERE id = ${id}
             `;
 
-            this._fiberDebug("fiber=%s completed method=%s", id, methodName);
+            this._experimental_fiberDebug(
+              "fiber=%s completed method=%s",
+              id,
+              methodName
+            );
 
             try {
-              await this.onFiberComplete({
+              await this.experimental_onFiberComplete({
                 id,
                 methodName,
                 payload,
                 result
               });
             } catch (e) {
-              console.error("Error in onFiberComplete:", e);
+              console.error("Error in experimental_onFiberComplete:", e);
             }
           });
 
           return; // Success — exit retry loop
         } catch (e) {
           const now = Date.now();
-          const currentFiber = this._getRawFiber(id);
+          const currentFiber = this._experimental_getRawFiber(id);
           const newRetryCount = (currentFiber?.retry_count ?? 0) + 1;
 
           if (newRetryCount > maxRetries) {
@@ -2696,7 +2733,7 @@ export class Agent<
                   updated_at = ${now}
               WHERE id = ${id}
             `;
-            this._fiberDebug(
+            this._experimental_fiberDebug(
               "fiber=%s failed after %d retries: %s",
               id,
               newRetryCount,
@@ -2711,7 +2748,7 @@ export class Agent<
             SET retry_count = ${newRetryCount}, updated_at = ${now}
             WHERE id = ${id}
           `;
-          this._fiberDebug(
+          this._experimental_fiberDebug(
             "fiber=%s retrying (%d/%d)",
             id,
             newRetryCount,
@@ -2721,7 +2758,7 @@ export class Agent<
         }
       }
     } finally {
-      this._activeFibers.delete(id);
+      this._experimental_activeFibers.delete(id);
       disposeKeepAlive();
     }
   }
@@ -2732,17 +2769,17 @@ export class Agent<
    * Detects fibers marked 'running' in SQLite that are NOT actively
    * executing in this DO instance.
    *
-   * Guarded by _fiberRecoveryInProgress to prevent double-firing
+   * Guarded by _experimental_fiberRecoveryInProgress to prevent double-firing
    * when both the heartbeat callback and the alarm() fallback trigger
    * in the same alarm handler invocation.
    * @internal
    */
-  private async _checkInterruptedFibers(): Promise<void> {
-    if (this._fiberRecoveryInProgress) return;
-    this._fiberRecoveryInProgress = true;
+  private async _experimental_checkInterruptedFibers(): Promise<void> {
+    if (this._experimental_fiberRecoveryInProgress) return;
+    this._experimental_fiberRecoveryInProgress = true;
 
     try {
-      const runningFibers = this.sql<RawFiberRow>`
+      const runningFibers = this.sql<experimental_RawFiberRow>`
         SELECT * FROM cf_agents_fibers
         WHERE status = 'running'
         ORDER BY created_at ASC
@@ -2750,11 +2787,11 @@ export class Agent<
 
       if (!runningFibers || runningFibers.length === 0) return;
 
-      const interrupted: FiberRecoveryContext[] = [];
+      const interrupted: experimental_FiberRecoveryContext[] = [];
 
       for (const fiber of runningFibers) {
         // If this fiber is actively executing in this process, skip it
-        if (this._activeFibers.has(fiber.id)) continue;
+        if (this._experimental_activeFibers.has(fiber.id)) continue;
 
         const newRetryCount = fiber.retry_count + 1;
         const now = Date.now();
@@ -2769,7 +2806,7 @@ export class Agent<
                 updated_at = ${now}
             WHERE id = ${fiber.id}
           `;
-          this._fiberDebug(
+          this._experimental_fiberDebug(
             "fiber=%s max retries exceeded on recovery",
             fiber.id
           );
@@ -2786,31 +2823,31 @@ export class Agent<
           interrupted.push({
             id: fiber.id,
             methodName: fiber.callback,
-            payload: this._safeJsonParse(fiber.payload),
-            snapshot: this._safeJsonParse(fiber.snapshot),
+            payload: this._experimental_safeJsonParse(fiber.payload),
+            snapshot: this._experimental_safeJsonParse(fiber.snapshot),
             retryCount: newRetryCount
           });
         }
       }
 
       if (interrupted.length > 0) {
-        this._fiberDebug(
+        this._experimental_fiberDebug(
           "recovering %d interrupted fibers",
           interrupted.length
         );
 
         // Clean up orphaned heartbeat schedules from previous DO instances
         // before starting recovery (which creates new heartbeat schedules)
-        this._cleanupOrphanedHeartbeats();
+        this._experimental_cleanupOrphanedHeartbeats();
 
         try {
-          await this.onFibersRecovered(interrupted);
+          await this.experimental_onFibersRecovered(interrupted);
         } catch (e) {
-          console.error("Error in onFibersRecovered:", e);
+          console.error("Error in experimental_onFibersRecovered:", e);
         }
       }
     } finally {
-      this._fiberRecoveryInProgress = false;
+      this._experimental_fiberRecoveryInProgress = false;
     }
   }
 
@@ -2818,6 +2855,9 @@ export class Agent<
    * Destroy the Agent, removing all state and scheduled tasks
    */
   async destroy() {
+    // Clear in-memory fiber tracking
+    this._experimental_activeFibers.clear();
+
     // drop all tables
     this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
     this.sql`DROP TABLE IF EXISTS cf_agents_state`;

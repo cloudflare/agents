@@ -2,12 +2,12 @@
  * Long-Running Agent — Durable Fibers Demo
  *
  * Demonstrates:
- * - spawnFiber() for fire-and-forget durable execution
- * - stashFiber() for checkpointing progress that survives eviction
- * - onFiberRecovered() for custom recovery after DO restart
- * - onFiberComplete() for handling completion
- * - cancelFiber() for stopping a running fiber
- * - getFiber() for querying fiber state
+ * - experimental_spawnFiber() for fire-and-forget durable execution
+ * - experimental_stashFiber() for checkpointing progress that survives eviction
+ * - experimental_onFiberRecovered() for custom recovery after DO restart
+ * - experimental_onFiberComplete() for handling completion
+ * - experimental_cancelFiber() for stopping a running fiber
+ * - experimental_getFiber() for querying fiber state
  * - Real-time progress via broadcast() to connected clients
  *
  * No API keys needed — research steps are simulated with delays.
@@ -17,10 +17,10 @@ import {
   Agent,
   callable,
   routeAgentRequest,
-  type FiberContext,
-  type FiberRecoveryContext,
-  type FiberCompleteContext,
-  type FiberState
+  type experimental_FiberContext,
+  type experimental_FiberRecoveryContext,
+  type experimental_FiberCompleteContext,
+  type experimental_FiberState
 } from "agents";
 
 // ── Types shared with the client ──────────────────────────────────────
@@ -103,7 +103,7 @@ function getFindings(topic: string): string[] {
 
 export class ResearchAgent extends Agent<Env, AgentState> {
   // Enable debug logging for fiber lifecycle
-  static override options = { hibernate: true, debugFibers: true };
+  static override options = { hibernate: true, experimental_debugFibers: true };
 
   initialState: AgentState = { activeFiberId: null };
 
@@ -111,11 +111,11 @@ export class ResearchAgent extends Agent<Env, AgentState> {
 
   /**
    * The actual research work. Runs as a fiber — survives eviction.
-   * Each step is checkpointed via stashFiber().
+   * Each step is checkpointed via experimental_stashFiber().
    */
   async doResearch(
     payload: ResearchPayload,
-    fiberCtx: FiberContext
+    fiberCtx: experimental_FiberContext
   ): Promise<{ results: ResearchStep[] }> {
     const { topic, steps } = payload;
     const findings = getFindings(topic);
@@ -155,7 +155,7 @@ export class ResearchAgent extends Agent<Env, AgentState> {
       completedSteps.push(stepResult);
 
       // Checkpoint — this data survives eviction
-      this.stashFiber({
+      this.experimental_stashFiber({
         topic,
         completedSteps: [...completedSteps],
         currentStep: step,
@@ -180,7 +180,9 @@ export class ResearchAgent extends Agent<Env, AgentState> {
 
   // ── Lifecycle hooks ─────────────────────────────────────────────
 
-  override onFiberComplete(ctx: FiberCompleteContext) {
+  override experimental_onFiberComplete(
+    ctx: experimental_FiberCompleteContext
+  ) {
     const results = (ctx.result as { results: ResearchStep[] })?.results;
 
     this.broadcast(
@@ -194,10 +196,12 @@ export class ResearchAgent extends Agent<Env, AgentState> {
     this.setState({ activeFiberId: null });
   }
 
-  override onFiberRecovered(ctx: FiberRecoveryContext) {
+  override experimental_onFiberRecovered(
+    ctx: experimental_FiberRecoveryContext
+  ) {
     // Default behavior: restart the fiber.
     // The doResearch method checks fiberCtx.snapshot to skip completed steps.
-    this.restartFiber(ctx.id);
+    this.experimental_restartFiber(ctx.id);
   }
 
   // ── Callable methods (client-facing API) ────────────────────────
@@ -216,7 +220,7 @@ export class ResearchAgent extends Agent<Env, AgentState> {
       "Synthesis"
     ];
 
-    const fiberId = this.spawnFiber("doResearch", {
+    const fiberId = this.experimental_spawnFiber("doResearch", {
       topic,
       steps
     } satisfies ResearchPayload);
@@ -240,7 +244,7 @@ export class ResearchAgent extends Agent<Env, AgentState> {
     const { activeFiberId } = this.state;
     if (!activeFiberId) return false;
 
-    const cancelled = this.cancelFiber(activeFiberId);
+    const cancelled = this.experimental_cancelFiber(activeFiberId);
     if (cancelled) {
       this.setState({ activeFiberId: null });
       this.broadcast(
@@ -254,10 +258,10 @@ export class ResearchAgent extends Agent<Env, AgentState> {
   }
 
   @callable()
-  getResearchStatus(): FiberState | null {
+  getResearchStatus(): experimental_FiberState | null {
     const { activeFiberId } = this.state;
     if (!activeFiberId) return null;
-    return this.getFiber(activeFiberId);
+    return this.experimental_getFiber(activeFiberId);
   }
 
   /**
@@ -265,12 +269,12 @@ export class ResearchAgent extends Agent<Env, AgentState> {
    *
    * In a real eviction, the runtime kills the DO process. We can't
    * kill a running async function from JavaScript. So this method:
-   * 1. Cancels the fiber (stops it cooperatively via cancelFiber)
+   * 1. Cancels the fiber (stops it cooperatively via experimental_cancelFiber)
    * 2. Resets the fiber status to 'running' (mimicking what SQLite
    *    looks like after a real eviction — process killed mid-execution)
    * 3. Removes from in-memory tracking
    * 4. Triggers the alarm handler, which detects the interrupted fiber
-   *    and calls onFiberRecovered → restartFiber → resumes from checkpoint
+   *    and calls experimental_onFiberRecovered → experimental_restartFiber → resumes from checkpoint
    *
    * In production, steps 2-4 happen automatically: the process dies,
    * SQLite keeps 'running' status, and the heartbeat alarm fires on restart.
@@ -281,10 +285,10 @@ export class ResearchAgent extends Agent<Env, AgentState> {
     if (!activeFiberId) return false;
 
     // Step 1: Cancel the fiber (stops the running doResearch)
-    this.cancelFiber(activeFiberId);
+    this.experimental_cancelFiber(activeFiberId);
 
     // Step 2: Reset to 'running' — as if the process was killed
-    // (cancelFiber set it to 'cancelled', but real eviction leaves it as 'running')
+    // (experimental_cancelFiber set it to 'cancelled', but real eviction leaves it as 'running')
     const now = Date.now();
     this.sql`
       UPDATE cf_agents_fibers
@@ -292,10 +296,8 @@ export class ResearchAgent extends Agent<Env, AgentState> {
       WHERE id = ${activeFiberId}
     `;
 
-    // Step 3: Clear in-memory tracking
-    this._activeFibers.delete(activeFiberId);
-
-    // Step 4: Trigger alarm → recovery detects interrupted fiber → restarts
+    // Step 3: Trigger alarm → recovery detects interrupted fiber → restarts
+    // (experimental_cancelFiber already cleared in-memory tracking)
     await this.alarm();
 
     return true;
