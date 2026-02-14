@@ -590,37 +590,88 @@ We chose NOT to wrap the `onChatMessage` + `_reply` flow in a fiber. The reasons
 
 4. **`onStreamInterrupted` gives users control** — different providers need different recovery strategies (OpenAI background mode vs. Anthropic prefill vs. plain retry). A hook with the partial text and messages is more useful than an opinionated default.
 
-### Concrete code changes to make in `packages/ai-chat/src/index.ts`
+### Concrete code changes to make
 
-#### 1. Add `keepAlive()` in `_reply()`
+#### 1. Add `keepAlive()` in `_reply()` — `packages/ai-chat/src/index.ts`
 
 Call `await this.keepAlive()` at the top of `_reply` and dispose in `.finally()`. This is the single biggest win — prevents idle eviction during streaming with no API changes.
 
-#### 2. Add `getPartialStreamText()` public method
+```typescript
+private async _reply(id, response, excludeBroadcastIds, options) {
+  const disposeKeepAlive = await this.keepAlive();
+  return this._tryCatchChat(async () => {
+    // ... existing streaming logic ...
+  }).finally(() => {
+    disposeKeepAlive();
+  });
+}
+```
 
-Extracts partial response from the most recent stream's persisted chunks by parsing SSE `text-delta` events and concatenating them.
+#### 2. Add `getPartialStreamText()` public method — `packages/ai-chat/src/index.ts`
 
-#### 3. Add `onStreamInterrupted(context)` hook
+Extracts partial response from the most recent stream's persisted chunks. Can use `ResumableStream`'s SQL interface to query chunks, and optionally `applyChunkToParts` from `message-builder.ts` for robust parsing (handles reasoning, tool calls, not just text-delta).
 
-Overridable hook called when `_restoreActiveStream()` detects a stale stream (older than threshold). Context provides `partialText`, `messages`, `streamId`, `requestId`.
+#### 3. Add `onStreamInterrupted(context)` hook — `packages/ai-chat/src/index.ts`
 
-#### 4. Modify `_restoreActiveStream()` stale handling
+Overridable hook called when a stale/interrupted stream is detected. Context provides:
 
-Change from deleting stale streams to marking as `'error'` and firing `onStreamInterrupted`. The existing test `"deletes stale streams on restore"` in `resumable-streaming.test.ts` will need updating to expect `status = 'error'` instead of `null`.
+- `partialText` — from `getPartialStreamText()`
+- `messages` — all persisted messages (`this.messages`)
+- `streamId` / `requestId` — for correlation
+- `lastBody` — the original custom body from `_lastBody` (now persisted!)
+- `lastClientTools` — the original client tools from `_lastClientTools` (now persisted!)
 
-### Prerequisites: AIChatAgent improvements needed first
+Having `lastBody` and `lastClientTools` available makes re-calling `onChatMessage` straightforward:
 
-These changes should be made to AIChatAgent before implementing the Layer 3 integration. Being worked on in a separate branch.
+```typescript
+async onStreamInterrupted(ctx) {
+  const response = await this.onChatMessage(() => {}, {
+    clientTools: ctx.lastClientTools,
+    body: ctx.lastBody
+  });
+  if (response) await this._reply(ctx.requestId, response, [], { continuation: true });
+}
+```
 
-1. **Store the last user message ID separately** — currently, recovery has to scan `this.messages` to find what triggered the interrupted generation. A dedicated field would make this trivial.
+#### 4. Modify stale stream handling — `packages/ai-chat/src/resumable-stream.ts`
 
-2. **Make `onChatMessage` easier to re-call programmatically** — currently it requires an `onFinish` callback and options (abort signal, client tools, custom body). A simpler `retryLastGeneration()` method that reconstructs these internally would make recovery hooks much easier to write.
+In `ResumableStream.restore()`, change stale stream handling from deleting to marking as `'error'` and returning the stream info so `AIChatAgent._restoreActiveStream()` can fire the `onStreamInterrupted` hook. The existing test `"deletes stale streams on restore"` in `resumable-streaming.test.ts` will need updating.
 
-3. **Configurable stale threshold** — the 5-minute `STREAM_STALE_THRESHOLD_MS` is hardcoded. Some LLM calls (deep reasoning) can legitimately run longer. Making this configurable via `static options` would help.
+### AIChatAgent refactor (merged to main) — what changed
 
-4. **Separate chunk persistence from broadcast** — currently `_storeStreamChunk` and the WebSocket broadcast are interleaved in the streaming loop. Separating them would make it easier to replay chunks to clients after recovery without re-generating.
+A major refactor of AIChatAgent was completed on `main`. These changes significantly affect the Layer 3 plan. Key findings:
 
-5. **Provider-specific recovery helpers** — utility functions like `createPrefillMessages(partialText, originalMessages)` that construct the right message format for Anthropic-style prefill, or `retrieveOpenAIResponse(responseId)` for OpenAI background mode retrieval.
+#### Prerequisites now resolved
+
+1. **Request context persists across hibernation** (DONE) — `_lastBody` and `_lastClientTools` are now stored in a `cf_ai_chat_request_context` SQLite table and restored in the constructor. This was the biggest blocker — on recovery, we now have the original request context needed to re-call `onChatMessage`. No need for a separate `retryLastGeneration()` method.
+
+2. **`onFinish` is now optional** (DONE) — the framework handles abort controller cleanup and observability automatically. This means `onChatMessage` can be re-called programmatically with just `await this.onChatMessage(() => {})` — no complex callback reconstruction needed.
+
+3. **Stream chunk persistence separated** (DONE) — extracted to standalone `ResumableStream` class in `resumable-stream.ts`. Clean separation of chunk buffering, persistence, and replay from the main agent logic.
+
+4. **Shared message parser** (DONE) — `message-builder.ts` provides `applyChunkToParts()` for parsing SSE events into UIMessage parts. Could be used by `getPartialStreamText()` instead of hand-rolling text-delta extraction.
+
+#### Prerequisites still needed
+
+1. **Configurable stale threshold** — `STREAM_STALE_THRESHOLD_MS` (5 minutes) is still hardcoded in `resumable-stream.ts`. Should be configurable via `static options`.
+
+2. **Provider-specific recovery helpers** — utility functions for prefill construction, OpenAI response retrieval, etc.
+
+#### New architecture to account for
+
+The code changes in section "Concrete code changes" need updating:
+
+- **`_restoreActiveStream()`** now delegates to `this._resumableStream.restore()` — the stale stream detection logic is in `ResumableStream`, not `AIChatAgent` directly. The `onStreamInterrupted` hook needs to be triggered from within `ResumableStream.restore()` or after it returns.
+
+- **`_reply()`** signature changed to `_reply(id, response, excludeBroadcastIds, { continuation?, chatMessageId? })`. The `keepAlive()` integration point is the same.
+
+- **`message-builder.ts`** — `getPartialStreamText()` could use `applyChunkToParts` from this module for more robust text extraction (handles reasoning parts, tool calls, etc., not just text-delta).
+
+- **New tables** — `cf_ai_chat_request_context` stores `lastBody` and `lastClientTools`. These survive hibernation and would be available during recovery.
+
+- **`ws-chat-transport.ts`** — new WebSocket-based ChatTransport on the client. Replaces the old aiFetch approach. Stream resumption flows may have changed on the client side.
+
+- **E2E test infrastructure** — `packages/ai-chat/e2e/` now has Playwright-based tests with a wrangler dev server. Could be extended for fiber recovery e2e tests with real LLM calls.
 
 ### How recovery will work
 
