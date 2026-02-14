@@ -1,4 +1,10 @@
-import { Agent, callable, type experimental_FiberState } from "../../index.ts";
+import { Agent, callable } from "../../index.ts";
+import {
+  withFibers,
+  type FiberState,
+  type FiberCompleteContext,
+  type FiberRecoveryContext
+} from "../../experimental/forever.ts";
 
 type CompletedFiberInfo = {
   id: string;
@@ -13,9 +19,11 @@ type RecoveredFiberInfo = {
   retryCount: number;
 };
 
-export class TestFiberAgent extends Agent<Record<string, unknown>> {
+// Apply the fiber mixin to Agent
+const FiberAgent = withFibers(Agent, { debugFibers: true });
+
+export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
   observability = undefined;
-  static override options = { hibernate: true, experimental_debugFibers: true };
 
   // ── Tracking arrays for test assertions ──────────────────────────
 
@@ -35,7 +43,7 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
     const completed: string[] = [];
     for (const step of payload.steps) {
       completed.push(step);
-      this.experimental_stashFiber({
+      this.stashFiber({
         completedSteps: [...completed],
         currentStep: step
       });
@@ -70,12 +78,7 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
 
   // ── Lifecycle hooks ──────────────────────────────────────────────
 
-  override experimental_onFiberComplete(ctx: {
-    id: string;
-    methodName: string;
-    payload: unknown;
-    result: unknown;
-  }) {
+  override onFiberComplete(ctx: FiberCompleteContext) {
     this.completedFibers.push({
       id: ctx.id,
       methodName: ctx.methodName,
@@ -83,21 +86,14 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
     });
   }
 
-  override experimental_onFiberRecovered(ctx: {
-    id: string;
-    methodName: string;
-    payload: unknown;
-    snapshot: unknown;
-    retryCount: number;
-  }) {
+  override onFiberRecovered(ctx: FiberRecoveryContext) {
     this.recoveredFibers.push({
       id: ctx.id,
       methodName: ctx.methodName,
       snapshot: ctx.snapshot,
       retryCount: ctx.retryCount
     });
-    // Default behavior: restart the fiber
-    this.experimental_restartFiber(ctx.id);
+    this.restartFiber(ctx.id);
   }
 
   // ── @callable() methods for test access ──────────────────────────
@@ -108,21 +104,17 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
     payload: unknown,
     options?: { maxRetries?: number }
   ): Promise<string> {
-    return this.experimental_spawnFiber(
-      methodName as keyof this,
-      payload,
-      options
-    );
+    return this.spawnFiber(methodName as keyof this, payload, options);
   }
 
   @callable()
-  async getFiberState(id: string): Promise<experimental_FiberState | null> {
-    return this.experimental_getFiber(id);
+  async getFiberState(id: string): Promise<FiberState | null> {
+    return this.getFiber(id);
   }
 
   @callable()
   async cancel(id: string): Promise<boolean> {
-    return this.experimental_cancelFiber(id);
+    return this.cancelFiber(id);
   }
 
   @callable()
@@ -152,7 +144,7 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
 
   @callable()
   async startKeepAlive(): Promise<string> {
-    const dispose = await this.experimental_keepAlive();
+    const dispose = await this.keepAlive();
     this._testKeepAliveDisposer = dispose;
     this.testKeepAliveCount++;
     return "started";
@@ -188,9 +180,7 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
 
   @callable()
   async simulateEviction(fiberId: string): Promise<void> {
-    // Clear in-memory tracking (simulates DO restart losing memory)
-    this._experimental_activeFibers.delete(fiberId);
-    // The fiber is still 'running' in SQLite — this is what eviction looks like
+    this._fiberActiveFibers.delete(fiberId);
   }
 
   @callable()
@@ -205,7 +195,9 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
 
   @callable()
   async triggerAlarm(): Promise<void> {
-    await this.alarm();
+    // Call checkFibers directly for immediate recovery (tests only).
+    // In production, the heartbeat schedule triggers this automatically.
+    await this.checkFibers();
   }
 
   @callable()
@@ -214,7 +206,7 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
-  async experimental_getFiberCount(): Promise<number> {
+  async getFiberCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_fibers
     `;
@@ -236,12 +228,11 @@ export class TestFiberAgent extends Agent<Record<string, unknown>> {
 
   @callable()
   async resetCleanupTimerForTest(): Promise<void> {
-    // Reset the cleanup timer so the next experimental_spawnFiber triggers cleanup
-    this._experimental_lastFiberCleanupTime = 0;
+    this._fiberLastCleanupTime = 0;
   }
 
   @callable()
-  async experimental_getFibersByStatus(
+  async getFibersByStatus(
     status: string
   ): Promise<Array<{ id: string; callback: string; retry_count: number }>> {
     return this.sql<{

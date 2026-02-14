@@ -9,7 +9,8 @@ async function main() {
       "src/index.ts",
       "src/react.tsx",
       "src/types.ts",
-      "src/ai-chat-v5-migration.ts"
+      "src/ai-chat-v5-migration.ts",
+      "src/experimental/forever.ts"
     ],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],

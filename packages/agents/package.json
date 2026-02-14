@@ -136,6 +136,11 @@
       "import": "./dist/workflows.js",
       "require": "./dist/workflows.js"
     },
+    "./experimental/forever": {
+      "types": "./dist/experimental/forever.d.ts",
+      "import": "./dist/experimental/forever.js",
+      "require": "./dist/experimental/forever.js"
+    },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",

@@ -2,14 +2,13 @@
  * E2E test worker — a minimal agent with a slow fiber for eviction testing.
  * Runs under wrangler dev with persistent SQLite storage.
  */
+import { Agent, callable, routeAgentRequest } from "agents";
 import {
-  Agent,
-  callable,
-  routeAgentRequest,
-  type experimental_FiberContext,
-  type experimental_FiberState,
-  type experimental_FiberRecoveryContext
-} from "agents";
+  withFibers,
+  type FiberContext,
+  type FiberState,
+  type FiberRecoveryContext
+} from "agents/experimental/forever";
 
 // Env type for this worker — matches wrangler.jsonc bindings
 type Env = {
@@ -27,8 +26,9 @@ export type SlowFiberSnapshot = {
   totalSteps: number;
 };
 
-export class FiberTestAgent extends Agent<Record<string, unknown>> {
-  static override options = { hibernate: true, experimental_debugFibers: true };
+const FiberAgent = withFibers(Agent, { debugFibers: true });
+
+export class FiberTestAgent extends FiberAgent<Record<string, unknown>> {
   observability = undefined;
 
   /**
@@ -37,14 +37,13 @@ export class FiberTestAgent extends Agent<Record<string, unknown>> {
    */
   async slowSteps(
     payload: { totalSteps: number },
-    fiberCtx: experimental_FiberContext
+    fiberCtx: FiberContext
   ): Promise<{ completedSteps: StepResult[] }> {
     const snapshot = fiberCtx.snapshot as SlowFiberSnapshot | null;
     const completedSteps = snapshot?.completedSteps ?? [];
     const startIndex = completedSteps.length;
 
     for (let i = startIndex; i < payload.totalSteps; i++) {
-      // ~1 second per step
       await new Promise((resolve) => setTimeout(resolve, 1000));
 
       completedSteps.push({
@@ -53,7 +52,7 @@ export class FiberTestAgent extends Agent<Record<string, unknown>> {
         completedAt: Date.now()
       });
 
-      this.experimental_stashFiber({
+      this.stashFiber({
         completedSteps: [...completedSteps],
         totalSteps: payload.totalSteps
       } satisfies SlowFiberSnapshot);
@@ -62,31 +61,23 @@ export class FiberTestAgent extends Agent<Record<string, unknown>> {
     return { completedSteps };
   }
 
-  override experimental_onFiberRecovered(
-    ctx: experimental_FiberRecoveryContext
-  ) {
-    this.experimental_restartFiber(ctx.id);
+  override onFiberRecovered(ctx: FiberRecoveryContext) {
+    this.restartFiber(ctx.id);
   }
 
   @callable()
   startSlowFiber(totalSteps: number): string {
-    return this.experimental_spawnFiber("slowSteps", { totalSteps });
+    return this.spawnFiber("slowSteps", { totalSteps });
   }
 
   @callable()
-  getFiberStatus(fiberId: string): experimental_FiberState | null {
-    return this.experimental_getFiber(fiberId);
+  getFiberStatus(fiberId: string): FiberState | null {
+    return this.getFiber(fiberId);
   }
 
-  /**
-   * Manually trigger the alarm handler.
-   * In production, alarms fire automatically. In wrangler dev,
-   * persisted alarms don't survive process restarts, so we
-   * trigger recovery manually for e2e testing.
-   */
   @callable()
   async triggerAlarm(): Promise<void> {
-    await this.alarm();
+    await this.checkFibers();
   }
 }
 

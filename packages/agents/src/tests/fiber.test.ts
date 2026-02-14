@@ -1,7 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
-import { getAgentByName, type experimental_FiberState } from "..";
+import { getAgentByName } from "..";
+import type { FiberState } from "../experimental/forever";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -76,7 +77,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber).toBeDefined();
       expect(fiber.status).toBe("completed");
       expect(fiber.result).toEqual({ result: "hello" });
@@ -116,7 +117,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber).toBeDefined();
       // Will be failed since failingWork throws and maxRetries is 0
       expect(fiber.status).toBe("failed");
@@ -136,7 +137,7 @@ describe("fiber operations", () => {
       // Fiber should exist in SQLite right away
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber).toBeDefined();
       expect(fiber.status).toBe("running");
       expect(fiber.retryCount).toBe(0);
@@ -146,7 +147,7 @@ describe("fiber operations", () => {
 
       const completedFiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(completedFiber.status).toBe("completed");
     });
   });
@@ -164,7 +165,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber.status).toBe("completed");
       expect(fiber.snapshot).toEqual({
         completedSteps: ["a", "b", "c"],
@@ -185,7 +186,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       // The last stash should be the final state, not a merge
       expect(fiber.snapshot).toEqual({
         completedSteps: ["first", "second"],
@@ -210,7 +211,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber.status).toBe("cancelled");
     });
 
@@ -259,7 +260,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber.status).toBe("failed");
       expect(fiber.error).toBe("Intentional fiber error");
       // retry_count should be maxRetries + 1 (initial + retries all failed)
@@ -280,7 +281,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber.status).toBe("failed");
       expect(fiber.retryCount).toBe(1);
     });
@@ -296,7 +297,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber.status).toBe("completed");
       expect(fiber.result).toEqual({ result: "recovered" });
       // One retry was needed
@@ -329,15 +330,9 @@ describe("fiber operations", () => {
 
       await agent.waitFor(300);
 
-      const f1 = (await agent.getFiberState(
-        id1
-      )) as unknown as experimental_FiberState;
-      const f2 = (await agent.getFiberState(
-        id2
-      )) as unknown as experimental_FiberState;
-      const f3 = (await agent.getFiberState(
-        id3
-      )) as unknown as experimental_FiberState;
+      const f1 = (await agent.getFiberState(id1)) as unknown as FiberState;
+      const f2 = (await agent.getFiberState(id2)) as unknown as FiberState;
+      const f3 = (await agent.getFiberState(id3)) as unknown as FiberState;
 
       expect(f1.status).toBe("completed");
       expect(f2.status).toBe("completed");
@@ -366,12 +361,8 @@ describe("fiber operations", () => {
       // Wait for both to complete
       await agent.waitFor(500);
 
-      const f1 = (await agent.getFiberState(
-        id1
-      )) as unknown as experimental_FiberState;
-      const f2 = (await agent.getFiberState(
-        id2
-      )) as unknown as experimental_FiberState;
+      const f1 = (await agent.getFiberState(id1)) as unknown as FiberState;
+      const f2 = (await agent.getFiberState(id2)) as unknown as FiberState;
       expect(f1.status).toBe("completed");
       expect(f2.status).toBe("completed");
 
@@ -425,7 +416,7 @@ describe("fiber operations", () => {
 
       const completedFiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(completedFiber.status).toBe("completed");
       expect(completedFiber.snapshot).toEqual({
         completedSteps: ["a", "b", "c"],
@@ -471,9 +462,7 @@ describe("fiber operations", () => {
       await agent.triggerAlarm();
       await agent.waitFor(100);
 
-      let fiber = (await agent.getFiberState(
-        fiberId
-      )) as unknown as experimental_FiberState;
+      let fiber = (await agent.getFiberState(fiberId)) as unknown as FiberState;
       // After first recovery, retryCount should be 1
       expect(fiber.retryCount).toBeGreaterThanOrEqual(1);
 
@@ -482,9 +471,7 @@ describe("fiber operations", () => {
       await agent.triggerAlarm();
       await agent.waitFor(100);
 
-      fiber = (await agent.getFiberState(
-        fiberId
-      )) as unknown as experimental_FiberState;
+      fiber = (await agent.getFiberState(fiberId)) as unknown as FiberState;
       expect(fiber.retryCount).toBeGreaterThanOrEqual(2);
     });
 
@@ -505,9 +492,7 @@ describe("fiber operations", () => {
       await agent.triggerAlarm();
       await agent.waitFor(100);
 
-      let fiber = (await agent.getFiberState(
-        fiberId
-      )) as unknown as experimental_FiberState;
+      let fiber = (await agent.getFiberState(fiberId)) as unknown as FiberState;
       // Should still be recoverable (retryCount 1 <= maxRetries 1)
       expect(fiber.status).not.toBe("failed");
 
@@ -516,9 +501,7 @@ describe("fiber operations", () => {
       await agent.triggerAlarm();
       await agent.waitFor(100);
 
-      fiber = (await agent.getFiberState(
-        fiberId
-      )) as unknown as experimental_FiberState;
+      fiber = (await agent.getFiberState(fiberId)) as unknown as FiberState;
       expect(fiber.status).toBe("failed");
       expect(fiber.error).toBe("max retries exceeded (eviction recovery)");
     });
@@ -573,7 +556,7 @@ describe("fiber operations", () => {
 
       const fiber = (await agent.getFiberState(
         fiberId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(fiber).toBeDefined();
       expect(fiber.id).toBe(fiberId);
       expect(fiber.callback).toBe("simpleWork");
@@ -665,7 +648,7 @@ describe("fiber operations", () => {
 
       const oldFiber = (await agent.getFiberState(
         oldId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(oldFiber.status).toBe("completed");
 
       // Backdate the completed_at and updated_at to 25 hours ago
@@ -688,7 +671,7 @@ describe("fiber operations", () => {
       // The new fiber should still exist
       const newFiber = (await agent.getFiberState(
         newId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(newFiber.status).toBe("completed");
     });
 
@@ -708,7 +691,7 @@ describe("fiber operations", () => {
       // Recent fiber should still exist (completed less than 24h ago)
       const recentFiber = (await agent.getFiberState(
         recentId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(recentFiber).toBeDefined();
       expect(recentFiber.status).toBe("completed");
     });
@@ -726,7 +709,7 @@ describe("fiber operations", () => {
 
       const failedFiber = (await agent.getFiberState(
         failedId
-      )) as unknown as experimental_FiberState;
+      )) as unknown as FiberState;
       expect(failedFiber.status).toBe("failed");
 
       // Backdate to 8 days ago

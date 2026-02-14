@@ -1679,10 +1679,6 @@ export class AIChatAgent<
   ) {
     const { continuation = false, chatMessageId } = options;
 
-    // Keep the DO alive during streaming — prevents eviction from inactivity
-    // timeout while waiting for LLM chunks. Disposed in .finally() below.
-    const disposeKeepAlive = await this.experimental_keepAlive();
-
     return this._tryCatchChat(async () => {
       if (!response.body) {
         // Send empty response if no body
@@ -1823,8 +1819,6 @@ export class AIChatAgent<
           );
         }
       }
-    }).finally(() => {
-      disposeKeepAlive();
     });
   }
 

@@ -52,6 +52,11 @@
       "types": "./dist/ai-chat-v5-migration.d.ts",
       "import": "./dist/ai-chat-v5-migration.js",
       "require": "./dist/ai-chat-v5-migration.js"
+    },
+    "./experimental/forever": {
+      "types": "./dist/experimental/forever.d.ts",
+      "import": "./dist/experimental/forever.js",
+      "require": "./dist/experimental/forever.js"
     }
   },
   "author": "Cloudflare Inc.",
