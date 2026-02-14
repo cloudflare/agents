@@ -1,5 +1,4 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
 import { cloudflare } from "@cloudflare/vite-plugin";
 import path from "node:path";
 
@@ -10,5 +9,5 @@ export default defineConfig({
       express: path.resolve(__dirname, "./src/express-alias.js")
     }
   },
-  plugins: [react(), cloudflare()]
+  plugins: [cloudflare()]
 });
