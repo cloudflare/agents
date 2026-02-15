@@ -82,7 +82,7 @@ describe("retries", () => {
       expect(attempts).toBe(3);
     });
 
-    it("respects isRetryable to bail early", async () => {
+    it("respects shouldRetry to bail early", async () => {
       let attempts = 0;
       await expect(
         tryN(
@@ -94,11 +94,33 @@ describe("retries", () => {
           {
             baseDelayMs: 1,
             maxDelayMs: 10,
-            isRetryable: (err) => (err as Error).message === "retryable"
+            shouldRetry: (err) => (err as Error).message === "retryable"
           }
         )
       ).rejects.toThrow("fatal");
       expect(attempts).toBe(2);
+    });
+
+    it("passes nextAttempt to shouldRetry", async () => {
+      const receivedNextAttempts: number[] = [];
+      await expect(
+        tryN(
+          5,
+          async () => {
+            throw new Error("fail");
+          },
+          {
+            baseDelayMs: 1,
+            maxDelayMs: 10,
+            shouldRetry: (_err, nextAttempt) => {
+              receivedNextAttempts.push(nextAttempt);
+              return true;
+            }
+          }
+        )
+      ).rejects.toThrow("fail");
+      // shouldRetry is called for attempts 1→2, 2→3, 3→4, 4→5
+      expect(receivedNextAttempts).toEqual([2, 3, 4, 5]);
     });
 
     it("passes attempt number to fn", async () => {
@@ -119,16 +141,53 @@ describe("retries", () => {
 
     it("rejects invalid inputs", async () => {
       const doer = async () => 1;
-      await expect(tryN(0, doer)).rejects.toThrow("n must be greater than 0");
+      await expect(tryN(0, doer)).rejects.toThrow(
+        "retry.maxAttempts must be >= 1"
+      );
       await expect(tryN(1, doer, { baseDelayMs: 0 })).rejects.toThrow(
-        "baseDelayMs and maxDelayMs must be greater than 0"
+        "retry.baseDelayMs must be > 0"
       );
       await expect(tryN(1, doer, { maxDelayMs: 0 })).rejects.toThrow(
-        "baseDelayMs and maxDelayMs must be greater than 0"
+        "retry.maxDelayMs must be > 0"
       );
       await expect(
         tryN(1, doer, { baseDelayMs: 5000, maxDelayMs: 100 })
-      ).rejects.toThrow("baseDelayMs must be less than or equal to maxDelayMs");
+      ).rejects.toThrow("retry.baseDelayMs must be <= retry.maxDelayMs");
+    });
+
+    it("rejects NaN and Infinity", async () => {
+      const doer = async () => 1;
+      await expect(tryN(Number.NaN, doer)).rejects.toThrow(
+        "retry.maxAttempts must be >= 1"
+      );
+      await expect(tryN(Number.POSITIVE_INFINITY, doer)).rejects.toThrow(
+        "retry.maxAttempts must be >= 1"
+      );
+      await expect(tryN(1, doer, { baseDelayMs: Number.NaN })).rejects.toThrow(
+        "retry.baseDelayMs must be > 0"
+      );
+      await expect(tryN(1, doer, { maxDelayMs: Number.NaN })).rejects.toThrow(
+        "retry.maxDelayMs must be > 0"
+      );
+      await expect(
+        tryN(1, doer, { baseDelayMs: Number.POSITIVE_INFINITY })
+      ).rejects.toThrow("retry.baseDelayMs must be > 0");
+    });
+
+    it("floors fractional n to integer", async () => {
+      let attempts = 0;
+      await expect(
+        tryN(
+          2.9,
+          async () => {
+            attempts++;
+            throw new Error(`fail-${attempts}`);
+          },
+          { baseDelayMs: 1, maxDelayMs: 10 }
+        )
+      ).rejects.toThrow("fail-2");
+      // 2.9 floors to 2, so exactly 2 attempts
+      expect(attempts).toBe(2);
     });
 
     it("allows baseDelayMs equal to maxDelayMs", async () => {
@@ -149,7 +208,6 @@ describe("retries", () => {
     it("works with n=1 (no retries)", async () => {
       let attempts = 0;
       // n=1 means exactly one attempt, no retries
-      // Need valid baseDelayMs < maxDelayMs even though delay is never used
       await expect(
         tryN(1, async () => {
           attempts++;
@@ -182,6 +240,15 @@ describe("retries", () => {
       );
       expect(() => validateRetryOptions({ maxAttempts: -1 })).toThrow(
         "retry.maxAttempts must be >= 1"
+      );
+    });
+
+    it("rejects non-integer maxAttempts", () => {
+      expect(() => validateRetryOptions({ maxAttempts: 2.5 })).toThrow(
+        "retry.maxAttempts must be an integer"
+      );
+      expect(() => validateRetryOptions({ maxAttempts: 3.1 })).toThrow(
+        "retry.maxAttempts must be an integer"
       );
     });
 
@@ -221,12 +288,39 @@ describe("retries", () => {
       ).not.toThrow();
     });
 
-    it("skips cross-field check when only one delay field is provided", () => {
-      // baseDelayMs: 5000 alone is valid — the default maxDelayMs (3000)
-      // would cause a failure at execution time, but validateRetryOptions
-      // only checks fields that are explicitly provided.
+    it("skips cross-field check when no defaults and only one delay field", () => {
+      // Without defaults, we can't validate cross-field constraints
+      // when only one field is provided.
       expect(() => validateRetryOptions({ baseDelayMs: 5000 })).not.toThrow();
       expect(() => validateRetryOptions({ maxDelayMs: 50 })).not.toThrow();
+    });
+
+    describe("with defaults", () => {
+      const defaults = { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 3000 };
+
+      it("rejects baseDelayMs exceeding default maxDelayMs", () => {
+        expect(() =>
+          validateRetryOptions({ baseDelayMs: 5000 }, defaults)
+        ).toThrow("retry.baseDelayMs must be <= retry.maxDelayMs");
+      });
+
+      it("rejects default baseDelayMs exceeding explicit maxDelayMs", () => {
+        expect(() =>
+          validateRetryOptions({ maxDelayMs: 50 }, defaults)
+        ).toThrow("retry.baseDelayMs must be <= retry.maxDelayMs");
+      });
+
+      it("accepts valid options resolved against defaults", () => {
+        expect(() =>
+          validateRetryOptions({ baseDelayMs: 200 }, defaults)
+        ).not.toThrow();
+        expect(() =>
+          validateRetryOptions({ maxDelayMs: 5000 }, defaults)
+        ).not.toThrow();
+        expect(() =>
+          validateRetryOptions({ maxAttempts: 5 }, defaults)
+        ).not.toThrow();
+      });
     });
   });
 

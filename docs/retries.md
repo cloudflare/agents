@@ -41,7 +41,7 @@ The `retry()` method is available on every `Agent` instance. It retries the prov
 async retry<T>(
   fn: (attempt: number) => Promise<T>,
   options?: RetryOptions & {
-    shouldRetry?: (err: unknown) => boolean;
+    shouldRetry?: (err: unknown, nextAttempt: number) => boolean;
   }
 ): Promise<T>
 ```
@@ -49,8 +49,8 @@ async retry<T>(
 **Parameters:**
 
 - `fn` — the async function to retry. Receives the current attempt number (1-indexed).
-- `options` — optional retry configuration (see [RetryOptions](#retryoptions) below).
-- `options.shouldRetry` — optional predicate called with the thrown error. Return `false` to stop retrying immediately. If not provided, all errors are retried.
+- `options` — optional retry configuration (see [RetryOptions](#retryoptions) below). Options are validated eagerly — invalid values throw immediately.
+- `options.shouldRetry` — optional predicate called with the thrown error and the next attempt number. Return `false` to stop retrying immediately. If not provided, all errors are retried.
 
 **Returns:** the result of `fn` on success.
 
@@ -92,7 +92,7 @@ const result = await this.retry(async (attempt) => {
 
 **Selective retry with `shouldRetry`:**
 
-Use `shouldRetry` to stop retrying on specific errors:
+Use `shouldRetry` to stop retrying on specific errors. The predicate receives both the error and the next attempt number:
 
 ```typescript
 const data = await this.retry(
@@ -103,7 +103,7 @@ const data = await this.retry(
   },
   {
     maxAttempts: 5,
-    shouldRetry: (err) => {
+    shouldRetry: (err, nextAttempt) => {
       // Don't retry 4xx client errors — our request is wrong
       if (err instanceof HttpError && err.status >= 400 && err.status < 500) {
         return false;
@@ -192,7 +192,7 @@ If the callback throws, it is retried before the task is dequeued. After all att
 
 ## Validation
 
-Retry options are validated eagerly when you call `queue()`, `schedule()`, or `scheduleEvery()`. Invalid options throw immediately instead of failing later at execution time:
+Retry options are validated eagerly when you call `this.retry()`, `queue()`, `schedule()`, or `scheduleEvery()`. Invalid options throw immediately instead of failing later at execution time:
 
 ```typescript
 // Throws immediately: "retry.maxAttempts must be >= 1"
@@ -209,7 +209,18 @@ await this.schedule(
     retry: { baseDelayMs: -100 }
   }
 );
+
+// Throws immediately: "retry.maxAttempts must be an integer"
+await this.retry(() => fetch(url), { maxAttempts: 2.5 });
+
+// Throws immediately: "retry.baseDelayMs must be <= retry.maxDelayMs"
+// because baseDelayMs: 5000 exceeds the default maxDelayMs: 3000
+await this.queue("sendEmail", data, {
+  retry: { baseDelayMs: 5000 }
+});
 ```
+
+Validation resolves partial options against class-level or built-in defaults before checking cross-field constraints. This means `{ baseDelayMs: 5000 }` is caught immediately when the resolved `maxDelayMs` is 3000, rather than failing later at execution time.
 
 ## Default Behavior
 
@@ -273,11 +284,11 @@ await this.schedule(
 
 ```typescript
 interface RetryOptions {
-  /** Maximum number of attempts (including the first). Default: 3 */
+  /** Maximum number of attempts (including the first). Must be an integer >= 1. Default: 3 */
   maxAttempts?: number;
-  /** Base delay in milliseconds for exponential backoff. Default: 100 */
+  /** Base delay in milliseconds for exponential backoff. Must be > 0 and <= maxDelayMs. Default: 100 */
   baseDelayMs?: number;
-  /** Maximum delay cap in milliseconds. Default: 3000 */
+  /** Maximum delay cap in milliseconds. Must be > 0. Default: 3000 */
   maxDelayMs?: number;
 }
 ```
@@ -422,6 +433,7 @@ class MyAgent extends Agent {
 
 - **No dead-letter queue.** If a queued or scheduled task fails all retry attempts, it is removed. Implement your own persistence if you need to track failed tasks.
 - **Retry delays block the agent.** During the backoff delay, the Durable Object is awake but idle. For short delays (under 3 seconds) this is fine. For longer recovery times, use `this.schedule()` instead.
+- **Queue retries are head-of-line blocking.** Queue items are processed sequentially. If one item is being retried with long delays, it blocks all subsequent items. If you need independent retry behavior, use `this.retry()` inside the callback rather than per-task retry options on `queue()`.
 - **No circuit breaker.** The retry system does not track failure rates across calls. If a service is persistently down, each task will exhaust its retry budget independently.
 - **`shouldRetry` is only available on `this.retry()`.** The `shouldRetry` predicate cannot be used with `schedule()` or `queue()` because functions cannot be serialized to the database. For scheduled/queued tasks, handle non-retryable errors inside the callback itself.
 

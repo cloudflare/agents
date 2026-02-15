@@ -30,7 +30,8 @@ describe("retry integration", () => {
 
     it("throws last error when retries are exhausted", async () => {
       const stub = await getAgentByName(env.TestRetryAgent, "retry-exhausted");
-      await expect(stub.retryExhausted()).rejects.toThrow("always-fail-2");
+      const { error } = await stub.retryExhausted();
+      expect(error).toBe("always-fail-2");
     });
   });
 
@@ -42,7 +43,11 @@ describe("retry integration", () => {
         env.TestRetryAgent,
         "should-retry-transient"
       );
-      const { result, attempts } = await stub.retryWithShouldRetry(2, false);
+      const { result, attempts, error } = await stub.retryWithShouldRetry(
+        2,
+        false
+      );
+      expect(error).toBe("");
       expect(result).toBe("ok-3");
       expect(attempts).toEqual([1, 2, 3]);
     });
@@ -52,9 +57,20 @@ describe("retry integration", () => {
         env.TestRetryAgent,
         "should-retry-permanent"
       );
-      await expect(stub.retryWithShouldRetry(1, true)).rejects.toThrow(
-        "permanent-1"
+      const { error } = await stub.retryWithShouldRetry(1, true);
+      expect(error).toBe("permanent-1");
+    });
+
+    it("receives the next attempt number", async () => {
+      const stub = await getAgentByName(
+        env.TestRetryAgent,
+        "should-retry-attempt-number"
       );
+      const { result, receivedAttempts } =
+        await stub.retryWithAttemptAwareShouldRetry();
+      expect(result).toBe("ok-4");
+      // shouldRetry is called before attempts 2, 3, 4
+      expect(receivedAttempts).toEqual([2, 3, 4]);
     });
   });
 
@@ -96,6 +112,18 @@ describe("retry integration", () => {
       };
       const persisted = await stub.enqueueAndGetRetryOptions(retryOpts);
       expect(persisted).toEqual(retryOpts);
+    });
+
+    it("persists retry options on multiple queued items via getQueues", async () => {
+      const stub = await getAgentByName(
+        env.TestRetryAgent,
+        "queue-retry-get-queues"
+      );
+      const retryOptions = await stub.enqueueMultipleAndGetRetryOptions();
+      expect(retryOptions).toEqual([
+        { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1000 },
+        { maxAttempts: 7, baseDelayMs: 200, maxDelayMs: 5000 }
+      ]);
     });
   });
 
@@ -145,9 +173,8 @@ describe("retry integration", () => {
   describe("eager validation", () => {
     it("rejects invalid retry options on queue()", async () => {
       const stub = await getAgentByName(env.TestRetryAgent, "validate-queue");
-      await expect(stub.enqueueWithInvalidRetry()).rejects.toThrow(
-        "retry.maxAttempts must be >= 1"
-      );
+      const { error } = await stub.enqueueWithInvalidRetry();
+      expect(error).toBe("retry.maxAttempts must be >= 1");
     });
 
     it("rejects invalid retry options on schedule()", async () => {
@@ -155,9 +182,27 @@ describe("retry integration", () => {
         env.TestRetryAgent,
         "validate-schedule"
       );
-      await expect(stub.scheduleWithInvalidRetry()).rejects.toThrow(
-        "retry.maxAttempts must be >= 1"
+      const { error } = await stub.scheduleWithInvalidRetry();
+      expect(error).toBe("retry.maxAttempts must be >= 1");
+    });
+
+    it("rejects cross-field invalid options resolved against defaults", async () => {
+      const stub = await getAgentByName(
+        env.TestRetryAgent,
+        "validate-cross-field"
       );
+      // baseDelayMs: 5000 with default maxDelayMs: 3000 should fail
+      const { error } = await stub.enqueueWithCrossFieldInvalidRetry();
+      expect(error).toBe("retry.baseDelayMs must be <= retry.maxDelayMs");
+    });
+
+    it("rejects fractional maxAttempts on this.retry()", async () => {
+      const stub = await getAgentByName(
+        env.TestRetryAgent,
+        "validate-fractional"
+      );
+      const { error } = await stub.retryWithFractionalAttempts();
+      expect(error).toBe("retry.maxAttempts must be an integer");
     });
   });
 
@@ -179,9 +224,8 @@ describe("retry integration", () => {
         env.TestRetryDefaultsAgent,
         "defaults-exhaust"
       );
-      await expect(stub.retryExceedingDefaults()).rejects.toThrow(
-        "always-fail-5"
-      );
+      const { error } = await stub.retryExceedingDefaults();
+      expect(error).toBe("always-fail-5");
     });
 
     it("allows per-call override of class-level defaults", async () => {

@@ -381,6 +381,34 @@ export interface AgentStaticOptions {
   retry?: RetryOptions;
 }
 
+/**
+ * Parse the raw `retry_options` TEXT column from a SQLite row into a
+ * typed `RetryOptions` object, or `undefined` if not set.
+ */
+function parseRetryOptions(
+  row: Record<string, unknown>
+): RetryOptions | undefined {
+  const raw = row.retry_options;
+  if (typeof raw !== "string") return undefined;
+  return JSON.parse(raw) as RetryOptions;
+}
+
+/**
+ * Resolve per-task retry options against class-level defaults and call
+ * `tryN`. This is the shared retry-execution path used by both queue
+ * flush and schedule alarm handlers.
+ */
+function resolveRetryConfig(
+  taskRetry: RetryOptions | undefined,
+  defaults: Required<RetryOptions>
+): { maxAttempts: number; baseDelayMs: number; maxDelayMs: number } {
+  return {
+    maxAttempts: taskRetry?.maxAttempts ?? defaults.maxAttempts,
+    baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
+    maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
+  };
+}
+
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
 >(): {
@@ -568,12 +596,16 @@ export class Agent<
   static options: AgentStaticOptions = { hibernate: true };
 
   /**
-   * Resolved options (merges defaults with subclass overrides)
+   * Resolved options (merges defaults with subclass overrides).
+   * Cached after first access — static options never change during the
+   * lifetime of a Durable Object instance.
    */
+  private _cachedOptions?: ResolvedAgentOptions;
   private get _resolvedOptions(): ResolvedAgentOptions {
+    if (this._cachedOptions) return this._cachedOptions;
     const ctor = this.constructor as typeof Agent;
     const userRetry = ctor.options?.retry;
-    return {
+    this._cachedOptions = {
       hibernate:
         ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
       sendIdentityOnConnect:
@@ -593,6 +625,7 @@ export class Agent<
           userRetry?.maxDelayMs ?? DEFAULT_AGENT_STATIC_OPTIONS.retry.maxDelayMs
       }
     };
+    return this._cachedOptions;
   }
 
   /**
@@ -1587,24 +1620,25 @@ export class Agent<
    * @param options.maxAttempts Maximum number of attempts (including the first). Falls back to static options, then 3.
    * @param options.baseDelayMs Base delay in ms for exponential backoff. Falls back to static options, then 100.
    * @param options.maxDelayMs Maximum delay cap in ms. Falls back to static options, then 3000.
-   * @param options.shouldRetry Predicate called with the error. Return false to stop retrying immediately. Default: retry all errors.
+   * @param options.shouldRetry Predicate called with the error and next attempt number. Return false to stop retrying immediately. Default: retry all errors.
    * @returns The result of fn on success.
    * @throws The last error if all attempts fail or shouldRetry returns false.
    */
   async retry<T>(
     fn: (attempt: number) => Promise<T>,
     options?: RetryOptions & {
-      /** Return false to stop retrying a specific error. Default: retry all errors. */
-      shouldRetry?: (err: unknown) => boolean;
+      /** Return false to stop retrying a specific error. Receives the error and the next attempt number. Default: retry all errors. */
+      shouldRetry?: (err: unknown, nextAttempt: number) => boolean;
     }
   ): Promise<T> {
     const defaults = this._resolvedOptions.retry;
+    if (options) {
+      validateRetryOptions(options, defaults);
+    }
     return tryN(options?.maxAttempts ?? defaults.maxAttempts, fn, {
       baseDelayMs: options?.baseDelayMs ?? defaults.baseDelayMs,
       maxDelayMs: options?.maxDelayMs ?? defaults.maxDelayMs,
-      isRetryable: options?.shouldRetry
-        ? (err) => options.shouldRetry!(err)
-        : undefined
+      shouldRetry: options?.shouldRetry
     });
   }
 
@@ -1631,7 +1665,7 @@ export class Agent<
     }
 
     if (options?.retry) {
-      validateRetryOptions(options.retry);
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
     }
 
     const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
@@ -1682,21 +1716,33 @@ export class Agent<
               email
             },
             async () => {
-              const rawRetryOptions = (
-                row as unknown as { retry_options?: string }
-              ).retry_options;
-              const retryOpts: RetryOptions = rawRetryOptions
-                ? JSON.parse(rawRetryOptions)
-                : {};
-              const defaults = this._resolvedOptions.retry;
-              const maxAttempts = retryOpts.maxAttempts ?? defaults.maxAttempts;
-              const baseDelayMs = retryOpts.baseDelayMs ?? defaults.baseDelayMs;
-              const maxDelayMs = retryOpts.maxDelayMs ?? defaults.maxDelayMs;
+              const retryOpts = parseRetryOptions(
+                row as unknown as Record<string, unknown>
+              );
+              const { maxAttempts, baseDelayMs, maxDelayMs } =
+                resolveRetryConfig(retryOpts, this._resolvedOptions.retry);
               const parsedPayload = JSON.parse(row.payload as string);
               try {
                 await tryN(
                   maxAttempts,
-                  async () => {
+                  async (attempt) => {
+                    if (attempt > 1) {
+                      this.observability?.emit(
+                        {
+                          displayMessage: `Retrying queue callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
+                          id: nanoid(),
+                          payload: {
+                            callback: row.callback,
+                            id: row.id,
+                            attempt,
+                            maxAttempts
+                          },
+                          timestamp: Date.now(),
+                          type: "queue:retry"
+                        },
+                        this.ctx
+                      );
+                    }
                     await (
                       callback as (
                         payload: unknown,
@@ -1762,12 +1808,10 @@ export class Agent<
     `;
     if (!result || result.length === 0) return undefined;
     const row = result[0];
-    const rawRetry = (row as unknown as { retry_options?: string })
-      .retry_options;
     return {
       ...row,
       payload: JSON.parse(row.payload as unknown as string),
-      retry: rawRetry ? JSON.parse(rawRetry) : undefined
+      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
     };
   }
 
@@ -1785,15 +1829,11 @@ export class Agent<
       .filter(
         (row) => JSON.parse(row.payload as unknown as string)[key] === value
       )
-      .map((row) => {
-        const rawRetry = (row as unknown as { retry_options?: string })
-          .retry_options;
-        return {
-          ...row,
-          payload: JSON.parse(row.payload as unknown as string),
-          retry: rawRetry ? JSON.parse(rawRetry) : undefined
-        };
-      });
+      .map((row) => ({
+        ...row,
+        payload: JSON.parse(row.payload as unknown as string),
+        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
+      }));
   }
 
   /**
@@ -1815,7 +1855,7 @@ export class Agent<
     const id = nanoid(9);
 
     if (options?.retry) {
-      validateRetryOptions(options.retry);
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
     }
 
     const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
@@ -1964,7 +2004,7 @@ export class Agent<
     }
 
     if (options?.retry) {
-      validateRetryOptions(options.retry);
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
     }
 
     const id = nanoid(9);
@@ -2021,12 +2061,10 @@ export class Agent<
       return undefined;
     }
     const row = result[0];
-    const rawRetry = (row as unknown as { retry_options?: string })
-      .retry_options;
     return {
       ...row,
       payload: JSON.parse(row.payload) as T,
-      retry: rawRetry ? JSON.parse(rawRetry) : undefined
+      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
     };
   }
 
@@ -2069,15 +2107,11 @@ export class Agent<
     const result = this.ctx.storage.sql
       .exec(query, ...params)
       .toArray()
-      .map((row) => {
-        const rawRetry = (row as unknown as { retry_options?: string })
-          .retry_options;
-        return {
-          ...row,
-          payload: JSON.parse(row.payload as string) as T,
-          retry: rawRetry ? JSON.parse(rawRetry) : undefined
-        };
-      }) as Schedule<T>[];
+      .map((row) => ({
+        ...row,
+        payload: JSON.parse(row.payload as string) as T,
+        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
+      })) as Schedule<T>[];
 
     return result;
   }
@@ -2190,16 +2224,13 @@ export class Agent<
             email: undefined
           },
           async () => {
-            const rawRetryOptions = (
-              row as unknown as { retry_options?: string }
-            ).retry_options;
-            const retryOpts: RetryOptions = rawRetryOptions
-              ? JSON.parse(rawRetryOptions)
-              : {};
-            const defaults = this._resolvedOptions.retry;
-            const maxAttempts = retryOpts.maxAttempts ?? defaults.maxAttempts;
-            const baseDelayMs = retryOpts.baseDelayMs ?? defaults.baseDelayMs;
-            const maxDelayMs = retryOpts.maxDelayMs ?? defaults.maxDelayMs;
+            const retryOpts = parseRetryOptions(
+              row as unknown as Record<string, unknown>
+            );
+            const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
+              retryOpts,
+              this._resolvedOptions.retry
+            );
             const parsedPayload = JSON.parse(row.payload as string);
 
             try {
@@ -2219,7 +2250,24 @@ export class Agent<
 
               await tryN(
                 maxAttempts,
-                async () => {
+                async (attempt) => {
+                  if (attempt > 1) {
+                    this.observability?.emit(
+                      {
+                        displayMessage: `Retrying schedule callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
+                        id: nanoid(),
+                        payload: {
+                          callback: row.callback,
+                          id: row.id,
+                          attempt,
+                          maxAttempts
+                        },
+                        timestamp: Date.now(),
+                        type: "schedule:retry"
+                      },
+                      this.ctx
+                    );
+                  }
                   await (
                     callback as (
                       payload: unknown,
@@ -2493,7 +2541,7 @@ export class Agent<
 
     const instance = await workflow.get(workflowId);
     await tryN(3, async () => instance.sendEvent(event), {
-      isRetryable: isErrorRetryable,
+      shouldRetry: isErrorRetryable,
       baseDelayMs: 200,
       maxDelayMs: 3000
     });
@@ -2644,7 +2692,7 @@ export class Agent<
     const instance = await workflow.get(workflowId);
     try {
       await tryN(3, async () => instance.terminate(), {
-        isRetryable: isErrorRetryable,
+        shouldRetry: isErrorRetryable,
         baseDelayMs: 200,
         maxDelayMs: 3000
       });
@@ -2710,7 +2758,7 @@ export class Agent<
     const instance = await workflow.get(workflowId);
     try {
       await tryN(3, async () => instance.pause(), {
-        isRetryable: isErrorRetryable,
+        shouldRetry: isErrorRetryable,
         baseDelayMs: 200,
         maxDelayMs: 3000
       });
@@ -2774,7 +2822,7 @@ export class Agent<
     const instance = await workflow.get(workflowId);
     try {
       await tryN(3, async () => instance.resume(), {
-        isRetryable: isErrorRetryable,
+        shouldRetry: isErrorRetryable,
         baseDelayMs: 200,
         maxDelayMs: 3000
       });
@@ -2850,7 +2898,7 @@ export class Agent<
     const instance = await workflow.get(workflowId);
     try {
       await tryN(3, async () => instance.restart(), {
-        isRetryable: isErrorRetryable,
+        shouldRetry: isErrorRetryable,
         baseDelayMs: 200,
         maxDelayMs: 3000
       });

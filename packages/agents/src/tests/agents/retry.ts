@@ -3,6 +3,12 @@ import { Agent, callable, type RetryOptions } from "../../index.ts";
 /**
  * Test agent with default static options (no retry override).
  * Uses the framework defaults: maxAttempts 3, baseDelayMs 100, maxDelayMs 3000.
+ *
+ * Methods that test error paths catch errors internally and return them as
+ * `{ error: string }` results. This avoids unhandled promise rejections in
+ * the workerd runtime — thrown errors in @callable methods cross the RPC
+ * boundary and appear as uncaught rejections to the runtime even when the
+ * test correctly uses .rejects.toThrow().
  */
 export class TestRetryAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
@@ -29,43 +35,52 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
-  async retryExhausted(): Promise<string> {
-    return this.retry(
-      async (attempt) => {
-        throw new Error(`always-fail-${attempt}`);
-      },
-      { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 10 }
-    );
+  async retryExhausted(): Promise<{ error: string }> {
+    try {
+      await this.retry(
+        async (attempt) => {
+          throw new Error(`always-fail-${attempt}`);
+        },
+        { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 10 }
+      );
+      return { error: "" };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
   }
 
   @callable()
   async retryWithShouldRetry(
     failCount: number,
     permanent: boolean
-  ): Promise<{ result: string; attempts: number[] }> {
+  ): Promise<{ result: string; attempts: number[]; error: string }> {
     const attempts: number[] = [];
-    const result = await this.retry(
-      async (attempt) => {
-        attempts.push(attempt);
-        if (attempt <= failCount) {
-          const err = new Error(
-            `${permanent ? "permanent" : "transient"}-${attempt}`
-          );
-          (err as unknown as { permanent: boolean }).permanent = permanent;
-          throw err;
+    try {
+      const result = await this.retry(
+        async (attempt) => {
+          attempts.push(attempt);
+          if (attempt <= failCount) {
+            const err = new Error(
+              `${permanent ? "permanent" : "transient"}-${attempt}`
+            );
+            (err as unknown as { permanent: boolean }).permanent = permanent;
+            throw err;
+          }
+          return `ok-${attempt}`;
+        },
+        {
+          maxAttempts: 10,
+          baseDelayMs: 1,
+          maxDelayMs: 10,
+          shouldRetry: (err) => {
+            return !(err as { permanent?: boolean }).permanent;
+          }
         }
-        return `ok-${attempt}`;
-      },
-      {
-        maxAttempts: 10,
-        baseDelayMs: 1,
-        maxDelayMs: 10,
-        shouldRetry: (err) => {
-          return !(err as { permanent?: boolean }).permanent;
-        }
-      }
-    );
-    return { result, attempts };
+      );
+      return { result, attempts, error: "" };
+    } catch (e) {
+      return { result: "", attempts, error: (e as Error).message };
+    }
   }
 
   // ── queue() with retry ───────────────────────────────────────────
@@ -178,21 +193,113 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     // no-op
   }
 
+  // ── getQueues with retry options ──────────────────────────────────
+
+  @callable()
+  enqueueMultipleAndGetRetryOptions(): (RetryOptions | undefined)[] {
+    // Use synchronous queue calls (no await) so items are inserted into
+    // SQLite before the background _flushQueue can dequeue any of them.
+    // Each queue() call is async but the SQL INSERT is synchronous —
+    // awaiting would yield to the microtask queue and let the background
+    // flush consume items before we can read them.
+    void this.queue(
+      "testQueueNoop",
+      { group: "a" },
+      {
+        retry: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1000 }
+      }
+    );
+    void this.queue(
+      "testQueueNoop",
+      { group: "a" },
+      {
+        retry: { maxAttempts: 7, baseDelayMs: 200, maxDelayMs: 5000 }
+      }
+    );
+    void this.queue("testQueueNoop", { group: "b" });
+    const items = this.getQueues("group", "a");
+    return items.map((item) => item.retry);
+  }
+
+  // ── shouldRetry with attempt number ─────────────────────────────
+
+  @callable()
+  async retryWithAttemptAwareShouldRetry(): Promise<{
+    result: string;
+    receivedAttempts: number[];
+  }> {
+    const receivedAttempts: number[] = [];
+    const result = await this.retry(
+      async (attempt) => {
+        if (attempt <= 3) {
+          throw new Error(`fail-${attempt}`);
+        }
+        return `ok-${attempt}`;
+      },
+      {
+        maxAttempts: 10,
+        baseDelayMs: 1,
+        maxDelayMs: 10,
+        shouldRetry: (_err, nextAttempt) => {
+          receivedAttempts.push(nextAttempt);
+          return true;
+        }
+      }
+    );
+    return { result, receivedAttempts };
+  }
+
   // ── validation ───────────────────────────────────────────────────
 
   @callable()
-  async enqueueWithInvalidRetry(): Promise<string> {
-    return this.queue("testQueueNoop", "test", {
-      retry: { maxAttempts: 0 }
-    });
+  async enqueueWithInvalidRetry(): Promise<{ error: string }> {
+    try {
+      await this.queue("testQueueNoop", "test", {
+        retry: { maxAttempts: 0 }
+      });
+      return { error: "" };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
   }
 
   @callable()
-  async scheduleWithInvalidRetry(): Promise<string> {
-    const s = await this.schedule(60, "testScheduleNoop", "test", {
-      retry: { maxAttempts: -1 }
-    });
-    return s.id;
+  async scheduleWithInvalidRetry(): Promise<{ error: string }> {
+    try {
+      await this.schedule(60, "testScheduleNoop", "test", {
+        retry: { maxAttempts: -1 }
+      });
+      return { error: "" };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
+
+  @callable()
+  async enqueueWithCrossFieldInvalidRetry(): Promise<{ error: string }> {
+    try {
+      // baseDelayMs: 5000 exceeds default maxDelayMs: 3000
+      await this.queue("testQueueNoop", "test", {
+        retry: { baseDelayMs: 5000 }
+      });
+      return { error: "" };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
+
+  @callable()
+  async retryWithFractionalAttempts(): Promise<{ error: string }> {
+    try {
+      await this.retry(async () => "ok", {
+        maxAttempts: 2.7,
+        baseDelayMs: 1,
+        maxDelayMs: 10
+      });
+      return { error: "" };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
   }
 }
 
@@ -223,11 +330,16 @@ export class TestRetryDefaultsAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
-  async retryExceedingDefaults(): Promise<string> {
-    // With class-level maxAttempts=5, always throwing should exhaust after 5
-    return this.retry(async (attempt) => {
-      throw new Error(`always-fail-${attempt}`);
-    });
+  async retryExceedingDefaults(): Promise<{ error: string }> {
+    try {
+      // With class-level maxAttempts=5, always throwing should exhaust after 5
+      await this.retry(async (attempt) => {
+        throw new Error(`always-fail-${attempt}`);
+      });
+      return { error: "" };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
   }
 
   @callable()

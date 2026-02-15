@@ -11,25 +11,34 @@ export interface RetryOptions {
 }
 
 /**
- * Internal options for tryN -- extends RetryOptions with an isRetryable predicate.
+ * Internal options for tryN -- extends RetryOptions with a shouldRetry predicate.
  */
 interface TryNOptions extends RetryOptions {
   /**
-   * Predicate to determine if an error is retryable.
+   * Predicate to determine if an error should be retried.
+   * Receives the error and the next attempt number (so callers can
+   * make attempt-aware decisions).
    * If not provided, all errors are retried.
    */
-  isRetryable?: (err: unknown, nextAttempt: number) => boolean;
+  shouldRetry?: (err: unknown, nextAttempt: number) => boolean;
 }
 
 /**
  * Validate retry options eagerly so invalid config fails at enqueue/schedule time
- * rather than at execution time. Checks individual field ranges and cross-field
- * constraints when both baseDelayMs and maxDelayMs are provided.
+ * rather than at execution time. Checks individual field ranges, enforces integer
+ * maxAttempts, and validates cross-field constraints after resolving against
+ * defaults when provided.
  */
-export function validateRetryOptions(options: RetryOptions): void {
+export function validateRetryOptions(
+  options: RetryOptions,
+  defaults?: Required<RetryOptions>
+): void {
   if (options.maxAttempts !== undefined) {
     if (!Number.isFinite(options.maxAttempts) || options.maxAttempts < 1) {
       throw new Error("retry.maxAttempts must be >= 1");
+    }
+    if (!Number.isInteger(options.maxAttempts)) {
+      throw new Error("retry.maxAttempts must be an integer");
     }
   }
   if (options.baseDelayMs !== undefined) {
@@ -42,10 +51,17 @@ export function validateRetryOptions(options: RetryOptions): void {
       throw new Error("retry.maxDelayMs must be > 0");
     }
   }
-  if (options.baseDelayMs !== undefined && options.maxDelayMs !== undefined) {
-    if (options.baseDelayMs > options.maxDelayMs) {
-      throw new Error("retry.baseDelayMs must be <= retry.maxDelayMs");
-    }
+
+  // Resolve against defaults (when provided) so that cross-field checks
+  // catch e.g. { baseDelayMs: 5000 } against default maxDelayMs: 3000.
+  const resolvedBase = options.baseDelayMs ?? defaults?.baseDelayMs;
+  const resolvedMax = options.maxDelayMs ?? defaults?.maxDelayMs;
+  if (
+    resolvedBase !== undefined &&
+    resolvedMax !== undefined &&
+    resolvedBase > resolvedMax
+  ) {
+    throw new Error("retry.baseDelayMs must be <= retry.maxDelayMs");
   }
 }
 
@@ -71,30 +87,37 @@ export function jitterBackoff(
 /**
  * Retry an async function up to `n` total attempts with jittered exponential backoff.
  *
- * @param n Total number of attempts (must be >= 1).
+ * @param n Total number of attempts (must be a finite integer >= 1).
  * @param fn The async function to retry. Receives the current attempt number (1-indexed).
  * @param options Retry configuration.
  * @returns The result of `fn` on success.
- * @throws The last error if all attempts fail or `isRetryable` returns false.
+ * @throws The last error if all attempts fail or `shouldRetry` returns false.
  */
 export async function tryN<T>(
   n: number,
   fn: (attempt: number) => Promise<T>,
   options?: TryNOptions
 ): Promise<T> {
-  if (n <= 0) {
-    throw new Error("n must be greater than 0");
+  if (!Number.isFinite(n) || n < 1) {
+    throw new Error("retry.maxAttempts must be >= 1");
   }
   n = Math.floor(n);
 
-  const baseDelayMs = Math.floor(options?.baseDelayMs ?? 100);
-  const maxDelayMs = Math.floor(options?.maxDelayMs ?? 3000);
+  const rawBase = options?.baseDelayMs ?? 100;
+  const rawMax = options?.maxDelayMs ?? 3000;
 
-  if (baseDelayMs <= 0 || maxDelayMs <= 0) {
-    throw new Error("baseDelayMs and maxDelayMs must be greater than 0");
+  if (!Number.isFinite(rawBase) || rawBase <= 0) {
+    throw new Error("retry.baseDelayMs must be > 0");
   }
+  if (!Number.isFinite(rawMax) || rawMax <= 0) {
+    throw new Error("retry.maxDelayMs must be > 0");
+  }
+
+  const baseDelayMs = Math.floor(rawBase);
+  const maxDelayMs = Math.floor(rawMax);
+
   if (baseDelayMs > maxDelayMs) {
-    throw new Error("baseDelayMs must be less than or equal to maxDelayMs");
+    throw new Error("retry.baseDelayMs must be <= retry.maxDelayMs");
   }
 
   let attempt = 1;
@@ -105,7 +128,7 @@ export async function tryN<T>(
       const nextAttempt = attempt + 1;
       if (
         nextAttempt > n ||
-        (options?.isRetryable && !options.isRetryable(err, nextAttempt))
+        (options?.shouldRetry && !options.shouldRetry(err, nextAttempt))
       ) {
         throw err;
       }
