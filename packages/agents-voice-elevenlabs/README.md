@@ -10,11 +10,14 @@ npm install @cloudflare/agents-voice-elevenlabs
 
 ## Usage
 
-Override `synthesize()` on your `VoiceAgent` subclass:
+Override `synthesize()` on your voice agent:
 
 ```typescript
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
+import { Agent } from "agents";
+import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
 import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
+
+const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
   #tts: ElevenLabsTTS | null = null;

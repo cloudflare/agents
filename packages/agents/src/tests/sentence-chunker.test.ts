@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { SentenceChunker } from "../sentence-chunker";
+import { SentenceChunker } from "../experimental/voice/sentence-chunker";
 
 describe("SentenceChunker", () => {
   let chunker: SentenceChunker;

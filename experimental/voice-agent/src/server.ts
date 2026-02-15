@@ -1,9 +1,16 @@
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
-import { routeAgentRequest, type Connection } from "agents";
+import {
+  Agent,
+  routeAgentRequest,
+  type Connection,
+  type WSMessage
+} from "agents";
+import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
 import { streamText, tool, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
+
+const VoiceAgent = withVoice(Agent);
 
 const SYSTEM_PROMPT = `You are a helpful voice assistant running on Cloudflare Workers. Keep your responses concise and conversational — you're being spoken aloud, not read. Aim for 1-3 sentences unless the user asks for more detail. Be warm and natural.
 
@@ -15,6 +22,10 @@ You have tools available:
 Use tools when the user's request matches. After calling a tool, incorporate the result naturally into your spoken response.`;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
+  // Disable hibernation — voice agents must stay alive during active calls
+  // to preserve audio buffers and in-flight pipeline state.
+  static options = { hibernate: false };
+
   /**
    * Custom TTS: uses ElevenLabs when ELEVENLABS_API_KEY is set,
    * otherwise falls back to the default Workers AI TTS.
@@ -38,6 +49,100 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     if (!tts) return super.synthesize(text);
     return tts.synthesize(text);
   }
+
+  // Enable streaming TTS when using ElevenLabs
+  async *synthesizeStream(text: string) {
+    const tts = this.#getTTS();
+    if (!tts) return;
+    yield* tts.synthesizeStream(text);
+  }
+
+  // --- Single-speaker enforcement ---
+  //
+  // Only one connection can be the active speaker at a time. This prevents
+  // two browser tabs from capturing audio simultaneously. Other connections
+  // can still observe transcripts and send text messages.
+
+  #activeSpeakerId: string | null = null;
+
+  beforeCallStart(connection: Connection): boolean {
+    if (this.#activeSpeakerId && this.#activeSpeakerId !== connection.id) {
+      connection.send(
+        JSON.stringify({
+          type: "speaker_conflict",
+          message:
+            "Another session is currently the active speaker. You can kick them to take over."
+        })
+      );
+      return false;
+    }
+    this.#activeSpeakerId = connection.id;
+    return true;
+  }
+
+  onCallEnd(connection: Connection) {
+    if (this.#activeSpeakerId === connection.id) {
+      this.#activeSpeakerId = null;
+    }
+  }
+
+  onClose(connection: Connection) {
+    if (this.#activeSpeakerId === connection.id) {
+      this.#activeSpeakerId = null;
+    }
+    super.onClose(connection);
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    // Intercept kick_speaker before the voice protocol handles it
+    if (typeof message === "string") {
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed.type === "kick_speaker") {
+          this.#handleKick(connection);
+          return;
+        }
+      } catch {
+        // not JSON — fall through
+      }
+    }
+    super.onMessage(connection, message);
+  }
+
+  #handleKick(requester: Connection) {
+    if (!this.#activeSpeakerId) {
+      // No active speaker — nothing to kick
+      return;
+    }
+
+    const activeConn = [...this.getConnections()].find(
+      (c) => c.id === this.#activeSpeakerId
+    );
+
+    if (activeConn) {
+      // Notify the kicked connection
+      activeConn.send(
+        JSON.stringify({
+          type: "kicked",
+          message: "Another session has taken over as the active speaker."
+        })
+      );
+      // Force end their call (sends end_call internally)
+      activeConn.send(JSON.stringify({ type: "end_call" }));
+    }
+
+    this.#activeSpeakerId = null;
+
+    // Notify the requester they can now start
+    requester.send(
+      JSON.stringify({
+        type: "speaker_available",
+        message: "Previous speaker has been disconnected. You can start a call."
+      })
+    );
+  }
+
+  // --- Voice agent logic ---
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const workersAi = createWorkersAI({ binding: this.env.AI });

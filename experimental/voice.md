@@ -1,4 +1,6 @@
-# Voice Agents
+# Voice Agents (Experimental)
+
+> **This feature is experimental.** The API is under active development and will break between releases. Import paths are under `agents/experimental/voice`. Pin your `agents` version and expect to update your code when upgrading.
 
 Build voice agents that users can talk to in real time. The Agents SDK provides a complete voice pipeline — speech-to-text, text-to-speech, turn detection, streaming audio, interruption handling, and conversation persistence — so you can focus on your agent's logic.
 
@@ -8,13 +10,15 @@ All AI models run via Workers AI bindings. No external API keys are required for
 
 ### Server
 
-Extend `VoiceAgent` from `agents/voice` and implement `onTurn()`:
+Apply the `withVoice` mixin from `agents/experimental/voice` and implement `onTurn()`:
 
 ```ts
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
-import { routeAgentRequest } from "agents";
+import { Agent, routeAgentRequest } from "agents";
+import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
+
+const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {
@@ -52,7 +56,7 @@ export default {
 Use the `useVoiceAgent` hook from `agents/voice-react`:
 
 ```tsx
-import { useVoiceAgent } from "agents/voice-react";
+import { useVoiceAgent } from "agents/experimental/voice-react";
 
 function App() {
   const { status, transcript, connected, startCall, endCall, toggleMute } =
@@ -85,7 +89,7 @@ function App() {
 Use the `VoiceClient` class from `agents/voice-client`:
 
 ```ts
-import { VoiceClient } from "agents/voice-client";
+import { VoiceClient } from "agents/experimental/voice-client";
 
 const client = new VoiceClient({ agent: "my-agent" });
 
@@ -130,8 +134,8 @@ A single WebSocket connection carries everything: binary audio frames, JSON stat
 
 ```
 Browser                             VoiceAgent (Durable Object)
-┌──────────┐   binary PCM frames   ┌──────────────────────────────┐
-│ Mic      │ ─────────────────────► │ Audio buffer (per connection) │
+┌──────────┐   binary PCM frames    ┌──────────────────────────────┐
+│ Mic      │ ─────────────────────► │ Audio buffer (per connection)│
 │ (16kHz)  │                        │   ↓                          │
 │          │   JSON: end_of_speech  │ VAD: smart-turn-v2           │
 │          │ ─────────────────────► │   ↓                          │
@@ -252,6 +256,31 @@ getConversationHistory(limit?: number): Array<{ role: string; content: string }>
 
 Load the most recent messages from SQLite. Defaults to `voiceOptions.historyLimit` (20).
 
+### beforeCallStart(connection) — optional
+
+```ts
+beforeCallStart(connection: Connection): boolean | Promise<boolean>
+```
+
+Called before the call pipeline starts. Return `false` to reject the call. Use this for single-speaker enforcement or authentication:
+
+```ts
+class MyAgent extends VoiceAgent<Env> {
+  #activeSpeaker: string | null = null;
+
+  beforeCallStart(connection: Connection): boolean {
+    if (this.#activeSpeaker && this.#activeSpeaker !== connection.id) {
+      connection.send(
+        JSON.stringify({ type: "error", message: "Another speaker is active." })
+      );
+      return false;
+    }
+    this.#activeSpeaker = connection.id;
+    return true;
+  }
+}
+```
+
 ### STT / TTS / VAD — overridable
 
 The default implementations use Workers AI. Override these methods to use custom providers:
@@ -269,25 +298,43 @@ async synthesize(text: string): Promise<ArrayBuffer | null>
 Text-to-speech. Default: `@cf/deepgram/aura-1` with speaker `asteria`.
 
 ```ts
+async *synthesizeStream(text: string): AsyncIterable<ArrayBuffer>
+```
+
+Streaming text-to-speech. When overridden, the pipeline sends audio chunks to the client as they arrive from the TTS provider, reducing time-to-first-audio within each sentence. If not overridden, the pipeline falls back to `synthesize()`.
+
+```ts
 async checkEndOfTurn(audioData: ArrayBuffer): Promise<VADResult>
 ```
 
 Voice activity detection. Default: `@cf/pipecat-ai/smart-turn-v2`. Returns `{ isComplete: boolean, probability: number }`.
 
-Example using a custom TTS provider:
+Example using ElevenLabs with streaming TTS:
 
 ```ts
+import { Agent } from "agents";
+import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
+import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
+
+const VoiceAgent = withVoice(Agent);
+
 class MyAgent extends VoiceAgent<Env> {
-  async synthesize(text: string): Promise<ArrayBuffer | null> {
-    const response = await fetch(
-      "https://api.elevenlabs.io/v1/text-to-speech/...",
-      {
-        method: "POST",
-        headers: { "xi-api-key": this.env.ELEVENLABS_KEY },
-        body: JSON.stringify({ text })
-      }
-    );
-    return response.arrayBuffer();
+  #tts: ElevenLabsTTS | null = null;
+
+  #getTTS() {
+    if (!this.#tts) {
+      this.#tts = new ElevenLabsTTS({ apiKey: this.env.ELEVENLABS_API_KEY });
+    }
+    return this.#tts;
+  }
+
+  async synthesize(text: string) {
+    return this.#getTTS().synthesize(text);
+  }
+
+  // Enable streaming TTS for lower latency:
+  async *synthesizeStream(text: string) {
+    yield* this.#getTTS().synthesizeStream(text);
   }
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
@@ -320,7 +367,7 @@ class MyAgent extends VoiceAgent<Env> {
 ### useVoiceAgent (React)
 
 ```ts
-import { useVoiceAgent } from "agents/voice-react";
+import { useVoiceAgent } from "agents/experimental/voice-react";
 
 const {
   status, // "idle" | "listening" | "thinking" | "speaking"
@@ -340,14 +387,38 @@ const {
   silenceThreshold: 0.01, // RMS below this = silence
   silenceDurationMs: 500, // Silence duration before end_of_speech
   interruptThreshold: 0.02, // RMS above this during playback = interrupt
-  interruptChunks: 2 // Consecutive high-RMS chunks to trigger interrupt
+  interruptChunks: 2, // Consecutive high-RMS chunks to trigger interrupt
+  onReconnect: () => {
+    // Called when the hook reconnects due to option changes
+    showToast("Reconnected to agent.");
+  }
+});
+```
+
+**Option changes trigger reconnect.** If `agent`, `name`, or `host` changes between renders, the hook automatically disconnects the old client, creates a new one, and reconnects. The `onReconnect` callback fires when this happens — use it to show a toast or notification.
+
+**Session management pattern.** Use `name` with a persistent session ID to ensure the same user always connects to the same agent instance (preserving conversation history across page reloads):
+
+```tsx
+function getSessionId() {
+  let id = localStorage.getItem("voice-session-id");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("voice-session-id", id);
+  }
+  return id;
+}
+
+const { startCall, ... } = useVoiceAgent({
+  agent: "my-agent",
+  name: getSessionId()
 });
 ```
 
 ### VoiceClient (vanilla JavaScript)
 
 ```ts
-import { VoiceClient } from "agents/voice-client";
+import { VoiceClient } from "agents/experimental/voice-client";
 
 const client = new VoiceClient({
   agent: "my-agent",
@@ -484,14 +555,31 @@ The default pipeline uses these Workers AI models, all accessed via the `AI` bin
 
 Override any model via `voiceOptions` or by overriding the corresponding method (`transcribe`, `synthesize`, `checkEndOfTurn`).
 
+## Hibernation
+
+By default, Durable Objects hibernate when no JavaScript is executing. During an active voice call, `VoiceAgent` starts a keepalive timer to prevent this. However, there are known edge cases where hibernation can disrupt voice calls (see `design/voice.md` for details).
+
+**For production voice agents, disable hibernation:**
+
+```ts
+class MyAgent extends VoiceAgent<Env> {
+  static options = { hibernate: false };
+  // ...
+}
+```
+
+This keeps the DO alive as long as it has connections, at the cost of billable duration. The keepalive timer is a best-effort mitigation when hibernation is enabled.
+
 ## Telephony (phone calls)
 
 Connect phone calls to your VoiceAgent using the `@cloudflare/agents-voice-twilio` adapter. The same agent that handles web voice and text chat can answer the phone.
 
 ```ts
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
-import { routeAgentRequest } from "agents";
+import { Agent, routeAgentRequest } from "agents";
+import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
 import { TwilioAdapter } from "@cloudflare/agents-voice-twilio";
+
+const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {
@@ -528,6 +616,21 @@ In Twilio, configure a TwiML webhook that streams media to your Worker:
 ```
 
 The adapter bridges Twilio's mulaw 8kHz audio to VoiceAgent's 16kHz PCM protocol automatically. Conversation history, state, tools, and scheduling are shared across all channels.
+
+**Important:** The Twilio adapter expects VoiceAgent to output 16kHz 16-bit mono PCM audio. The default Workers AI TTS returns MP3, which cannot be decoded to PCM in the Workers runtime. When using Twilio, configure your VoiceAgent with a TTS provider that outputs raw PCM, such as ElevenLabs with `outputFormat: "pcm_16000"`:
+
+```ts
+class MyTwilioAgent extends VoiceAgent<Env> {
+  #tts = new ElevenLabsTTS({
+    apiKey: this.env.ELEVENLABS_API_KEY,
+    outputFormat: "pcm_16000"
+  });
+
+  async synthesize(text: string) {
+    return this.#tts.synthesize(text);
+  }
+}
+```
 
 ## Agent handoffs
 
@@ -615,3 +718,113 @@ The SFU handles:
 The WebSocket Adapter bridges SFU audio tracks to WebSocket frames that your VoiceAgent can process. See the [Cloudflare Realtime SFU documentation](https://developers.cloudflare.com/realtime/sfu/) and the [WebSocket Adapter guide](https://developers.cloudflare.com/realtime/sfu/media-transport-adapters/websocket-adapter/) for setup instructions.
 
 Note that the SFU sends 48kHz stereo PCM (protobuf framed), which differs from the VoiceAgent's expected 16kHz mono PCM. You will need a resampling layer similar to the Twilio adapter.
+
+---
+
+## Known issues and remaining work
+
+### Hibernation bugs (fix before shipping)
+
+#### Bug 1: `onConnect` sends wrong status on wake
+
+After hibernation, `onConnect` sends `{ type: "status", status: "idle" }` to all connections. If a connection was mid-call, this incorrectly tells the client the call ended.
+
+**Root cause:** `#audioBuffers` is in-memory and lost on eviction. When the DO wakes, VoiceAgent sees no audio buffer and assumes no call is active.
+
+**Fix:** Persist call state in the WebSocket connection attachment. Durable Objects hibernation preserves WebSocket connections and their attachments (`serializeAttachment` / `deserializeAttachment`).
+
+```typescript
+// In #handleStartCall — persist call state on the connection:
+connection.serializeAttachment({
+  ...(connection.deserializeAttachment() ?? {}),
+  voiceCallActive: true
+});
+
+// In #handleEndCall — clear it:
+connection.serializeAttachment({
+  ...(connection.deserializeAttachment() ?? {}),
+  voiceCallActive: false
+});
+
+// In onConnect — check attachment before sending status:
+onConnect(connection: Connection) {
+  const attachment = connection.deserializeAttachment() as
+    | { voiceCallActive?: boolean }
+    | null;
+
+  if (attachment?.voiceCallActive) {
+    this.#audioBuffers.set(connection.id, []);
+    this.#startKeepalive(connection.id);
+    this.#sendJSON(connection, { type: "status", status: "listening" });
+    this.#sendJSON(connection, { type: "call_restored" });
+  } else {
+    this.#sendJSON(connection, { type: "status", status: "idle" });
+  }
+}
+```
+
+#### Bug 2: PartySocket reconnect does not restore call state
+
+When the WebSocket drops and PartySocket auto-reconnects, the client does not know a call was active. It sets `connected = true` and waits for the user to click "Start Call" again.
+
+**Root cause:** VoiceClient has no memory of call state across reconnects.
+
+**Fix:** Track call state in VoiceClient. On reconnect, if a call was active and the mic stream is still running, automatically re-send `start_call`. The mic `MediaStream` and AudioWorklet survive the WebSocket reconnect (they are tied to `AudioContext`, not the socket).
+
+```typescript
+// voice-client.ts
+
+#callWasActive = false;
+
+// In startCall():
+async startCall() {
+  // ... existing logic ...
+  this.#callWasActive = true;
+}
+
+// In endCall():
+endCall() {
+  this.#callWasActive = false;
+  // ... existing logic ...
+}
+
+// In socket.onopen — auto-restore on reconnect:
+socket.onopen = () => {
+  this.#connected = true;
+  this.#error = null;
+  this.#emit("connectionchange");
+  this.#emit("error");
+
+  if (this.#callWasActive && this.#stream) {
+    this.#socket?.send(JSON.stringify({ type: "start_call" }));
+  }
+};
+```
+
+The server-side fix (Bug 1) and client-side fix (Bug 2) are complementary:
+
+- DO hibernated and woke: `onConnect` detects previous call from attachment, sends `listening`
+- WebSocket dropped but DO stayed alive: `start_call` from client re-initializes buffer
+- Both paths converge on the same result: call active, mic capturing, server buffering
+
+#### Bug 3: Audio buffer loss on isolate crash
+
+**Status:** Accepted tradeoff, documented in `design/voice.md`.
+
+The keepalive timer prevents normal hibernation during calls. Buffers are only lost if the isolate crashes from an unhandled exception (rare). The pipeline handles empty/short buffers gracefully — returns to "listening" without processing. At most one utterance is lost.
+
+Persisting audio to SQLite/R2 would add latency to every audio chunk (32KB/s). Not worth the tradeoff.
+
+### Code quality improvements (non-blocking)
+
+#### `env.AI` fragile access pattern
+
+The AI binding is accessed via cast in three places in `voice.ts`. If `env.AI` is missing (user forgot the binding), this throws a cryptic `Cannot read properties of undefined`. Should be extracted into a helper with a clear error message.
+
+#### `onStart()` fragile override
+
+`onStart()` creates the `cf_voice_messages` table. If a user overrides `onStart()` and forgets `super.onStart()`, conversation history silently breaks. Should use lazy initialization instead — call `#ensureSchema()` at the start of `saveMessage()` and `getConversationHistory()`.
+
+### Post-push
+
+File a GitHub issue for the hibernation bugs (1 and 2 above). Title: "VoiceAgent: fix call recovery across hibernation and WebSocket reconnects". Reference this file and `design/voice.md`.
