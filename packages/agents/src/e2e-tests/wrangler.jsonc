@@ -1,0 +1,20 @@
+{
+  "name": "fiber-e2e-test",
+  "main": "worker.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "FiberTestAgent",
+        "class_name": "FiberTestAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["FiberTestAgent"]
+    }
+  ]
+}

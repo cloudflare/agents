@@ -1,0 +1,20 @@
+{
+  "name": "@cloudflare/agents-forever-fibers-example",
+  "description": "Demo showing durable fibers — checkpointing, eviction recovery, and progress tracking",
+  "author": "",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.1.18"
+  }
+}

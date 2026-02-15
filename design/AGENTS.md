@@ -69,12 +69,14 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 ## Current contents
 
-| File               | Type       | Scope                                                                        |
-| ------------------ | ---------- | ---------------------------------------------------------------------------- |
-| `visuals.md`       | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration |
-| `voice-livekit.md` | design doc | Competitive analysis of LiveKit Agents — architecture, gaps, strategy        |
-| `voice-pipecat.md` | design doc | Competitive analysis of Pipecat — pipeline model, gaps, strategy             |
-| `voice-vapi.md`    | design doc | Competitive analysis of Vapi — managed service, orchestration, strategy      |
+| File                      | Type       | Scope                                                                        |
+| ------------------------- | ---------- | ---------------------------------------------------------------------------- |
+| `readonly-connections.md` | design doc | Readonly connections — enforcement, storage wrapping, caveats                |
+| `retries.md`              | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs   |
+| `visuals.md`              | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration |
+| `voice-livekit.md`        | design doc | Competitive analysis of LiveKit Agents — architecture, gaps, strategy        |
+| `voice-pipecat.md`        | design doc | Competitive analysis of Pipecat — pipeline model, gaps, strategy             |
+| `voice-vapi.md`           | design doc | Competitive analysis of Vapi — managed service, orchestration, strategy      |
 
 ## Relationship to `/docs`
 

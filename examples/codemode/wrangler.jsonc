@@ -2,11 +2,7 @@
   "name": "codemode-demo",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": [
-    "nodejs_compat",
-    "experimental",
-    "enable_ctx_exports"
-  ],
+  "compatibility_flags": ["nodejs_compat", "experimental"],
   "assets": {
     "directory": "public"
   },

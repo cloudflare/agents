@@ -151,3 +151,117 @@ agent.call("nonExistentMethod");
 
 // @ts-expect-error requires parameters
 agent.call("updateState");
+
+// ============================================
+// DEEPLY NESTED TYPE TESTS
+// Verifies that deeply nested types (like AI SDK CoreMessage[])
+// don't hit TypeScript's recursion limit.
+// See: https://github.com/cloudflare/agents/issues/903
+// ============================================
+
+// Simulate deeply nested AI SDK-like types with discriminated unions
+interface TextPart {
+  type: "text";
+  text: string;
+  metadata?: {
+    source: string;
+    confidence: number;
+    annotations: Array<{
+      type: string;
+      value: string;
+      range: { start: number; end: number };
+    }>;
+  };
+}
+
+interface ToolCallPart {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: {
+    type: "success" | "error";
+    value: unknown;
+    metadata: {
+      duration: number;
+      retries: number;
+    };
+  };
+}
+
+interface ImagePart {
+  type: "image";
+  image: string;
+  mimeType: string;
+  dimensions?: {
+    width: number;
+    height: number;
+    aspectRatio: { numerator: number; denominator: number };
+  };
+}
+
+type ContentPart = TextPart | ToolCallPart | ImagePart;
+
+interface UserMessage {
+  role: "user";
+  content: string | ContentPart[];
+  metadata?: {
+    id: string;
+    timestamp: string;
+    context: {
+      sessionId: string;
+      parentId?: string;
+      threadInfo: {
+        id: string;
+        position: number;
+      };
+    };
+  };
+}
+
+interface AssistantMessage {
+  role: "assistant";
+  content: string | ContentPart[];
+  toolCalls?: Array<{
+    id: string;
+    type: "function";
+    function: {
+      name: string;
+      arguments: string;
+    };
+  }>;
+}
+
+interface SystemMessage {
+  role: "system";
+  content: string;
+}
+
+// Simulated CoreMessage — a deeply nested discriminated union
+type CoreMessage = UserMessage | AssistantMessage | SystemMessage;
+
+interface DeeplyNestedState {
+  messages: CoreMessage[];
+  metadata: {
+    conversationId: string;
+    model: string;
+  };
+}
+
+// Agent with deeply nested state that previously caused recursion errors
+declare class DeepStateAgent extends Agent<typeof env, DeeplyNestedState> {
+  getMessages: () => Promise<CoreMessage[]>;
+  addMessage: (message: CoreMessage) => Promise<DeeplyNestedState>;
+  getState: () => DeeplyNestedState;
+}
+
+const deepAgent = useAgent<DeepStateAgent, DeeplyNestedState>({
+  agent: "deep-state"
+});
+
+// These should NOT cause "Type instantiation is excessively deep" errors
+deepAgent.call("getMessages") satisfies Promise<CoreMessage[]>;
+deepAgent.call("addMessage", [
+  { role: "user", content: "hello" }
+]) satisfies Promise<DeeplyNestedState>;
+deepAgent.call("getState") satisfies Promise<DeeplyNestedState>;

@@ -5,6 +5,8 @@ compatibility_flags = ["nodejs_compat"]
 
 assets = { directory = "public" }
 
+[ai]
+binding = "AI"
 
 [[durable_objects.bindings]]
 name = "HumanInTheLoop"

@@ -22,6 +22,15 @@ export type AgentObservabilityEvent =
         id: string;
       }
     >
+  | BaseEvent<
+      "queue:retry" | "schedule:retry",
+      {
+        callback: string;
+        id: string;
+        attempt: number;
+        maxAttempts: number;
+      }
+    >
   | BaseEvent<"destroy">
   | BaseEvent<
       "connect",

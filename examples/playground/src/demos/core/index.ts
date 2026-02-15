@@ -6,3 +6,4 @@ export { ConnectionsDemo } from "./ConnectionsDemo";
 export { SqlDemo } from "./SqlDemo";
 export { RoutingDemo } from "./RoutingDemo";
 export { ReadonlyDemo } from "./ReadonlyDemo";
+export { RetryDemo } from "./RetryDemo";

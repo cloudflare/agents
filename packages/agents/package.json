@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -32,20 +32,20 @@
     "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.6",
-    "partyserver": "^0.1.4",
+    "partyserver": "^0.1.5",
     "partysocket": "1.1.13",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/openai": "^3.0.26",
-    "@ai-sdk/react": "^3.0.79",
-    "@cloudflare/workers-oauth-provider": "^0.2.2",
+    "@ai-sdk/openai": "^3.0.29",
+    "@ai-sdk/react": "^3.0.88",
+    "@cloudflare/workers-oauth-provider": "^0.2.3",
     "@types/escape-html": "^1.0.4",
-    "@types/react": "^19.2.13",
+    "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
-    "@x402/core": "^2.3.0",
-    "@x402/evm": "^2.3.0",
-    "ai": "^6.0.77",
+    "@x402/core": "^2.3.1",
+    "@x402/evm": "^2.3.1",
+    "ai": "^6.0.86",
     "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
     "zod": "^4.3.6"
@@ -53,7 +53,7 @@
   "peerDependencies": {
     "@ai-sdk/openai": "^3.0.0",
     "@ai-sdk/react": "^3.0.0",
-    "@cloudflare/ai-chat": "^0.0.7",
+    "@cloudflare/ai-chat": "^0.0.8 || ^0.1.0",
     "@cloudflare/codemode": "^0.0.7",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
@@ -136,10 +136,10 @@
       "import": "./dist/workflows.js",
       "require": "./dist/workflows.js"
     },
-    "./internal_context": {
-      "types": "./dist/internal_context.d.ts",
-      "import": "./dist/internal_context.js",
-      "require": "./dist/internal_context.js"
+    "./experimental/forever": {
+      "types": "./dist/experimental/forever.d.ts",
+      "import": "./dist/experimental/forever.js",
+      "require": "./dist/experimental/forever.js"
     },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",

@@ -6,6 +6,17 @@ import type { UIMessage } from "ai";
  */
 
 /**
+ * One-shot deprecation warnings (warns once per key per session).
+ */
+const _deprecationWarnings = new Set<string>();
+function warnDeprecated(id: string, message: string) {
+  if (!_deprecationWarnings.has(id)) {
+    _deprecationWarnings.add(id);
+    console.warn(`[@cloudflare/ai-chat] Deprecated: ${message}`);
+  }
+}
+
+/**
  * AI SDK v5 Message Part types reference (from official AI SDK documentation)
  *
  * The migration logic below transforms legacy messages to match these official AI SDK v5 formats:
@@ -168,7 +179,7 @@ type InputMessage = {
  * @returns UIMessage in v5 format
  */
 export function autoTransformMessage(
-  message: InputMessage,
+  message: UIMessage | InputMessage,
   index = 0
 ): UIMessage {
   // Already in v5 format
@@ -268,9 +279,14 @@ export function autoTransformMessage(
 }
 
 /**
- * Legacy single message migration for backward compatibility
+ * Legacy single message migration for backward compatibility.
+ * @deprecated Use `autoTransformMessage` instead. Will be removed in the next major version.
  */
 export function migrateToUIMessage(message: MigratableMessage): UIMessage {
+  warnDeprecated(
+    "migrateToUIMessage",
+    "migrateToUIMessage() is deprecated. Use autoTransformMessage() instead. It will be removed in the next major version."
+  );
   return autoTransformMessage(message as InputMessage);
 }
 
@@ -284,22 +300,32 @@ export function autoTransformMessages(messages: unknown[]): UIMessage[] {
 }
 
 /**
- * Migrates an array of messages to UIMessage format (legacy compatibility)
+ * Migrates an array of messages to UIMessage format (legacy compatibility).
  * @param messages - Array of messages in old or new format
  * @returns Array of UIMessages in the new format
+ * @deprecated Use `autoTransformMessages` instead. Will be removed in the next major version.
  */
 export function migrateMessagesToUIFormat(
   messages: MigratableMessage[]
 ): UIMessage[] {
+  warnDeprecated(
+    "migrateMessagesToUIFormat",
+    "migrateMessagesToUIFormat() is deprecated. Use autoTransformMessages() instead. It will be removed in the next major version."
+  );
   return autoTransformMessages(messages as InputMessage[]);
 }
 
 /**
- * Checks if any messages in an array need migration
+ * Checks if any messages in an array need migration.
  * @param messages - Array of messages to check
  * @returns true if any messages are not in proper UIMessage format
+ * @deprecated Migration is now automatic via `autoTransformMessages`. Will be removed in the next major version.
  */
 export function needsMigration(messages: unknown[]): boolean {
+  warnDeprecated(
+    "needsMigration",
+    "needsMigration() is deprecated. Migration is automatic via autoTransformMessages(). It will be removed in the next major version."
+  );
   return messages.some((message) => {
     // If it's already a UIMessage, no migration needed
     if (isUIMessage(message)) {
@@ -322,9 +348,10 @@ export function needsMigration(messages: unknown[]): boolean {
 }
 
 /**
- * Analyzes the corruption types in a message array for debugging
+ * Analyzes the corruption types in a message array for debugging.
  * @param messages - Array of messages to analyze
  * @returns Statistics about corruption types found
+ * @deprecated Migration is now automatic. Use this only for debugging legacy data. Will be removed in the next major version.
  */
 export function analyzeCorruption(messages: unknown[]): {
   total: number;

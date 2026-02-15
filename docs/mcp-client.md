@@ -95,6 +95,22 @@ await this.addMcpServer("internal", "https://internal-mcp.example.com/mcp", {
 });
 ```
 
+### Retry Options
+
+Configure retry behavior for connection and reconnection attempts:
+
+```typescript
+await this.addMcpServer("github", "https://mcp.github.com/mcp", {
+  retry: {
+    maxAttempts: 5,
+    baseDelayMs: 1000,
+    maxDelayMs: 10000
+  }
+});
+```
+
+These options are persisted and used when reconnecting after hibernation or after OAuth completion. Default: 3 attempts, 500ms base delay, 5s max delay. See [Retries](./retries.md) for more details.
+
 ### Return Value
 
 `addMcpServer()` returns the connection state:
@@ -457,6 +473,7 @@ async addMcpServer(
       headers?: HeadersInit;
       type?: "sse" | "streamable-http" | "auto"; // default: "streamable-http"
     };
+    retry?: RetryOptions; // retry options for connection/reconnection
   }
 ): Promise<
   | { id: string; state: "ready" }

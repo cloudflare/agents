@@ -1,5 +1,9 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { agentContext, type AgentEmail } from "./internal_context";
+import {
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentEmail
+} from "./internal_context";
+export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
 
@@ -22,6 +26,12 @@ import {
   routePartykitRequest
 } from "partyserver";
 import { camelCaseToKebabCase } from "./utils";
+import {
+  type RetryOptions,
+  tryN,
+  isErrorRetryable,
+  validateRetryOptions
+} from "./retries";
 import { MCPClientManager, type MCPClientOAuthResult } from "./mcp/client";
 import type {
   WorkflowCallback,
@@ -183,6 +193,7 @@ export type QueueItem<T = string> = {
   payload: T;
   callback: keyof Agent<Cloudflare.Env>;
   created_at: number;
+  retry?: RetryOptions;
 };
 
 /**
@@ -196,6 +207,8 @@ export type Schedule<T = string> = {
   callback: string;
   /** Data to be passed to the callback */
   payload: T;
+  /** Retry options for callback execution */
+  retry?: RetryOptions;
 } & (
   | {
       /** Type of schedule for one-time execution at a specific time */
@@ -229,12 +242,16 @@ export type Schedule<T = string> = {
     }
 );
 
+/**
+ * Represents the public state of a fiber.
+ */
 function getNextCronTime(cron: string) {
   const interval = parseCronExpression(cron);
   return interval.getNextDate();
 }
 
 export type { TransportType } from "./mcp/types";
+export type { RetryOptions } from "./retries";
 export type {
   AgentMcpOAuthProvider,
   /** @deprecated Use {@link AgentMcpOAuthProvider} instead. */
@@ -296,6 +313,8 @@ export type AddMcpServerOptions = {
     /** Transport type: "sse", "streamable-http", or "auto" (default) */
     type?: TransportType;
   };
+  /** Retry options for connection and reconnection attempts */
+  retry?: RetryOptions;
 };
 
 const STATE_ROW_ID = "cf_state_row_id";
@@ -329,10 +348,24 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
    * and force-reset. Increase this if you have callbacks that legitimately
    * take longer than 30 seconds.
    */
-  hungScheduleTimeoutSeconds: 30
+  hungScheduleTimeoutSeconds: 30,
+  /** Default retry options for schedule(), queue(), and this.retry() */
+  retry: {
+    maxAttempts: 3,
+    baseDelayMs: 100,
+    maxDelayMs: 3000
+  } satisfies Required<RetryOptions>
 };
 
-type ResolvedAgentOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
+/**
+ * Fully resolved agent options — all fields are defined with concrete values.
+ */
+interface ResolvedAgentOptions {
+  hibernate: boolean;
+  sendIdentityOnConnect: boolean;
+  hungScheduleTimeoutSeconds: number;
+  retry: Required<RetryOptions>;
+}
 
 /**
  * Configuration options for the Agent.
@@ -340,7 +373,41 @@ type ResolvedAgentOptions = typeof DEFAULT_AGENT_STATIC_OPTIONS;
  * All fields are optional - defaults are applied at runtime.
  * Note: `hibernate` defaults to `true` if not specified.
  */
-export type AgentStaticOptions = Partial<ResolvedAgentOptions>;
+export interface AgentStaticOptions {
+  hibernate?: boolean;
+  sendIdentityOnConnect?: boolean;
+  hungScheduleTimeoutSeconds?: number;
+  /** Default retry options for schedule(), queue(), and this.retry(). */
+  retry?: RetryOptions;
+}
+
+/**
+ * Parse the raw `retry_options` TEXT column from a SQLite row into a
+ * typed `RetryOptions` object, or `undefined` if not set.
+ */
+function parseRetryOptions(
+  row: Record<string, unknown>
+): RetryOptions | undefined {
+  const raw = row.retry_options;
+  if (typeof raw !== "string") return undefined;
+  return JSON.parse(raw) as RetryOptions;
+}
+
+/**
+ * Resolve per-task retry options against class-level defaults and call
+ * `tryN`. This is the shared retry-execution path used by both queue
+ * flush and schedule alarm handlers.
+ */
+function resolveRetryConfig(
+  taskRetry: RetryOptions | undefined,
+  defaults: Required<RetryOptions>
+): { maxAttempts: number; baseDelayMs: number; maxDelayMs: number } {
+  return {
+    maxAttempts: taskRetry?.maxAttempts ?? defaults.maxAttempts,
+    baseDelayMs: taskRetry?.baseDelayMs ?? defaults.baseDelayMs,
+    maxDelayMs: taskRetry?.maxDelayMs ?? defaults.maxDelayMs
+  };
+}
 
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
@@ -529,11 +596,16 @@ export class Agent<
   static options: AgentStaticOptions = { hibernate: true };
 
   /**
-   * Resolved options (merges defaults with subclass overrides)
+   * Resolved options (merges defaults with subclass overrides).
+   * Cached after first access — static options never change during the
+   * lifetime of a Durable Object instance.
    */
+  private _cachedOptions?: ResolvedAgentOptions;
   private get _resolvedOptions(): ResolvedAgentOptions {
+    if (this._cachedOptions) return this._cachedOptions;
     const ctor = this.constructor as typeof Agent;
-    return {
+    const userRetry = ctor.options?.retry;
+    this._cachedOptions = {
       hibernate:
         ctor.options?.hibernate ?? DEFAULT_AGENT_STATIC_OPTIONS.hibernate,
       sendIdentityOnConnect:
@@ -541,8 +613,19 @@ export class Agent<
         DEFAULT_AGENT_STATIC_OPTIONS.sendIdentityOnConnect,
       hungScheduleTimeoutSeconds:
         ctor.options?.hungScheduleTimeoutSeconds ??
-        DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds
+        DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds,
+      retry: {
+        maxAttempts:
+          userRetry?.maxAttempts ??
+          DEFAULT_AGENT_STATIC_OPTIONS.retry.maxAttempts,
+        baseDelayMs:
+          userRetry?.baseDelayMs ??
+          DEFAULT_AGENT_STATIC_OPTIONS.retry.baseDelayMs,
+        maxDelayMs:
+          userRetry?.maxDelayMs ?? DEFAULT_AGENT_STATIC_OPTIONS.retry.maxDelayMs
+      }
     };
+    return this._cachedOptions;
   }
 
   /**
@@ -649,6 +732,12 @@ export class Agent<
     );
     addColumnIfNotExists(
       "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
+    );
+    addColumnIfNotExists(
+      "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
     );
 
     // Workflow tracking table for Agent-Workflow integration
@@ -1523,12 +1612,49 @@ export class Agent<
   }
 
   /**
+   * Retry an async operation with exponential backoff and jitter.
+   * Retries on all errors by default. Use `shouldRetry` to bail early on non-retryable errors.
+   *
+   * @param fn The async function to retry. Receives the current attempt number (1-indexed).
+   * @param options Retry configuration.
+   * @param options.maxAttempts Maximum number of attempts (including the first). Falls back to static options, then 3.
+   * @param options.baseDelayMs Base delay in ms for exponential backoff. Falls back to static options, then 100.
+   * @param options.maxDelayMs Maximum delay cap in ms. Falls back to static options, then 3000.
+   * @param options.shouldRetry Predicate called with the error and next attempt number. Return false to stop retrying immediately. Default: retry all errors.
+   * @returns The result of fn on success.
+   * @throws The last error if all attempts fail or shouldRetry returns false.
+   */
+  async retry<T>(
+    fn: (attempt: number) => Promise<T>,
+    options?: RetryOptions & {
+      /** Return false to stop retrying a specific error. Receives the error and the next attempt number. Default: retry all errors. */
+      shouldRetry?: (err: unknown, nextAttempt: number) => boolean;
+    }
+  ): Promise<T> {
+    const defaults = this._resolvedOptions.retry;
+    if (options) {
+      validateRetryOptions(options, defaults);
+    }
+    return tryN(options?.maxAttempts ?? defaults.maxAttempts, fn, {
+      baseDelayMs: options?.baseDelayMs ?? defaults.baseDelayMs,
+      maxDelayMs: options?.maxDelayMs ?? defaults.maxDelayMs,
+      shouldRetry: options?.shouldRetry
+    });
+  }
+
+  /**
    * Queue a task to be executed in the future
-   * @param payload Payload to pass to the callback
    * @param callback Name of the method to call
+   * @param payload Payload to pass to the callback
+   * @param options Options for the queued task
+   * @param options.retry Retry options for the callback execution
    * @returns The ID of the queued task
    */
-  async queue<T = unknown>(callback: keyof this, payload: T): Promise<string> {
+  async queue<T = unknown>(
+    callback: keyof this,
+    payload: T,
+    options?: { retry?: RetryOptions }
+  ): Promise<string> {
     const id = nanoid(9);
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
@@ -1538,9 +1664,15 @@ export class Agent<
       throw new Error(`this.${callback} is not a function`);
     }
 
+    if (options?.retry) {
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
+    }
+
+    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
+
     this.sql`
-      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback)
-      VALUES (${id}, ${JSON.stringify(payload)}, ${callback})
+      INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback, retry_options)
+      VALUES (${id}, ${JSON.stringify(payload)}, ${callback}, ${retryJson})
     `;
 
     void this._flushQueue().catch((e) => {
@@ -1557,58 +1689,103 @@ export class Agent<
       return;
     }
     this._flushingQueue = true;
-    while (true) {
-      const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues
-      ORDER BY created_at ASC
-    `;
+    try {
+      while (true) {
+        const result = this.sql<QueueItem<string>>`
+        SELECT * FROM cf_agents_queues
+        ORDER BY created_at ASC
+      `;
 
-      if (!result || result.length === 0) {
-        break;
-      }
-
-      for (const row of result || []) {
-        const callback = this[row.callback as keyof Agent<Env>];
-        if (!callback) {
-          console.error(`callback ${row.callback} not found`);
-          continue;
+        if (!result || result.length === 0) {
+          break;
         }
-        const { connection, request, email } = agentContext.getStore() || {};
-        await agentContext.run(
-          {
-            agent: this,
-            connection,
-            request,
-            email
-          },
-          async () => {
-            // TODO: add retries and backoff
-            await (
-              callback as (
-                payload: unknown,
-                queueItem: QueueItem<string>
-              ) => Promise<void>
-            ).bind(this)(JSON.parse(row.payload as string), row);
+
+        for (const row of result || []) {
+          const callback = this[row.callback as keyof Agent<Env>];
+          if (!callback) {
+            console.error(`callback ${row.callback} not found`);
             await this.dequeue(row.id);
+            continue;
           }
-        );
+          const { connection, request, email } = agentContext.getStore() || {};
+          await agentContext.run(
+            {
+              agent: this,
+              connection,
+              request,
+              email
+            },
+            async () => {
+              const retryOpts = parseRetryOptions(
+                row as unknown as Record<string, unknown>
+              );
+              const { maxAttempts, baseDelayMs, maxDelayMs } =
+                resolveRetryConfig(retryOpts, this._resolvedOptions.retry);
+              const parsedPayload = JSON.parse(row.payload as string);
+              try {
+                await tryN(
+                  maxAttempts,
+                  async (attempt) => {
+                    if (attempt > 1) {
+                      this.observability?.emit(
+                        {
+                          displayMessage: `Retrying queue callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
+                          id: nanoid(),
+                          payload: {
+                            callback: row.callback,
+                            id: row.id,
+                            attempt,
+                            maxAttempts
+                          },
+                          timestamp: Date.now(),
+                          type: "queue:retry"
+                        },
+                        this.ctx
+                      );
+                    }
+                    await (
+                      callback as (
+                        payload: unknown,
+                        queueItem: QueueItem<string>
+                      ) => Promise<void>
+                    ).bind(this)(parsedPayload, row);
+                  },
+                  { baseDelayMs, maxDelayMs }
+                );
+              } catch (e) {
+                console.error(
+                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
+                  e
+                );
+                try {
+                  await this.onError(e);
+                } catch {
+                  // swallow onError errors
+                }
+              } finally {
+                await this.dequeue(row.id);
+              }
+            }
+          );
+        }
       }
+    } finally {
+      this._flushingQueue = false;
     }
-    this._flushingQueue = false;
   }
 
   /**
    * Dequeue a task by ID
    * @param id ID of the task to dequeue
    */
-  async dequeue(id: string) {
+  dequeue(id: string) {
     this.sql`DELETE FROM cf_agents_queues WHERE id = ${id}`;
   }
 
   /**
    * Dequeue all tasks
    */
-  async dequeueAll() {
+  dequeueAll() {
     this.sql`DELETE FROM cf_agents_queues`;
   }
 
@@ -1616,7 +1793,7 @@ export class Agent<
    * Dequeue all tasks by callback
    * @param callback Name of the callback to dequeue
    */
-  async dequeueAllByCallback(callback: string) {
+  dequeueAllByCallback(callback: string) {
     this.sql`DELETE FROM cf_agents_queues WHERE callback = ${callback}`;
   }
 
@@ -1625,13 +1802,17 @@ export class Agent<
    * @param id ID of the task to get
    * @returns The task or undefined if not found
    */
-  async getQueue(id: string): Promise<QueueItem<string> | undefined> {
+  getQueue(id: string): QueueItem<string> | undefined {
     const result = this.sql<QueueItem<string>>`
       SELECT * FROM cf_agents_queues WHERE id = ${id}
     `;
-    return result
-      ? { ...result[0], payload: JSON.parse(result[0].payload) }
-      : undefined;
+    if (!result || result.length === 0) return undefined;
+    const row = result[0];
+    return {
+      ...row,
+      payload: JSON.parse(row.payload as unknown as string),
+      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
+    };
   }
 
   /**
@@ -1640,11 +1821,19 @@ export class Agent<
    * @param value Value to filter by
    * @returns Array of matching QueueItem objects
    */
-  async getQueues(key: string, value: string): Promise<QueueItem<string>[]> {
+  getQueues(key: string, value: string): QueueItem<string>[] {
     const result = this.sql<QueueItem<string>>`
       SELECT * FROM cf_agents_queues
     `;
-    return result.filter((row) => JSON.parse(row.payload)[key] === value);
+    return result
+      .filter(
+        (row) => JSON.parse(row.payload as unknown as string)[key] === value
+      )
+      .map((row) => ({
+        ...row,
+        payload: JSON.parse(row.payload as unknown as string),
+        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
+      }));
   }
 
   /**
@@ -1653,14 +1842,23 @@ export class Agent<
    * @param when When to execute the task (Date, seconds delay, or cron expression)
    * @param callback Name of the method to call
    * @param payload Data to pass to the callback
+   * @param options Options for the scheduled task
+   * @param options.retry Retry options for the callback execution
    * @returns Schedule object representing the scheduled task
    */
   async schedule<T = string>(
     when: Date | string | number,
     callback: keyof this,
-    payload?: T
+    payload?: T,
+    options?: { retry?: RetryOptions }
   ): Promise<Schedule<T>> {
     const id = nanoid(9);
+
+    if (options?.retry) {
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
+    }
+
+    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
 
     const emitScheduleCreate = (schedule: Schedule<T>) =>
       this.observability?.emit(
@@ -1688,10 +1886,10 @@ export class Agent<
     if (when instanceof Date) {
       const timestamp = Math.floor(when.getTime() / 1000);
       this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, time)
+        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, time, retry_options)
         VALUES (${id}, ${callback}, ${JSON.stringify(
           payload
-        )}, 'scheduled', ${timestamp})
+        )}, 'scheduled', ${timestamp}, ${retryJson})
       `;
 
       await this._scheduleNextAlarm();
@@ -1700,6 +1898,7 @@ export class Agent<
         callback: callback,
         id,
         payload: payload as T,
+        retry: options?.retry,
         time: timestamp,
         type: "scheduled"
       };
@@ -1713,10 +1912,10 @@ export class Agent<
       const timestamp = Math.floor(time.getTime() / 1000);
 
       this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time)
+        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time, retry_options)
         VALUES (${id}, ${callback}, ${JSON.stringify(
           payload
-        )}, 'delayed', ${when}, ${timestamp})
+        )}, 'delayed', ${when}, ${timestamp}, ${retryJson})
       `;
 
       await this._scheduleNextAlarm();
@@ -1726,6 +1925,7 @@ export class Agent<
         delayInSeconds: when,
         id,
         payload: payload as T,
+        retry: options?.retry,
         time: timestamp,
         type: "delayed"
       };
@@ -1739,10 +1939,10 @@ export class Agent<
       const timestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
       this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, cron, time)
+        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, cron, time, retry_options)
         VALUES (${id}, ${callback}, ${JSON.stringify(
           payload
-        )}, 'cron', ${when}, ${timestamp})
+        )}, 'cron', ${when}, ${timestamp}, ${retryJson})
       `;
 
       await this._scheduleNextAlarm();
@@ -1752,6 +1952,7 @@ export class Agent<
         cron: when,
         id,
         payload: payload as T,
+        retry: options?.retry,
         time: timestamp,
         type: "cron"
       };
@@ -1771,12 +1972,15 @@ export class Agent<
    * @param intervalSeconds Number of seconds between executions
    * @param callback Name of the method to call
    * @param payload Data to pass to the callback
+   * @param options Options for the scheduled task
+   * @param options.retry Retry options for the callback execution
    * @returns Schedule object representing the scheduled task
    */
   async scheduleEvery<T = string>(
     intervalSeconds: number,
     callback: keyof this,
-    payload?: T
+    payload?: T,
+    options?: { retry?: RetryOptions }
   ): Promise<Schedule<T>> {
     // DO alarms have a max schedule time of 30 days
     const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60; // 30 days in seconds
@@ -1799,13 +2003,19 @@ export class Agent<
       throw new Error(`this.${callback} is not a function`);
     }
 
+    if (options?.retry) {
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
+    }
+
     const id = nanoid(9);
     const time = new Date(Date.now() + intervalSeconds * 1000);
     const timestamp = Math.floor(time.getTime() / 1000);
 
+    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
+
     this.sql`
-      INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, intervalSeconds, time, running)
-      VALUES (${id}, ${callback}, ${JSON.stringify(payload)}, 'interval', ${intervalSeconds}, ${timestamp}, 0)
+      INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, intervalSeconds, time, running, retry_options)
+      VALUES (${id}, ${callback}, ${JSON.stringify(payload)}, 'interval', ${intervalSeconds}, ${timestamp}, 0, ${retryJson})
     `;
 
     await this._scheduleNextAlarm();
@@ -1815,6 +2025,7 @@ export class Agent<
       id,
       intervalSeconds,
       payload: payload as T,
+      retry: options?.retry,
       time: timestamp,
       type: "interval"
     };
@@ -1842,15 +2053,19 @@ export class Agent<
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
    */
-  async getSchedule<T = string>(id: string): Promise<Schedule<T> | undefined> {
+  getSchedule<T = string>(id: string): Schedule<T> | undefined {
     const result = this.sql<Schedule<string>>`
       SELECT * FROM cf_agents_schedules WHERE id = ${id}
     `;
     if (!result || result.length === 0) {
       return undefined;
     }
-
-    return { ...result[0], payload: JSON.parse(result[0].payload) as T };
+    const row = result[0];
+    return {
+      ...row,
+      payload: JSON.parse(row.payload) as T,
+      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
+    };
   }
 
   /**
@@ -1894,7 +2109,8 @@ export class Agent<
       .toArray()
       .map((row) => ({
         ...row,
-        payload: JSON.parse(row.payload as string) as T
+        payload: JSON.parse(row.payload as string) as T,
+        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
       })) as Schedule<T>[];
 
     return result;
@@ -1906,7 +2122,7 @@ export class Agent<
    * @returns true if the task was cancelled, false if the task was not found
    */
   async cancelSchedule(id: string): Promise<boolean> {
-    const schedule = await this.getSchedule(id);
+    const schedule = this.getSchedule(id);
     if (!schedule) {
       return false;
     }
@@ -2008,6 +2224,15 @@ export class Agent<
             email: undefined
           },
           async () => {
+            const retryOpts = parseRetryOptions(
+              row as unknown as Record<string, unknown>
+            );
+            const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
+              retryOpts,
+              this._resolvedOptions.retry
+            );
+            const parsedPayload = JSON.parse(row.payload as string);
+
             try {
               this.observability?.emit(
                 {
@@ -2023,14 +2248,40 @@ export class Agent<
                 this.ctx
               );
 
-              await (
-                callback as (
-                  payload: unknown,
-                  schedule: Schedule<unknown>
-                ) => Promise<void>
-              ).bind(this)(JSON.parse(row.payload as string), row);
+              await tryN(
+                maxAttempts,
+                async (attempt) => {
+                  if (attempt > 1) {
+                    this.observability?.emit(
+                      {
+                        displayMessage: `Retrying schedule callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
+                        id: nanoid(),
+                        payload: {
+                          callback: row.callback,
+                          id: row.id,
+                          attempt,
+                          maxAttempts
+                        },
+                        timestamp: Date.now(),
+                        type: "schedule:retry"
+                      },
+                      this.ctx
+                    );
+                  }
+                  await (
+                    callback as (
+                      payload: unknown,
+                      schedule: Schedule<unknown>
+                    ) => Promise<void>
+                  ).bind(this)(parsedPayload, row);
+                },
+                { baseDelayMs, maxDelayMs }
+              );
             } catch (e) {
-              console.error(`error executing callback "${row.callback}"`, e);
+              console.error(
+                `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
+                e
+              );
               // Route schedule errors through onError for consistency
               try {
                 await this.onError(e);
@@ -2073,6 +2324,7 @@ export class Agent<
     await this._scheduleNextAlarm();
   };
 
+  // Fiber methods moved to agents/experimental/forever (withFibers mixin)
   /**
    * Destroy the Agent, removing all state and scheduled tasks
    */
@@ -2288,7 +2540,11 @@ export class Agent<
     }
 
     const instance = await workflow.get(workflowId);
-    await instance.sendEvent(event);
+    await tryN(3, async () => instance.sendEvent(event), {
+      shouldRetry: isErrorRetryable,
+      baseDelayMs: 200,
+      maxDelayMs: 3000
+    });
 
     this.observability?.emit(
       {
@@ -2435,7 +2691,11 @@ export class Agent<
 
     const instance = await workflow.get(workflowId);
     try {
-      await instance.terminate();
+      await tryN(3, async () => instance.terminate(), {
+        shouldRetry: isErrorRetryable,
+        baseDelayMs: 200,
+        maxDelayMs: 3000
+      });
     } catch (err) {
       if (err instanceof Error && err.message.includes("Not implemented")) {
         throw new Error(
@@ -2497,7 +2757,11 @@ export class Agent<
 
     const instance = await workflow.get(workflowId);
     try {
-      await instance.pause();
+      await tryN(3, async () => instance.pause(), {
+        shouldRetry: isErrorRetryable,
+        baseDelayMs: 200,
+        maxDelayMs: 3000
+      });
     } catch (err) {
       if (err instanceof Error && err.message.includes("Not implemented")) {
         throw new Error(
@@ -2557,7 +2821,11 @@ export class Agent<
 
     const instance = await workflow.get(workflowId);
     try {
-      await instance.resume();
+      await tryN(3, async () => instance.resume(), {
+        shouldRetry: isErrorRetryable,
+        baseDelayMs: 200,
+        maxDelayMs: 3000
+      });
     } catch (err) {
       if (err instanceof Error && err.message.includes("Not implemented")) {
         throw new Error(
@@ -2629,7 +2897,11 @@ export class Agent<
 
     const instance = await workflow.get(workflowId);
     try {
-      await instance.restart();
+      await tryN(3, async () => instance.restart(), {
+        shouldRetry: isErrorRetryable,
+        baseDelayMs: 200,
+        maxDelayMs: 3000
+      });
     } catch (err) {
       if (err instanceof Error && err.message.includes("Not implemented")) {
         throw new Error(
@@ -3355,6 +3627,7 @@ export class Agent<
             headers?: HeadersInit;
             type?: TransportType;
           };
+          retry?: RetryOptions;
         }
       | undefined;
 
@@ -3370,7 +3643,8 @@ export class Agent<
       resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
       resolvedOptions = {
         client: callbackHostOrOptions.client,
-        transport: callbackHostOrOptions.transport
+        transport: callbackHostOrOptions.transport,
+        retry: callbackHostOrOptions.retry
       };
     } else {
       // Legacy API: positional parameters
@@ -3449,7 +3723,8 @@ export class Agent<
         ...headerTransportOpts,
         authProvider,
         type: transportType
-      }
+      },
+      retry: resolvedOptions?.retry
     });
 
     const result = await this.mcp.connectToServer(id);
@@ -3584,6 +3859,7 @@ export class Agent<
     const result = await this.mcp.handleCallbackRequest(request);
 
     // If auth was successful, establish the connection in the background
+    // (establishConnection handles retries internally using per-server retry config)
     if (result.authSuccess) {
       this.mcp.establishConnection(result.serverId).catch((error) => {
         console.error(

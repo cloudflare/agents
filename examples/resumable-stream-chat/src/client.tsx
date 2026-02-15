@@ -185,6 +185,7 @@ function Chat() {
               type="submit"
               variant="primary"
               shape="square"
+              aria-label="Send message"
               disabled={!input.trim() || !isConnected || isStreaming}
               icon={<PaperPlaneRightIcon size={18} />}
               loading={isStreaming}

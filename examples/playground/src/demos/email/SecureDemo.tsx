@@ -363,6 +363,7 @@ export function SecureDemo() {
                     variant="ghost"
                     shape="square"
                     size="xs"
+                    aria-label="Close email"
                     onClick={() => setSelectedEmail(null)}
                   >
                     ×
@@ -402,6 +403,7 @@ export function SecureDemo() {
                     variant="ghost"
                     shape="square"
                     size="xs"
+                    aria-label="Close reply"
                     onClick={() => setSelectedReply(null)}
                   >
                     ×

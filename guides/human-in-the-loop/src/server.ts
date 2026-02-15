@@ -1,77 +1,29 @@
-import { openai } from "@ai-sdk/openai";
+import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import {
-  convertToModelMessages,
-  type StreamTextOnFinishCallback,
-  streamText,
-  stepCountIs
-} from "ai";
+import { convertToModelMessages, streamText, stepCountIs } from "ai";
 import { tools } from "./tools";
-import {
-  processToolCalls,
-  hasToolConfirmation,
-  getWeatherInformation
-} from "./utils";
 
 export class HumanInTheLoop extends AIChatAgent {
-  async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
+  async onChatMessage() {
     const startTime = Date.now();
 
-    const lastMessage = this.messages[this.messages.length - 1];
+    // streamText handles the full tool lifecycle automatically:
+    // - Tools with needsApproval pause for user approval via the AI SDK
+    // - Tools without execute wait for client-side onToolCall results
+    // - Tools with execute run server-side automatically
+    const workersai = createWorkersAI({ binding: this.env.AI });
 
-    if (hasToolConfirmation(lastMessage)) {
-      // Process tool confirmations - execute the tool and update messages
-      const updatedMessages = await processToolCalls(
-        { messages: this.messages, tools },
-        { getWeatherInformation }
-      );
-
-      // Update the agent's messages with the actual tool results
-      // This replaces "Yes, confirmed." with the actual tool output
-      this.messages = updatedMessages;
-      await this.persistMessages(this.messages);
-
-      // Now continue with streamText so the LLM can respond to the tool result
-      const result = streamText({
-        messages: await convertToModelMessages(this.messages),
-        model: openai("gpt-4o"),
-        onFinish,
-        tools,
-        stopWhen: stepCountIs(5)
-      });
-
-      return result.toUIMessageStreamResponse({
-        messageMetadata: ({ part }) => {
-          if (part.type === "start") {
-            return {
-              model: "gpt-4o",
-              createdAt: Date.now(),
-              messageCount: this.messages.length
-            };
-          }
-          if (part.type === "finish") {
-            return {
-              responseTime: Date.now() - startTime,
-              totalTokens: part.totalUsage?.totalTokens
-            };
-          }
-        }
-      });
-    }
-
-    // Use streamText directly and return with metadata
     const result = streamText({
       messages: await convertToModelMessages(this.messages),
-      model: openai("gpt-4o"),
-      onFinish,
+      // @ts-expect-error — model not yet in workers-ai-provider types
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       tools,
       stopWhen: stepCountIs(5)
     });
 
     return result.toUIMessageStreamResponse({
       messageMetadata: ({ part }) => {
-        // This is optional, purely for demo purposes in this example
         if (part.type === "start") {
           return {
             model: "gpt-4o",

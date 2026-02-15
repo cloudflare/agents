@@ -1,6 +1,6 @@
 import { useAgent } from "agents/react";
 import type { Schedule } from "agents";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
@@ -39,20 +39,20 @@ export function ScheduleDemo() {
     }
   });
 
-  const refreshSchedules = async () => {
+  const refreshSchedules = useCallback(async () => {
     try {
       const result = await agent.call("listSchedules");
       setSchedules(result);
     } catch {
       // Ignore errors during refresh
     }
-  };
+  }, [agent]);
 
   useEffect(() => {
     if (agent.readyState === WebSocket.OPEN) {
       refreshSchedules();
     }
-  }, [agent.readyState]);
+  }, [agent.readyState, refreshSchedules]);
 
   const handleScheduleTask = async () => {
     addLog("out", "scheduleTask", {

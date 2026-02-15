@@ -338,6 +338,7 @@ type Schedule<T = string> = {
   id: string; // Unique identifier
   callback: string; // Method name to call
   payload: T; // Data passed to the callback
+  retry?: RetryOptions; // Retry options (if configured)
   time: number; // Unix timestamp (seconds) of next execution
 } & (
   | { type: "scheduled" } // One-time at specific date
@@ -350,13 +351,19 @@ type Schedule<T = string> = {
 **Example:**
 
 ```typescript
-const schedule = await this.schedule(60, "myTask", { foo: "bar" });
+const schedule = await this.schedule(
+  60,
+  "myTask",
+  { foo: "bar" },
+  { retry: { maxAttempts: 5 } }
+);
 
 console.log(schedule);
 // {
 //   id: "abc123xyz",
 //   callback: "myTask",
 //   payload: { foo: "bar" },
+//   retry: { maxAttempts: 5 },
 //   time: 1706745600,
 //   type: "delayed",
 //   delayInSeconds: 60
@@ -399,7 +406,23 @@ class PollingAgent extends Agent {
 }
 ```
 
-### Exponential Backoff Retry
+### Retry on Failure
+
+For immediate retries (within seconds), use the built-in retry option:
+
+```typescript
+// Retry up to 5 times with exponential backoff
+await this.schedule(
+  60,
+  "processTask",
+  { taskId: "123" },
+  {
+    retry: { maxAttempts: 5 }
+  }
+);
+```
+
+For longer recovery windows (minutes or hours), combine `this.retry()` for immediate retries with scheduled retries for extended outages:
 
 ```typescript
 class RetryAgent extends Agent {
@@ -409,7 +432,10 @@ class RetryAgent extends Agent {
     maxAttempts: number;
   }) {
     try {
-      await this.doWork(payload.taskId);
+      // Immediate retries for transient failures
+      await this.retry(() => this.doWork(payload.taskId), {
+        maxAttempts: 3
+      });
       console.log(
         `Task ${payload.taskId} succeeded on attempt ${payload.attempt}`
       );
@@ -421,15 +447,15 @@ class RetryAgent extends Agent {
         return;
       }
 
-      // Exponential backoff: 2^attempt seconds (2s, 4s, 8s, 16s...)
-      const delaySeconds = Math.pow(2, payload.attempt);
+      // Schedule a retry in the future for longer outages
+      const delaySeconds = Math.pow(2, payload.attempt) * 60;
 
       await this.schedule(delaySeconds, "attemptTask", {
         ...payload,
         attempt: payload.attempt + 1
       });
 
-      console.log(`Retrying task ${payload.taskId} in ${delaySeconds}s`);
+      console.log(`Scheduled retry in ${delaySeconds}s`);
     }
   }
 
@@ -438,6 +464,8 @@ class RetryAgent extends Agent {
   }
 }
 ```
+
+See [Retries](./retries.md) for full documentation on retry options and patterns.
 
 ### Self-Destructing Agents
 
@@ -583,7 +611,7 @@ import { scheduleSchema } from "agents";
 | ------------------ | ------------------ | ----------------- | ------------------- |
 | **When**           | Immediately (FIFO) | Future time       | Future time         |
 | **Execution**      | Sequential         | At scheduled time | Multi-step          |
-| **Retries**        | Manual             | Manual            | Automatic           |
+| **Retries**        | Automatic          | Automatic         | Automatic           |
 | **Persistence**    | SQLite             | SQLite            | Workflow engine     |
 | **Recurring**      | No                 | Yes (cron)        | No (use scheduling) |
 | **Complex logic**  | No                 | No                | Yes                 |
@@ -616,7 +644,8 @@ import { scheduleSchema } from "agents";
 async schedule<T = string>(
   when: Date | string | number,
   callback: keyof this,
-  payload?: T
+  payload?: T,
+  options?: { retry?: RetryOptions }
 ): Promise<Schedule<T>>
 ```
 
@@ -627,6 +656,7 @@ Schedule a task for future execution.
 - `when` - When to execute: `number` (seconds delay), `Date` (specific time), or `string` (cron expression)
 - `callback` - Name of the method to call
 - `payload` - Data to pass to the callback (must be JSON-serializable)
+- `options.retry` - Optional retry configuration. See [Retries](./retries.md) for details.
 
 **Returns:** A `Schedule` object with the task details
 
@@ -636,7 +666,8 @@ Schedule a task for future execution.
 async scheduleEvery<T = string>(
   intervalSeconds: number,
   callback: keyof this,
-  payload?: T
+  payload?: T,
+  options?: { retry?: RetryOptions }
 ): Promise<Schedule<T>>
 ```
 
@@ -647,6 +678,7 @@ Schedule a task to run repeatedly at a fixed interval.
 - `intervalSeconds` - Number of seconds between executions (must be > 0)
 - `callback` - Name of the method to call
 - `payload` - Data to pass to the callback (must be JSON-serializable)
+- `options.retry` - Optional retry configuration. See [Retries](./retries.md) for details.
 
 **Returns:** A `Schedule` object with `type: "interval"`
 

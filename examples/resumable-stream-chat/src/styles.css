@@ -1,7 +1,7 @@
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
 @import "@cloudflare/agents-ui/theme/workers.css";
-@source "../../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 
 html,
 body,

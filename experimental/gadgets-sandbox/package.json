@@ -1,0 +1,25 @@
+{
+  "name": "@cloudflare/agents-gadgets-sandbox-example",
+  "description": "Sandboxed code execution: AI agent writes code that runs in a dynamic Worker isolate with restricted bindings",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.5.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.0.2",
+    "agents": "*",
+    "streamdown": "^2.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.1.18"
+  }
+}

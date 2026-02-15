@@ -1,4 +1,4 @@
-import type { UIMessage } from "ai";
+import type { JSONSchema7, UIMessage } from "ai";
 
 /**
  * Enum for message types to improve type safety and maintainability
@@ -14,6 +14,8 @@ export enum MessageType {
   CF_AGENT_STREAM_RESUMING = "cf_agent_stream_resuming",
   /** Sent by client to acknowledge stream resuming notification and request chunks */
   CF_AGENT_STREAM_RESUME_ACK = "cf_agent_stream_resume_ack",
+  /** Sent by client after message handler is ready, requesting stream resume check */
+  CF_AGENT_STREAM_RESUME_REQUEST = "cf_agent_stream_resume_request",
 
   /** Client sends tool result to server (for client-side tools) */
   CF_AGENT_TOOL_RESULT = "cf_agent_tool_result",
@@ -50,6 +52,8 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       error?: boolean;
       /** Whether this is a continuation (append to last assistant message) */
       continuation?: boolean;
+      /** Whether this chunk is being replayed from storage (stream resumption) */
+      replay?: boolean;
     }
   | {
       /** Indicates the server is resuming an active stream */
@@ -111,6 +115,10 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       id: string;
     }
   | {
+      /** Client requests stream resume check after message handler is registered */
+      type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST;
+    }
+  | {
       /** Client sends tool result to server (for client-side tools) */
       type: MessageType.CF_AGENT_TOOL_RESULT;
       /** The tool call ID this result is for */
@@ -121,6 +129,12 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       output: unknown;
       /** Whether server should auto-continue the conversation after applying result */
       autoContinue?: boolean;
+      /** Client tool schemas for continuation (client is source of truth) */
+      clientTools?: Array<{
+        name: string;
+        description?: string;
+        parameters?: JSONSchema7;
+      }>;
     }
   | {
       /** Client sends tool approval response to server (for tools with needsApproval) */
