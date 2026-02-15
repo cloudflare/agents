@@ -7,6 +7,7 @@
   "rules": {
     "no-explicit-any": "error",
     "no-unused-expressions": "off",
+    "typescript/no-deprecated": "warn",
     "no-this-alias": "off",
     "react-hooks/exhaustive-deps": "warn",
     "no-unused-vars": [
