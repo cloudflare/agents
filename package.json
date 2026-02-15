@@ -82,6 +82,7 @@
     "examples/*",
     "packages/*",
     "guides/*",
+    "experimental/*",
     "openai-sdk/*",
     "site/*"
   ],
