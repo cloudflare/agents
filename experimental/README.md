@@ -6,4 +6,5 @@ The code here is for exploration, prototyping, and validating patterns that may 
 
 ## Contents
 
-- **[gadgets.md](./gadgets.md)** — Exploration of facets, isolation, and structural safety for agents. Covers the Gatekeeper/ApprovalQueue pattern, Worker Loader sandboxing, sub-agent facets, multi-room chat, and other patterns worth pulling into the SDK. Includes findings from prototype examples and a proposed integration strategy.
+- **[gadgets.md](./gadgets.md)** — Exploration of facets, isolation, and structural safety for agents. Covers the Gatekeeper/ApprovalQueue pattern, Worker Loader sandboxing, sub-agent facets, multi-room chat, and other patterns worth pulling into the SDK.
+- **[forever.md](./forever.md)** — Design doc for durable long-running execution. Covers keepAlive, fibers (spawnFiber/stashFiber), eviction recovery, and AIChatAgent integration. Implemented as mixins in `agents/experimental/forever` and `@cloudflare/ai-chat/experimental/forever`.

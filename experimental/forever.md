@@ -1,6 +1,11 @@
-# Long-Running Agents (Fibers)
+# Forever — Durable Long-Running Agents
 
 This document describes the design of durable long-running execution for agents: surviving Durable Object eviction, recovering interrupted work (including LLM calls), and the API surface that makes this possible.
+
+Implemented as mixins:
+
+- `agents/experimental/forever` — `withFibers(Agent)` for durable execution (see `forever-fibers/` example)
+- `@cloudflare/ai-chat/experimental/forever` — `withDurableChat(AIChatAgent)` for durable streaming (see `forever-chat/` example)
 
 ## Problem
 
@@ -821,4 +826,4 @@ In **local development** (wrangler dev / miniflare), persisted alarms do **not**
 
 **Workaround for testing:** The e2e test in `packages/agents/src/e2e-tests/` works around this by calling `this.alarm()` via RPC after restarting wrangler. This triggers the same recovery path that would fire automatically in production. The test still validates the important part: SQLite persistence of fiber state, checkpoint data, and heartbeat schedules across a real process kill (SIGKILL).
 
-**Workaround for local demos:** The example in `examples/long-running-agent/` uses a "Simulate Kill & Recover" button that does cancel + status reset + alarm trigger as a single action, since we can't kill a running async function from JavaScript and can't rely on alarms firing automatically in local dev.
+**Workaround for local demos:** The `forever-fibers/` example uses a "Simulate Kill & Recover" button that does cancel + status reset + alarm trigger as a single action, since we can't kill a running async function from JavaScript and can't rely on alarms firing automatically in local dev.

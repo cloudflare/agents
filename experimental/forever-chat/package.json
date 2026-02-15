@@ -1,16 +1,19 @@
 {
-  "name": "@cloudflare/agents-long-running-example",
-  "description": "Demo showing durable long-running fibers - checkpointing, eviction recovery, and progress tracking",
-  "author": "",
+  "name": "@cloudflare/agents-forever-chat-example",
+  "description": "Durable AI chat with keepAlive — streaming that survives DO eviction",
   "private": true,
   "type": "module",
   "version": "0.0.0",
   "scripts": {
     "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.5.0",
+    "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
   },
   "devDependencies": {

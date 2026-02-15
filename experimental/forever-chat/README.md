@@ -4,6 +4,8 @@
 
 AI chat using `withDurableChat(AIChatAgent)` — the mixin adds keepAlive during streaming so the DO won't be evicted while the LLM generates.
 
+See [forever.md](../forever.md) for the full design doc.
+
 ## What it shows
 
 - `withDurableChat` mixin from `@cloudflare/ai-chat/experimental/forever`
@@ -14,7 +16,7 @@ AI chat using `withDurableChat(AIChatAgent)` — the mixin adds keepAlive during
 
 ```bash
 npm install
-cd examples/forever
+cd experimental/forever-chat
 npm start
 ```
 
