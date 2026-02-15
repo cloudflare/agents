@@ -467,8 +467,6 @@ class RetryAgent extends Agent {
 
 See [Retries](./retries.md) for full documentation on retry options and patterns.
 
-````
-
 ### Self-Destructing Agents
 
 You can safely call `this.destroy()` from within a scheduled callback:
@@ -488,7 +486,7 @@ class TemporaryAgent extends Agent {
     await this.destroy();
   }
 }
-````
+```
 
 ### Timezone-Aware Scheduling
 
