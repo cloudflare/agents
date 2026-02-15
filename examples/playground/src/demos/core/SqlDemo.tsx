@@ -1,5 +1,5 @@
 import { useAgent } from "agents/react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import {
   Button,
   Input,
@@ -39,7 +39,7 @@ export function SqlDemo() {
     onError: () => addLog("error", "error", "Connection error")
   });
 
-  const loadTables = async () => {
+  const loadTables = useCallback(async () => {
     try {
       const result = (await agent.call("listTables")) as Array<{
         name: string;
@@ -49,23 +49,23 @@ export function SqlDemo() {
     } catch {
       // Ignore
     }
-  };
+  }, [agent]);
 
-  const loadRecords = async () => {
+  const loadRecords = useCallback(async () => {
     try {
       const result = (await agent.call("getRecords")) as unknown[];
       setRecords(result);
     } catch {
       // Ignore
     }
-  };
+  }, [agent]);
 
   useEffect(() => {
     if (agent.readyState === WebSocket.OPEN) {
       loadTables();
       loadRecords();
     }
-  }, [agent.readyState]);
+  }, [agent.readyState, loadTables, loadRecords]);
 
   const handleSelectTable = async (tableName: string) => {
     setSelectedTable(tableName);

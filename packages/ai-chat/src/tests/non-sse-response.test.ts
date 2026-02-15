@@ -106,7 +106,7 @@ describe("Non-SSE Response Handling - PR #761", () => {
     const doneMessage = chatResponses.find((m) => m.done === true);
     expect(doneMessage).toBeDefined();
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("should use consistent id across text-start, text-delta, and text-end events", async () => {
@@ -181,6 +181,6 @@ describe("Non-SSE Response Handling - PR #761", () => {
       expect(event.id).toBe(requestId);
     }
 
-    ws.close();
+    ws.close(1000);
   });
 });

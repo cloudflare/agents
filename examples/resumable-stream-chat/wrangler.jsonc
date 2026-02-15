@@ -1,9 +1,11 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
+  "ai": { "binding": "AI" },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
   },
   "durable_objects": {
     "bindings": [

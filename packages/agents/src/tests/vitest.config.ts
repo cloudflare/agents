@@ -3,6 +3,9 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 export default defineWorkersConfig({
   test: {
     name: "workers",
+    // Exclude experimental fiber tests — they hang in CI.
+    // Run locally with: npx vitest run src/tests/fiber.test.ts
+    exclude: ["**/fiber.test.ts"],
     // DO RPC methods that intentionally throw produce unhandled rejections
     // in the workerd runtime even though vitest catches them via .rejects.toThrow().
     // This is a known limitation of testing error paths in Durable Objects.

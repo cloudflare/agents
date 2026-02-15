@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/ai-chat",
-  "version": "0.0.6",
+  "version": "0.0.8",
   "description": "Cloudflare Agents (x) AI SDK Chat",
   "keywords": [
     "cloudflare",
@@ -19,8 +19,9 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "devDependencies": {
-    "@types/react": "^19.2.13",
-    "ai": "^6.0.77",
+    "@playwright/test": "^1.58.2",
+    "@types/react": "^19.2.14",
+    "ai": "^6.0.86",
     "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
     "zod": "^4.3.6"
@@ -51,6 +52,11 @@
       "types": "./dist/ai-chat-v5-migration.d.ts",
       "import": "./dist/ai-chat-v5-migration.js",
       "require": "./dist/ai-chat-v5-migration.js"
+    },
+    "./experimental/forever": {
+      "types": "./dist/experimental/forever.d.ts",
+      "import": "./dist/experimental/forever.js",
+      "require": "./dist/experimental/forever.js"
     }
   },
   "author": "Cloudflare Inc.",
@@ -59,6 +65,7 @@
     "build": "tsx ./scripts/build.ts",
     "test": "vitest --run",
     "test:react": "vitest --project react",
-    "test:workers": "vitest --project workers"
+    "test:workers": "vitest --project workers",
+    "test:e2e": "npx playwright test --config e2e/playwright.config.ts"
   }
 }

@@ -1,12 +1,7 @@
-import { openai } from "@ai-sdk/openai";
+import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import {
-  streamText,
-  convertToModelMessages,
-  createUIMessageStream,
-  createUIMessageStreamResponse
-} from "ai";
+import { streamText, convertToModelMessages } from "ai";
 
 /**
  * Resumable Streaming Chat Agent
@@ -24,22 +19,15 @@ export class ResumableStreamingChat extends AIChatAgent {
    * Handle incoming chat messages.
    */
   async onChatMessage() {
-    const stream = createUIMessageStream({
-      execute: async ({ writer }) => {
-        try {
-          const result = streamText({
-            model: openai("gpt-4o"),
-            messages: await convertToModelMessages(this.messages)
-          });
+    const workersai = createWorkersAI({ binding: this.env.AI });
 
-          writer.merge(result.toUIMessageStream());
-        } catch (error) {
-          console.error("Stream error:", error);
-          throw error;
-        }
-      }
+    const result = streamText({
+      // @ts-expect-error — model not yet in workers-ai-provider types
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      messages: await convertToModelMessages(this.messages)
     });
-    return createUIMessageStreamResponse({ stream });
+
+    return result.toUIMessageStreamResponse();
   }
 }
 

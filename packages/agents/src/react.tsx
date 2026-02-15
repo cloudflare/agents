@@ -319,6 +319,9 @@ export function useAgent<State>(
 
   // Get or create the query promise
   const queryPromise = useMemo(() => {
+    // Re-run when cache is invalidated after TTL expiry
+    void cacheInvalidatedAt;
+
     if (!query || typeof query !== "function") {
       return null;
     }
@@ -630,7 +633,10 @@ export function useAgent<State>(
   agent.name = identity.name;
   agent.identified = identity.identified;
   agent.ready = readyRef.current!.promise;
-  agent.stub = createStubProxy(call);
+  // Memoize stub so it's referentially stable across renders
+  // (call is already stable via useCallback)
+  const stub = useMemo(() => createStubProxy(call), [call]);
+  agent.stub = stub;
 
   // warn if agent isn't in lowercase
   if (identity.agent !== identity.agent.toLowerCase()) {

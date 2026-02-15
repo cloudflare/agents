@@ -1,5 +1,13 @@
 # hono-agents
 
+## 3.0.3
+
+### Patch Changes
+
+- [`13c6c26`](https://github.com/cloudflare/agents/commit/13c6c264ad68955ef2477a348d3a2ce2dcf24b7e) Thanks [@threepointone](https://github.com/threepointone)! - broaden deps
+
+- [#865](https://github.com/cloudflare/agents/pull/865) [`c3211d0`](https://github.com/cloudflare/agents/commit/c3211d0b0cc36aa294c15569ae650d3afeab9926) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
 ## 3.0.2
 
 ### Patch Changes

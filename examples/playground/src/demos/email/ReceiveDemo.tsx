@@ -209,6 +209,7 @@ export function ReceiveDemo() {
                     variant="ghost"
                     shape="square"
                     size="xs"
+                    aria-label="Close email"
                     onClick={() => setSelectedEmail(null)}
                   >
                     ×

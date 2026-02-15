@@ -76,7 +76,7 @@ describe("Client-side tool duplicate message prevention", () => {
     expect(toolPart.state).toBe("output-available");
     expect(toolPart.output).toBe("result");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("CF_AGENT_TOOL_RESULT applies tool result without auto-continuation by default", async () => {
@@ -149,7 +149,7 @@ describe("Client-side tool duplicate message prevention", () => {
     // No continuation parts (only the original tool part)
     expect(assistantMsg.parts.length).toBe(1);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("CF_AGENT_TOOL_RESULT auto-continues and merges when autoContinue is true", async () => {
@@ -224,7 +224,7 @@ describe("Client-side tool duplicate message prevention", () => {
     // Continuation parts should be appended (TestChatAgent returns text response)
     expect(assistantMsg.parts.length).toBeGreaterThan(1);
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("strips OpenAI itemIds from persisted messages to prevent duplicate errors", async () => {
@@ -284,7 +284,7 @@ describe("Client-side tool duplicate message prevention", () => {
     expect(textPart.text).toBe("Hello! How can I help?");
     expect(textPart.providerMetadata?.openai?.itemId).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("strips OpenAI itemIds from tool parts with callProviderMetadata", async () => {
@@ -347,7 +347,7 @@ describe("Client-side tool duplicate message prevention", () => {
     expect(toolPart.toolCallId).toBe(toolCallId);
     expect(toolPart.callProviderMetadata?.openai?.itemId).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("preserves other providerMetadata when stripping itemId", async () => {
@@ -418,7 +418,7 @@ describe("Client-side tool duplicate message prevention", () => {
       "also_keep_me"
     );
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("filters out empty reasoning parts to prevent AI SDK warnings", async () => {
@@ -472,7 +472,7 @@ describe("Client-side tool duplicate message prevention", () => {
     expect(assistantMessage!.parts.length).toBe(1);
     expect(assistantMessage!.parts[0].type).toBe("text");
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("preserves non-empty reasoning parts", async () => {
@@ -539,7 +539,7 @@ describe("Client-side tool duplicate message prevention", () => {
     // itemId should still be stripped
     expect(reasoningPart.providerMetadata?.openai?.itemId).toBeUndefined();
 
-    ws.close();
+    ws.close(1000);
   });
 });
 
@@ -610,7 +610,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     expect(toolPart.state).toBe("approval-responded");
     expect(toolPart.approval).toEqual({ approved: true });
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("CF_AGENT_TOOL_APPROVAL handles rejection (approved: false)", async () => {
@@ -673,7 +673,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     expect(toolPart.state).toBe("approval-responded");
     expect(toolPart.approval).toEqual({ approved: false });
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("CF_AGENT_TOOL_APPROVAL updates tool in approval-requested state", async () => {
@@ -737,7 +737,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     expect(toolPart.state).toBe("approval-responded");
     expect(toolPart.approval).toEqual({ approved: true });
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("CF_AGENT_TOOL_APPROVAL with non-existent toolCallId logs warning", async () => {
@@ -787,7 +787,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     const assistantMsg = messages.find((m) => m.role === "assistant");
     expect(assistantMsg?.parts[0]).toEqual({ type: "text", text: "Hi there!" });
 
-    ws.close();
+    ws.close(1000);
   });
 
   it("CF_AGENT_TOOL_APPROVAL does not update tool already in output-available state", async () => {
@@ -852,6 +852,6 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     expect(toolPart.state).toBe("output-available");
     expect(toolPart.output).toEqual({ result: "done" });
 
-    ws.close();
+    ws.close(1000);
   });
 });

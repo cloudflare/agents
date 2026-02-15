@@ -80,6 +80,6 @@ describe("AIChatAgent Connection Context - Issue #711", () => {
     // The connection ID should match between onChatMessage and nested function
     expect(nestedContext?.connectionId).toBe(capturedContext?.connectionId);
 
-    ws.close();
+    ws.close(1000);
   });
 });

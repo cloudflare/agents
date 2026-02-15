@@ -26,4 +26,9 @@ export type AgentContextStore = {
   email: AgentEmail | undefined;
 };
 
-export const agentContext = new AsyncLocalStorage<AgentContextStore>();
+/**
+ * @internal — This is an internal implementation detail.
+ * Importing or relying on this symbol **will** break your code in a future release.
+ */
+export const __DO_NOT_USE_WILL_BREAK__agentContext =
+  new AsyncLocalStorage<AgentContextStore>();

@@ -1,5 +1,9 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { agentContext, type AgentEmail } from "./internal_context";
+import {
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentEmail
+} from "./internal_context";
+export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
 
@@ -42,7 +46,7 @@ import type {
 import { MCPConnectionState } from "./mcp/client-connection";
 import {
   DurableObjectOAuthClientProvider,
-  type AgentsOAuthProvider
+  type AgentMcpOAuthProvider
 } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
 import { genericObservability, type Observability } from "./observability";
@@ -238,6 +242,9 @@ export type Schedule<T = string> = {
     }
 );
 
+/**
+ * Represents the public state of a fiber.
+ */
 function getNextCronTime(cron: string) {
   const interval = parseCronExpression(cron);
   return interval.getNextDate();
@@ -245,6 +252,11 @@ function getNextCronTime(cron: string) {
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
+export type {
+  AgentMcpOAuthProvider,
+  /** @deprecated Use {@link AgentMcpOAuthProvider} instead. */
+  AgentsOAuthProvider
+} from "./mcp/do-oauth-client-provider";
 
 /**
  * MCP Server state update message from server -> Client
@@ -1643,73 +1655,77 @@ export class Agent<
       return;
     }
     this._flushingQueue = true;
-    while (true) {
-      const result = this.sql<QueueItem<string>>`
-      SELECT * FROM cf_agents_queues
-      ORDER BY created_at ASC
-    `;
+    try {
+      while (true) {
+        const result = this.sql<QueueItem<string>>`
+        SELECT * FROM cf_agents_queues
+        ORDER BY created_at ASC
+      `;
 
-      if (!result || result.length === 0) {
-        break;
-      }
-
-      for (const row of result || []) {
-        const callback = this[row.callback as keyof Agent<Env>];
-        if (!callback) {
-          console.error(`callback ${row.callback} not found`);
-          continue;
+        if (!result || result.length === 0) {
+          break;
         }
-        const { connection, request, email } = agentContext.getStore() || {};
-        await agentContext.run(
-          {
-            agent: this,
-            connection,
-            request,
-            email
-          },
-          async () => {
-            const rawRetryOptions = (
-              row as unknown as { retry_options?: string }
-            ).retry_options;
-            const retryOpts: RetryOptions = rawRetryOptions
-              ? JSON.parse(rawRetryOptions)
-              : {};
-            const defaults = this._resolvedOptions.retry;
-            const maxAttempts = retryOpts.maxAttempts ?? defaults.maxAttempts;
-            const baseDelayMs = retryOpts.baseDelayMs ?? defaults.baseDelayMs;
-            const maxDelayMs = retryOpts.maxDelayMs ?? defaults.maxDelayMs;
-            const parsedPayload = JSON.parse(row.payload as string);
-            try {
-              await tryN(
-                maxAttempts,
-                async () => {
-                  await (
-                    callback as (
-                      payload: unknown,
-                      queueItem: QueueItem<string>
-                    ) => Promise<void>
-                  ).bind(this)(parsedPayload, row);
-                },
-                { baseDelayMs, maxDelayMs }
-              );
-            } catch (e) {
-              console.error(
-                `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
-                e
-              );
-              try {
-                await this.onError(e);
-              } catch {
-                // swallow onError errors
-              }
-            } finally {
-              await this.dequeue(row.id);
-            }
+
+        for (const row of result || []) {
+          const callback = this[row.callback as keyof Agent<Env>];
+          if (!callback) {
+            console.error(`callback ${row.callback} not found`);
+            await this.dequeue(row.id);
+            continue;
           }
-        );
+          const { connection, request, email } = agentContext.getStore() || {};
+          await agentContext.run(
+            {
+              agent: this,
+              connection,
+              request,
+              email
+            },
+            async () => {
+              const rawRetryOptions = (
+                row as unknown as { retry_options?: string }
+              ).retry_options;
+              const retryOpts: RetryOptions = rawRetryOptions
+                ? JSON.parse(rawRetryOptions)
+                : {};
+              const defaults = this._resolvedOptions.retry;
+              const maxAttempts = retryOpts.maxAttempts ?? defaults.maxAttempts;
+              const baseDelayMs = retryOpts.baseDelayMs ?? defaults.baseDelayMs;
+              const maxDelayMs = retryOpts.maxDelayMs ?? defaults.maxDelayMs;
+              const parsedPayload = JSON.parse(row.payload as string);
+              try {
+                await tryN(
+                  maxAttempts,
+                  async () => {
+                    await (
+                      callback as (
+                        payload: unknown,
+                        queueItem: QueueItem<string>
+                      ) => Promise<void>
+                    ).bind(this)(parsedPayload, row);
+                  },
+                  { baseDelayMs, maxDelayMs }
+                );
+              } catch (e) {
+                console.error(
+                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
+                  e
+                );
+                try {
+                  await this.onError(e);
+                } catch {
+                  // swallow onError errors
+                }
+              } finally {
+                await this.dequeue(row.id);
+              }
+            }
+          );
+        }
       }
+    } finally {
+      this._flushingQueue = false;
     }
-    this._flushingQueue = false;
   }
 
   /**
@@ -2260,6 +2276,7 @@ export class Agent<
     await this._scheduleNextAlarm();
   };
 
+  // Fiber methods moved to agents/experimental/forever (withFibers mixin)
   /**
    * Destroy the Agent, removing all state and scheduled tasks
    */
@@ -3623,7 +3640,7 @@ export class Agent<
 
     const id = nanoid(8);
 
-    const authProvider = this.createOAuthProvider(callbackUrl);
+    const authProvider = this.createMcpOAuthProvider(callbackUrl);
     authProvider.serverId = id;
 
     // Use the transport type specified in options, or default to "auto"
@@ -3738,7 +3755,7 @@ export class Agent<
    * @example
    * // Custom OAuth provider
    * class MyAgent extends Agent {
-   *   createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+   *   createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
    *     return new MyCustomOAuthProvider(
    *       this.ctx.storage,
    *       this.name,
@@ -3748,9 +3765,9 @@ export class Agent<
    * }
    *
    * @param callbackUrl The OAuth callback URL for the authorization flow
-   * @returns An {@link AgentsOAuthProvider} instance used by {@link addMcpServer}
+   * @returns An {@link AgentMcpOAuthProvider} instance used by {@link addMcpServer}
    */
-  createOAuthProvider(callbackUrl: string): AgentsOAuthProvider {
+  createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
     return new DurableObjectOAuthClientProvider(
       this.ctx.storage,
       this.name,

@@ -92,12 +92,20 @@
         "name": "TestChildAgent"
       },
       {
+        "class_name": "TestQueueAgent",
+        "name": "TestQueueAgent"
+      },
+      {
         "class_name": "TestRetryAgent",
         "name": "TestRetryAgent"
       },
       {
         "class_name": "TestRetryDefaultsAgent",
         "name": "TestRetryDefaultsAgent"
+      },
+      {
+        "class_name": "TestFiberAgent",
+        "name": "TestFiberAgent"
       }
     ]
   },
@@ -138,8 +146,10 @@
         "TestNoIdentityAgent",
         "TestCallableAgent",
         "TestChildAgent",
+        "TestQueueAgent",
         "TestRetryAgent",
-        "TestRetryDefaultsAgent"
+        "TestRetryDefaultsAgent",
+        "TestFiberAgent"
       ],
       "tag": "v1"
     }
