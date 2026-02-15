@@ -29,7 +29,8 @@ export {
   TestRaceAgent,
   TestRetryAgent,
   TestRetryDefaultsAgent,
-  TestFiberAgent
+  TestFiberAgent,
+  TestVoiceAgent
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -65,7 +66,8 @@ import type {
   TestQueueAgent,
   TestRetryAgent,
   TestRetryDefaultsAgent,
-  TestFiberAgent
+  TestFiberAgent,
+  TestVoiceAgent
 } from "./agents";
 
 export type Env = {
@@ -93,6 +95,7 @@ export type Env = {
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestFiberAgent: DurableObjectNamespace<TestFiberAgent>;
+  TestVoiceAgent: DurableObjectNamespace<TestVoiceAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;

@@ -15,7 +15,7 @@
  *
  * @example
  * ```typescript
- * import { VoiceAgent } from "agents/voice";
+ * import { withVoice } from "agents/experimental/voice";
  * import { TwilioAdapter } from "@cloudflare/agents-voice-twilio";
  *
  * class MyAgent extends VoiceAgent<Env> {
@@ -251,21 +251,54 @@ export class TwilioAdapter {
         if (!streamSid) return;
 
         if (typeof event.data === "string") {
-          // JSON messages from agent — forward status/transcript as-is
-          // (Twilio doesn't render these, but they can be logged)
-          // We could also use marks to track them
+          // JSON messages from agent — we can use Twilio marks to track them.
+          // Forward as a mark so the Twilio side can correlate events.
+          try {
+            const msg = JSON.parse(event.data);
+            if (
+              serverSocket.readyState === WebSocket.OPEN &&
+              (msg.type === "transcript" ||
+                msg.type === "transcript_end" ||
+                msg.type === "status")
+            ) {
+              serverSocket.send(
+                JSON.stringify({
+                  event: "mark",
+                  streamSid,
+                  mark: { name: JSON.stringify(msg) }
+                })
+              );
+            }
+          } catch {
+            // ignore non-JSON
+          }
         } else if (event.data instanceof ArrayBuffer) {
-          // MP3 audio from agent — we need to decode and convert to mulaw
-          // For now, we send the raw audio and let Twilio handle it
-          // TODO: decode MP3 → PCM → resample to 8kHz → encode mulaw → base64
-          // This requires an MP3 decoder which is complex in pure JS.
-          // A practical approach: configure VoiceAgent to output mulaw directly,
-          // or use a TTS provider that can output mulaw 8kHz.
+          // Audio from agent. This is expected to be 16kHz 16-bit mono PCM.
           //
-          // For now, we log this as a limitation.
-          console.log(
-            "[TwilioAdapter] Received audio from agent (MP3→mulaw conversion needed)"
-          );
+          // IMPORTANT: The default Workers AI TTS returns MP3, which cannot
+          // be decoded to PCM on Workers (no AudioContext). For Twilio, the
+          // VoiceAgent MUST be configured with a TTS provider that outputs
+          // raw PCM (e.g., ElevenLabs with output_format "pcm_16000", or a
+          // custom synthesize() that returns 16kHz 16-bit PCM).
+          //
+          // Convert: 16kHz PCM → resample to 8kHz → encode mulaw → base64
+          const pcm16k = new Int16Array(event.data);
+          const pcm8k = resamplePCM(pcm16k, 16000, 8000);
+          const mulawBytes = new Uint8Array(pcm8k.length);
+          for (let i = 0; i < pcm8k.length; i++) {
+            mulawBytes[i] = encodeMulaw(pcm8k[i]);
+          }
+          const payload = btoa(String.fromCharCode(...mulawBytes));
+
+          if (serverSocket.readyState === WebSocket.OPEN) {
+            serverSocket.send(
+              JSON.stringify({
+                event: "media",
+                streamSid,
+                media: { payload }
+              })
+            );
+          }
         }
       });
 

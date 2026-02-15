@@ -4,6 +4,9 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
+  // Hibernation is disabled for voice agents. The DO must stay alive during
+  // active calls to preserve audio buffers and in-flight pipeline state.
+  // See design/voice.md § Hibernation for details.
   "ai": {
     "binding": "AI"
   },

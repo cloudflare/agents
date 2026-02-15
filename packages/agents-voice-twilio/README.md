@@ -25,9 +25,11 @@ npm install @cloudflare/agents-voice-twilio
 ### 1. Add the adapter to your Worker
 
 ```typescript
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
-import { routeAgentRequest } from "agents";
+import { Agent, routeAgentRequest } from "agents";
+import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
 import { TwilioAdapter } from "@cloudflare/agents-voice-twilio";
+
+const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {

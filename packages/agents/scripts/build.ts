@@ -15,7 +15,11 @@ async function main() {
       "src/mcp/x402.ts",
       "src/observability/index.ts",
       "src/codemode/ai.ts",
-      "src/experimental/forever.ts"
+      "src/experimental/forever.ts",
+      "src/experimental/voice/voice.ts",
+      "src/experimental/voice/voice-client.ts",
+      "src/experimental/voice/voice-react.tsx",
+      "src/experimental/voice/sentence-chunker.ts"
     ],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],

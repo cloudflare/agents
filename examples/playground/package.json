@@ -13,12 +13,12 @@
     "@cloudflare/agents-ui": "*",
     "@cloudflare/ai-chat": "*",
     "agents": "*",
-    "ai": "^6.0.77",
+    "ai": "^6.0.86",
     "cronstrue": "^3.12.0",
     "nanoid": "^5.1.6",
     "postal-mime": "^2.7.3",
     "react-router-dom": "^7.13.0",
-    "workers-ai-provider": "^3.0.4"
+    "workers-ai-provider": "^3.1.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

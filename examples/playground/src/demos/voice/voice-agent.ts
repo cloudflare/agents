@@ -1,7 +1,9 @@
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
-import type { Connection } from "agents";
+import { Agent, type Connection } from "agents";
+import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
+
+const VoiceAgent = withVoice(Agent);
 
 export class PlaygroundVoiceAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {

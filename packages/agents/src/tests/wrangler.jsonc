@@ -106,6 +106,10 @@
       {
         "class_name": "TestFiberAgent",
         "name": "TestFiberAgent"
+      },
+      {
+        "class_name": "TestVoiceAgent",
+        "name": "TestVoiceAgent"
       }
     ]
   },
@@ -149,7 +153,8 @@
         "TestQueueAgent",
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
-        "TestFiberAgent"
+        "TestFiberAgent",
+        "TestVoiceAgent"
       ],
       "tag": "v1"
     }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   VoiceClient,
   type VoiceClientOptions,
@@ -15,8 +15,14 @@ export type {
   VoiceClientOptions
 } from "./voice-client";
 
-/** Options accepted by useVoiceAgent — same shape as VoiceClientOptions. */
-export type UseVoiceAgentOptions = VoiceClientOptions;
+/** Options accepted by useVoiceAgent. */
+export interface UseVoiceAgentOptions extends VoiceClientOptions {
+  /**
+   * Called when the hook reconnects due to option changes (e.g., agent name
+   * or instance name changed). Use this to show a toast or notification.
+   */
+  onReconnect?: () => void;
+}
 
 export interface UseVoiceAgentReturn {
   status: VoiceStatus;
@@ -36,16 +42,25 @@ export interface UseVoiceAgentReturn {
  * React hook that wraps VoiceClient, syncing its state into React state.
  * All audio infrastructure (mic capture, playback, silence/interrupt detection,
  * voice protocol) is handled by VoiceClient — this hook just bridges to React.
+ *
+ * When the connection identity changes (agent, name, or host), the hook
+ * automatically disconnects the old client, creates a new one, and reconnects.
+ * The `onReconnect` callback fires when this happens.
  */
 export function useVoiceAgent(
   options: UseVoiceAgentOptions
 ): UseVoiceAgentReturn {
-  const clientRef = useRef<VoiceClient | null>(null);
+  // Derive a stable key from the connection-identity fields.
+  // When this changes, we tear down the old client and create a new one.
+  const connectionKey = useMemo(
+    () => `${options.agent}:${options.name ?? "default"}:${options.host ?? ""}`,
+    [options.agent, options.name, options.host]
+  );
 
-  // Lazily create the VoiceClient (stable across renders)
-  if (!clientRef.current) {
-    clientRef.current = new VoiceClient(options);
-  }
+  const clientRef = useRef<VoiceClient | null>(null);
+  const prevKeyRef = useRef(connectionKey);
+  const onReconnectRef = useRef(options.onReconnect);
+  onReconnectRef.current = options.onReconnect;
 
   // React state mirrors VoiceClient state
   const [status, setStatus] = useState<VoiceStatus>("idle");
@@ -56,9 +71,27 @@ export function useVoiceAgent(
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Connect on mount, disconnect on unmount
+  // Connect on mount or when connection identity changes
   useEffect(() => {
-    const client = clientRef.current!;
+    const isReconnect = prevKeyRef.current !== connectionKey;
+    prevKeyRef.current = connectionKey;
+
+    // Fire reconnect callback (e.g., to show a toast)
+    if (isReconnect) {
+      onReconnectRef.current?.();
+    }
+
+    // Reset state for a fresh connection
+    setStatus("idle");
+    setTranscript([]);
+    setMetrics(null);
+    setAudioLevel(0);
+    setIsMuted(false);
+    setConnected(false);
+    setError(null);
+
+    const client = new VoiceClient(options);
+    clientRef.current = client;
     client.connect();
 
     // Sync handlers — read state from client and push to React
@@ -88,9 +121,10 @@ export function useVoiceAgent(
       client.removeEventListener("error", onError);
       client.disconnect();
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reconnect when connection identity changes
+  }, [connectionKey]);
 
-  // Stable action callbacks
+  // Stable action callbacks — always use the latest client
   const startCall = useCallback(() => clientRef.current!.startCall(), []);
   const endCall = useCallback(() => clientRef.current!.endCall(), []);
   const toggleMute = useCallback(() => clientRef.current!.toggleMute(), []);

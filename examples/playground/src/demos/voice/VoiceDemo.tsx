@@ -1,4 +1,7 @@
-import { useVoiceAgent, type VoiceStatus } from "agents/voice-react";
+import {
+  useVoiceAgent,
+  type VoiceStatus
+} from "agents/experimental/voice-react";
 import {
   MicrophoneIcon,
   MicrophoneSlashIcon,

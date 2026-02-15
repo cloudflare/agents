@@ -1,5 +1,5 @@
 import { PartySocket } from "partysocket";
-import { camelCaseToKebabCase } from "./utils";
+import { camelCaseToKebabCase } from "../../utils";
 
 // --- Public types ---
 
@@ -68,9 +68,16 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
 
     const channelData = input[0];
 
+    // Linear interpolation resampling (e.g. 48kHz → 16kHz).
+    // Nearest-neighbor (picking every Nth sample) introduces aliasing
+    // artifacts, especially on sibilants (s, f, th). Linear interpolation
+    // blends adjacent samples, acting as a basic low-pass filter.
     for (let i = 0; i < channelData.length; i += this.ratio) {
       const idx = Math.floor(i);
-      if (idx < channelData.length) {
+      const frac = i - idx;
+      if (idx + 1 < channelData.length) {
+        this.buffer.push(channelData[idx] * (1 - frac) + channelData[idx + 1] * frac);
+      } else if (idx < channelData.length) {
         this.buffer.push(channelData[idx]);
       }
     }
@@ -132,6 +139,7 @@ export class VoiceClient {
 
   // Audio refs
   #audioContext: AudioContext | null = null;
+  #workletRegistered = false;
   #workletNode: AudioWorkletNode | null = null;
   #stream: MediaStream | null = null;
   #silenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -397,6 +405,7 @@ export class VoiceClient {
     if (this.#audioContext) {
       this.#audioContext.close().catch(() => {});
       this.#audioContext = null;
+      this.#workletRegistered = false;
     }
   }
 
@@ -455,12 +464,17 @@ export class VoiceClient {
 
       const ctx = await this.#getAudioContext();
 
-      const blob = new Blob([WORKLET_PROCESSOR], {
-        type: "application/javascript"
-      });
-      const workletUrl = URL.createObjectURL(blob);
-      await ctx.audioWorklet.addModule(workletUrl);
-      URL.revokeObjectURL(workletUrl);
+      // Only register the worklet processor once per AudioContext.
+      // Calling addModule twice with the same processor name throws.
+      if (!this.#workletRegistered) {
+        const blob = new Blob([WORKLET_PROCESSOR], {
+          type: "application/javascript"
+        });
+        const workletUrl = URL.createObjectURL(blob);
+        await ctx.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
+        this.#workletRegistered = true;
+      }
 
       const source = ctx.createMediaStreamSource(stream);
       const workletNode = new AudioWorkletNode(ctx, "audio-capture-processor");

@@ -52,7 +52,7 @@ import {
   useVoiceAgent,
   type UseVoiceAgentReturn,
   type UseVoiceAgentOptions
-} from "../voice-react";
+} from "../experimental/voice/voice-react";
 
 // --- Audio API mocks ---
 

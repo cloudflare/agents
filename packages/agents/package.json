@@ -156,20 +156,20 @@
       "import": "./dist/ai-chat-v5-migration.js",
       "require": "./dist/ai-chat-v5-migration.js"
     },
-    "./voice": {
-      "types": "./dist/voice.d.ts",
-      "import": "./dist/voice.js",
-      "require": "./dist/voice.js"
+    "./experimental/voice": {
+      "types": "./dist/experimental/voice/voice.d.ts",
+      "import": "./dist/experimental/voice/voice.js",
+      "require": "./dist/experimental/voice/voice.js"
     },
-    "./voice-client": {
-      "types": "./dist/voice-client.d.ts",
-      "import": "./dist/voice-client.js",
-      "require": "./dist/voice-client.js"
+    "./experimental/voice-client": {
+      "types": "./dist/experimental/voice/voice-client.d.ts",
+      "import": "./dist/experimental/voice/voice-client.js",
+      "require": "./dist/experimental/voice/voice-client.js"
     },
-    "./voice-react": {
-      "types": "./dist/voice-react.d.ts",
-      "import": "./dist/voice-react.js",
-      "require": "./dist/voice-react.js"
+    "./experimental/voice-react": {
+      "types": "./dist/experimental/voice/voice-react.d.ts",
+      "import": "./dist/experimental/voice/voice-react.js",
+      "require": "./dist/experimental/voice/voice-react.js"
     },
     "./ai-react": {
       "types": "./dist/ai-react.d.ts",
