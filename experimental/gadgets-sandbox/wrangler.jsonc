@@ -1,0 +1,36 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "ai": { "binding": "AI" },
+  "compatibility_date": "2026-01-28",
+  // "experimental" enables ctx.facets, ctx.exports, and worker_loaders.
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "SandboxAgent",
+        "name": "SandboxAgent"
+      }
+      // CustomerDatabase and DatabaseLoopback are NOT here —
+      // they're facets/entrypoints used internally.
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["SandboxAgent"],
+      "tag": "v1"
+    }
+  ],
+  // The Worker Loader binding. This lets us dynamically load and execute
+  // code at runtime in isolated Workers with restricted env bindings.
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
+  "name": "gadgets-sandbox"
+}

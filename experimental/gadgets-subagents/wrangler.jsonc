@@ -1,0 +1,28 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "ai": { "binding": "AI" },
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "CoordinatorAgent",
+        "name": "CoordinatorAgent"
+      }
+      // PerspectiveAgent is NOT here — it's a facet, instantiated by
+      // the coordinator via ctx.facets.get().
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["CoordinatorAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "gadgets-subagents"
+}

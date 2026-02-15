@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "ai": { "binding": "AI" },
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "OverseerAgent",
+        "name": "OverseerAgent"
+      }
+      // ChatGadget is NOT here — it's a facet.
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["OverseerAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "gadgets-chat"
+}
