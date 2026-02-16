@@ -143,4 +143,6 @@ export type IncomingMessage<ChatMessage extends UIMessage = UIMessage> =
       toolCallId: string;
       /** Whether the tool execution was approved */
       approved: boolean;
+      /** Whether server should auto-continue the conversation after applying approval */
+      autoContinue?: boolean;
     };

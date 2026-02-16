@@ -607,8 +607,59 @@ export class AIChatAgent<
 
         // Handle client-side tool approval response
         if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
-          const { toolCallId, approved } = data;
-          this._applyToolApproval(toolCallId, approved);
+          const { toolCallId, approved, autoContinue } = data;
+          this._applyToolApproval(toolCallId, approved).then((applied) => {
+            // Only auto-continue if approved AND client requested it
+            if (applied && approved && autoContinue) {
+              const waitForStream = async () => {
+                if (this._streamCompletionPromise) {
+                  await this._streamCompletionPromise;
+                } else {
+                  await new Promise((resolve) => setTimeout(resolve, 500));
+                }
+              };
+
+              waitForStream()
+                .then(() => {
+                  const continuationId = nanoid();
+                  const abortSignal = this._getAbortSignal(continuationId);
+
+                  return this._tryCatchChat(async () => {
+                    return agentContext.run(
+                      {
+                        agent: this,
+                        connection,
+                        request: undefined,
+                        email: undefined
+                      },
+                      async () => {
+                        const response = await this.onChatMessage(
+                          async (_finishResult) => {},
+                          {
+                            abortSignal,
+                            clientTools: this._lastClientTools,
+                            body: this._lastBody
+                          }
+                        );
+
+                        if (response) {
+                          await this._reply(continuationId, response, [], {
+                            continuation: true,
+                            chatMessageId: continuationId
+                          });
+                        }
+                      }
+                    );
+                  });
+                })
+                .catch((error) => {
+                  console.error(
+                    "[AIChatAgent] Tool approval continuation failed:",
+                    error
+                  );
+                });
+            }
+          });
           return;
         }
       }
@@ -1510,6 +1561,62 @@ export class AIChatAgent<
             // It handles: text, reasoning, file, source, tool lifecycle,
             // step boundaries — all the part types needed for UIMessage.
             const handled = applyChunkToParts(message.parts, data);
+
+            // Cross-message tool output fallback:
+            // When a tool with needsApproval is approved, the continuation
+            // stream emits tool-output-available/tool-output-error for a
+            // tool call that lives in a *previous* assistant message.
+            // applyChunkToParts only searches the current message's parts,
+            // so the update is silently skipped. Fall back to searching
+            // this.messages and update the persisted message directly.
+            if (
+              handled &&
+              (data.type === "tool-output-available" ||
+                data.type === "tool-output-error") &&
+              data.toolCallId
+            ) {
+              const foundInCurrentMessage = message.parts.some(
+                (p) => "toolCallId" in p && p.toolCallId === data.toolCallId
+              );
+              if (!foundInCurrentMessage) {
+                if (data.type === "tool-output-available") {
+                  this._findAndUpdateToolPart(
+                    data.toolCallId,
+                    "_streamSSEReply",
+                    [
+                      "input-available",
+                      "input-streaming",
+                      "approval-responded",
+                      "approval-requested"
+                    ],
+                    (part) => ({
+                      ...part,
+                      state: "output-available",
+                      output: data.output,
+                      ...(data.preliminary !== undefined && {
+                        preliminary: data.preliminary
+                      })
+                    })
+                  );
+                } else {
+                  this._findAndUpdateToolPart(
+                    data.toolCallId,
+                    "_streamSSEReply",
+                    [
+                      "input-available",
+                      "input-streaming",
+                      "approval-responded",
+                      "approval-requested"
+                    ],
+                    (part) => ({
+                      ...part,
+                      state: "output-error",
+                      errorText: data.errorText
+                    })
+                  );
+                }
+              }
+            }
 
             // Handle server-specific chunk types not covered by the shared parser
             if (!handled) {

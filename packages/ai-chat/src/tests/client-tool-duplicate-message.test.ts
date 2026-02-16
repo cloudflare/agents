@@ -855,3 +855,288 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     ws.close(1000);
   });
 });
+
+describe("Tool approval auto-continuation (needsApproval)", () => {
+  it("CF_AGENT_TOOL_APPROVAL without autoContinue does NOT trigger continuation", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_no_auto_continue";
+
+    // Persist assistant message with tool in input-available state
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Send approval WITHOUT autoContinue
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: true
+        // no autoContinue
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    // Should have exactly 1 assistant message (no continuation)
+    expect(assistantMessages.length).toBe(1);
+
+    const assistantMsg = assistantMessages[0];
+    expect(assistantMsg.id).toBe("assistant-1");
+
+    // Tool state should be approval-responded but no continuation parts
+    const toolPart = assistantMsg.parts[0] as {
+      state: string;
+      approval?: { approved: boolean };
+    };
+    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.approval).toEqual({ approved: true });
+    expect(assistantMsg.parts.length).toBe(1);
+
+    ws.close(1000);
+  });
+
+  it("CF_AGENT_TOOL_APPROVAL with autoContinue triggers continuation", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_auto_continue_approval";
+
+    // Persist assistant message with tool in input-available state
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Send approval WITH autoContinue: true
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: true,
+        autoContinue: true
+      })
+    );
+
+    // Wait for approval + continuation (500ms wait + stream)
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    // Should still have 1 assistant message (continuation merged into it)
+    expect(assistantMessages.length).toBe(1);
+
+    const assistantMsg = assistantMessages[0];
+    expect(assistantMsg.id).toBe("assistant-1");
+
+    // First part should be the approved tool
+    const toolPart = assistantMsg.parts[0] as {
+      state: string;
+      approval?: { approved: boolean };
+    };
+    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.approval).toEqual({ approved: true });
+
+    // Continuation parts should be appended (TestChatAgent returns text response)
+    expect(assistantMsg.parts.length).toBeGreaterThan(1);
+
+    ws.close(1000);
+  });
+
+  it("CF_AGENT_TOOL_APPROVAL with approved: false and autoContinue does NOT continue", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_rejected_no_continue";
+
+    // Persist assistant message with tool in input-available state
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Send rejection with autoContinue: true — should NOT continue
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: false,
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    // Should have 1 assistant message, no continuation
+    expect(assistantMessages.length).toBe(1);
+
+    const assistantMsg = assistantMessages[0];
+    const toolPart = assistantMsg.parts[0] as {
+      state: string;
+      approval?: { approved: boolean };
+    };
+    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.approval).toEqual({ approved: false });
+
+    // No continuation parts
+    expect(assistantMsg.parts.length).toBe(1);
+
+    ws.close(1000);
+  });
+
+  it("CF_AGENT_TOOL_APPROVAL with autoContinue on approval-requested state triggers continuation", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_approval_requested_continue";
+
+    // Persist assistant message with tool in approval-requested state
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-requested",
+            input: { param: "value" },
+            approval: { id: "approval-456" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Send approval with autoContinue
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: true,
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const assistantMsg = assistantMessages[0];
+
+    // Tool part should be updated
+    const toolPart = assistantMsg.parts[0] as {
+      state: string;
+      approval?: { approved: boolean };
+    };
+    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.approval).toEqual({ approved: true });
+
+    // Continuation should have appended parts
+    expect(assistantMsg.parts.length).toBeGreaterThan(1);
+
+    ws.close(1000);
+  });
+});

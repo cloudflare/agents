@@ -806,11 +806,12 @@ export function useAgentChat<
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_APPROVAL,
           toolCallId,
-          approved
+          approved,
+          autoContinue: autoContinueAfterToolResult
         })
       );
     },
-    []
+    [autoContinueAfterToolResult]
   );
 
   // Effect for new onToolCall callback pattern (v6 style)
