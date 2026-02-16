@@ -1,0 +1,25 @@
+{
+  "name": "@cloudflare/agents-sandbox-example",
+  "description": "Chat agent with on-demand Sandbox + OpenCode for coding tasks",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.5.0",
+    "@opencode-ai/sdk": "^1.1.40",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/sandbox": "^0.7.4",
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.1.18"
+  }
+}
