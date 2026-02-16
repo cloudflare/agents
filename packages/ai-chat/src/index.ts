@@ -1569,8 +1569,10 @@ export class AIChatAgent<
             // applyChunkToParts only searches the current message's parts,
             // so the update is silently skipped. Fall back to searching
             // this.messages and update the persisted message directly.
+            // Note: checked independently of `handled` — applyChunkToParts
+            // returns true for recognized chunk types even when it cannot
+            // find the target part, so `handled` is not a reliable signal.
             if (
-              handled &&
               (data.type === "tool-output-available" ||
                 data.type === "tool-output-error") &&
               data.toolCallId
