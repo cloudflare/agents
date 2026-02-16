@@ -16,7 +16,7 @@ async function main() {
       "src/observability/index.ts",
       "src/codemode/ai.ts",
       "src/experimental/forever.ts",
-      "src/memory/index.ts"
+      "src/experimental/memory/index.ts"
     ],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],
