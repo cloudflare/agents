@@ -50,7 +50,7 @@ export class MyAgent extends AIChatAgent {
 
 ## Client Setup
 
-Use `onToolCall` to handle client-side tool execution. Set `autoContinueAfterToolResult: true` so the server automatically calls `onChatMessage()` again after receiving the tool result, letting the LLM continue in the same assistant message.
+Use `onToolCall` to handle client-side tool execution. Auto-continuation is enabled by default (`autoContinueAfterToolResult: true`), so the server automatically calls `onChatMessage()` again after receiving the tool result, letting the LLM continue in the same assistant message.
 
 ```tsx
 import { useAgent } from "agents/react";
@@ -61,9 +61,8 @@ function Chat() {
 
   const { messages, sendMessage } = useAgentChat({
     agent,
-    // Server auto-continues after receiving client tool results
-    autoContinueAfterToolResult: true,
-    // Handle client-side tool execution
+    // Auto-continuation is enabled by default — no need to set this explicitly
+    // autoContinueAfterToolResult: true,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName === "getUserLocation") {
         const pos = await new Promise((resolve, reject) => {
@@ -105,7 +104,7 @@ The user sees a single seamless response, even though it involved a client-side 
 
 ## Without Auto-Continuation
 
-When `autoContinueAfterToolResult` is `false` (the default), the client must explicitly send a follow-up message after providing the tool result:
+When `autoContinueAfterToolResult` is set to `false`, the client must explicitly send a follow-up message after providing the tool result:
 
 ```tsx
 const { messages, sendMessage, addToolOutput } = useAgentChat({
@@ -119,7 +118,7 @@ const { messages, sendMessage, addToolOutput } = useAgentChat({
       });
     }
   }
-  // autoContinueAfterToolResult defaults to false
+  autoContinueAfterToolResult: false, // Disable auto-continuation
 });
 
 // After tool result is provided, send a follow-up to continue

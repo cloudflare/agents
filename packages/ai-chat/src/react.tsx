@@ -248,15 +248,15 @@ type UseAgentChatOptions<
    */
   toolsRequiringConfirmation?: string[];
   /**
-   * When true, the server automatically continues the conversation after
-   * receiving client-side tool results, similar to how server-executed tools
-   * work with maxSteps in streamText. The continuation is merged into the
-   * same assistant message.
+   * When true (default), the server automatically continues the conversation
+   * after receiving client-side tool results or approvals, similar to how
+   * server-executed tools work with maxSteps in streamText. The continuation
+   * is merged into the same assistant message.
    *
-   * When false (default), the client calls sendMessage() after tool results
+   * When false, the client must call sendMessage() after tool results
    * to continue the conversation, which creates a new assistant message.
    *
-   * @default false
+   * @default true
    */
   autoContinueAfterToolResult?: boolean;
   /**
@@ -376,7 +376,7 @@ export function useAgentChat<
     experimental_automaticToolResolution,
     tools,
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
-    autoContinueAfterToolResult = false, // Opt-in to server auto-continuation
+    autoContinueAfterToolResult = true, // Server auto-continues after tool results/approvals
     autoSendAfterAllConfirmationsResolved = true, // Legacy option for client-side batching
     resume = true, // Enable stream resumption by default
     body: bodyOption,

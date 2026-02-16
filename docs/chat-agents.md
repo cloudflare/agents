@@ -312,7 +312,7 @@ function Chat() {
 | ----------------------------- | --------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `agent`                       | `ReturnType<typeof useAgent>`                 | Required | Agent connection from `useAgent`                                                                                         |
 | `onToolCall`                  | `({ toolCall, addToolOutput }) => void`       | —        | Handle client-side tool execution                                                                                        |
-| `autoContinueAfterToolResult` | `boolean`                                     | `false`  | Auto-continue conversation after client tool results                                                                     |
+| `autoContinueAfterToolResult` | `boolean`                                     | `true`   | Auto-continue conversation after client tool results and approvals                                                       |
 | `resume`                      | `boolean`                                     | `true`   | Enable automatic stream resumption on reconnect                                                                          |
 | `body`                        | `object \| () => object`                      | —        | Custom data sent with every request                                                                                      |
 | `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`            | —        | Advanced per-request customization                                                                                       |
