@@ -169,7 +169,7 @@ npx vitest run --config src/experimental/memory/__tests__/vitest.config.ts
 - **Workers AI only** — only the Workers AI adapter is shipped. OpenAI/Anthropic adapters are planned.
 - **No compaction/summarization** — the event schema supports compaction events, but no orchestration or auto-compaction is implemented yet. Bring your own summarizer.
 - **No token estimation** — there is no built-in token counter. Use an external estimator or character-based heuristic if you need to enforce context limits.
-- **Concurrent request context divergence** — two simultaneous requests to the same agent DO will each build separate `WorkingContext` snapshots. Events are safely appended (no overwrites), but the LLM responses may be contextually divergent since neither request sees the other's in-flight messages.
+- **Concurrent request context divergence** — two simultaneous requests to the same agent DO will each build separate `WorkingContext` snapshots from the last completed turn. User messages should be added in-memory (via `ctx.addMessage`) and persisted atomically with the full turn via `persistWorkingContext` — **not** via `appendEvents` before the LLM call, which would leak in-flight messages to concurrent requests. Even with this pattern, concurrent LLM responses may be contextually divergent since neither request sees the other's in-flight messages.
 - **No Vercel AI SDK integration** — only raw Workers AI `env.AI.run()` is supported via the adapter.
 - **`_buildWorkingContext` is protected** — helper functions called from within the agent need a public wrapper method in the subclass to access it.
 

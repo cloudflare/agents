@@ -43,20 +43,24 @@ curl -X DELETE "http://localhost:8787/session?agent=test"
 
 ```
 POST /chat
-  → appendEvents(userMessage)        # durable before LLM call
-  → buildContext(sessionId)           # load recent events → WorkingContext
+  → buildContext(sessionId)           # load completed events → WorkingContext
+  → ctx.addMessage(userMessage)       # add user message in-memory only
   → workersAIAdapter.toModelMessages  # convert to Workers AI format
   → env.AI.run(model, ...)           # LLM call
   → handle tool calls (loop)         # accumulate in-memory
-  → persistWorkingContext(sessionId)  # batch-persist new messages
+  → persistWorkingContext(sessionId)  # batch-persist user + assistant atomically
 ```
+
+The user message is **not** persisted before the LLM call. This prevents concurrent
+requests from seeing each other's in-flight user messages via `loadEvents()`. The
+entire turn (user message + tool calls + assistant response) is written atomically
+at the end.
 
 Key primitives used:
 
 | Primitive | Purpose |
 |-----------|---------|
 | `SessionAgent` | Agent subclass with session/event SQL tables |
-| `messageToEvent` | Convert a `ContextMessage` to a `SessionEvent` for storage |
-| `buildContext` (wraps `_buildWorkingContext`) | Load events from SQL → `WorkingContext` |
+| `buildContext` (wraps `_buildWorkingContext`) | Load completed events from SQL → `WorkingContext` |
 | `workersAIAdapter` | Convert `WorkingContext` messages to Workers AI format |
-| `persistWorkingContext` | Batch-persist new messages as events |
+| `persistWorkingContext` | Batch-persist all new messages (user + assistant) as events |
