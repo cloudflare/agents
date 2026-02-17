@@ -36,7 +36,7 @@ import type {
   LoadEventsOptions,
   SessionEvent,
   StoredEvent,
-  StoredSession,
+  StoredSession
 } from "./types";
 import { hydrateEvent, dehydrateEvent, messageToEvent } from "./utils";
 import { buildWorkingContext, type WorkingContext } from "./context";
@@ -49,7 +49,7 @@ const DEFAULT_LOAD_LIMIT = 50;
 export class SessionAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
-  Props extends Record<string, unknown> = Record<string, unknown>,
+  Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
@@ -155,10 +155,7 @@ export class SessionAgent<
    *
    * Default limit is 50. Pass a higher limit or use `since` for larger windows.
    */
-  loadEvents(
-    sessionId: string,
-    opts: LoadEventsOptions = {}
-  ): SessionEvent[] {
+  loadEvents(sessionId: string, opts: LoadEventsOptions = {}): SessionEvent[] {
     const limit = opts.limit ?? DEFAULT_LOAD_LIMIT;
     const since = opts.since ?? null;
     const actions = opts.actions ?? null;
@@ -180,7 +177,7 @@ export class SessionAgent<
         ? `SELECT * FROM (${inner}) sub ORDER BY seq ASC`
         : inner;
       rows = [
-        ...this.ctx.storage.sql.exec(query, sessionId, since, ...actions, limit),
+        ...this.ctx.storage.sql.exec(query, sessionId, since, ...actions, limit)
       ] as unknown as StoredEvent[];
     } else if (since !== null) {
       if (tail) {
@@ -210,7 +207,7 @@ export class SessionAgent<
         ? `SELECT * FROM (${inner}) sub ORDER BY seq ASC`
         : inner;
       rows = [
-        ...this.ctx.storage.sql.exec(query, sessionId, ...actions, limit),
+        ...this.ctx.storage.sql.exec(query, sessionId, ...actions, limit)
       ] as unknown as StoredEvent[];
     } else {
       if (tail) {
@@ -308,7 +305,7 @@ export class SessionAgent<
       limit: opts.limit,
       since: opts.since,
       actions: opts.actions,
-      tail: opts.tail,
+      tail: opts.tail
     });
 
     return buildWorkingContext(events, opts);

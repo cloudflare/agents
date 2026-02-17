@@ -10,7 +10,7 @@ import {
   type ContextMessage,
   type SessionEvent,
   type StoredEvent,
-  type ToolCall,
+  type ToolCall
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -26,7 +26,7 @@ export function hydrateEvent(row: StoredEvent): SessionEvent {
     id: row.id,
     sessionId: row.session_id,
     seq: row.seq,
-    timestamp: row.created_at,
+    timestamp: row.created_at
   };
 
   const meta: Record<string, unknown> = row.metadata
@@ -35,14 +35,18 @@ export function hydrateEvent(row: StoredEvent): SessionEvent {
 
   switch (row.action) {
     case EventAction.USER_MESSAGE:
-      return { ...base, action: EventAction.USER_MESSAGE, content: row.content ?? "" };
+      return {
+        ...base,
+        action: EventAction.USER_MESSAGE,
+        content: row.content ?? ""
+      };
 
     case EventAction.AGENT_MESSAGE:
       return {
         ...base,
         action: EventAction.AGENT_MESSAGE,
         content: row.content ?? "",
-        model: meta.model as string | undefined,
+        model: meta.model as string | undefined
       };
 
     case EventAction.TOOL_CALL_REQUEST:
@@ -50,7 +54,7 @@ export function hydrateEvent(row: StoredEvent): SessionEvent {
         ...base,
         action: EventAction.TOOL_CALL_REQUEST,
         content: row.content ?? "",
-        toolCalls: (meta.toolCalls as ToolCall[]) ?? [],
+        toolCalls: (meta.toolCalls as ToolCall[]) ?? []
       };
 
     case EventAction.TOOL_RESULT:
@@ -60,23 +64,31 @@ export function hydrateEvent(row: StoredEvent): SessionEvent {
         content: row.content ?? "",
         toolCallId: meta.toolCallId as string,
         toolName: meta.toolName as string,
-        isSuccess: (meta.isSuccess as boolean) ?? true,
+        isSuccess: (meta.isSuccess as boolean) ?? true
       };
 
     case EventAction.SYSTEM_INSTRUCTION:
-      return { ...base, action: EventAction.SYSTEM_INSTRUCTION, content: row.content ?? "" };
+      return {
+        ...base,
+        action: EventAction.SYSTEM_INSTRUCTION,
+        content: row.content ?? ""
+      };
 
     case EventAction.COMPACTION:
       return {
         ...base,
         action: EventAction.COMPACTION,
         content: row.content ?? "",
-        compactedEventCount: (meta.compactedEventCount as number) ?? 0,
+        compactedEventCount: (meta.compactedEventCount as number) ?? 0
       };
 
     default:
       // Treat unknown actions as user messages to avoid data loss
-      return { ...base, action: EventAction.USER_MESSAGE, content: row.content ?? "" };
+      return {
+        ...base,
+        action: EventAction.USER_MESSAGE,
+        content: row.content ?? ""
+      };
   }
 }
 
@@ -86,12 +98,15 @@ export function hydrateEvent(row: StoredEvent): SessionEvent {
  * The `seq` field must be set by the caller (appendEvents computes it).
  */
 export function dehydrateEvent(event: SessionEvent): StoredEvent {
-  const base: Pick<StoredEvent, "id" | "session_id" | "seq" | "action" | "created_at"> = {
+  const base: Pick<
+    StoredEvent,
+    "id" | "session_id" | "seq" | "action" | "created_at"
+  > = {
     id: event.id,
     session_id: event.sessionId,
     seq: event.seq,
     action: event.action,
-    created_at: event.timestamp,
+    created_at: event.timestamp
   };
 
   switch (event.action) {
@@ -102,14 +117,14 @@ export function dehydrateEvent(event: SessionEvent): StoredEvent {
       return {
         ...base,
         content: event.content,
-        metadata: event.model ? JSON.stringify({ model: event.model }) : null,
+        metadata: event.model ? JSON.stringify({ model: event.model }) : null
       };
 
     case EventAction.TOOL_CALL_REQUEST:
       return {
         ...base,
         content: event.content,
-        metadata: JSON.stringify({ toolCalls: event.toolCalls }),
+        metadata: JSON.stringify({ toolCalls: event.toolCalls })
       };
 
     case EventAction.TOOL_RESULT:
@@ -119,8 +134,8 @@ export function dehydrateEvent(event: SessionEvent): StoredEvent {
         metadata: JSON.stringify({
           toolCallId: event.toolCallId,
           toolName: event.toolName,
-          isSuccess: event.isSuccess,
-        }),
+          isSuccess: event.isSuccess
+        })
       };
 
     case EventAction.SYSTEM_INSTRUCTION:
@@ -130,11 +145,17 @@ export function dehydrateEvent(event: SessionEvent): StoredEvent {
       return {
         ...base,
         content: event.content,
-        metadata: JSON.stringify({ compactedEventCount: event.compactedEventCount }),
+        metadata: JSON.stringify({
+          compactedEventCount: event.compactedEventCount
+        })
       };
 
     default:
-      return { ...base, content: (event as SessionEvent).content, metadata: null };
+      return {
+        ...base,
+        content: (event as SessionEvent).content,
+        metadata: null
+      };
   }
 }
 
@@ -159,7 +180,7 @@ export function eventToMessage(event: SessionEvent): ContextMessage | null {
       return {
         role: "assistant",
         content: event.content,
-        toolCalls: event.toolCalls,
+        toolCalls: event.toolCalls
       };
 
     case EventAction.TOOL_RESULT:
@@ -167,7 +188,7 @@ export function eventToMessage(event: SessionEvent): ContextMessage | null {
         role: "tool",
         content: event.content,
         toolCallId: event.toolCallId,
-        name: event.toolName,
+        name: event.toolName
       };
 
     case EventAction.SYSTEM_INSTRUCTION:
@@ -196,7 +217,7 @@ export function messageToEvent(
     id: crypto.randomUUID(),
     sessionId,
     seq: 0, // placeholder — assigned by appendEvents
-    timestamp: Date.now(),
+    timestamp: Date.now()
   };
 
   if (msg.role === "user") {
@@ -208,7 +229,7 @@ export function messageToEvent(
       ...base,
       action: EventAction.TOOL_CALL_REQUEST,
       content: msg.content,
-      toolCalls: msg.toolCalls,
+      toolCalls: msg.toolCalls
     };
   }
 
@@ -223,12 +244,16 @@ export function messageToEvent(
       content: msg.content,
       toolCallId: msg.toolCallId ?? "",
       toolName: msg.name ?? "",
-      isSuccess: true,
+      isSuccess: true
     };
   }
 
   if (msg.role === "system") {
-    return { ...base, action: EventAction.SYSTEM_INSTRUCTION, content: msg.content };
+    return {
+      ...base,
+      action: EventAction.SYSTEM_INSTRUCTION,
+      content: msg.content
+    };
   }
 
   // Fallback

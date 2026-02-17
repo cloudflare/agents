@@ -15,14 +15,12 @@ describe("workersAIAdapter", () => {
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toEqual({
       role: "system",
-      content: "Be helpful.\n\nBe concise.",
+      content: "Be helpful.\n\nBe concise."
     });
   });
 
   it("omits system message when no instructions provided", () => {
-    const messages: ContextMessage[] = [
-      { role: "user", content: "Hello" },
-    ];
+    const messages: ContextMessage[] = [{ role: "user", content: "Hello" }];
     const result = workersAIAdapter.toModelMessages([], messages);
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0].role).toBe("user");
@@ -32,7 +30,7 @@ describe("workersAIAdapter", () => {
     const messages: ContextMessage[] = [
       { role: "user", content: "Hello" },
       { role: "assistant", content: "Hi there" },
-      { role: "user", content: "How are you?" },
+      { role: "user", content: "How are you?" }
     ];
     const result = workersAIAdapter.toModelMessages(
       ["You are helpful."],
@@ -42,16 +40,16 @@ describe("workersAIAdapter", () => {
     expect(result.messages).toHaveLength(4);
     expect(result.messages[0]).toEqual({
       role: "system",
-      content: "You are helpful.",
+      content: "You are helpful."
     });
     expect(result.messages[1]).toEqual({ role: "user", content: "Hello" });
     expect(result.messages[2]).toEqual({
       role: "assistant",
-      content: "Hi there",
+      content: "Hi there"
     });
     expect(result.messages[3]).toEqual({
       role: "user",
-      content: "How are you?",
+      content: "How are you?"
     });
   });
 
@@ -62,9 +60,9 @@ describe("workersAIAdapter", () => {
         content: "",
         toolCalls: [
           { id: "tc1", name: "search", arguments: { q: "weather" } },
-          { id: "tc2", name: "calc", arguments: { expr: "2+2" } },
-        ],
-      },
+          { id: "tc2", name: "calc", arguments: { expr: "2+2" } }
+        ]
+      }
     ];
     const result = workersAIAdapter.toModelMessages([], messages);
 
@@ -78,16 +76,16 @@ describe("workersAIAdapter", () => {
       type: "function",
       function: {
         name: "search",
-        arguments: JSON.stringify({ q: "weather" }),
-      },
+        arguments: JSON.stringify({ q: "weather" })
+      }
     });
     expect(msg.tool_calls![1]).toEqual({
       id: "tc2",
       type: "function",
       function: {
         name: "calc",
-        arguments: JSON.stringify({ expr: "2+2" }),
-      },
+        arguments: JSON.stringify({ expr: "2+2" })
+      }
     });
   });
 
@@ -97,8 +95,8 @@ describe("workersAIAdapter", () => {
         role: "tool",
         content: "Sunny, 72°F",
         toolCallId: "tc1",
-        name: "search",
-      },
+        name: "search"
+      }
     ];
     const result = workersAIAdapter.toModelMessages([], messages);
 
@@ -117,19 +115,19 @@ describe("workersAIAdapter", () => {
         role: "assistant",
         content: "",
         toolCalls: [
-          { id: "tc1", name: "get_weather", arguments: { city: "SF" } },
-        ],
+          { id: "tc1", name: "get_weather", arguments: { city: "SF" } }
+        ]
       },
       {
         role: "tool",
         content: "Sunny, 72°F",
         toolCallId: "tc1",
-        name: "get_weather",
+        name: "get_weather"
       },
       {
         role: "assistant",
-        content: "The weather in SF is sunny and 72°F.",
-      },
+        content: "The weather in SF is sunny and 72°F."
+      }
     ];
 
     const result = workersAIAdapter.toModelMessages(
@@ -153,7 +151,7 @@ describe("workersAIAdapter", () => {
   it("does not include tool_calls or tool_call_id when not present", () => {
     const messages: ContextMessage[] = [
       { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi" },
+      { role: "assistant", content: "Hi" }
     ];
     const result = workersAIAdapter.toModelMessages([], messages);
 

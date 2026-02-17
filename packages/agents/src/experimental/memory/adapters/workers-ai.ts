@@ -32,7 +32,7 @@ export interface WorkersAIChatInput {
 function toWorkersAIMessage(msg: ContextMessage): WorkersAIChatMessage {
   const result: WorkersAIChatMessage = {
     role: msg.role,
-    content: msg.content,
+    content: msg.content
   };
 
   if (msg.name) {
@@ -49,8 +49,8 @@ function toWorkersAIMessage(msg: ContextMessage): WorkersAIChatMessage {
       type: "function" as const,
       function: {
         name: tc.name,
-        arguments: JSON.stringify(tc.arguments),
-      },
+        arguments: JSON.stringify(tc.arguments)
+      }
     }));
   }
 
@@ -74,7 +74,7 @@ export const workersAIAdapter: ModelFormatAdapter<WorkersAIChatInput> = {
     if (systemInstructions.length > 0) {
       result.push({
         role: "system",
-        content: systemInstructions.join("\n\n"),
+        content: systemInstructions.join("\n\n")
       });
     }
 
@@ -83,5 +83,5 @@ export const workersAIAdapter: ModelFormatAdapter<WorkersAIChatInput> = {
     }
 
     return { messages: result };
-  },
+  }
 };

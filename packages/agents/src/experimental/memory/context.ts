@@ -9,7 +9,7 @@
 import type {
   ContextMessage,
   SessionEvent,
-  ContextBuilderOptions,
+  ContextBuilderOptions
 } from "./types";
 import { eventToMessage as defaultEventToMessage } from "./utils";
 
@@ -82,9 +82,5 @@ export function buildWorkingContext(
     }
   }
 
-  return new WorkingContext(
-    options.systemInstructions ?? [],
-    messages,
-    {}
-  );
+  return new WorkingContext(options.systemInstructions ?? [], messages, {});
 }

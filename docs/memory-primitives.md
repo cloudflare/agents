@@ -111,7 +111,7 @@ class MyAgent extends SessionAgent<Env> {
   async handleUserMessage(sessionId: string, userMessage: string) {
     const ctx = this._buildWorkingContext(sessionId, {
       systemInstructions: ["You are a helpful assistant."],
-      limit: 10,
+      limit: 10
     });
     ctx.addMessage({ role: "user", content: userMessage });
 
@@ -119,7 +119,10 @@ class MyAgent extends SessionAgent<Env> {
       ctx.systemInstructions,
       ctx.messages
     );
-    const response = await this.env.AI.run("@cf/meta/llama-3-8b-instruct", modelInput);
+    const response = await this.env.AI.run(
+      "@cf/meta/llama-3-8b-instruct",
+      modelInput
+    );
 
     ctx.addMessage({ role: "assistant", content: response.response });
     this.persistWorkingContext(sessionId, ctx);
@@ -139,14 +142,16 @@ const events = await agent.loadEvents(sessionId, { limit: 10 });
 
 // Build context locally (pure function, no RPC)
 const ctx = buildWorkingContext(events, {
-  systemInstructions: ["You are a helpful assistant."],
+  systemInstructions: ["You are a helpful assistant."]
 });
 ctx.addMessage({ role: "user", content: userMessage });
 
 // ... call LLM, accumulate messages ...
 
 // Persist new messages back via RPC
-const newEvents = ctx.getNewMessages().map((msg) => messageToEvent(sessionId, msg));
+const newEvents = ctx
+  .getNewMessages()
+  .map((msg) => messageToEvent(sessionId, msg));
 await agent.appendEvents(sessionId, newEvents);
 ```
 
@@ -175,13 +180,13 @@ npx vitest run --config src/experimental/memory/__tests__/vitest.config.ts
 
 ## Key Design Decisions
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Storage | One event per row + `seq` column | Avoids 2MB row limit, deterministic ordering |
-| Timestamps | Milliseconds everywhere (`Date.now()`) | No seconds/ms mismatch |
-| Session API | `SessionAgent` subclass + pure utility functions | RPC-accessible CRUD; pure fns for local/testable logic |
-| RPC safety | `_buildWorkingContext` is `protected` | Prevents dead-object trap over RPC boundary |
-| Tool calls | Structured `ToolCall[]` on `ContextMessage` | Preserves structure through storage→load→adapter roundtrips |
-| Validation | Application-level (no FK constraints) | SQLite FK OFF by default |
-| Default limit | `loadEvents` defaults to 50 | Prevents accidental full-table scans |
-| Compaction | Deferred | Architecture supports it (event deletion + summary insertion) |
+| Decision      | Choice                                           | Rationale                                                     |
+| ------------- | ------------------------------------------------ | ------------------------------------------------------------- |
+| Storage       | One event per row + `seq` column                 | Avoids 2MB row limit, deterministic ordering                  |
+| Timestamps    | Milliseconds everywhere (`Date.now()`)           | No seconds/ms mismatch                                        |
+| Session API   | `SessionAgent` subclass + pure utility functions | RPC-accessible CRUD; pure fns for local/testable logic        |
+| RPC safety    | `_buildWorkingContext` is `protected`            | Prevents dead-object trap over RPC boundary                   |
+| Tool calls    | Structured `ToolCall[]` on `ContextMessage`      | Preserves structure through storage→load→adapter roundtrips   |
+| Validation    | Application-level (no FK constraints)            | SQLite FK OFF by default                                      |
+| Default limit | `loadEvents` defaults to 50                      | Prevents accidental full-table scans                          |
+| Compaction    | Deferred                                         | Architecture supports it (event deletion + summary insertion) |
