@@ -18,7 +18,7 @@ export const EventAction = {
   TOOL_CALL_REQUEST: "tool_call_request",
   TOOL_RESULT: "tool_result",
   SYSTEM_INSTRUCTION: "system_instruction",
-  COMPACTION: "compaction",
+  COMPACTION: "compaction"
 } as const;
 
 export type EventActionType = (typeof EventAction)[keyof typeof EventAction];
@@ -186,8 +186,5 @@ export interface ContextBuilderOptions {
  */
 export interface ModelFormatAdapter<T = unknown> {
   name: string;
-  toModelMessages(
-    systemInstructions: string[],
-    messages: ContextMessage[]
-  ): T;
+  toModelMessages(systemInstructions: string[], messages: ContextMessage[]): T;
 }

@@ -18,7 +18,7 @@ describe("WorkingContext", () => {
   it("initializes with provided messages and instructions", () => {
     const msgs: ContextMessage[] = [
       { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi" },
+      { role: "assistant", content: "Hi" }
     ];
     const ctx = new WorkingContext(["Be helpful."], msgs);
     expect(ctx.systemInstructions).toEqual(["Be helpful."]);
@@ -38,11 +38,11 @@ describe("WorkingContext", () => {
     expect(ctx.getNewMessages()).toHaveLength(2);
     expect(ctx.getNewMessages()[0]).toEqual({
       role: "assistant",
-      content: "Hi",
+      content: "Hi"
     });
     expect(ctx.getNewMessages()[1]).toEqual({
       role: "user",
-      content: "How are you?",
+      content: "How are you?"
     });
   });
 
@@ -76,7 +76,7 @@ describe("buildWorkingContext", () => {
       id: `e${seq}`,
       sessionId: "s1",
       seq,
-      timestamp: seq * 1000,
+      timestamp: seq * 1000
     };
 
     switch (action) {
@@ -93,7 +93,7 @@ describe("buildWorkingContext", () => {
           content,
           toolCallId: "tc1",
           toolName: "test",
-          isSuccess: true,
+          isSuccess: true
         };
       case EventAction.SYSTEM_INSTRUCTION:
         return { ...base, action, content };
@@ -108,7 +108,7 @@ describe("buildWorkingContext", () => {
     const events: SessionEvent[] = [
       makeEvent(EventAction.USER_MESSAGE, "Hello", 0),
       makeEvent(EventAction.AGENT_MESSAGE, "Hi there", 1),
-      makeEvent(EventAction.USER_MESSAGE, "What's 2+2?", 2),
+      makeEvent(EventAction.USER_MESSAGE, "What's 2+2?", 2)
     ];
 
     const ctx = buildWorkingContext(events);
@@ -124,7 +124,7 @@ describe("buildWorkingContext", () => {
 
   it("sets system instructions from options", () => {
     const ctx = buildWorkingContext([], {
-      systemInstructions: ["Be helpful.", "Be concise."],
+      systemInstructions: ["Be helpful.", "Be concise."]
     });
     expect(ctx.systemInstructions).toEqual(["Be helpful.", "Be concise."]);
     expect(ctx.messages).toEqual([]);
@@ -133,7 +133,7 @@ describe("buildWorkingContext", () => {
   it("uses custom eventToMessage mapper", () => {
     const events: SessionEvent[] = [
       makeEvent(EventAction.USER_MESSAGE, "Hello", 0),
-      makeEvent(EventAction.AGENT_MESSAGE, "Hi", 1),
+      makeEvent(EventAction.AGENT_MESSAGE, "Hi", 1)
     ];
 
     const ctx = buildWorkingContext(events, {
@@ -143,13 +143,13 @@ describe("buildWorkingContext", () => {
           return { role: "user", content: `[custom] ${event.content}` };
         }
         return null;
-      },
+      }
     });
 
     expect(ctx.messages).toHaveLength(1);
     expect(ctx.messages[0]).toEqual({
       role: "user",
-      content: "[custom] Hello",
+      content: "[custom] Hello"
     });
   });
 
@@ -167,7 +167,7 @@ describe("buildWorkingContext", () => {
       timestamp: 1000,
       action: EventAction.TOOL_CALL_REQUEST,
       content: "",
-      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }],
+      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }]
     };
     const toolResultEvent: SessionEvent = {
       id: "e2",
@@ -178,7 +178,7 @@ describe("buildWorkingContext", () => {
       content: "search results",
       toolCallId: "tc1",
       toolName: "search",
-      isSuccess: true,
+      isSuccess: true
     };
 
     const ctx = buildWorkingContext([toolCallEvent, toolResultEvent]);
@@ -187,22 +187,22 @@ describe("buildWorkingContext", () => {
     expect(ctx.messages[0]).toEqual({
       role: "assistant",
       content: "",
-      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }],
+      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }]
     });
     expect(ctx.messages[1]).toEqual({
       role: "tool",
       content: "search results",
       toolCallId: "tc1",
-      name: "search",
+      name: "search"
     });
   });
 
   it("new messages added after build are tracked", () => {
     const events: SessionEvent[] = [
-      makeEvent(EventAction.USER_MESSAGE, "Hello", 0),
+      makeEvent(EventAction.USER_MESSAGE, "Hello", 0)
     ];
     const ctx = buildWorkingContext(events, {
-      systemInstructions: ["Be helpful."],
+      systemInstructions: ["Be helpful."]
     });
 
     expect(ctx.getNewMessages()).toEqual([]);

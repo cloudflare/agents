@@ -33,7 +33,7 @@ export {
   type ContextMessage,
   type LoadEventsOptions,
   type ContextBuilderOptions,
-  type ModelFormatAdapter,
+  type ModelFormatAdapter
 } from "./types";
 
 // Pure utility functions
@@ -41,7 +41,7 @@ export {
   hydrateEvent,
   dehydrateEvent,
   eventToMessage,
-  messageToEvent,
+  messageToEvent
 } from "./utils";
 
 // WorkingContext
@@ -54,5 +54,5 @@ export { SessionAgent } from "./session-agent";
 export { workersAIAdapter } from "./adapters/workers-ai";
 export type {
   WorkersAIChatMessage,
-  WorkersAIChatInput,
+  WorkersAIChatInput
 } from "./adapters/workers-ai";

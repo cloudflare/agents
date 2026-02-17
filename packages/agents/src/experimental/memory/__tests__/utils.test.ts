@@ -3,7 +3,7 @@ import {
   hydrateEvent,
   dehydrateEvent,
   eventToMessage,
-  messageToEvent,
+  messageToEvent
 } from "../utils";
 import { EventAction } from "../types";
 import type { StoredEvent, SessionEvent, ContextMessage } from "../types";
@@ -21,7 +21,7 @@ describe("hydrateEvent", () => {
       action: "user_message",
       content: "Hello",
       metadata: null,
-      created_at: 1000,
+      created_at: 1000
     };
     const event = hydrateEvent(row);
     expect(event).toEqual({
@@ -30,7 +30,7 @@ describe("hydrateEvent", () => {
       seq: 0,
       timestamp: 1000,
       action: EventAction.USER_MESSAGE,
-      content: "Hello",
+      content: "Hello"
     });
   });
 
@@ -42,7 +42,7 @@ describe("hydrateEvent", () => {
       action: "agent_message",
       content: "Hi there",
       metadata: JSON.stringify({ model: "llama-3" }),
-      created_at: 2000,
+      created_at: 2000
     };
     const event = hydrateEvent(row);
     expect(event.action).toBe(EventAction.AGENT_MESSAGE);
@@ -61,7 +61,7 @@ describe("hydrateEvent", () => {
       action: "tool_call_request",
       content: "",
       metadata: JSON.stringify({ toolCalls }),
-      created_at: 3000,
+      created_at: 3000
     };
     const event = hydrateEvent(row);
     expect(event.action).toBe(EventAction.TOOL_CALL_REQUEST);
@@ -80,9 +80,9 @@ describe("hydrateEvent", () => {
       metadata: JSON.stringify({
         toolCallId: "tc1",
         toolName: "search",
-        isSuccess: true,
+        isSuccess: true
       }),
-      created_at: 4000,
+      created_at: 4000
     };
     const event = hydrateEvent(row);
     expect(event.action).toBe(EventAction.TOOL_RESULT);
@@ -101,7 +101,7 @@ describe("hydrateEvent", () => {
       action: "compaction",
       content: "Summary of prior conversation.",
       metadata: JSON.stringify({ compactedEventCount: 20 }),
-      created_at: 5000,
+      created_at: 5000
     };
     const event = hydrateEvent(row);
     expect(event.action).toBe(EventAction.COMPACTION);
@@ -118,7 +118,7 @@ describe("hydrateEvent", () => {
       action: "system_instruction",
       content: "You are helpful.",
       metadata: null,
-      created_at: 6000,
+      created_at: 6000
     };
     const event = hydrateEvent(row);
     expect(event.action).toBe(EventAction.SYSTEM_INSTRUCTION);
@@ -133,7 +133,7 @@ describe("hydrateEvent", () => {
       action: "unknown_action",
       content: "some content",
       metadata: null,
-      created_at: 7000,
+      created_at: 7000
     };
     const event = hydrateEvent(row);
     expect(event.action).toBe(EventAction.USER_MESSAGE);
@@ -148,7 +148,7 @@ describe("hydrateEvent", () => {
       action: "user_message",
       content: null,
       metadata: null,
-      created_at: 8000,
+      created_at: 8000
     };
     const event = hydrateEvent(row);
     expect(event.content).toBe("");
@@ -167,7 +167,7 @@ describe("dehydrateEvent", () => {
       seq: 0,
       timestamp: 1000,
       action: EventAction.USER_MESSAGE,
-      content: "Hello",
+      content: "Hello"
     };
     const row = dehydrateEvent(event);
     expect(row).toEqual({
@@ -177,7 +177,7 @@ describe("dehydrateEvent", () => {
       action: "user_message",
       content: "Hello",
       metadata: null,
-      created_at: 1000,
+      created_at: 1000
     });
   });
 
@@ -189,7 +189,7 @@ describe("dehydrateEvent", () => {
       timestamp: 2000,
       action: EventAction.AGENT_MESSAGE,
       content: "Hi",
-      model: "llama-3",
+      model: "llama-3"
     };
     const row = dehydrateEvent(event);
     expect(row.metadata).toBe(JSON.stringify({ model: "llama-3" }));
@@ -202,7 +202,7 @@ describe("dehydrateEvent", () => {
       seq: 1,
       timestamp: 2000,
       action: EventAction.AGENT_MESSAGE,
-      content: "Hi",
+      content: "Hi"
     };
     const row = dehydrateEvent(event);
     expect(row.metadata).toBeNull();
@@ -216,11 +216,11 @@ describe("dehydrateEvent", () => {
       timestamp: 3000,
       action: EventAction.TOOL_CALL_REQUEST,
       content: "",
-      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }],
+      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }]
     };
     const row = dehydrateEvent(event);
     expect(JSON.parse(row.metadata!)).toEqual({
-      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }],
+      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }]
     });
   });
 
@@ -234,13 +234,13 @@ describe("dehydrateEvent", () => {
       content: "result",
       toolCallId: "tc1",
       toolName: "search",
-      isSuccess: true,
+      isSuccess: true
     };
     const row = dehydrateEvent(event);
     expect(JSON.parse(row.metadata!)).toEqual({
       toolCallId: "tc1",
       toolName: "search",
-      isSuccess: true,
+      isSuccess: true
     });
   });
 
@@ -252,9 +252,9 @@ describe("dehydrateEvent", () => {
       action: "tool_call_request",
       content: "",
       metadata: JSON.stringify({
-        toolCalls: [{ id: "tc5", name: "calc", arguments: { x: 42 } }],
+        toolCalls: [{ id: "tc5", name: "calc", arguments: { x: 42 } }]
       }),
-      created_at: 10000,
+      created_at: 10000
     };
 
     const hydrated = hydrateEvent(original);
@@ -277,7 +277,7 @@ describe("eventToMessage", () => {
       seq: 0,
       timestamp: 1000,
       action: EventAction.USER_MESSAGE,
-      content: "Hello",
+      content: "Hello"
     };
     const msg = eventToMessage(event);
     expect(msg).toEqual({ role: "user", content: "Hello" });
@@ -290,7 +290,7 @@ describe("eventToMessage", () => {
       seq: 1,
       timestamp: 2000,
       action: EventAction.AGENT_MESSAGE,
-      content: "Hi there",
+      content: "Hi there"
     };
     const msg = eventToMessage(event);
     expect(msg).toEqual({ role: "assistant", content: "Hi there" });
@@ -304,13 +304,13 @@ describe("eventToMessage", () => {
       timestamp: 3000,
       action: EventAction.TOOL_CALL_REQUEST,
       content: "",
-      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }],
+      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }]
     };
     const msg = eventToMessage(event);
     expect(msg).toEqual({
       role: "assistant",
       content: "",
-      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }],
+      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }]
     });
   });
 
@@ -324,14 +324,14 @@ describe("eventToMessage", () => {
       content: "result data",
       toolCallId: "tc1",
       toolName: "search",
-      isSuccess: true,
+      isSuccess: true
     };
     const msg = eventToMessage(event);
     expect(msg).toEqual({
       role: "tool",
       content: "result data",
       toolCallId: "tc1",
-      name: "search",
+      name: "search"
     });
   });
 
@@ -342,7 +342,7 @@ describe("eventToMessage", () => {
       seq: 4,
       timestamp: 5000,
       action: EventAction.SYSTEM_INSTRUCTION,
-      content: "Be helpful.",
+      content: "Be helpful."
     };
     const msg = eventToMessage(event);
     expect(msg).toEqual({ role: "system", content: "Be helpful." });
@@ -356,12 +356,12 @@ describe("eventToMessage", () => {
       timestamp: 6000,
       action: EventAction.COMPACTION,
       content: "Summary of prior 20 messages.",
-      compactedEventCount: 20,
+      compactedEventCount: 20
     };
     const msg = eventToMessage(event);
     expect(msg).toEqual({
       role: "system",
-      content: "Summary of prior 20 messages.",
+      content: "Summary of prior 20 messages."
     });
   });
 });
@@ -391,13 +391,13 @@ describe("messageToEvent", () => {
     const msg: ContextMessage = {
       role: "assistant",
       content: "",
-      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }],
+      toolCalls: [{ id: "tc1", name: "search", arguments: { q: "test" } }]
     };
     const event = messageToEvent("s1", msg);
     expect(event.action).toBe(EventAction.TOOL_CALL_REQUEST);
     if (event.action === EventAction.TOOL_CALL_REQUEST) {
       expect(event.toolCalls).toEqual([
-        { id: "tc1", name: "search", arguments: { q: "test" } },
+        { id: "tc1", name: "search", arguments: { q: "test" } }
       ]);
     }
   });
@@ -407,7 +407,7 @@ describe("messageToEvent", () => {
       role: "tool",
       content: "result",
       toolCallId: "tc1",
-      name: "search",
+      name: "search"
     };
     const event = messageToEvent("s1", msg);
     expect(event.action).toBe(EventAction.TOOL_RESULT);
