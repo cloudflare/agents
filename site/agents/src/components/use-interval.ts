@@ -29,7 +29,8 @@ SOFTWARE.
 import { useEffect, useRef } from "react";
 
 type Delay = number | null;
-type TimerHandler = (...args: any[]) => void;
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- matches native TimerHandler signature
+type TimerHandler = (...args: unknown[]) => void;
 
 /**
  * Provides a declarative useInterval
@@ -46,7 +47,7 @@ const useInterval = (callback: TimerHandler, delay: Delay) => {
   }, [callback]);
 
   useEffect(() => {
-    const handler = (...args: any[]) => savedCallbackRef.current!(...args);
+    const handler = (...args: unknown[]) => savedCallbackRef.current!(...args);
 
     if (delay !== null) {
       const intervalId = setInterval(handler, delay);

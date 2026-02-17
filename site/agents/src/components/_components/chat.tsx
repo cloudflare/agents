@@ -20,7 +20,6 @@ import {
 import { ChatArrow } from "./chat-bubble";
 import clsx from "clsx";
 
-import { useRef } from "react";
 import useInterval from "../use-interval";
 
 const ChatContext = createContext<{
@@ -162,6 +161,7 @@ export function ChatMessage({
   useEffect(() => {
     const t = setTimeout(() => setIndex(index + 1), delay);
     return () => clearTimeout(t);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- index intentionally excluded to avoid infinite loop
   }, [delay]);
 
   return (
@@ -344,6 +344,7 @@ export function TypedMessage({ message }: { message: string }) {
 
   useEffect(() => {
     start();
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- start once on mount
   }, []);
 
   return <p>{visibleMessage}</p>;

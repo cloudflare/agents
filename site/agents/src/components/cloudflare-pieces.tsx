@@ -351,6 +351,7 @@ export const useStickyState = (ref: RefObject<HTMLElement | null>) => {
     };
     document.addEventListener("scroll", handleScroll);
     return () => document.removeEventListener("scroll", handleScroll);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- ref is stable, attach scroll listener once on mount
   }, []);
 
   return state;
@@ -398,13 +399,17 @@ function UserInput({ width = 500 }) {
         <ArrowDown x={width - 32} y={90} />
       </motion.svg>
       <div className="flex justify-between w-full">
-        <StepIcon name="email-workers" left={[<WorkersLogo />]}>
+        <StepIcon name="email-workers" left={[<WorkersLogo key="workers" />]}>
           <Email />
         </StepIcon>
-        <StepIcon name="chat" left={[<WorkersLogo />]} right={[<PagesLogo />]}>
+        <StepIcon
+          name="chat"
+          left={[<WorkersLogo key="workers" />]}
+          right={[<PagesLogo key="pages" />]}
+        >
           <Chat />
         </StepIcon>
-        <StepIcon name="voice" right={[<CallsLogo />]}>
+        <StepIcon name="voice" right={[<CallsLogo key="calls" />]}>
           <Phone />
         </StepIcon>
       </div>
@@ -528,9 +533,10 @@ function Diagram({ width = 500 }) {
             <AiLines width={width} />
             <StepIcon
               name={{ left: "host-llm", right: "ai-provider" }}
-              left={[<WorkersLogo />]}
+              left={[<WorkersLogo key="workers" />]}
               right={[
                 <svg
+                  key="openai"
                   width="28"
                   viewBox="0 0 24 24"
                   xmlns="http://www.w3.org/2000/svg"
@@ -541,6 +547,7 @@ function Diagram({ width = 500 }) {
                   />
                 </svg>,
                 <svg
+                  key="anthropic"
                   width="28"
                   viewBox="0 0 24 24"
                   xmlns="http://www.w3.org/2000/svg"
@@ -592,7 +599,7 @@ function Diagram({ width = 500 }) {
           </motion.svg>
         </div>
         <div className="flex justify-between w-full">
-          <StepIcon name="compute" left={[<WorkersLogo />]}>
+          <StepIcon name="compute" left={[<WorkersLogo key="workers" />]}>
             <ArrowCycle />
           </StepIcon>
           <StepIcon>
@@ -601,7 +608,7 @@ function Diagram({ width = 500 }) {
           <StepIcon
             name="state"
             right={[
-              <svg viewBox="0 0 64 64" width="28">
+              <svg key="globe" viewBox="0 0 64 64" width="28">
                 <path
                   fill="currentColor"
                   fillRule="evenodd"
@@ -621,7 +628,7 @@ function Diagram({ width = 500 }) {
           <StepIcon
             name="api"
             left={[
-              <svg viewBox="0 0 80 80" width="28">
+              <svg key="api" viewBox="0 0 80 80" width="28">
                 <path
                   transform="translate(-7 -7)"
                   fill="currentColor"
@@ -635,7 +642,7 @@ function Diagram({ width = 500 }) {
           <StepIcon
             name="utilities"
             left={[
-              <svg viewBox="0 0 48 48" width="28">
+              <svg key="circuits" viewBox="0 0 48 48" width="28">
                 <path
                   fill="currentColor"
                   fillRule="evenodd"
@@ -645,7 +652,7 @@ function Diagram({ width = 500 }) {
               </svg>
             ]}
             right={[
-              <svg viewBox="0 0 65 65" width="28">
+              <svg key="browser" viewBox="0 0 65 65" width="28">
                 <path
                   fill="currentColor"
                   d="M23.3 18.2a2.1 2.1 0 1 1-4.2 0 2.1 2.1 0 0 1 4.2 0m-6.7 0a2.1 2.1 0 1 1-4.2 0 2.1 2.1 0 0 1 4.2 0m13.3-.61a2.1 2.1 0 1 0 0 1.22zm28.1-1.6V12.7l-2-2h-1.39v5.29zm0 9.67v-4.99h-3.39v4.99zm0 9.67v-4.99h-3.39v4.99zM58 45v-4.99h-3.39V45zm-3.39 9.6H56l2-2v-2.93h-3.39zm-17.9-4H41v4h-4.29zm8.96 0h4.29v4h-4.29zm-8.96-29H41v4h-4.29zm8.96 0h4.29v4h-4.29zm4.29-6.9h-4.29v-4h4.29zm-8.96 0h-4.29v-4H41zm-8.96-4h-24l-2 2v39.9l2 2h24v-4h-22v-25h22v-4h-22v-6.9h22z"

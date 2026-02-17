@@ -6,10 +6,10 @@ import {
   useState
 } from "react";
 import { motion, useInView } from "framer-motion";
-import { BackgroundDots, BackgroundLinesOnly } from "./_components/background";
+import { BackgroundLinesOnly } from "./_components/background";
 import { useTypedMessage } from "./_components/chat";
 import clsx from "clsx";
-import { gsap, useGSAP } from "./gsap";
+import { gsap } from "./gsap";
 import { ChatBubble } from "./_components/chat-bubble";
 
 export function AgentsIntro() {
@@ -91,7 +91,7 @@ function BacklogItem({
 function AgentsVisualBacklog({ onComplete }: { onComplete?: () => void }) {
   const container = useRef<HTMLDivElement>(null);
   const isVisible = useInView(container, { amount: 0.8, once: true });
-  const tl = useRef<gsap.core.Timeline>(null);
+  const _tl = useRef<gsap.core.Timeline>(null);
   const [showList, setShowList] = useState(false);
 
   /* useGSAP(
@@ -226,17 +226,20 @@ function AgentsVisualBacklog({ onComplete }: { onComplete?: () => void }) {
         setShowList(true);
         setTimeout(() => onComplete?.(), 3000);
       }, 100);
+      // oxlint-disable-next-line react-hooks/exhaustive-deps -- intentionally fire-once animation callback
     }, [])
   });
   const msg = useTypedMessage(
     "Clean up our backlog, cancelling any issues that are no longer relevant.",
     {
+      // oxlint-disable-next-line react-hooks/exhaustive-deps -- intentionally fire-once animation callback
       onDone: useCallback(() => agent.start(), [])
     }
   );
 
   useEffect(() => {
     if (isVisible) msg.start();
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- msg.start is stable, only trigger on visibility
   }, [isVisible]);
 
   return (
@@ -400,7 +403,7 @@ function FileIcon() {
   );
 }
 
-function ExternalRequests() {
+function _ExternalRequests() {
   return (
     <svg viewBox="0 0 200 110" width="100%" className="-mt-4 stroke-orange-400">
       <g>

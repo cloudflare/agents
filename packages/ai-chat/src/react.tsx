@@ -444,11 +444,15 @@ export function useAgentChat<
   // is updated synchronously, so each thread gets its own cache entry
   const initialMessagesCacheKey = `${agentUrlString}|${agent.agent ?? ""}|${agent.name ?? ""}`;
 
-  // Keep a ref to always point to the latest agent instance
+  // Keep a ref to always point to the latest agent instance.
+  // Updated synchronously during render (not in useEffect) to ensure
+  // useMemo and other synchronous code always sees the latest agent.
+  // Using useEffect would cause a race: when agent._pk changes, useMemo
+  // re-evaluates during render but the effect hasn't fired yet, so
+  // agentRef.current would still hold the old (closed) agent — causing
+  // the transport to send messages to a dead WebSocket (issue #929).
   const agentRef = useRef(agent);
-  useEffect(() => {
-    agentRef.current = agent;
-  }, [agent]);
+  agentRef.current = agent;
 
   async function defaultGetInitialMessagesFetch({
     url

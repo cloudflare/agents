@@ -12,6 +12,8 @@ export default defineConfig({
   timeout: 30_000,
   retries: 0,
   workers: 1, // Sequential — single wrangler dev instance
+  // Kill stale processes on the test port before starting
+  globalSetup: [join(e2eDir, "global-setup.ts")],
   use: {
     baseURL: `http://localhost:${PORT}`
   },

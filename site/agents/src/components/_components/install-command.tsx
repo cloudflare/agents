@@ -13,6 +13,7 @@ export function InstallCommand() {
 
   useEffect(() => {
     if (inView) start();
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- start is stable, only trigger on visibility
   }, [inView]);
 
   return (

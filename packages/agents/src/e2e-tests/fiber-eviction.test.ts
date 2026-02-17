@@ -9,8 +9,8 @@
  * this test exercises the full real path: process death → SQLite persists →
  * alarm fires on restart → _checkInterruptedFibers → experimental_onFiberRecovered.
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
@@ -25,6 +25,32 @@ const PERSIST_DIR = path.join(__dirname, ".wrangler-e2e-state");
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Kill any process listening on the given port.
+ * Handles stale processes left behind by previous test runs that were
+ * forcefully terminated before cleanup could run.
+ */
+function killProcessOnPort(port: number): void {
+  try {
+    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+      .toString()
+      .trim();
+    if (output) {
+      const pids = output.split("\n").filter(Boolean);
+      for (const pid of pids) {
+        try {
+          process.kill(Number(pid), "SIGKILL");
+          console.log(`[setup] Killed stale process ${pid} on port ${port}`);
+        } catch {
+          // Process may have already exited
+        }
+      }
+    }
+  } catch {
+    // lsof not available or other error — ignore
+  }
 }
 
 /**
@@ -197,12 +223,20 @@ type FiberStatus = {
 describe("fiber eviction e2e", () => {
   let wrangler: ChildProcess | null = null;
 
+  beforeEach(() => {
+    // Kill any stale processes left on the port from a previous run
+    // that was forcefully terminated before afterEach could run.
+    killProcessOnPort(PORT);
+  });
+
   afterEach(async () => {
     // Clean up wrangler process
     if (wrangler) {
       await killProcess(wrangler);
       wrangler = null;
     }
+    // Force-kill anything still on the port as a fallback
+    killProcessOnPort(PORT);
     // Clean up persist directory
     try {
       fs.rmSync(PERSIST_DIR, { recursive: true, force: true });

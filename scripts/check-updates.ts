@@ -4,7 +4,7 @@ const update = process.argv.includes("-u") ? "-u" : "";
 
 execSync(
   `npx npm-check-updates ${update} \
-  --reject @a2a-\*  \
+  --reject @a2a-*  \
   --reject vitest \
   --reject @vitest/runner \
   --reject @vitest/browser \

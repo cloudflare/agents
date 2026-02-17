@@ -8,6 +8,7 @@
 import { unstable_dev, type Unstable_DevWorker } from "wrangler";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execSync } from "node:child_process";
 import net from "node:net";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const TEST_WORKER_PORT = 18787;
 
 let worker: Unstable_DevWorker | undefined;
+let signalHandlersInstalled = false;
 
 // Check if port is available
 function isPortAvailable(port: number): Promise<boolean> {
@@ -30,41 +32,68 @@ function isPortAvailable(port: number): Promise<boolean> {
   });
 }
 
-// Wait for port to become available with retries
-async function waitForPort(
-  port: number,
-  maxAttempts = 30,
-  delayMs = 1000
-): Promise<boolean> {
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      const response = await fetch(`http://localhost:${port}/`);
-      if (response.ok || response.status === 404) {
-        return true;
+/**
+ * Kill any process listening on the given port.
+ * Handles stale processes left behind by previous test runs that were
+ * forcefully terminated (e.g., Ctrl+C, timeout kill) before teardown ran.
+ */
+function killProcessOnPort(port: number): void {
+  try {
+    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+      .toString()
+      .trim();
+    if (output) {
+      const pids = output.split("\n").filter(Boolean);
+      for (const pid of pids) {
+        try {
+          process.kill(Number(pid), "SIGKILL");
+          console.log(`[setup] Killed stale process ${pid} on port ${port}`);
+        } catch {
+          // Process may have already exited
+        }
       }
-    } catch {
-      // Server not ready yet
     }
-    await new Promise((r) => setTimeout(r, delayMs));
+  } catch {
+    // lsof not available or other error — ignore
   }
-  return false;
+}
+
+async function stopWorker() {
+  if (worker) {
+    console.log("[teardown] Stopping test worker...");
+    try {
+      await worker.stop();
+    } catch (error) {
+      console.error("[teardown] Error stopping worker:", error);
+      // If graceful stop fails, force-kill whatever is on our port
+      killProcessOnPort(TEST_WORKER_PORT);
+    }
+    worker = undefined;
+  }
 }
 
 export async function setup() {
-  // Check if port is already in use (worker already running from another setup call)
+  // Kill any stale processes left on the port from a previous run
+  // that was forcefully terminated before teardown could run.
   const portAvailable = await isPortAvailable(TEST_WORKER_PORT);
   if (!portAvailable) {
     console.log(
-      `[setup] Port ${TEST_WORKER_PORT} already in use, waiting for worker to be ready...`
+      `[setup] Port ${TEST_WORKER_PORT} in use — killing stale process...`
     );
-    // Wait for the worker to be fully ready
-    const ready = await waitForPort(TEST_WORKER_PORT, 30, 1000);
-    if (ready) {
-      console.log("[setup] Worker is ready");
-    } else {
-      console.warn("[setup] Worker may not be fully ready");
-    }
-    return;
+    killProcessOnPort(TEST_WORKER_PORT);
+    // Brief wait for the OS to release the port
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  // Install signal handlers so teardown runs even on Ctrl+C / kill.
+  // Only install once to avoid stacking handlers across setup calls.
+  if (!signalHandlersInstalled) {
+    signalHandlersInstalled = true;
+    const onSignal = () => {
+      stopWorker().finally(() => process.exit(1));
+    };
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
   }
 
   console.log("[setup] Starting test worker...");
@@ -95,13 +124,5 @@ export async function setup() {
 }
 
 export async function teardown() {
-  if (worker) {
-    console.log("[teardown] Stopping test worker...");
-    try {
-      await worker.stop();
-    } catch (error) {
-      console.error("[teardown] Error stopping worker:", error);
-    }
-    worker = undefined;
-  }
+  await stopWorker();
 }

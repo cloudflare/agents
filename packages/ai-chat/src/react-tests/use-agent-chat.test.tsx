@@ -1358,3 +1358,78 @@ describe("useAgentChat body option", () => {
     expect(sentMessages).toBeDefined();
   });
 });
+
+describe("useAgentChat stale agent ref (issue #929)", () => {
+  it("should use the new agent's send method after agent switch, not the old one", async () => {
+    const oldSend = vi.fn();
+    const newSend = vi.fn();
+
+    const agentOld = createAgent({
+      name: "thread-old",
+      url: "ws://localhost:3000/agents/chat/thread-old?_pk=old",
+      send: oldSend
+    });
+
+    const agentNew = createAgent({
+      name: "thread-new",
+      url: "ws://localhost:3000/agents/chat/thread-new?_pk=new",
+      send: newSend
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      chatInstance = chat;
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentOld} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Switch to the new agent
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentNew} />);
+      await sleep(10);
+    });
+
+    // Clear any sends that happened during setup (e.g., stream resume requests)
+    oldSend.mockClear();
+    newSend.mockClear();
+
+    // Clear history triggers agent.send() — this should go to the NEW agent
+    await act(async () => {
+      chatInstance!.clearHistory();
+      await sleep(10);
+    });
+
+    // The clear message should have been sent to the NEW agent, not the old one
+    const newSendCalls = newSend.mock.calls
+      .map((args) => JSON.parse(args[0] as string))
+      .filter((m: Record<string, unknown>) => m.type === "cf_agent_chat_clear");
+    expect(newSendCalls.length).toBe(1);
+
+    // The old agent should NOT have received the clear message
+    const oldSendCalls = oldSend.mock.calls
+      .map((args) => JSON.parse(args[0] as string))
+      .filter((m: Record<string, unknown>) => m.type === "cf_agent_chat_clear");
+    expect(oldSendCalls.length).toBe(0);
+  });
+});

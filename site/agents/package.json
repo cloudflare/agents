@@ -19,8 +19,8 @@
     "@use-it/interval": "^1.0.0",
     "astro": "^5.17.2",
     "clsx": "^2.1.1",
-    "effect": "^3.19.17",
-    "framer-motion": "^12.34.0",
+    "effect": "^3.19.18",
+    "framer-motion": "^12.34.1",
     "gsap": "^3.14.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -35,7 +35,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.65.0"
+    "wrangler": "^4.66.0"
   },
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.31.1",

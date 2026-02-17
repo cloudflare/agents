@@ -148,7 +148,7 @@ const ViewCodeModal = ({
   messages
 }: {
   visible: boolean;
-  handleHide: (e: React.MouseEvent<HTMLDivElement>) => void;
+  handleHide: (e: React.MouseEvent<HTMLElement>) => void;
   params: PlaygroundState;
   messages: UIMessage[];
 }) => {
@@ -157,25 +157,26 @@ const ViewCodeModal = ({
   const cfg = getConfig(params.externalProvider);
 
   return (
-    // oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- modal backdrop dismiss
+    // oxlint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- modal backdrop dismiss
     <div
       onClick={handleHide}
       className="fixed inset-0 bg-kumo-base/50 backdrop-blur-sm z-20 flex md:items-center md:justify-center items-end md:p-16"
     >
-      {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- stop propagation */}
+      {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- stop propagation */}
       <div
         onClick={(e) => e.stopPropagation()}
         className="bg-kumo-base shadow-xl rounded-lg md:max-w-2xl w-full p-6 ring ring-kumo-line"
       >
         <h2 className="font-semibold text-xl flex items-center text-kumo-default">
           View code
-          {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events -- close button */}
-          <div
+          {/* oxlint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- close button */}
+          <button
+            type="button"
             onClick={handleHide}
             className="ml-auto text-kumo-secondary cursor-pointer hover:text-kumo-default"
           >
             <XIcon size={24} />
-          </div>
+          </button>
         </h2>
         <p className="mt-2 text-kumo-secondary">
           {params.useExternalProvider ? (
