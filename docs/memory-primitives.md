@@ -162,6 +162,17 @@ npx vitest run --config src/experimental/memory/__tests__/vitest.config.ts
 - **`context.test.ts`** — 11 tests: WorkingContext construction, new message tracking, custom mappers.
 - **`adapters.test.ts`** — 8 tests: Workers AI format, tool calls, full agentic loop conversation.
 
+## Known Limitations
+
+> This module is experimental. Expect breaking changes.
+
+- **Workers AI only** — only the Workers AI adapter is shipped. OpenAI/Anthropic adapters are planned.
+- **No compaction/summarization** — the event schema supports compaction events, but no orchestration or auto-compaction is implemented yet. Bring your own summarizer.
+- **No token estimation** — there is no built-in token counter. Use an external estimator or character-based heuristic if you need to enforce context limits.
+- **Concurrent request context divergence** — two simultaneous requests to the same agent DO will each build separate `WorkingContext` snapshots. Events are safely appended (no overwrites), but the LLM responses may be contextually divergent since neither request sees the other's in-flight messages.
+- **No Vercel AI SDK integration** — only raw Workers AI `env.AI.run()` is supported via the adapter.
+- **`_buildWorkingContext` is protected** — helper functions called from within the agent need a public wrapper method in the subclass to access it.
+
 ## Key Design Decisions
 
 | Decision | Choice | Rationale |

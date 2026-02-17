@@ -1,15 +1,25 @@
 /**
- * @experimental Memory primitives — unstable, may change without notice.
+ * @experimental Memory primitives — unstable API, may change without notice.
  *
  * This module provides session management, event storage, working context,
  * and model format adapters for building context-aware agents.
  *
+ * All public classes and functions carry `@experimental` JSDoc tags.
+ * Import from `agents/experimental/memory`.
+ *
  * **Key exports:**
  * - `SessionAgent` — Agent subclass with session/event SQL methods
- * - `buildWorkingContext` — Pure function to build WorkingContext from events
+ * - `buildWorkingContext` — Pure function to build context from events
  * - `WorkingContext` — Ephemeral in-memory context for LLM invocations
  * - `workersAIAdapter` — Model format adapter for Workers AI
  * - Utility functions: `hydrateEvent`, `dehydrateEvent`, `eventToMessage`, `messageToEvent`
+ *
+ * **Known limitations:**
+ * - Only Workers AI adapter shipped; OpenAI/Anthropic adapters planned
+ * - No built-in compaction/summarization yet
+ * - Token estimation is not included; bring your own estimator
+ * - Concurrent requests to the same agent DO may produce contextually divergent LLM responses
+ * - API will change as we iterate on schemas and primitives
  */
 
 // Types
