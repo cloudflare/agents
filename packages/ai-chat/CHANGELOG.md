@@ -1,5 +1,92 @@
 # @cloudflare/ai-chat
 
+## 0.1.0
+
+### Minor Changes
+
+- [#899](https://github.com/cloudflare/agents/pull/899) [`04c6411`](https://github.com/cloudflare/agents/commit/04c6411c9a73fe48784d7ce86150d62cf54becda) Thanks [@threepointone](https://github.com/threepointone)! - Refactor AIChatAgent: extract ResumableStream class, add WebSocket ChatTransport, simplify SSE parsing.
+
+  **Bug fixes:**
+  - Fix `setMessages` functional updater sending empty array to server
+  - Fix `_sendPlaintextReply` creating multiple text parts instead of one
+  - Fix uncaught exception on empty/invalid request body
+  - Fix `CF_AGENT_MESSAGE_UPDATED` not broadcast for streaming messages
+  - Fix stream resumption race condition (client-initiated resume request + replay flag)
+  - Fix `_streamCompletionPromise` not resolved on error (tool continuations could hang)
+  - Fix `body` lost during tool continuations (now preserved alongside `clientTools`)
+  - Fix `clearAll()` not clearing in-memory chunk buffer (orphaned chunks could flush after clear)
+  - Fix errored streams never cleaned up by garbage collector
+  - Fix `reasoning-delta` silently dropping data when `reasoning-start` was missed (stream resumption)
+  - Fix row size guard using `string.length` instead of UTF-8 byte count for SQLite limits
+  - Fix `completed` guard on abort listener to prevent redundant cancel after stream completion
+
+  **New features:**
+  - `maxPersistedMessages` — cap SQLite message storage with automatic oldest-message deletion
+  - `body` option on `useAgentChat` — send custom data with every request (static or dynamic)
+  - Incremental persistence with hash-based cache to skip redundant SQL writes
+  - Row size guard — automatic two-pass compaction when messages approach SQLite 2MB limit
+  - `onFinish` is now optional — framework handles abort controller cleanup and observability
+  - Stream chunk size guard in ResumableStream (skip oversized chunks for replay)
+  - Full tool streaming lifecycle in message-builder (tool-input-start/delta/error, tool-output-error)
+
+  **Docs:**
+  - New `docs/chat-agents.md` — comprehensive AIChatAgent and useAgentChat reference
+  - Rewritten README, migration guides, human-in-the-loop, resumable streaming, client tools docs
+  - New `examples/ai-chat/` example with modern patterns and Workers AI
+
+  **Deprecations (with console.warn):**
+  - `createToolsFromClientSchemas()`, `extractClientToolSchemas()`, `detectToolsRequiringConfirmation()`
+  - `tools`, `toolsRequiringConfirmation`, `experimental_automaticToolResolution` options
+  - `addToolResult()` (use `addToolOutput()`)
+
+- [#919](https://github.com/cloudflare/agents/pull/919) [`6b6497c`](https://github.com/cloudflare/agents/commit/6b6497c65e07175ffd83f8cf3a6b3371e2dc17eb) Thanks [@threepointone](https://github.com/threepointone)! - Change `autoContinueAfterToolResult` default from `false` to `true`.
+
+  Client-side tool results and tool approvals now automatically trigger a server continuation by default, matching the behavior of server-executed tools (which auto-continue via `streamText`'s multi-step). This eliminates the most common setup friction with client tools — the LLM now responds after receiving tool results without requiring explicit opt-in.
+
+  To restore the previous behavior, set `autoContinueAfterToolResult: false` in `useAgentChat`.
+
+### Patch Changes
+
+- [#900](https://github.com/cloudflare/agents/pull/900) [`16b2dca`](https://github.com/cloudflare/agents/commit/16b2dcaf5adc152e78f01230dd99d4710867d4b6) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Add support for `data-*` stream parts (developer-defined typed JSON blobs) in the shared message builder and client hook.
+
+  **Data part handling:**
+
+  `applyChunkToParts` now handles `data-*` prefixed chunk types, covering both server persistence and client reconstruction (stream resume, cross-tab broadcast). Transient parts (`transient: true`) are broadcast to connected clients but excluded from `message.parts` and SQLite persistence. Non-transient parts support reconciliation by type+id — a second chunk with the same type and id updates the existing part's data in-place instead of appending a duplicate.
+
+  **`onData` callback forwarding:**
+
+  `useAgentChat` now invokes the `onData` callback for `data-*` chunks on the stream resumption and cross-tab broadcast codepaths, which bypass the AI SDK's internal pipeline. For new messages sent via the transport, the AI SDK already invokes `onData` internally. This is the correct way to consume transient data parts on the client since they are not added to `message.parts`.
+
+- [#922](https://github.com/cloudflare/agents/pull/922) [`c8e5244`](https://github.com/cloudflare/agents/commit/c8e524499d902229e8ac83afd6cf2864f888cecc) Thanks [@threepointone](https://github.com/threepointone)! - Fix tool approval UI not surviving page refresh, and fix invalid prompt error after approval
+  - Handle `tool-approval-request` and `tool-output-denied` stream chunks in the server-side message builder. Previously these were only handled client-side, so the server never transitioned tool parts to `approval-requested` or `output-denied` state.
+  - Persist the streaming message to SQLite (without broadcasting) when a tool enters `approval-requested` state. The stream is paused waiting for user approval, so this is a natural persistence point. Without this, refreshing the page would reload from SQLite where the tool was still in `input-available` state, showing "Running..." instead of the Approve/Reject UI.
+  - On stream completion, update the early-persisted message in place rather than appending a duplicate.
+  - Fix `_applyToolApproval` to merge with existing approval data instead of replacing it. Previously `approval: { approved }` would overwrite the entire object, losing the `id` field that `convertToModelMessages` needs to produce a valid `tool-approval-request` content part. This caused an `InvalidPromptError` on the continuation stream after approval.
+
+- [#897](https://github.com/cloudflare/agents/pull/897) [`994a808`](https://github.com/cloudflare/agents/commit/994a808abb5620b57aba4e0e0125bbcd89c1ae5f) Thanks [@alexanderjacobsen](https://github.com/alexanderjacobsen)! - Fix client tool schemas lost after DO restart by re-sending them with CF_AGENT_TOOL_RESULT
+
+- [#916](https://github.com/cloudflare/agents/pull/916) [`24e16e0`](https://github.com/cloudflare/agents/commit/24e16e025b82dbd7b321339a18c6d440b2879136) Thanks [@threepointone](https://github.com/threepointone)! - Widen peer dependency ranges across packages to prevent cascading major bumps during 0.x minor releases. Mark `@cloudflare/ai-chat` and `@cloudflare/codemode` as optional peer dependencies of `agents` to fix unmet peer dependency warnings during installation.
+
+- [#912](https://github.com/cloudflare/agents/pull/912) [`baa87cc`](https://github.com/cloudflare/agents/commit/baa87cceccd11ce051af5d2918831ec8eddd86fb) Thanks [@threepointone](https://github.com/threepointone)! - Persist request context across Durable Object hibernation.
+
+  Persist `_lastBody` and `_lastClientTools` to SQLite so custom body fields and client tool schemas survive Durable Object hibernation during tool continuation flows (issue #887). Add test coverage for body forwarding during tool auto-continuation, and update JSDoc for `OnChatMessageOptions.body` to document tool continuation and hibernation behavior.
+
+- [#913](https://github.com/cloudflare/agents/pull/913) [`bc91c9a`](https://github.com/cloudflare/agents/commit/bc91c9a63aefa2faf37db2ad7b5f3f382a1de101) Thanks [@threepointone](https://github.com/threepointone)! - Sync `_lastClientTools` cache and SQLite when client tools arrive via `CF_AGENT_TOOL_RESULT`, and align the wire type with `ClientToolSchema` (`JSONSchema7` instead of `Record<string, unknown>`)
+
+- [#919](https://github.com/cloudflare/agents/pull/919) [`6b6497c`](https://github.com/cloudflare/agents/commit/6b6497c65e07175ffd83f8cf3a6b3371e2dc17eb) Thanks [@threepointone](https://github.com/threepointone)! - Add auto-continuation support for tool approval (`needsApproval`).
+
+  When a tool with `needsApproval: true` is approved via `CF_AGENT_TOOL_APPROVAL`, the server can now automatically continue the conversation (matching the existing `autoContinue` behavior of `CF_AGENT_TOOL_RESULT`). The client hook passes `autoContinue` with approval messages when `autoContinueAfterToolResult` is enabled. Also fixes silent data loss where `tool-output-available` events for tool calls in previous assistant messages were dropped during continuation streams by adding a cross-message fallback search in `_streamSSEReply`.
+
+- [#910](https://github.com/cloudflare/agents/pull/910) [`a668155`](https://github.com/cloudflare/agents/commit/a668155598aa8cd2f53b724391d1c538f3e96a2d) Thanks [@threepointone](https://github.com/threepointone)! - Add structural message validation and fix message metadata on broadcast/resume path.
+
+  **Structural message validation:**
+
+  Messages loaded from SQLite are now validated for required structure (non-empty `id` string, valid `role`, `parts` is an array). Malformed rows — from corruption, manual tampering, or schema drift — are logged with a warning and silently skipped instead of crashing the agent. This is intentionally lenient: empty `parts` arrays are allowed (streams that errored mid-flight), and no tool/data schema validation is performed at load time (that remains a userland concern via `safeValidateUIMessages` from the AI SDK).
+
+  **Message metadata on broadcast/resume path:**
+
+  The server already captures `messageMetadata` from `start`, `finish`, and `message-metadata` stream chunks and persists it on `message.metadata`. However, the client-side broadcast path (multi-tab sync) and stream resume path (reconnection) did not propagate metadata — the `activeStreamRef` only tracked `parts`. Now it also tracks `metadata`, and `flushActiveStreamToMessages` includes it in the partial message flushed to React state. This means cross-tab clients and reconnecting clients see metadata (model info, token usage, timestamps) during streaming, not just after the final `CF_AGENT_CHAT_MESSAGES` broadcast.
+
 ## 0.0.8
 
 ### Patch Changes
