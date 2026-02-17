@@ -41,6 +41,8 @@ export type StreamChunkData = {
   errorText?: string;
   /** When true, the output is preliminary (may be updated by a later chunk) */
   preliminary?: boolean;
+  /** Approval ID for tools with needsApproval */
+  approvalId?: string;
   providerMetadata?: Record<string, unknown>;
   /** Payload for data-* parts (developer-defined typed JSON) */
   data?: unknown;
@@ -228,6 +230,28 @@ export function applyChunkToParts(
           input: chunk.input,
           errorText: chunk.errorText
         } as MessagePart);
+      }
+      return true;
+    }
+
+    case "tool-approval-request": {
+      // Tool requires user approval before executing.
+      // Transition the tool part to approval-requested state with the approval ID.
+      const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
+      if (toolPart) {
+        const p = toolPart as Record<string, unknown>;
+        p.state = "approval-requested";
+        p.approval = { id: chunk.approvalId };
+      }
+      return true;
+    }
+
+    case "tool-output-denied": {
+      // User rejected the tool approval request.
+      const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
+      if (toolPart) {
+        const p = toolPart as Record<string, unknown>;
+        p.state = "output-denied";
       }
       return true;
     }

@@ -219,6 +219,14 @@ export class AIChatAgent<
   private _streamingMessage: ChatMessage | null = null;
 
   /**
+   * Tracks the ID of a streaming message that was persisted early due to
+   * a tool entering approval-requested state. When set, stream completion
+   * updates the existing persisted message instead of appending a new one.
+   * @internal
+   */
+  private _approvalPersistedMessageId: string | null = null;
+
+  /**
    * Promise that resolves when the current stream completes.
    * Used to wait for message persistence before continuing after tool results.
    * @internal
@@ -1562,6 +1570,36 @@ export class AIChatAgent<
             // step boundaries — all the part types needed for UIMessage.
             const handled = applyChunkToParts(message.parts, data);
 
+            // When a tool enters approval-requested state, the stream is
+            // paused waiting for user approval. Persist the streaming message
+            // immediately so the approval UI survives page refresh. Without
+            // this, a refresh would reload from SQLite where the tool part
+            // is still in input-available state, showing "Running..." instead
+            // of the Approve/Reject buttons.
+            if (
+              data.type === "tool-approval-request" &&
+              this._streamingMessage
+            ) {
+              // Persist directly to SQLite without broadcasting.
+              // The client already has this data from the SSE stream —
+              // broadcasting would cause the approval UI to render twice.
+              // We only need the SQL write so the state survives page refresh.
+              const snapshot: ChatMessage = {
+                ...this._streamingMessage,
+                parts: [...this._streamingMessage.parts]
+              };
+              const sanitized = this._sanitizeMessageForPersistence(snapshot);
+              const json = JSON.stringify(sanitized);
+              this.sql`
+                INSERT INTO cf_ai_chat_agent_messages (id, message)
+                VALUES (${sanitized.id}, ${json})
+                ON CONFLICT(id) DO UPDATE SET message = excluded.message
+              `;
+              // Track that we persisted early so stream completion can update
+              // in place rather than appending a duplicate.
+              this._approvalPersistedMessageId = sanitized.id;
+            }
+
             // Cross-message tool output fallback:
             // When a tool with needsApproval is approved, the continuation
             // stream emits tool-output-available/tool-output-error for a
@@ -1775,7 +1813,13 @@ export class AIChatAgent<
       (part) => ({
         ...part,
         state: "approval-responded",
-        approval: { approved }
+        // Merge with existing approval data to preserve the id field.
+        // convertToModelMessages needs approval.id to produce a valid
+        // tool-approval-request content part with approvalId.
+        approval: {
+          ...(part.approval as Record<string, unknown> | undefined),
+          approved
+        }
       })
     );
   }
@@ -1824,6 +1868,10 @@ export class AIChatAgent<
       const contentType = response.headers.get("content-type") || "";
       const isSSE = contentType.includes("text/event-stream"); // AI SDK v5 SSE format
       const streamCompleted = { value: false };
+      // Capture before try so it's available after finally.
+      // _approvalPersistedMessageId is set inside _streamSSEReply when a
+      // tool enters approval-requested state and the message is persisted early.
+      let earlyPersistedId: string | null = null;
 
       try {
         if (isSSE) {
@@ -1868,6 +1916,10 @@ export class AIChatAgent<
         // promise, even on error. Without this, tool continuations waiting on
         // _streamCompletionPromise would hang forever after a stream error.
         this._streamingMessage = null;
+        // Capture and clear early-persist tracking. The persistence block
+        // after the finally uses the local to update in place.
+        earlyPersistedId = this._approvalPersistedMessageId;
+        this._approvalPersistedMessageId = null;
         if (this._streamCompletionResolve) {
           this._streamCompletionResolve();
           this._streamCompletionResolve = null;
@@ -1896,7 +1948,18 @@ export class AIChatAgent<
       }
 
       if (message.parts.length > 0) {
-        if (continuation) {
+        if (earlyPersistedId) {
+          // Message already exists in this.messages from the early persist.
+          // Update it in place with the final streaming state.
+          // Note: early-persisted messages come from the initial stream
+          // (before approval), which is never a continuation. The
+          // continuation stream starts fresh after approval, so
+          // earlyPersistedId will always be null for continuations.
+          const updatedMessages = this.messages.map((msg) =>
+            msg.id === earlyPersistedId ? message : msg
+          );
+          await this.persistMessages(updatedMessages, excludeBroadcastIds);
+        } else if (continuation) {
           // Find the last assistant message and append parts to it
           let lastAssistantIdx = -1;
           for (let i = this.messages.length - 1; i >= 0; i--) {

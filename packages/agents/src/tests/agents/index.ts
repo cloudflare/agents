@@ -21,6 +21,7 @@ export { TestDestroyScheduleAgent, TestScheduleAgent } from "./schedule";
 export { TestWorkflowAgent } from "./workflow";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { TestReadonlyAgent } from "./readonly";
+export { TestProtocolMessagesAgent } from "./protocol-messages";
 export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";
 export { TestQueueAgent } from "./queue";
 export { TestRaceAgent } from "./race";

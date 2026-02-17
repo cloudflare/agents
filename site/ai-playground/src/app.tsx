@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import TextareaAutosize from "react-textarea-autosize";
-import { GearIcon } from "@phosphor-icons/react";
+import { GearIcon, CaretDownIcon } from "@phosphor-icons/react";
 import { Button } from "@cloudflare/kumo";
 import Footer from "./components/Footer";
 import Header from "./components/Header";
@@ -57,6 +57,7 @@ function getOrCreateSessionId(): string {
 const App = () => {
   const [codeVisible, setCodeVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
+  const [parametersOpen, setParametersOpen] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
   const [params, setParams] = useState<PlaygroundState>({
@@ -229,173 +230,187 @@ const App = () => {
           {/* ── Left sidebar ── */}
           <div className="md:w-1/3 w-full h-full md:overflow-auto bg-kumo-base md:rounded-md shadow-md md:block z-10">
             <div className="bg-ai h-[3px]" />
-            <section className="rounded-lg bg-kumo-base p-4">
-              <div className="flex items-center">
-                <span className="text-lg font-semibold text-kumo-default">
-                  Workers AI LLM Playground
-                </span>
-                <div className="ml-3 mt-1">
-                  <WorkersAILogo />
-                </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="ml-auto"
-                  onClick={handleReset}
-                >
+
+            {/* ── Title bar ── */}
+            <div className="flex items-center px-3 pt-3 pb-2">
+              <span className="text-sm font-semibold text-kumo-default">
+                Workers AI Playground
+              </span>
+              <div className="ml-2">
+                <WorkersAILogo />
+              </div>
+              <div className="ml-auto flex items-center gap-1">
+                <Button variant="secondary" size="sm" onClick={handleReset}>
                   Reset
                 </Button>
                 <Button
                   variant="secondary"
                   size="sm"
-                  className="ml-2 md:hidden"
+                  className="md:hidden"
                   onClick={() => setSettingsVisible(!settingsVisible)}
-                  icon={<GearIcon size={18} />}
+                  icon={<GearIcon size={16} />}
                   title="Settings"
                 />
               </div>
+            </div>
 
-              <p className="text-kumo-inactive text-sm mt-1 mb-4">
-                Explore different Text Generation models by drafting messages
-                and fine-tuning your responses.
-              </p>
-
-              <div className="md:mb-4">
-                <UnifiedModelSelector
-                  workersAiModels={models}
-                  activeWorkersAiModel={activeModel}
-                  isLoadingWorkersAi={isLoadingModels}
-                  useExternalProvider={params.useExternalProvider || false}
-                  externalProvider={params.externalProvider || "openai"}
-                  externalModel={params.externalModel}
-                  authMethod={params.authMethod || "provider-key"}
-                  providerApiKey={params.providerApiKey}
-                  gatewayAccountId={params.gatewayAccountId}
-                  gatewayId={params.gatewayId}
-                  gatewayApiKey={params.gatewayApiKey}
-                  onModeChange={(useExternal) => {
-                    const selectedModel = useExternal
-                      ? DEFAULT_EXTERNAL_MODELS[
-                          params.externalProvider || "openai"
-                        ] || params.model
-                      : params.model || DEFAULT_PARAMS.model;
-                    updateState({
-                      model: selectedModel,
-                      useExternalProvider: useExternal,
-                      externalModel: useExternal ? selectedModel : undefined
-                    });
-                  }}
-                  onWorkersAiModelSelect={(model) => {
-                    updateState({
-                      model: model ? model.name : DEFAULT_PARAMS.model,
-                      useExternalProvider: false,
-                      externalModel: undefined
-                    });
-                  }}
-                  onExternalProviderChange={(provider) => {
-                    const selectedModel =
-                      DEFAULT_EXTERNAL_MODELS[provider] || params.model;
-                    updateState({
-                      model: selectedModel,
-                      useExternalProvider: true,
-                      externalProvider: provider,
-                      externalModel: selectedModel
-                    });
-                  }}
-                  onExternalModelSelect={(modelId) => {
-                    updateState({
-                      model: modelId,
-                      useExternalProvider: true,
-                      externalModel: modelId
-                    });
-                  }}
-                  onAuthMethodChange={(method) => {
-                    updateState({
-                      useExternalProvider: true,
-                      authMethod: method
-                    });
-                  }}
-                  onProviderApiKeyChange={(key) => {
-                    updateState({
-                      useExternalProvider: true,
-                      authMethod: "provider-key",
-                      providerApiKey: key
-                    });
-                  }}
-                  onGatewayAccountIdChange={(accountId) => {
-                    updateState({
-                      useExternalProvider: true,
-                      authMethod: "gateway",
-                      gatewayAccountId: accountId
-                    });
-                  }}
-                  onGatewayIdChange={(gwId) => {
-                    updateState({
-                      useExternalProvider: true,
-                      authMethod: "gateway",
-                      gatewayId: gwId
-                    });
-                  }}
-                  onGatewayApiKeyChange={(apiKey) => {
-                    updateState({
-                      useExternalProvider: true,
-                      authMethod: "gateway",
-                      gatewayApiKey: apiKey
-                    });
-                  }}
-                />
-              </div>
-
-              <div
-                className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
-              >
-                <label
-                  htmlFor="system-message"
-                  className="font-semibold text-sm block mb-1 text-kumo-default"
-                >
-                  System Message
-                </label>
-                <TextareaAutosize
-                  id="system-message"
-                  className="w-full p-2 border border-kumo-line rounded-md resize-none bg-kumo-base text-kumo-default hover:bg-kumo-tint focus:outline-none focus:ring-1 focus:ring-kumo-ring"
-                  minRows={4}
-                  value={params.system}
-                  onChange={(e) => updateState({ system: e.target.value })}
-                />
-              </div>
-
-              <div
-                className={`mt-4 md:block ${settingsVisible ? "block" : "hidden"}`}
-              >
-                <label
-                  htmlFor="temperature"
-                  className="font-semibold text-sm block mb-1 text-kumo-default"
-                >
-                  Temperature
-                </label>
-                <div className="flex items-center p-2 border border-kumo-line rounded-md">
-                  <input
-                    id="temperature"
-                    className="w-full appearance-none cursor-pointer bg-ai rounded-full h-2 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_#901475]"
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.1}
-                    value={params.temperature}
-                    onChange={(e) =>
-                      updateState({
-                        temperature: Number.parseFloat(e.target.value)
-                      })
-                    }
-                  />
-                  <span className="ml-3 text-md text-kumo-default w-12 text-right">
-                    {params.temperature.toFixed(1)}
-                  </span>
-                </div>
-              </div>
+            {/* ── Model selector ── */}
+            <section className="px-3 pb-2">
+              <UnifiedModelSelector
+                workersAiModels={models}
+                activeWorkersAiModel={activeModel}
+                isLoadingWorkersAi={isLoadingModels}
+                useExternalProvider={params.useExternalProvider || false}
+                externalProvider={params.externalProvider || "openai"}
+                externalModel={params.externalModel}
+                authMethod={params.authMethod || "provider-key"}
+                providerApiKey={params.providerApiKey}
+                gatewayAccountId={params.gatewayAccountId}
+                gatewayId={params.gatewayId}
+                gatewayApiKey={params.gatewayApiKey}
+                onModeChange={(useExternal) => {
+                  const selectedModel = useExternal
+                    ? DEFAULT_EXTERNAL_MODELS[
+                        params.externalProvider || "openai"
+                      ] || params.model
+                    : params.model || DEFAULT_PARAMS.model;
+                  updateState({
+                    model: selectedModel,
+                    useExternalProvider: useExternal,
+                    externalModel: useExternal ? selectedModel : undefined
+                  });
+                }}
+                onWorkersAiModelSelect={(model) => {
+                  updateState({
+                    model: model ? model.name : DEFAULT_PARAMS.model,
+                    useExternalProvider: false,
+                    externalModel: undefined
+                  });
+                }}
+                onExternalProviderChange={(provider) => {
+                  const selectedModel =
+                    DEFAULT_EXTERNAL_MODELS[provider] || params.model;
+                  updateState({
+                    model: selectedModel,
+                    useExternalProvider: true,
+                    externalProvider: provider,
+                    externalModel: selectedModel
+                  });
+                }}
+                onExternalModelSelect={(modelId) => {
+                  updateState({
+                    model: modelId,
+                    useExternalProvider: true,
+                    externalModel: modelId
+                  });
+                }}
+                onAuthMethodChange={(method) => {
+                  updateState({
+                    useExternalProvider: true,
+                    authMethod: method
+                  });
+                }}
+                onProviderApiKeyChange={(key) => {
+                  updateState({
+                    useExternalProvider: true,
+                    authMethod: "provider-key",
+                    providerApiKey: key
+                  });
+                }}
+                onGatewayAccountIdChange={(accountId) => {
+                  updateState({
+                    useExternalProvider: true,
+                    authMethod: "gateway",
+                    gatewayAccountId: accountId
+                  });
+                }}
+                onGatewayIdChange={(gwId) => {
+                  updateState({
+                    useExternalProvider: true,
+                    authMethod: "gateway",
+                    gatewayId: gwId
+                  });
+                }}
+                onGatewayApiKeyChange={(apiKey) => {
+                  updateState({
+                    useExternalProvider: true,
+                    authMethod: "gateway",
+                    gatewayApiKey: apiKey
+                  });
+                }}
+              />
             </section>
 
-            <div className="bg-ai h-px mx-2 mt-2 opacity-25" />
+            <div className="bg-ai h-px mx-3 opacity-25" />
+
+            {/* ── Parameters (collapsible) ── */}
+            <section className="px-3 py-2">
+              <button
+                type="button"
+                className="flex items-center justify-between w-full group"
+                onClick={() => setParametersOpen(!parametersOpen)}
+              >
+                <span className="text-xs font-semibold text-kumo-secondary uppercase tracking-wide">
+                  Parameters
+                </span>
+                <CaretDownIcon
+                  size={14}
+                  className={`text-kumo-secondary transition-transform ${parametersOpen ? "rotate-180" : ""}`}
+                />
+              </button>
+
+              {(parametersOpen || settingsVisible) && (
+                <div className="mt-2 space-y-3">
+                  <div>
+                    <label
+                      htmlFor="system-message"
+                      className="font-medium text-xs block mb-1 text-kumo-default"
+                    >
+                      System Message
+                    </label>
+                    <TextareaAutosize
+                      id="system-message"
+                      className="w-full p-2 text-sm border border-kumo-line rounded-md resize-none bg-kumo-base text-kumo-default hover:bg-kumo-tint focus:outline-none focus:ring-1 focus:ring-kumo-ring"
+                      minRows={2}
+                      value={params.system}
+                      onChange={(e) => updateState({ system: e.target.value })}
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="temperature"
+                      className="font-medium text-xs block mb-1 text-kumo-default"
+                    >
+                      Temperature
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        id="temperature"
+                        className="w-full appearance-none cursor-pointer bg-ai rounded-full h-1.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_#901475]"
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.1}
+                        value={params.temperature}
+                        onChange={(e) =>
+                          updateState({
+                            temperature: Number.parseFloat(e.target.value)
+                          })
+                        }
+                      />
+                      <span className="text-xs text-kumo-default w-8 text-right tabular-nums">
+                        {params.temperature.toFixed(1)}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <div className="bg-ai h-px mx-3 opacity-25" />
+
+            {/* ── MCP Servers ── */}
             <McpServers agent={agent} mcpState={mcp} mcpLogs={mcpLogs} />
           </div>
 

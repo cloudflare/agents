@@ -48,6 +48,10 @@
         "name": "TestReadonlyAgent"
       },
       {
+        "class_name": "TestProtocolMessagesAgent",
+        "name": "TestProtocolMessagesAgent"
+      },
+      {
         "class_name": "TestScheduleAgent",
         "name": "TestScheduleAgent"
       },
@@ -135,6 +139,7 @@
         "TestMcpJurisdiction",
         "TestDestroyScheduleAgent",
         "TestReadonlyAgent",
+        "TestProtocolMessagesAgent",
         "TestScheduleAgent",
         "TestWorkflowAgent",
         "TestAddMcpServerAgent",

@@ -329,6 +329,58 @@ const DEFAULT_STATE = {} as unknown;
 const CF_READONLY_KEY = "_cf_readonly";
 
 /**
+ * Internal key used to store the no-protocol flag in connection state.
+ * When set, protocol messages (identity, state sync, MCP servers) are not
+ * sent to this connection — neither on connect nor via broadcasts.
+ */
+const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
+
+/**
+ * The set of all internal keys stored in connection state that must be
+ * hidden from user code and preserved across setState calls.
+ */
+const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
+  CF_READONLY_KEY,
+  CF_NO_PROTOCOL_KEY
+]);
+
+/** Check if a raw connection state object contains any internal keys. */
+function rawHasInternalKeys(raw: Record<string, unknown>): boolean {
+  for (const key of Object.keys(raw)) {
+    if (CF_INTERNAL_KEYS.has(key)) return true;
+  }
+  return false;
+}
+
+/** Return a copy of `raw` with all internal keys removed, or null if no user keys remain. */
+function stripInternalKeys(
+  raw: Record<string, unknown>
+): Record<string, unknown> | null {
+  const result: Record<string, unknown> = {};
+  let hasUserKeys = false;
+  for (const key of Object.keys(raw)) {
+    if (!CF_INTERNAL_KEYS.has(key)) {
+      result[key] = raw[key];
+      hasUserKeys = true;
+    }
+  }
+  return hasUserKeys ? result : null;
+}
+
+/** Return a copy containing only the internal keys present in `raw`. */
+function extractInternalFlags(
+  raw: Record<string, unknown>
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(raw)) {
+    if (CF_INTERNAL_KEYS.has(key)) {
+      result[key] = raw[key];
+    }
+  }
+  return result;
+}
+
+/**
  * Tracks which agent constructors have already emitted the onStateUpdate
  * deprecation warning, so it fires at most once per class.
  */
@@ -495,8 +547,8 @@ export class Agent<
 
   /**
    * Stores raw state accessors for wrapped connections.
-   * Used by setConnectionReadonly/isConnectionReadonly to read/write the
-   * _cf_readonly flag without going through the user-facing state/setState.
+   * Used by internal flag methods (readonly, no-protocol) to read/write
+   * _cf_-prefixed keys without going through the user-facing state/setState.
    */
   private _rawStateAccessors = new WeakMap<
     Connection,
@@ -1002,33 +1054,40 @@ export class Agent<
             this.setConnectionReadonly(connection, true);
           }
 
-          // Send agent identity first so client knows which instance it's connected to
-          // Can be disabled via static options for security-sensitive instance names
-          if (this._resolvedOptions.sendIdentityOnConnect) {
+          // Check if protocol messages should be suppressed for this
+          // connection. When disabled, no identity/state/MCP text frames
+          // are sent — useful for binary-only clients (e.g. MQTT devices).
+          if (this.shouldSendProtocolMessages(connection, ctx)) {
+            // Send agent identity first so client knows which instance it's connected to
+            // Can be disabled via static options for security-sensitive instance names
+            if (this._resolvedOptions.sendIdentityOnConnect) {
+              connection.send(
+                JSON.stringify({
+                  name: this.name,
+                  agent: camelCaseToKebabCase(this._ParentClass.name),
+                  type: MessageType.CF_AGENT_IDENTITY
+                })
+              );
+            }
+
+            if (this.state) {
+              connection.send(
+                JSON.stringify({
+                  state: this.state,
+                  type: MessageType.CF_AGENT_STATE
+                })
+              );
+            }
+
             connection.send(
               JSON.stringify({
-                name: this.name,
-                agent: camelCaseToKebabCase(this._ParentClass.name),
-                type: MessageType.CF_AGENT_IDENTITY
+                mcp: this.getMcpServers(),
+                type: MessageType.CF_AGENT_MCP_SERVERS
               })
             );
+          } else {
+            this._setConnectionNoProtocol(connection);
           }
-
-          if (this.state) {
-            connection.send(
-              JSON.stringify({
-                state: this.state,
-                type: MessageType.CF_AGENT_STATE
-              })
-            );
-          }
-
-          connection.send(
-            JSON.stringify({
-              mcp: this.getMcpServers(),
-              type: MessageType.CF_AGENT_MCP_SERVERS
-            })
-          );
 
           this.observability?.emit(
             {
@@ -1121,6 +1180,23 @@ export class Agent<
     }
   }
 
+  /**
+   * Broadcast a protocol message only to connections that have protocol
+   * messages enabled. Connections where shouldSendProtocolMessages returned
+   * false are excluded automatically.
+   * @param msg The JSON-encoded protocol message
+   * @param excludeIds Additional connection IDs to exclude (e.g. the source)
+   */
+  private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
+    const exclude = [...excludeIds];
+    for (const conn of this.getConnections()) {
+      if (!this.isConnectionProtocolEnabled(conn)) {
+        exclude.push(conn.id);
+      }
+    }
+    this.broadcast(msg, exclude);
+  }
+
   private _setStateInternal(
     nextState: State,
     source: Connection | "server" = "server"
@@ -1139,8 +1215,8 @@ export class Agent<
       VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
     `;
 
-    // Broadcast state to connected clients immediately
-    this.broadcast(
+    // Broadcast state to protocol-enabled connections, excluding the source
+    this._broadcastProtocol(
       JSON.stringify({
         state: nextState,
         type: MessageType.CF_AGENT_STATE
@@ -1197,11 +1273,16 @@ export class Agent<
   }
 
   /**
-   * Wraps connection.state and connection.setState so that the internal
-   * _cf_readonly flag is hidden from user code and cannot be accidentally
-   * overwritten. Must be called before any user code sees the connection.
+   * Wraps connection.state and connection.setState so that internal
+   * _cf_-prefixed flags (readonly, no-protocol) are hidden from user code
+   * and cannot be accidentally overwritten.
    *
    * Idempotent — safe to call multiple times on the same connection.
+   * After hibernation, the _rawStateAccessors WeakMap is empty but the
+   * connection's state getter still reads from the persisted WebSocket
+   * attachment. Calling this method re-captures the raw getter so that
+   * predicate methods (isConnectionReadonly, isConnectionProtocolEnabled)
+   * work correctly post-hibernation.
    */
   private _ensureConnectionWrapped(connection: Connection) {
     if (this._rawStateAccessors.has(connection)) return;
@@ -1241,56 +1322,52 @@ export class Agent<
 
     this._rawStateAccessors.set(connection, { getRaw, setRaw });
 
-    const CF_KEY = CF_READONLY_KEY;
-
-    // Override state getter to hide the readonly flag from user code
+    // Override state getter to hide all internal _cf_ flags from user code
     Object.defineProperty(connection, "state", {
       configurable: true,
       enumerable: true,
       get() {
         const raw = getRaw();
-        if (raw != null && typeof raw === "object" && CF_KEY in raw) {
-          const { [CF_KEY]: _, ...userState } = raw;
-          return Object.keys(userState).length > 0 ? userState : null;
+        if (raw != null && typeof raw === "object" && rawHasInternalKeys(raw)) {
+          return stripInternalKeys(raw);
         }
         return raw;
       }
     });
 
-    // Override setState to preserve the readonly flag when user sets state
+    // Override setState to preserve internal flags when user sets state
     Object.defineProperty(connection, "setState", {
       configurable: true,
       writable: true,
       value(stateOrFn: unknown | ((prev: unknown) => unknown)) {
         const raw = getRaw();
-        const readonlyFlag =
+        const flags =
           raw != null && typeof raw === "object"
-            ? (raw as Record<string, unknown>)[CF_KEY]
-            : undefined;
+            ? extractInternalFlags(raw as Record<string, unknown>)
+            : {};
+        const hasFlags = Object.keys(flags).length > 0;
 
         let newUserState: unknown;
         if (typeof stateOrFn === "function") {
-          // Pass only the user-visible state (without the readonly flag) to the callback
-          let userVisible: unknown = raw;
-          if (raw != null && typeof raw === "object" && CF_KEY in raw) {
-            const { [CF_KEY]: _, ...rest } = raw;
-            userVisible = Object.keys(rest).length > 0 ? rest : null;
-          }
+          // Pass only the user-visible state (without internal flags) to the callback
+          const userVisible = hasFlags
+            ? stripInternalKeys(raw as Record<string, unknown>)
+            : raw;
           newUserState = (stateOrFn as (prev: unknown) => unknown)(userVisible);
         } else {
           newUserState = stateOrFn;
         }
 
-        // Merge back the readonly flag if it was set
-        if (readonlyFlag !== undefined) {
+        // Merge back internal flags if any were set
+        if (hasFlags) {
           if (newUserState != null && typeof newUserState === "object") {
             return setRaw({
               ...(newUserState as Record<string, unknown>),
-              [CF_KEY]: readonlyFlag
+              ...flags
             });
           }
-          // User set null — store just the flag
-          return setRaw({ [CF_KEY]: readonlyFlag });
+          // User set null — store just the flags
+          return setRaw(flags);
         }
         return setRaw(newUserState);
       }
@@ -1317,20 +1394,20 @@ export class Agent<
   }
 
   /**
-   * Check if a connection is marked as readonly
+   * Check if a connection is marked as readonly.
+   *
+   * Safe to call after hibernation — re-wraps the connection if the
+   * in-memory accessor cache was cleared.
    * @param connection The connection to check
    * @returns True if the connection is readonly
    */
   isConnectionReadonly(connection: Connection): boolean {
-    const accessors = this._rawStateAccessors.get(connection);
-    if (accessors) {
-      return !!(accessors.getRaw() as Record<string, unknown> | null)?.[
-        CF_READONLY_KEY
-      ];
-    }
-    // Connection hasn't been wrapped yet — the flag can't have been set via
-    // setConnectionReadonly (which always wraps first), so default to false.
-    return false;
+    this._ensureConnectionWrapped(connection);
+    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
+      string,
+      unknown
+    > | null;
+    return !!raw?.[CF_READONLY_KEY];
   }
 
   /**
@@ -1344,6 +1421,59 @@ export class Agent<
     _ctx: ConnectionContext
   ): boolean {
     return false;
+  }
+
+  /**
+   * Override this method to control whether protocol messages are sent to a
+   * connection. Protocol messages include identity (CF_AGENT_IDENTITY), state
+   * sync (CF_AGENT_STATE), and MCP server lists (CF_AGENT_MCP_SERVERS).
+   *
+   * When this returns `false` for a connection, that connection will not
+   * receive any protocol text frames — neither on connect nor via broadcasts.
+   * This is useful for binary-only clients (e.g. MQTT devices) that cannot
+   * handle JSON text frames.
+   *
+   * The connection can still send and receive regular messages, use RPC, and
+   * participate in all non-protocol communication.
+   *
+   * @param _connection The connection that is being established
+   * @param _ctx Connection context (includes the upgrade request)
+   * @returns True if protocol messages should be sent (default), false to suppress them
+   */
+  shouldSendProtocolMessages(
+    _connection: Connection,
+    _ctx: ConnectionContext
+  ): boolean {
+    return true;
+  }
+
+  /**
+   * Check if a connection has protocol messages enabled.
+   * Protocol messages include identity, state sync, and MCP server lists.
+   *
+   * Safe to call after hibernation — re-wraps the connection if the
+   * in-memory accessor cache was cleared.
+   * @param connection The connection to check
+   * @returns True if the connection receives protocol messages
+   */
+  isConnectionProtocolEnabled(connection: Connection): boolean {
+    this._ensureConnectionWrapped(connection);
+    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
+      string,
+      unknown
+    > | null;
+    return !raw?.[CF_NO_PROTOCOL_KEY];
+  }
+
+  /**
+   * Mark a connection as having protocol messages disabled.
+   * Called internally when shouldSendProtocolMessages returns false.
+   */
+  private _setConnectionNoProtocol(connection: Connection) {
+    this._ensureConnectionWrapped(connection);
+    const accessors = this._rawStateAccessors.get(connection)!;
+    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
+    accessors.setRaw({ ...raw, [CF_NO_PROTOCOL_KEY]: true });
   }
 
   /**
@@ -3824,7 +3954,7 @@ export class Agent<
   }
 
   private broadcastMcpServers() {
-    this.broadcast(
+    this._broadcastProtocol(
       JSON.stringify({
         mcp: this.getMcpServers(),
         type: MessageType.CF_AGENT_MCP_SERVERS
