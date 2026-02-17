@@ -202,7 +202,7 @@ export function messageToEvent(
   if (msg.role === "user") {
     return { ...base, action: EventAction.USER_MESSAGE, content: msg.content };
   }
-
+  // TOOL_CALL_REQUEST are also stored as 'assistant' messages, eventhough it is a separate event, hence this extra check
   if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
     return {
       ...base,

@@ -18,7 +18,7 @@
  * - Only Workers AI adapter shipped; OpenAI/Anthropic adapters planned
  * - No built-in compaction/summarization yet
  * - Token estimation is not included; bring your own estimator
- * - Concurrent requests to the same agent DO may produce contextually divergent LLM responses
+ * - Concurrent requests: add user messages in-memory via `ctx.addMessage`, persist atomically with the full turn — do NOT `appendEvents` before the LLM call
  * - API will change as we iterate on schemas and primitives
  */
 

@@ -2,7 +2,6 @@ import { type AgentNamespace, getAgentByName } from "agents";
 import {
 	SessionAgent,
 	type ContextBuilderOptions,
-	messageToEvent,
 	workersAIAdapter,
 } from "agents/experimental/memory";
 
@@ -96,14 +95,15 @@ export class MyAgent extends SessionAgent<Env, AgentState> {
 	async onStart() {
 		const sessions = this.listSessions();
 		if (sessions.length > 0) {
+			// Just use the first session. This is up to user on how they want to handle it
 			this.setState({ sessionId: sessions[0].id });
 		} else {
 			this.setState({ sessionId: this.createSession() });
 		}
 	}
 
-	// Public wrapper — _buildWorkingContext is protected to prevent RPC misuse,
-	// but we need it from our own helper methods.
+	// Public wrapper — _buildWorkingContext is protected,
+	// but we need it from our own helper methods (?)
 	buildContext(sessionId: string, opts?: ContextBuilderOptions) {
 		return this._buildWorkingContext(sessionId, opts);
 	}
@@ -131,12 +131,10 @@ export class MyAgent extends SessionAgent<Env, AgentState> {
 
 			const sessionId = this.ensureSession();
 
-			// Persist user message before calling the LLM (crash-safe).
-			this.appendEvents(sessionId, [
-				messageToEvent(sessionId, { role: "user", content: body.query }),
-			]);
-
-			const result = await this.runAgentLoop(sessionId, {
+			// User message is NOT persisted here — it stays in-memory until the
+			// full turn completes. This prevents concurrent requests from seeing
+			// each other's in-flight user messages via loadEvents().
+			const result = await this.runAgentLoop(sessionId, body.query, {
 				gatewayId: body.gatewayId,
 			});
 
@@ -179,6 +177,7 @@ export class MyAgent extends SessionAgent<Env, AgentState> {
 
 	private async runAgentLoop(
 		sessionId: string,
+		userMessage: string,
 		opts: { gatewayId?: string; maxIterations?: number; model?: string } = {}
 	) {
 		const {
@@ -187,10 +186,13 @@ export class MyAgent extends SessionAgent<Env, AgentState> {
 			model = "@cf/qwen/qwen3-30b-a3b-fp8",
 		} = opts;
 
+		// Build context from completed turns only, then add user message in-memory.
+		// persistWorkingContext at the end writes user + assistant atomically.
 		const ctx = this.buildContext(sessionId, {
 			systemInstructions: [SYSTEM_PROMPT],
 			limit: 100,
 		});
+		ctx.addMessage({ role: "user", content: userMessage });
 
 		let iteration = 0;
 		let totalToolCalls = 0;
