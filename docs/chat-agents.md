@@ -573,11 +573,11 @@ export class ChatAgent extends AIChatAgent {
 
 ### Three Patterns
 
-| Pattern | How | Persisted? | Use case |
-| --- | --- | --- | --- |
-| **Reconciliation** | Same `type` + `id` → updates in-place | Yes | Progressive state (searching → found) |
-| **Append** | No `id`, or different `id` → appends | Yes | Log entries, multiple citations |
-| **Transient** | `transient: true` → not added to `message.parts` | No | Ephemeral status (thinking indicator) |
+| Pattern            | How                                              | Persisted? | Use case                              |
+| ------------------ | ------------------------------------------------ | ---------- | ------------------------------------- |
+| **Reconciliation** | Same `type` + `id` → updates in-place            | Yes        | Progressive state (searching → found) |
+| **Append**         | No `id`, or different `id` → appends             | Yes        | Log entries, multiple citations       |
+| **Transient**      | `transient: true` → not added to `message.parts` | No         | Ephemeral status (thinking indicator) |
 
 Transient parts are broadcast to connected clients in real time but excluded from SQLite persistence and `message.parts`. Use the `onData` callback to consume them.
 
