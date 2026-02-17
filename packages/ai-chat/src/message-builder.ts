@@ -312,6 +312,9 @@ export function applyChunkToParts(
         }
 
         // Append new data parts to the array directly.
+        // Note: `chunk.data` should always be provided — if omitted, the
+        // persisted part will have `data: undefined` which JSON.stringify
+        // drops, so the part will have no `data` field on reload.
         // The cast is needed because UIMessage["parts"] doesn't include
         // data-* types in its union because they're an open extension point.
         parts.push({
