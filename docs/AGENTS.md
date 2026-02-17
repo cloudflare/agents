@@ -23,13 +23,7 @@ The fourth Diátaxis type — **explanation** ("understand why") — lives in `/
 
 ## Upstream sync
 
-Changes to `docs/` trigger a CI workflow (`.github/workflows/sync-docs.yml`) that:
-
-1. Diffs the PR against main to find changed doc files
-2. Runs Claude Code to adapt the content for `cloudflare/cloudflare-docs` conventions
-3. Creates or updates a PR in the `cloudflare/cloudflare-docs` repo
-
-This means your markdown here gets transformed at sync time — the sync handles Cloudflare-specific components (`WranglerConfig`, `PackageManagers`, `TypeScriptExample`, etc.), link format conversion, and style adjustments. Write clean, accurate markdown here; the sync workflow handles the rest.
+There is no automated sync workflow. Changes here must be manually ported to `cloudflare/cloudflare-docs` (the `src/content/docs/agents/` folder). When updating docs here, also update the corresponding `.mdx` file in cloudflare-docs — or at minimum note the discrepancy in `docs-to-upstream.md`.
 
 ### Tracking file
 
