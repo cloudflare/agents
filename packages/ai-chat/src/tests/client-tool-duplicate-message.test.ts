@@ -3,6 +3,11 @@ import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
+import {
+  applyChunkToParts,
+  type MessageParts,
+  type StreamChunkData
+} from "../message-builder";
 
 describe("Client-side tool duplicate message prevention", () => {
   it("merges tool output into existing message by toolCallId", async () => {
@@ -735,7 +740,8 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       approval?: { approved: boolean };
     };
     expect(toolPart.state).toBe("approval-responded");
-    expect(toolPart.approval).toEqual({ approved: true });
+    // approval.id is preserved from the approval-requested state
+    expect(toolPart.approval).toEqual({ id: "approval-123", approved: true });
 
     ws.close(1000);
   });
@@ -1132,10 +1138,162 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       approval?: { approved: boolean };
     };
     expect(toolPart.state).toBe("approval-responded");
-    expect(toolPart.approval).toEqual({ approved: true });
+    expect(toolPart.approval).toEqual({ id: "approval-456", approved: true });
 
     // Continuation should have appended parts
     expect(assistantMsg.parts.length).toBeGreaterThan(1);
+
+    ws.close(1000);
+  });
+});
+
+describe("applyChunkToParts: tool-approval-request", () => {
+  it("transitions tool part from input-available to approval-requested", () => {
+    const parts: MessageParts = [
+      {
+        type: "tool-calculate",
+        toolCallId: "call_123",
+        toolName: "calculate",
+        state: "input-available",
+        input: { a: 5000, b: 3, operator: "*" }
+      } as MessageParts[number]
+    ];
+
+    const handled = applyChunkToParts(parts, {
+      type: "tool-approval-request",
+      approvalId: "approval-abc",
+      toolCallId: "call_123"
+    } as StreamChunkData);
+
+    expect(handled).toBe(true);
+    const part = parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("approval-requested");
+    expect(part.approval).toEqual({ id: "approval-abc" });
+    // Input should be preserved
+    expect(part.input).toEqual({ a: 5000, b: 3, operator: "*" });
+  });
+
+  it("does nothing if tool part not found", () => {
+    const parts: MessageParts = [];
+
+    const handled = applyChunkToParts(parts, {
+      type: "tool-approval-request",
+      approvalId: "approval-abc",
+      toolCallId: "call_nonexistent"
+    } as StreamChunkData);
+
+    expect(handled).toBe(true);
+    expect(parts.length).toBe(0);
+  });
+});
+
+describe("applyChunkToParts: tool-output-denied", () => {
+  it("transitions tool part to output-denied state", () => {
+    const parts: MessageParts = [
+      {
+        type: "tool-calculate",
+        toolCallId: "call_456",
+        toolName: "calculate",
+        state: "approval-requested",
+        input: { a: 5000, b: 3, operator: "*" },
+        approval: { id: "approval-xyz" }
+      } as MessageParts[number]
+    ];
+
+    const handled = applyChunkToParts(parts, {
+      type: "tool-output-denied",
+      toolCallId: "call_456"
+    } as StreamChunkData);
+
+    expect(handled).toBe(true);
+    const part = parts[0] as Record<string, unknown>;
+    expect(part.state).toBe("output-denied");
+    // Input and approval should be preserved
+    expect(part.input).toEqual({ a: 5000, b: 3, operator: "*" });
+    expect(part.approval).toEqual({ id: "approval-xyz" });
+  });
+});
+
+describe("Tool approval persistence across reconnect", () => {
+  it("persisted messages include approval-requested state after approval-request chunk", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_persist_approval_test";
+
+    // Manually persist messages that simulate the state after
+    // a tool-approval-request was received and early-persisted.
+    // In a real flow, the streaming handler would do this.
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Calculate 5000 * 3" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-calculate",
+            toolCallId,
+            state: "approval-requested",
+            input: { a: 5000, b: 3, operator: "*" },
+            approval: { id: "approval-persist-test" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Verify the messages were persisted with approval-requested state
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as Record<string, unknown>;
+    expect(toolPart.state).toBe("approval-requested");
+    expect(toolPart.approval).toEqual({ id: "approval-persist-test" });
+
+    // Now simulate a client reconnecting and approving the tool.
+    // A new client would receive these persisted messages and see the approval UI.
+    // When they approve, CF_AGENT_TOOL_APPROVAL is sent.
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const updatedMessages =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const updatedAssistant = updatedMessages.filter(
+      (m) => m.role === "assistant"
+    );
+    expect(updatedAssistant.length).toBe(1);
+
+    const updatedToolPart = updatedAssistant[0].parts[0] as Record<
+      string,
+      unknown
+    >;
+    expect(updatedToolPart.state).toBe("approval-responded");
+    // approval.id preserved from the approval-requested state
+    expect(updatedToolPart.approval).toEqual({
+      id: "approval-persist-test",
+      approved: true
+    });
 
     ws.close(1000);
   });
