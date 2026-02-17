@@ -248,15 +248,15 @@ type UseAgentChatOptions<
    */
   toolsRequiringConfirmation?: string[];
   /**
-   * When true, the server automatically continues the conversation after
-   * receiving client-side tool results, similar to how server-executed tools
-   * work with maxSteps in streamText. The continuation is merged into the
-   * same assistant message.
+   * When true (default), the server automatically continues the conversation
+   * after receiving client-side tool results or approvals, similar to how
+   * server-executed tools work with maxSteps in streamText. The continuation
+   * is merged into the same assistant message.
    *
-   * When false (default), the client calls sendMessage() after tool results
+   * When false, the client must call sendMessage() after tool results
    * to continue the conversation, which creates a new assistant message.
    *
-   * @default false
+   * @default true
    */
   autoContinueAfterToolResult?: boolean;
   /**
@@ -373,10 +373,11 @@ export function useAgentChat<
     getInitialMessages,
     messages: optionsInitialMessages,
     onToolCall,
+    onData,
     experimental_automaticToolResolution,
     tools,
     toolsRequiringConfirmation: manualToolsRequiringConfirmation,
-    autoContinueAfterToolResult = false, // Opt-in to server auto-continuation
+    autoContinueAfterToolResult = true, // Server auto-continues after tool results/approvals
     autoSendAfterAllConfirmationsResolved = true, // Legacy option for client-side batching
     resume = true, // Enable stream resumption by default
     body: bodyOption,
@@ -420,9 +421,11 @@ export function useAgentChat<
     [manualToolsRequiringConfirmation, tools]
   );
 
-  // Keep a ref to always point to the latest onToolCall callback
+  // Keep refs to always point to the latest callbacks
   const onToolCallRef = useRef(onToolCall);
   onToolCallRef.current = onToolCall;
+  const onDataRef = useRef(onData);
+  onDataRef.current = onData;
 
   const agentUrl = new URL(
     `${
@@ -589,6 +592,7 @@ export function useAgentChat<
 
   const useChatHelpers = useChat<ChatMessage>({
     ...rest,
+    onData,
     messages: initialMessages,
     transport: customTransport,
     id: agent._pk
@@ -806,11 +810,12 @@ export function useAgentChat<
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_APPROVAL,
           toolCallId,
-          approved
+          approved,
+          autoContinue: autoContinueAfterToolResult
         })
       );
     },
-    []
+    [autoContinueAfterToolResult]
   );
 
   // Effect for new onToolCall callback pattern (v6 style)
@@ -1067,7 +1072,7 @@ export function useAgentChat<
               const chunkData = JSON.parse(data.body);
 
               // Apply chunk to parts using shared parser.
-              // Handles text, reasoning, file, source, tool, and step chunks.
+              // Handles text, reasoning, file, source, tool, step, and data-* chunks.
               // Unrecognized types (tool-input-start, tool-input-delta, etc.)
               // are intermediate states — the final state is captured by
               // tool-input-available / tool-output-available.
@@ -1075,6 +1080,18 @@ export function useAgentChat<
                 activeMsg.parts as MessageParts,
                 chunkData
               );
+
+              // Fire onData callback for data-* parts (stream resumption
+              // and cross-tab broadcasts). For the transport path (new
+              // messages from this tab), the AI SDK's pipeline invokes
+              // onData internally.
+              if (
+                typeof chunkData.type === "string" &&
+                chunkData.type.startsWith("data-") &&
+                onDataRef.current
+              ) {
+                onDataRef.current(chunkData);
+              }
 
               // Capture message metadata from start/finish/message-metadata
               // chunks. These carry metadata like timestamps, model info, and

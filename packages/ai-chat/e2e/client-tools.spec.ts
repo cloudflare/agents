@@ -10,6 +10,7 @@ const MessageType = {
   CF_AGENT_USE_CHAT_REQUEST: "cf_agent_use_chat_request",
   CF_AGENT_USE_CHAT_RESPONSE: "cf_agent_use_chat_response",
   CF_AGENT_TOOL_RESULT: "cf_agent_tool_result",
+  CF_AGENT_TOOL_APPROVAL: "cf_agent_tool_approval",
   CF_AGENT_MESSAGE_UPDATED: "cf_agent_message_updated"
 } as const;
 
@@ -323,5 +324,181 @@ test.describe("Client-side tool results e2e", () => {
         (m.body as string).trim()
     );
     expect(continuationChunks.length).toBeGreaterThan(0);
+  });
+});
+
+test.describe("Tool approval auto-continuation e2e", () => {
+  test.setTimeout(30_000);
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto("about:blank");
+  });
+
+  test("tool approval with autoContinue triggers continuation stream", async ({
+    page,
+    baseURL
+  }) => {
+    const room = crypto.randomUUID();
+    const wsUrl = agentPath(baseURL!, room);
+
+    // This test:
+    // 1. Sends a message that triggers the LLM to call getUserLocation
+    // 2. Waits for tool-input-available in the stream
+    // 3. Sends CF_AGENT_TOOL_APPROVAL (instead of TOOL_RESULT) with autoContinue
+    // 4. Verifies continuation messages are received
+    const result = await page.evaluate(
+      ({ url, MT }) => {
+        return new Promise<{
+          allMessages: WSMessage[];
+          continuationReceived: boolean;
+          toolCallId: string | null;
+          approvalSent: boolean;
+        }>((resolve) => {
+          const ws = new WebSocket(url);
+          const allMessages: WSMessage[] = [];
+          let toolCallId: string | null = null;
+          let sentApproval = false;
+          let doneCount = 0;
+          let continuationReceived = false;
+
+          ws.onmessage = (e) => {
+            try {
+              const data = JSON.parse(e.data) as WSMessage;
+              allMessages.push(data);
+
+              if (data.type === MT.CF_AGENT_USE_CHAT_RESPONSE) {
+                if (data.continuation === true) {
+                  continuationReceived = true;
+                }
+
+                // Look for tool-input-available
+                if (
+                  !sentApproval &&
+                  typeof data.body === "string" &&
+                  data.body.includes("tool-input-available")
+                ) {
+                  try {
+                    const chunk = JSON.parse(data.body as string);
+                    if (
+                      chunk.type === "tool-input-available" &&
+                      chunk.toolCallId
+                    ) {
+                      toolCallId = chunk.toolCallId;
+                      // Send tool APPROVAL with autoContinue
+                      ws.send(
+                        JSON.stringify({
+                          type: MT.CF_AGENT_TOOL_APPROVAL,
+                          toolCallId: chunk.toolCallId,
+                          approved: true,
+                          autoContinue: true
+                        })
+                      );
+                      sentApproval = true;
+                    }
+                  } catch {
+                    // not JSON
+                  }
+                }
+
+                if (data.done) {
+                  doneCount++;
+                  // With auto-continuation, we expect 2 done signals
+                  if (
+                    doneCount >= 2 ||
+                    (doneCount >= 1 && continuationReceived)
+                  ) {
+                    setTimeout(() => {
+                      ws.close();
+                      resolve({
+                        allMessages,
+                        continuationReceived,
+                        toolCallId,
+                        approvalSent: sentApproval
+                      });
+                    }, 500);
+                  }
+                }
+              }
+            } catch {
+              // ignore
+            }
+          };
+
+          ws.onopen = () => {
+            ws.send(
+              JSON.stringify({
+                type: MT.CF_AGENT_USE_CHAT_REQUEST,
+                id: "req-approval-cont",
+                init: {
+                  method: "POST",
+                  body: JSON.stringify({
+                    messages: [
+                      {
+                        id: "msg-appr-1",
+                        role: "user",
+                        parts: [
+                          {
+                            type: "text",
+                            text: "Where am I? Use the getUserLocation tool."
+                          }
+                        ]
+                      }
+                    ]
+                  })
+                }
+              })
+            );
+          };
+
+          setTimeout(() => {
+            ws.close();
+            resolve({
+              allMessages,
+              continuationReceived,
+              toolCallId,
+              approvalSent: sentApproval
+            });
+          }, 25000);
+        });
+      },
+      { url: wsUrl, MT: MessageType }
+    );
+
+    // The LLM should have called the tool
+    expect(result.toolCallId).toBeTruthy();
+    expect(result.approvalSent).toBe(true);
+
+    // With autoContinue=true on approval, the server should send continuation
+    expect(result.continuationReceived).toBe(true);
+
+    // The continuation should include response chunks
+    const continuationChunks = result.allMessages.filter(
+      (m) =>
+        m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        m.continuation === true &&
+        typeof m.body === "string" &&
+        (m.body as string).trim()
+    );
+    expect(continuationChunks.length).toBeGreaterThan(0);
+
+    // Verify persistence
+    const res = await page.request.get(
+      `${baseURL}/agents/client-tool-agent/${room}/get-messages`
+    );
+    expect(res.ok()).toBe(true);
+    const persisted = await res.json();
+    const assistantMsgs = persisted.filter(
+      (m: { role: string }) => m.role === "assistant"
+    );
+    expect(assistantMsgs.length).toBeGreaterThanOrEqual(1);
+
+    // The tool part should be in approval-responded state
+    const assistantMsg = assistantMsgs[0];
+    const toolPart = assistantMsg.parts.find(
+      (p: { toolCallId?: string }) => p.toolCallId === result.toolCallId
+    );
+    expect(toolPart).toBeTruthy();
+    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.approval).toEqual({ approved: true });
   });
 });

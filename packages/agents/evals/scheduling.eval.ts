@@ -1,7 +1,8 @@
 // import { anthropic } from "@ai-sdk/anthropic";
 // import { google } from "@ai-sdk/google";
-import { openai } from "@ai-sdk/openai";
-import { generateObject } from "ai";
+// import { openai } from "@ai-sdk/openai";
+import { createWorkersAI } from "workers-ai-provider";
+import { generateText, Output } from "ai";
 import { createScorer, evalite } from "evalite";
 import {
   type Schedule,
@@ -9,11 +10,18 @@ import {
   scheduleSchema
 } from "../src/schedule";
 
-const model = openai("gpt-4o");
+const workersai = createWorkersAI({
+  accountId: process.env.CLOUDFLARE_ACCOUNT_ID!,
+  apiKey: process.env.CLOUDFLARE_API_TOKEN!
+});
+
+// @ts-expect-error — model not yet in workers-ai-provider types
+const model = workersai("@cf/zai-org/glm-4.7-flash");
+// const model = openai("gpt-4o");
 // const model = google("gemini-2.0-pro-exp-02-05");
 // const model = google("gemini-2.0-flash");
 // const model = google("gemini-1.5-pro");
-// const model = anthropic("claude-3-5-sonnet-20240620"); // also disable mode: "json"
+// const model = anthropic("claude-3-5-sonnet-20240620");
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -40,9 +48,7 @@ const getsDetail = createScorer<string, Schedule>({
           output.when.type === "scheduled",
           "Output is not a scheduled task"
         );
-        return output.when?.date?.getTime() === expected.when?.date?.getTime()
-          ? 1
-          : 0;
+        return output.when?.date === expected.when?.date ? 1 : 0;
       }
       case "delayed": {
         assert(output.when.type === "delayed", "Output is not a delayed task");
@@ -98,7 +104,7 @@ evalite<string, Schedule>("Evals for scheduling", {
               const date = new Date();
               date.setDate(date.getDate() + 1);
               date.setHours(14, 0, 0, 0);
-              return date;
+              return date.toISOString();
             })(),
             type: "scheduled"
           }
@@ -137,7 +143,15 @@ evalite<string, Schedule>("Evals for scheduling", {
         expected: {
           description: "quarterly review",
           when: {
-            date: new Date(new Date().getFullYear(), 2, 15, 9, 0, 0, 0),
+            date: new Date(
+              new Date().getFullYear(),
+              2,
+              15,
+              9,
+              0,
+              0,
+              0
+            ).toISOString(),
             type: "scheduled"
           }
         },
@@ -180,7 +194,7 @@ evalite<string, Schedule>("Evals for scheduling", {
               const daysUntilFriday = (5 - date.getDay() + 7) % 7;
               date.setDate(date.getDate() + daysUntilFriday);
               date.setHours(15, 30, 0, 0);
-              return date;
+              return date.toISOString();
             })(),
             type: "scheduled"
           }
@@ -326,24 +340,18 @@ evalite<string, Schedule>("Evals for scheduling", {
   // The task to perform
   task: async (input) => {
     try {
-      const result = await generateObject({
+      const result = await generateText({
         maxRetries: 5,
-        model, // <- the shape of the object that the scheduler expects
-        providerOptions: {
-          openai: { strictJsonSchema: false }
-        },
+        model,
+        output: Output.object({ schema: scheduleSchema }),
         prompt: `${getSchedulePrompt({ date: new Date() })}
       
-Input to parse: "${input}"`,
-        // mode: "json",
-        // schemaName: "task",
-        // schemaDescription: "A task to be scheduled",
-        schema: scheduleSchema
+Input to parse: "${input}"`
       });
-      return result.object;
+      return result.output;
     } catch (error) {
-      console.error(error);
-      throw error;
+      // Re-throw as plain Error so evalite's reporter can serialize it
+      throw new Error(error instanceof Error ? error.message : String(error));
     }
   }
 });

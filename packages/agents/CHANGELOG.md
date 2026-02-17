@@ -1,5 +1,58 @@
 # @cloudflare/agents
 
+## 0.5.0
+
+This release adds per-connection protocol message control and a built-in retry system. Agents can now suppress JSON protocol frames for binary-only clients (MQTT, IoT devices) while keeping RPC and regular messaging working — useful for Durable Objects that serve mixed connection types. The new `this.retry()` method and per-task retry options bring exponential backoff with jitter to scheduling, queues, and MCP connections without external dependencies. This release also improves scheduling ergonomics with synchronous getter methods, a cleaner discriminated union schema, and fixes for hibernation, deep type recursion, and SSE keepalives.
+
+### Minor Changes
+
+- [#920](https://github.com/cloudflare/agents/pull/920) [`4dea3bd`](https://github.com/cloudflare/agents/commit/4dea3bdeeeba6a92782550cfb1025cf47e91a9ee) Thanks [@threepointone](https://github.com/threepointone)! - Add `shouldSendProtocolMessages` hook and `isConnectionProtocolEnabled` predicate for per-connection control of protocol text frames
+
+  Adds the ability to suppress protocol messages (`CF_AGENT_IDENTITY`, `CF_AGENT_STATE`, `CF_AGENT_MCP_SERVERS`) on a per-connection basis. This is useful for binary-only clients (e.g. MQTT devices) that cannot handle JSON text frames.
+
+  Override `shouldSendProtocolMessages(connection, ctx)` to return `false` for connections that should not receive protocol messages. These connections still fully participate in RPC and regular messaging — only the automatic protocol text frames are suppressed, both on connect and during broadcasts.
+
+  Use `isConnectionProtocolEnabled(connection)` to check a connection's protocol status at any time.
+
+  Also fixes `isConnectionReadonly` to correctly survive Durable Object hibernation by re-wrapping the connection when the in-memory accessor cache has been cleared.
+
+- [#874](https://github.com/cloudflare/agents/pull/874) [`a6ec9b0`](https://github.com/cloudflare/agents/commit/a6ec9b0af1868e21a19689c41732af0bb0de0a13) Thanks [@threepointone](https://github.com/threepointone)! - Add retry utilities: `this.retry()`, per-task retry options, and `RetryOptions` type
+  - `this.retry(fn, options?)` — retry any async operation with exponential backoff and jitter. Accepts optional `shouldRetry` predicate to bail early on non-retryable errors.
+  - `queue()`, `schedule()`, `scheduleEvery()` accept `{ retry?: RetryOptions }` for per-task retry configuration, persisted in SQLite alongside the task.
+  - `addMcpServer()` accepts `{ retry?: RetryOptions }` for configurable MCP connection retries.
+  - `RetryOptions` type is exported for TypeScript consumers.
+  - Retry options are validated eagerly at enqueue/schedule time — invalid values throw immediately.
+  - Class-level retry defaults via `static options = { retry: { ... } }` — override defaults for an entire agent class.
+  - Internal retries added for workflow operations (`terminateWorkflow`, `pauseWorkflow`, etc.) with Durable Object-aware error detection.
+
+### Patch Changes
+
+- [#899](https://github.com/cloudflare/agents/pull/899) [`04c6411`](https://github.com/cloudflare/agents/commit/04c6411c9a73fe48784d7ce86150d62cf54becda) Thanks [@threepointone](https://github.com/threepointone)! - Fix React hooks exhaustive-deps warning in useAgent by referencing cacheInvalidatedAt inside useMemo body.
+
+- [#904](https://github.com/cloudflare/agents/pull/904) [`d611b94`](https://github.com/cloudflare/agents/commit/d611b940e7884af4accd8e3c97a7a8f86703e6f9) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Fix TypeScript "excessively deep" error with deeply nested state types
+
+  Add a depth counter to `CanSerialize` and `IsSerializableParam` types that bails out to `true` after 10 levels of recursion. This prevents the "Type instantiation is excessively deep and possibly infinite" error when using deeply nested types like AI SDK `CoreMessage[]` as agent state.
+
+- [#911](https://github.com/cloudflare/agents/pull/911) [`67b1601`](https://github.com/cloudflare/agents/commit/67b1601e0f6f82998c1d6ffb2023bc50ba12fc99) Thanks [@threepointone](https://github.com/threepointone)! - Update all dependencies and fix breaking changes.
+
+  Update all dependencies, add required `aria-label` props to Kumo `Button` components with `shape` (now required for accessibility), and fix state test for constructor-time validation of conflicting `onStateChanged`/`onStateUpdate` hooks.
+
+- [#889](https://github.com/cloudflare/agents/pull/889) [`9100e65`](https://github.com/cloudflare/agents/commit/9100e6587e2cc14701f0857c1268e6f17057488d) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Fix scheduling schema compatibility with zod v3 and improve schema structure.
+  - Change `zod/v3` import to `zod` so the package works for users on zod v3 (who don't have the `zod/v3` subpath).
+  - Replace flat object with optional fields with a `z.discriminatedUnion` on `when.type`. Each scheduling variant now only contains the fields it needs, making the schema cleaner and easier for LLMs to follow.
+  - Replace `z.coerce.date()` with `z.string()`. Zod v4's `toJSONSchema()` cannot represent `Date`, and the AI SDK routes zod v4 schemas through it directly. Dates are now returned as ISO 8601 strings.
+  - **Type change:** `Schedule["when"]` is now a discriminated union instead of a flat object with optional fields. `when.date` is `string` instead of `Date`.
+
+- [#916](https://github.com/cloudflare/agents/pull/916) [`24e16e0`](https://github.com/cloudflare/agents/commit/24e16e025b82dbd7b321339a18c6d440b2879136) Thanks [@threepointone](https://github.com/threepointone)! - Widen peer dependency ranges across packages to prevent cascading major bumps during 0.x minor releases. Mark `@cloudflare/ai-chat` and `@cloudflare/codemode` as optional peer dependencies of `agents` to fix unmet peer dependency warnings during installation.
+
+- [#898](https://github.com/cloudflare/agents/pull/898) [`cd2d34f`](https://github.com/cloudflare/agents/commit/cd2d34fc3d77e80ab9a369e1f2cd76bd0ddd3e79) Thanks [@jvg123](https://github.com/jvg123)! - Add keepalive ping to POST SSE response streams in WorkerTransport
+
+  The GET SSE handler already sends `event: ping` every 30 seconds to keep the connection alive, but the POST SSE handler did not. This caused POST response streams to be silently dropped by proxies and infrastructure during long-running tool calls (e.g., MCP tools/call), resulting in clients never receiving the response.
+
+- [#874](https://github.com/cloudflare/agents/pull/874) [`a6ec9b0`](https://github.com/cloudflare/agents/commit/a6ec9b0af1868e21a19689c41732af0bb0de0a13) Thanks [@threepointone](https://github.com/threepointone)! - Make queue and schedule getter methods synchronous
+
+  `getQueue()`, `getQueues()`, `getSchedule()`, `dequeue()`, `dequeueAll()`, and `dequeueAllByCallback()` were unnecessarily `async` despite only performing synchronous SQL operations. They now return values directly instead of wrapping them in Promises. This is backward compatible — existing code using `await` on these methods will continue to work.
+
 ## 0.4.1
 
 ### Patch Changes

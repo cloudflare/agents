@@ -1,0 +1,52 @@
+name: Nightly E2E
+
+on:
+  schedule:
+    # Every day at midnight UTC
+    - cron: "0 0 * * *"
+  # Allow manual trigger for debugging
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-ai-chat:
+    name: "E2E: ai-chat (Playwright)"
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(jq -r '.packages["node_modules/playwright"].version' package-lock.json)" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run ai-chat e2e tests
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx playwright test --config e2e/playwright.config.ts
+        working-directory: packages/ai-chat

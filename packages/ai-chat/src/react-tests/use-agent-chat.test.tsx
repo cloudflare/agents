@@ -827,6 +827,193 @@ describe("useAgentChat clearHistory", () => {
   });
 });
 
+describe("useAgentChat autoContinueAfterToolResult default", () => {
+  it("should send autoContinue: true by default with tool results", async () => {
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name: "auto-continue-default",
+      url: "ws://localhost:3000/agents/chat/auto-continue-default?_pk=abc",
+      send: (data: string) => sentMessages.push(data)
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-default-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        // No explicit autoContinueAfterToolResult — should default to true
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+    });
+
+    // Find the CF_AGENT_TOOL_RESULT message
+    const toolResultMessages = sentMessages
+      .map((m) => JSON.parse(m))
+      .filter((m) => m.type === "cf_agent_tool_result");
+
+    expect(toolResultMessages.length).toBeGreaterThanOrEqual(1);
+    // Default should be autoContinue: true
+    expect(toolResultMessages[0].autoContinue).toBe(true);
+  });
+
+  it("should send autoContinue: false when explicitly disabled", async () => {
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name: "auto-continue-disabled",
+      url: "ws://localhost:3000/agents/chat/auto-continue-disabled?_pk=abc",
+      send: (data: string) => sentMessages.push(data)
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-disabled-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        autoContinueAfterToolResult: false, // Explicitly disabled
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+    });
+
+    const toolResultMessages = sentMessages
+      .map((m) => JSON.parse(m))
+      .filter((m) => m.type === "cf_agent_tool_result");
+
+    expect(toolResultMessages.length).toBeGreaterThanOrEqual(1);
+    expect(toolResultMessages[0].autoContinue).toBe(false);
+  });
+
+  it("should send autoContinue: true by default with tool approvals", async () => {
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name: "auto-continue-approval",
+      url: "ws://localhost:3000/agents/chat/auto-continue-approval?_pk=abc",
+      send: (data: string) => sentMessages.push(data)
+    });
+
+    // Tool part must have approval.id so the wrapper can find the toolCallId
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-dangerousAction",
+            toolCallId: "tc-approval-1",
+            state: "approval-requested",
+            input: { action: "delete" },
+            approval: { id: "approval-req-1" }
+          }
+        ]
+      }
+    ];
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages)
+        // No explicit autoContinueAfterToolResult — should default to true
+      });
+      chatInstance = chat;
+      return <div data-testid="messages-count">{chat.messages.length}</div>;
+    };
+
+    await act(async () => {
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+    });
+
+    // Send approval via the hook using the approval request ID
+    await act(async () => {
+      if (chatInstance) {
+        chatInstance.addToolApprovalResponse({
+          id: "approval-req-1",
+          approved: true
+        });
+      }
+      await sleep(10);
+    });
+
+    // Find the CF_AGENT_TOOL_APPROVAL message
+    const approvalMessages = sentMessages
+      .map((m) => JSON.parse(m))
+      .filter((m) => m.type === "cf_agent_tool_approval");
+
+    expect(approvalMessages.length).toBeGreaterThanOrEqual(1);
+    expect(approvalMessages[0].autoContinue).toBe(true);
+    expect(approvalMessages[0].approved).toBe(true);
+  });
+});
+
 describe("useAgentChat onToolCall", () => {
   it("should fire onToolCall for input-available tool parts", async () => {
     const agent = createAgent({

@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
@@ -53,8 +53,8 @@
   "peerDependencies": {
     "@ai-sdk/openai": "^3.0.0",
     "@ai-sdk/react": "^3.0.0",
-    "@cloudflare/ai-chat": "^0.0.8 || ^0.1.0",
-    "@cloudflare/codemode": "^0.0.7",
+    "@cloudflare/ai-chat": ">=0.0.8 <1.0.0",
+    "@cloudflare/codemode": ">=0.0.7 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",
@@ -67,6 +67,12 @@
       "optional": true
     },
     "@ai-sdk/react": {
+      "optional": true
+    },
+    "@cloudflare/ai-chat": {
+      "optional": true
+    },
+    "@cloudflare/codemode": {
       "optional": true
     },
     "@x402/core": {

@@ -41,7 +41,13 @@ export type StreamChunkData = {
   errorText?: string;
   /** When true, the output is preliminary (may be updated by a later chunk) */
   preliminary?: boolean;
+  /** Approval ID for tools with needsApproval */
+  approvalId?: string;
   providerMetadata?: Record<string, unknown>;
+  /** Payload for data-* parts (developer-defined typed JSON) */
+  data?: unknown;
+  /** When true, data parts are ephemeral and not persisted to message.parts */
+  transient?: boolean;
   [key: string]: unknown;
 };
 
@@ -58,6 +64,7 @@ export type StreamChunkData = {
  * - tool-input-start / tool-input-delta / tool-input-available / tool-input-error
  * - tool-output-available / tool-output-error
  * - step-start (aliased from start-step)
+ * - data-* (developer-defined typed JSON blobs)
  *
  * @param parts - The mutable parts array to update
  * @param chunk - The parsed stream chunk data
@@ -227,6 +234,28 @@ export function applyChunkToParts(
       return true;
     }
 
+    case "tool-approval-request": {
+      // Tool requires user approval before executing.
+      // Transition the tool part to approval-requested state with the approval ID.
+      const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
+      if (toolPart) {
+        const p = toolPart as Record<string, unknown>;
+        p.state = "approval-requested";
+        p.approval = { id: chunk.approvalId };
+      }
+      return true;
+    }
+
+    case "tool-output-denied": {
+      // User rejected the tool approval request.
+      const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
+      if (toolPart) {
+        const p = toolPart as Record<string, unknown>;
+        p.state = "output-denied";
+      }
+      return true;
+    }
+
     case "tool-output-available": {
       // Update existing tool part with output.
       // Supports `preliminary: true` for streaming tool results —
@@ -261,8 +290,43 @@ export function applyChunkToParts(
       return true;
     }
 
-    default:
+    default: {
+      // https://ai-sdk.dev/docs/ai-sdk-ui/streaming-data
+      if (chunk.type.startsWith("data-")) {
+        // Transient parts are ephemeral — the AI SDK client fires an onData
+        // callback instead of adding them to message.parts. On the server we
+        // still broadcast them (so connected clients see them in real time)
+        // but skip persisting them into the stored message parts.
+        if (chunk.transient) {
+          return true;
+        }
+
+        // Reconciliation: if a part with the same type AND id already exists,
+        // update its data in-place instead of appending a duplicate.
+        if (chunk.id != null) {
+          const existing = findDataPartByTypeAndId(parts, chunk.type, chunk.id);
+          if (existing) {
+            (existing as Record<string, unknown>).data = chunk.data;
+            return true;
+          }
+        }
+
+        // Append new data parts to the array directly.
+        // Note: `chunk.data` should always be provided — if omitted, the
+        // persisted part will have `data: undefined` which JSON.stringify
+        // drops, so the part will have no `data` field on reload.
+        // The cast is needed because UIMessage["parts"] doesn't include
+        // data-* types in its union because they're an open extension point.
+        parts.push({
+          type: chunk.type,
+          ...(chunk.id != null && { id: chunk.id }),
+          data: chunk.data
+        } as MessagePart);
+        return true;
+      }
+
       return false;
+    }
   }
 }
 
@@ -294,6 +358,25 @@ function findToolPartByCallId(
   for (let i = parts.length - 1; i >= 0; i--) {
     const p = parts[i];
     if ("toolCallId" in p && p.toolCallId === toolCallId) {
+      return p;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Finds a data part by its type and id for reconciliation.
+ * Data parts use type+id as a composite key so when the same combination
+ * is seen again, the existing part's data is updated in-place.
+ */
+function findDataPartByTypeAndId(
+  parts: MessagePart[],
+  type: string,
+  id: string
+): MessagePart | undefined {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    if (p.type === type && "id" in p && (p as { id: string }).id === id) {
       return p;
     }
   }

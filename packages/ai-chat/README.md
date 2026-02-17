@@ -295,15 +295,15 @@ React hook for chat interactions. Wraps the AI SDK's `useChat` with WebSocket tr
 
 **Options:**
 
-| Option                        | Type                                    | Description                                               |
-| ----------------------------- | --------------------------------------- | --------------------------------------------------------- |
-| `agent`                       | `ReturnType<typeof useAgent>`           | Agent connection (required)                               |
-| `onToolCall`                  | `({ toolCall, addToolOutput }) => void` | Handle client-side tool execution                         |
-| `autoContinueAfterToolResult` | `boolean`                               | Auto-continue after client tool results. Default: `false` |
-| `resume`                      | `boolean`                               | Enable stream resumption. Default: `true`                 |
-| `body`                        | `object \| () => object`                | Custom data sent with every request (see below)           |
-| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`      | Advanced per-request customization                        |
-| `getInitialMessages`          | `(options) => Promise<UIMessage[]>`     | Custom initial message loader                             |
+| Option                        | Type                                    | Description                                              |
+| ----------------------------- | --------------------------------------- | -------------------------------------------------------- |
+| `agent`                       | `ReturnType<typeof useAgent>`           | Agent connection (required)                              |
+| `onToolCall`                  | `({ toolCall, addToolOutput }) => void` | Handle client-side tool execution                        |
+| `autoContinueAfterToolResult` | `boolean`                               | Auto-continue after client tool results. Default: `true` |
+| `resume`                      | `boolean`                               | Enable stream resumption. Default: `true`                |
+| `body`                        | `object \| () => object`                | Custom data sent with every request (see below)          |
+| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`      | Advanced per-request customization                       |
+| `getInitialMessages`          | `(options) => Promise<UIMessage[]>`     | Custom initial message loader                            |
 
 **Returns:**
 

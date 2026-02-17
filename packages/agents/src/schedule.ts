@@ -1,4 +1,4 @@
-import { z } from "zod/v3";
+import { z } from "zod";
 
 /**
  * Get the schedule prompt for a given event
@@ -94,34 +94,38 @@ export function unstable_getSchedulePrompt(event: { date: Date }) {
  * @remarks
  * When using this schema with OpenAI models via the AI SDK, you must pass
  * `providerOptions: { openai: { strictJsonSchema: false } }` to `generateObject`.
- * This is because the schema uses optional fields which are not compatible with
- * OpenAI's strict structured outputs mode.
+ * This is because the schema uses a discriminated union which is not compatible
+ * with OpenAI's strict structured outputs mode.
  */
 export const scheduleSchema = z.object({
   description: z.string().describe("A description of the task"),
-  when: z.object({
-    cron: z
-      .string()
-      .optional()
-      .describe(
-        "execute task on a recurring interval specified as cron syntax (only use if the type is cron)"
-      ),
-    date: z.coerce
-      .date()
-      .optional()
-      .describe(
-        "execute task at the specified date and time (only use if the type is scheduled)"
-      ),
-    delayInSeconds: z
-      .number()
-      .optional()
-      .describe(
-        "execute task after a delay in seconds (only use if the type is delayed)"
-      ),
-    type: z
-      .enum(["scheduled", "delayed", "cron", "no-schedule"])
-      .describe("The type of scheduling details")
-  })
+  when: z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("scheduled"),
+      date: z
+        .string()
+        .describe(
+          "Execute task at the specified date and time in ISO 8601 format"
+        )
+    }),
+    z.object({
+      type: z.literal("delayed"),
+      delayInSeconds: z
+        .number()
+        .describe("Execute task after a delay in seconds")
+    }),
+    z.object({
+      type: z.literal("cron"),
+      cron: z
+        .string()
+        .describe(
+          "Execute task on a recurring interval specified as cron syntax"
+        )
+    }),
+    z.object({
+      type: z.literal("no-schedule")
+    })
+  ])
 });
 
 /**
