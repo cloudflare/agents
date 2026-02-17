@@ -1,6 +1,6 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "agents-memory-agent",
+  "name": "agents-session-agent",
   "main": "src/index.ts",
   "compatibility_date": "2025-09-27",
   "compatibility_flags": ["nodejs_compat"],

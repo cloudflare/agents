@@ -1,16 +1,16 @@
-# Memory Agent Example
+# Session Agent Example
 
-Demonstrates the **experimental memory primitives** from `agents/experimental/memory` — SQL-backed sessions, append-only event storage, ephemeral `WorkingContext`, and the Workers AI adapter.
+Demonstrates the **experimental session primitives** from `agents/experimental/memory` — SQL-backed sessions, append-only event storage, ephemeral `WorkingContext`, and the Workers AI adapter.
 
-> ⚠️ The memory primitives API is experimental and may change without notice.
+> ⚠️ The session primitives API is experimental and may change without notice.
 
 ## What it does
 
 - Extends `SessionAgent` to get built-in session and event management via DO SQLite
-- Persists user messages before calling the LLM (crash-safe)
 - Runs an agentic loop with tool calling (echo + weather tools)
-- Accumulates tool calls/results in-memory, then batch-persists at the end
-- Loads the most recent events for context (tail-mode `loadEvents`)
+- Accumulates user message, tool calls/results, and assistant response in-memory
+- Batch-persists the entire turn atomically at the end (concurrency-safe)
+- Loads the most recent completed events for context
 
 ## Usage
 
