@@ -2,6 +2,8 @@
 
 ## 0.1.0
 
+The first minor release of `@cloudflare/ai-chat` — a major step up from the `agents/ai-chat-agent` re-export. This release refactors the internals (extracting ResumableStream, adding a WebSocket ChatTransport, simplifying SSE parsing) and ships a wave of bug fixes for streaming, tool continuations, and message persistence. New features include `maxPersistedMessages` for storage caps, `body` for custom request data, row size protection, incremental persistence, and data parts — typed JSON blobs that can be attached to messages alongside text for citations, progress indicators, and usage metadata. Tool approval (`needsApproval`) now persists across page refresh, client tools survive DO hibernation, and `autoContinueAfterToolResult` defaults to `true` so the LLM responds after tool results without explicit opt-in.
+
 ### Minor Changes
 
 - [#899](https://github.com/cloudflare/agents/pull/899) [`04c6411`](https://github.com/cloudflare/agents/commit/04c6411c9a73fe48784d7ce86150d62cf54becda) Thanks [@threepointone](https://github.com/threepointone)! - Refactor AIChatAgent: extract ResumableStream class, add WebSocket ChatTransport, simplify SSE parsing.

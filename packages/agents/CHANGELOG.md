@@ -2,6 +2,8 @@
 
 ## 0.5.0
 
+This release adds per-connection protocol message control and a built-in retry system. Agents can now suppress JSON protocol frames for binary-only clients (MQTT, IoT devices) while keeping RPC and regular messaging working — useful for Durable Objects that serve mixed connection types. The new `this.retry()` method and per-task retry options bring exponential backoff with jitter to scheduling, queues, and MCP connections without external dependencies. This release also improves scheduling ergonomics with synchronous getter methods, a cleaner discriminated union schema, and fixes for hibernation, deep type recursion, and SSE keepalives.
+
 ### Minor Changes
 
 - [#920](https://github.com/cloudflare/agents/pull/920) [`4dea3bd`](https://github.com/cloudflare/agents/commit/4dea3bdeeeba6a92782550cfb1025cf47e91a9ee) Thanks [@threepointone](https://github.com/threepointone)! - Add `shouldSendProtocolMessages` hook and `isConnectionProtocolEnabled` predicate for per-connection control of protocol text frames
