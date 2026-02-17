@@ -1,5 +1,13 @@
 # @cloudflare/ai-chat
 
+## 0.1.1
+
+### Patch Changes
+
+- [`eeadbf4`](https://github.com/cloudflare/agents/commit/eeadbf4e780e2477798185cbc7a8abbeff2eadda) Thanks [@threepointone](https://github.com/threepointone)! - Add @ai-sdk/react as peer dependency to ai-chat
+
+  Declare @ai-sdk/react ^3.0.0 as a peerDependency in packages/ai-chat/package.json to express runtime compatibility with the React SDK. package-lock.json was updated to reflect the resulting dependency graph changes.
+
 ## 0.1.0
 
 The first minor release of `@cloudflare/ai-chat` — a major step up from the `agents/ai-chat-agent` re-export. This release refactors the internals (extracting ResumableStream, adding a WebSocket ChatTransport, simplifying SSE parsing) and ships a wave of bug fixes for streaming, tool continuations, and message persistence. New features include `maxPersistedMessages` for storage caps, `body` for custom request data, row size protection, incremental persistence, and data parts — typed JSON blobs that can be attached to messages alongside text for citations, progress indicators, and usage metadata. Tool approval (`needsApproval`) now persists across page refresh, client tools survive DO hibernation, and `autoContinueAfterToolResult` defaults to `true` so the LLM responds after tool results without explicit opt-in.
