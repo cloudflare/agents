@@ -18,7 +18,7 @@ import {
 } from "@phosphor-icons/react";
 import type { UIMessage } from "ai";
 
-// ── Data part type helpers ──────────────────────────────────────────
+// ── Typed data parts ──────────────────────────────────────────
 
 type SourcesData = {
   query: string;
@@ -38,11 +38,15 @@ type UsageData = {
   latencyMs: number;
 };
 
-type DataPart<T = unknown> = { type: string; id?: string; data: T };
-
-function isDataPart(part: { type: string }): part is DataPart {
-  return part.type.startsWith("data-");
-}
+/** Custom message type with typed data parts. */
+type ChatMessage = UIMessage<
+  unknown,
+  {
+    sources: SourcesData;
+    thinking: ThinkingData;
+    usage: UsageData;
+  }
+>;
 
 // ── Data part renderers ─────────────────────────────────────────────
 
@@ -112,11 +116,11 @@ function UsagePart({ data }: { data: UsageData }) {
 
 // ── Message helpers ─────────────────────────────────────────────────
 
-/** Extract plain text from a UIMessage's parts. */
-function getMessageText(message: UIMessage): string {
+/** Extract plain text from a message's parts. */
+function getMessageText(message: ChatMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
-    .map((part) => (part as { type: "text"; text: string }).text)
+    .map((part) => part.text)
     .join("");
 }
 
@@ -160,13 +164,17 @@ function Chat() {
     onError: handleError
   });
 
-  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+  const { messages, sendMessage, clearHistory, status } = useAgentChat<
+    unknown,
+    ChatMessage
+  >({
     agent,
     onData(part) {
       // Capture transient thinking parts from the onData callback.
       // These are ephemeral — not persisted and not in message.parts.
       if (part.type === "data-thinking") {
-        setThinkingData(part.data as ThinkingData);
+        // part.data is typed as ThinkingData here — no cast needed
+        setThinkingData(part.data);
       }
     }
   });
@@ -255,16 +263,14 @@ function Chat() {
               );
             }
 
-            // Collect non-transient data parts from message.parts.
-            // Transient parts (like data-thinking) are handled via
-            // the onData callback and stored in local state instead.
-            const dataParts = message.parts.filter(isDataPart);
-            const sourcesPart = dataParts.find(
+            // Transient parts (like data-thinking) are not in message.parts,
+            // they're captured via onData and stored in local state instead.
+            const sourcesPart = message.parts.find(
               (p) => p.type === "data-sources"
-            ) as DataPart<SourcesData> | undefined;
-            const usagePart = dataParts.find((p) => p.type === "data-usage") as
-              | DataPart<UsageData>
-              | undefined;
+            );
+            const usagePart = message.parts.find(
+              (p) => p.type === "data-usage"
+            );
 
             return (
               <div key={message.id} className="flex justify-start">
