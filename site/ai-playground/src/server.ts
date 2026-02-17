@@ -3,8 +3,6 @@ import { callable, routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
-  createUIMessageStream,
-  createUIMessageStreamResponse,
   type StreamTextOnFinishCallback,
   stepCountIs,
   streamText,
@@ -91,124 +89,112 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
 
     await this.ensureDestroy();
 
-    const stream = createUIMessageStream({
-      execute: async ({ writer }) => {
-        // Clean up incomplete tool calls to prevent API errors
-        const cleanedMessages = cleanupMessages(this.messages);
+    // Clean up incomplete tool calls to prevent API errors
+    const cleanedMessages = cleanupMessages(this.messages);
 
-        // Determine which model provider to use
-        let modelProvider: LanguageModel;
+    // Determine which model provider to use
+    let modelProvider: LanguageModel;
 
-        if (
-          this.state.useExternalProvider &&
-          this.state.externalProvider &&
-          this.state.externalModel
-        ) {
-          // Extract model name from provider/model format (e.g., "openai/gpt-5.2" -> "gpt-5.2")
-          let modelName = this.state.externalModel;
-          if (modelName.includes("/")) {
-            modelName = modelName.split("/")[1];
-          }
+    if (
+      this.state.useExternalProvider &&
+      this.state.externalProvider &&
+      this.state.externalModel
+    ) {
+      // Extract model name from provider/model format (e.g., "openai/gpt-5.2" -> "gpt-5.2")
+      let modelName = this.state.externalModel;
+      if (modelName.includes("/")) {
+        modelName = modelName.split("/")[1];
+      }
 
-          if (
-            this.state.authMethod === "gateway" &&
-            this.state.gatewayAccountId &&
-            this.state.gatewayId &&
-            this.state.gatewayApiKey
-          ) {
-            // Use AI Gateway with unified billing
-            const gateway = createAiGateway({
-              accountId: this.state.gatewayAccountId,
-              gateway: this.state.gatewayId,
-              apiKey: this.state.gatewayApiKey
-            });
+      if (
+        this.state.authMethod === "gateway" &&
+        this.state.gatewayAccountId &&
+        this.state.gatewayId &&
+        this.state.gatewayApiKey
+      ) {
+        // Use AI Gateway with unified billing
+        const gateway = createAiGateway({
+          accountId: this.state.gatewayAccountId,
+          gateway: this.state.gatewayId,
+          apiKey: this.state.gatewayApiKey
+        });
 
-            let baseModel: LanguageModel;
-            if (this.state.externalProvider === "openai") {
-              const openai = createOpenAIGateway(); // No API key for unified billing
-              baseModel = openai.chat(modelName);
-            } else if (this.state.externalProvider === "anthropic") {
-              const anthropic = createAnthropicGateway(); // No API key for unified billing
-              baseModel = anthropic.chat(modelName);
-            } else if (this.state.externalProvider === "google") {
-              const google = createGoogleGateway(); // No API key for unified billing
-              baseModel = google.chat(modelName);
-            } else if (this.state.externalProvider === "xai") {
-              // xAI uses OpenAI-compatible API, so use OpenAI gateway provider
-              const openai = createOpenAIGateway(); // No API key for unified billing
-              baseModel = openai.chat(modelName);
-            } else {
-              // Fallback to Workers AI
-              const fallbackModel = this.state.model as Parameters<
-                typeof workersAi
-              >[0];
-              baseModel = workersAi(fallbackModel);
-            }
-
-            modelProvider = gateway(baseModel);
-          } else if (
-            this.state.authMethod === "provider-key" &&
-            this.state.providerApiKey
-          ) {
-            // Use provider SDK directly with user's API key (BYOK)
-            if (this.state.externalProvider === "openai") {
-              const openai = createOpenAI({
-                apiKey: this.state.providerApiKey
-              });
-              modelProvider = openai(modelName);
-            } else if (this.state.externalProvider === "anthropic") {
-              const anthropic = createAnthropic({
-                apiKey: this.state.providerApiKey
-              });
-              modelProvider = anthropic(modelName);
-            } else if (this.state.externalProvider === "google") {
-              const google = createGoogleGenerativeAI({
-                apiKey: this.state.providerApiKey
-              });
-              modelProvider = google(modelName);
-            } else if (this.state.externalProvider === "xai") {
-              // xAI uses OpenAI-compatible API, so use OpenAI SDK with xAI base URL
-              const xai = createOpenAI({
-                apiKey: this.state.providerApiKey,
-                baseURL: "https://api.x.ai/v1"
-              });
-              modelProvider = xai(modelName);
-            } else {
-              // Fallback to Workers AI
-              modelProvider = workersAi(
-                this.state.model as Parameters<typeof workersAi>[0]
-              );
-            }
-          } else {
-            // Missing required auth, fallback to Workers AI
-            modelProvider = workersAi(
-              this.state.model as Parameters<typeof workersAi>[0]
-            );
-          }
+        let baseModel: LanguageModel;
+        if (this.state.externalProvider === "openai") {
+          const openai = createOpenAIGateway();
+          baseModel = openai.chat(modelName);
+        } else if (this.state.externalProvider === "anthropic") {
+          const anthropic = createAnthropicGateway();
+          baseModel = anthropic.chat(modelName);
+        } else if (this.state.externalProvider === "google") {
+          const google = createGoogleGateway();
+          baseModel = google.chat(modelName);
+        } else if (this.state.externalProvider === "xai") {
+          const openai = createOpenAIGateway();
+          baseModel = openai.chat(modelName);
         } else {
-          // Use Workers AI (default)
+          const fallbackModel = this.state.model as Parameters<
+            typeof workersAi
+          >[0];
+          baseModel = workersAi(fallbackModel);
+        }
+
+        modelProvider = gateway(baseModel);
+      } else if (
+        this.state.authMethod === "provider-key" &&
+        this.state.providerApiKey
+      ) {
+        // Use provider SDK directly with user's API key (BYOK)
+        if (this.state.externalProvider === "openai") {
+          const openai = createOpenAI({
+            apiKey: this.state.providerApiKey
+          });
+          modelProvider = openai(modelName);
+        } else if (this.state.externalProvider === "anthropic") {
+          const anthropic = createAnthropic({
+            apiKey: this.state.providerApiKey
+          });
+          modelProvider = anthropic(modelName);
+        } else if (this.state.externalProvider === "google") {
+          const google = createGoogleGenerativeAI({
+            apiKey: this.state.providerApiKey
+          });
+          modelProvider = google(modelName);
+        } else if (this.state.externalProvider === "xai") {
+          const xai = createOpenAI({
+            apiKey: this.state.providerApiKey,
+            baseURL: "https://api.x.ai/v1"
+          });
+          modelProvider = xai(modelName);
+        } else {
           modelProvider = workersAi(
             this.state.model as Parameters<typeof workersAi>[0]
           );
         }
-
-        const result = streamText({
-          system: this.state.system,
-          messages: await convertToModelMessages(cleanedMessages),
-          model: modelProvider,
-          tools,
-          onFinish: onFinish as unknown as StreamTextOnFinishCallback<
-            typeof tools
-          >,
-          temperature: this.state.temperature,
-          stopWhen: stepCountIs(10)
-        });
-
-        writer.merge(result.toUIMessageStream());
+      } else {
+        // Missing required auth, fallback to Workers AI
+        modelProvider = workersAi(
+          this.state.model as Parameters<typeof workersAi>[0]
+        );
       }
+    } else {
+      // Use Workers AI (default)
+      modelProvider = workersAi(
+        this.state.model as Parameters<typeof workersAi>[0]
+      );
+    }
+
+    const result = streamText({
+      system: this.state.system,
+      messages: await convertToModelMessages(cleanedMessages),
+      model: modelProvider,
+      tools,
+      onFinish: onFinish as unknown as StreamTextOnFinishCallback<typeof tools>,
+      temperature: this.state.temperature,
+      stopWhen: stepCountIs(10)
     });
 
-    return createUIMessageStreamResponse({ stream });
+    return result.toUIMessageStreamResponse();
   }
 
   async ensureDestroy() {

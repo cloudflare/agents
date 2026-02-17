@@ -284,6 +284,177 @@ describe("applyChunkToParts", () => {
     });
   });
 
+  describe("data-* chunks", () => {
+    it("appends a new data part", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "data-sources",
+        data: { query: "hello", results: [] }
+      });
+      expect(handled).toBe(true);
+      expect(parts.length).toBe(1);
+      expect(parts[0]).toEqual({
+        type: "data-sources",
+        data: { query: "hello", results: [] }
+      });
+    });
+
+    it("preserves the id field when present", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "data-sources",
+        id: "src-1",
+        data: { query: "hello", status: "searching" }
+      });
+      expect(parts[0]).toEqual({
+        type: "data-sources",
+        id: "src-1",
+        data: { query: "hello", status: "searching" }
+      });
+    });
+
+    it("reconciles by type+id (updates data in-place)", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "data-sources",
+        id: "src-1",
+        data: { status: "searching", results: [] }
+      });
+      applyChunkToParts(parts, {
+        type: "data-sources",
+        id: "src-1",
+        data: { status: "found", results: ["doc1", "doc2"] }
+      });
+      // Should update in-place, not append
+      expect(parts.length).toBe(1);
+      expect((parts[0] as Record<string, unknown>).data).toEqual({
+        status: "found",
+        results: ["doc1", "doc2"]
+      });
+    });
+
+    it("does not reconcile when ids differ", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "data-sources",
+        id: "src-1",
+        data: { query: "first" }
+      });
+      applyChunkToParts(parts, {
+        type: "data-sources",
+        id: "src-2",
+        data: { query: "second" }
+      });
+      expect(parts.length).toBe(2);
+    });
+
+    it("does not reconcile when types differ", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "data-sources",
+        id: "x",
+        data: { from: "sources" }
+      });
+      applyChunkToParts(parts, {
+        type: "data-usage",
+        id: "x",
+        data: { from: "usage" }
+      });
+      expect(parts.length).toBe(2);
+    });
+
+    it("does not reconcile parts without ids (appends each time)", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "data-status",
+        data: { step: 1 }
+      });
+      applyChunkToParts(parts, {
+        type: "data-status",
+        data: { step: 2 }
+      });
+      expect(parts.length).toBe(2);
+    });
+
+    it("transient parts return true but are not added to parts", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "data-thinking",
+        transient: true,
+        data: { model: "gpt-4o" }
+      });
+      expect(handled).toBe(true);
+      expect(parts.length).toBe(0);
+    });
+
+    it("transient parts with id are still skipped (not reconciled)", () => {
+      const parts = makeParts();
+      // First: non-transient part with id
+      applyChunkToParts(parts, {
+        type: "data-progress",
+        id: "p-1",
+        data: { step: 1 }
+      });
+      expect(parts.length).toBe(1);
+
+      // Second: transient part with SAME type+id — should not reconcile
+      const handled = applyChunkToParts(parts, {
+        type: "data-progress",
+        id: "p-1",
+        transient: true,
+        data: { step: 2 }
+      });
+      expect(handled).toBe(true);
+      // Original part unchanged
+      expect(parts.length).toBe(1);
+      expect((parts[0] as Record<string, unknown>).data).toEqual({ step: 1 });
+    });
+
+    it("handles undefined data (part persisted without data field)", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "data-empty"
+      } as StreamChunkData);
+      expect(handled).toBe(true);
+      expect(parts.length).toBe(1);
+      expect(parts[0].type).toBe("data-empty");
+      // data is undefined — JSON.stringify would drop it
+      expect((parts[0] as Record<string, unknown>).data).toBeUndefined();
+    });
+
+    it("non-data-* prefixed types still return false", () => {
+      const parts = makeParts();
+      const handled = applyChunkToParts(parts, {
+        type: "unknown-type"
+      } as StreamChunkData);
+      expect(handled).toBe(false);
+      expect(parts.length).toBe(0);
+    });
+
+    it("coexists with other part types", () => {
+      const parts = makeParts();
+
+      // Text
+      applyChunkToParts(parts, { type: "text-start", id: "t1" });
+      applyChunkToParts(parts, {
+        type: "text-delta",
+        id: "t1",
+        delta: "Hello"
+      });
+      applyChunkToParts(parts, { type: "text-end", id: "t1" });
+
+      // Data part
+      applyChunkToParts(parts, {
+        type: "data-usage",
+        data: { tokens: 42 }
+      });
+
+      expect(parts.length).toBe(2);
+      expect(parts[0].type).toBe("text");
+      expect(parts[1].type).toBe("data-usage");
+    });
+  });
+
   describe("unrecognized chunks", () => {
     it("returns false for unknown chunk types", () => {
       const parts = makeParts();

@@ -11,15 +11,116 @@ import {
 import {
   PaperPlaneRightIcon,
   TrashIcon,
-  ArrowClockwiseIcon
+  ArrowClockwiseIcon,
+  MagnifyingGlassIcon,
+  BrainIcon,
+  ChartBarIcon
 } from "@phosphor-icons/react";
 import type { UIMessage } from "ai";
 
-/** Extract plain text from a UIMessage's parts. */
-function getMessageText(message: UIMessage): string {
+// ── Typed data parts ──────────────────────────────────────────
+
+type SourcesData = {
+  query: string;
+  status: "searching" | "found";
+  results: string[];
+};
+
+type ThinkingData = {
+  model: string;
+  startedAt: string;
+};
+
+type UsageData = {
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+};
+
+/** Custom message type with typed data parts. */
+type ChatMessage = UIMessage<
+  unknown,
+  {
+    sources: SourcesData;
+    thinking: ThinkingData;
+    usage: UsageData;
+  }
+>;
+
+// ── Data part renderers ─────────────────────────────────────────────
+
+function SourcesPart({
+  data,
+  isStreaming
+}: {
+  data: SourcesData;
+  isStreaming: boolean;
+}) {
+  if (data.status === "searching") {
+    return (
+      <div className="flex items-center gap-2 text-xs text-kumo-subtle py-1.5">
+        <MagnifyingGlassIcon
+          size={14}
+          className={isStreaming ? "animate-pulse-dot" : ""}
+        />
+        <span>Searching for &ldquo;{data.query}&rdquo;&hellip;</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="text-xs border border-kumo-line rounded-lg p-2.5 mb-2">
+      <div className="flex items-center gap-1.5 text-kumo-subtle mb-1.5">
+        <MagnifyingGlassIcon size={12} />
+        <span className="font-medium">Sources</span>
+      </div>
+      <ul className="space-y-0.5">
+        {data.results.map((source) => (
+          <li
+            key={source}
+            className="text-kumo-default pl-3 relative before:content-['·'] before:absolute before:left-0 before:text-kumo-subtle"
+          >
+            {source}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ThinkingPart({ data }: { data: ThinkingData }) {
+  return (
+    <div className="flex items-center gap-2 text-xs text-kumo-subtle py-1">
+      <BrainIcon size={14} className="animate-pulse-dot" />
+      <span>Thinking with {data.model}&hellip;</span>
+    </div>
+  );
+}
+
+function UsagePart({ data }: { data: UsageData }) {
+  const totalTokens = data.inputTokens + data.outputTokens;
+  const latencySec = (data.latencyMs / 1000).toFixed(1);
+
+  return (
+    <div className="flex items-center gap-3 text-[11px] text-kumo-subtle mt-2 pt-2 border-t border-kumo-line">
+      <ChartBarIcon size={12} />
+      <span>{data.model}</span>
+      <span className="opacity-40">|</span>
+      <span>{totalTokens} tokens</span>
+      <span className="opacity-40">|</span>
+      <span>{latencySec}s</span>
+    </div>
+  );
+}
+
+// ── Message helpers ─────────────────────────────────────────────────
+
+/** Extract plain text from a message's parts. */
+function getMessageText(message: ChatMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
-    .map((part) => (part as { type: "text"; text: string }).text)
+    .map((part) => part.text)
     .join("");
 }
 
@@ -40,6 +141,11 @@ function Chat() {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Transient data parts are not added to message.parts, they only
+  // fire the onData callback. We store the latest thinking part in
+  // local state so we can render it while streaming.
+  const [thinkingData, setThinkingData] = useState<ThinkingData | null>(null);
+
   const handleOpen = useCallback(() => setConnectionStatus("connected"), []);
   const handleClose = useCallback(
     () => setConnectionStatus("disconnected"),
@@ -58,12 +164,30 @@ function Chat() {
     onError: handleError
   });
 
-  const { messages, sendMessage, clearHistory, status } = useAgentChat({
-    agent
+  const { messages, sendMessage, clearHistory, status } = useAgentChat<
+    unknown,
+    ChatMessage
+  >({
+    agent,
+    onData(part) {
+      // Capture transient thinking parts from the onData callback.
+      // These are ephemeral — not persisted and not in message.parts.
+      if (part.type === "data-thinking") {
+        // part.data is typed as ThinkingData here — no cast needed
+        setThinkingData(part.data);
+      }
+    }
   });
 
   const isStreaming = status === "streaming";
   const isConnected = connectionStatus === "connected";
+
+  // Clear transient thinking state when streaming ends
+  useEffect(() => {
+    if (!isStreaming) {
+      setThinkingData(null);
+    }
+  }, [isStreaming]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -139,15 +263,40 @@ function Chat() {
               );
             }
 
+            // Transient parts (like data-thinking) are not in message.parts,
+            // they're captured via onData and stored in local state instead.
+            const sourcesPart = message.parts.find(
+              (p) => p.type === "data-sources"
+            );
+            const usagePart = message.parts.find(
+              (p) => p.type === "data-usage"
+            );
+
             return (
               <div key={message.id} className="flex justify-start">
                 <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
+                  {sourcesPart && (
+                    <SourcesPart
+                      data={sourcesPart.data}
+                      isStreaming={isLastAssistant && isStreaming}
+                    />
+                  )}
+
+                  {/* Transient thinking indicator that is captured via onData and
+                      only visible on the last assistant message while streaming */}
+                  {thinkingData && isLastAssistant && isStreaming && (
+                    <ThinkingPart data={thinkingData} />
+                  )}
+
+                  {/* Message text */}
                   <div className="whitespace-pre-wrap">
                     {text}
                     {isLastAssistant && isStreaming && (
                       <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
                     )}
                   </div>
+
+                  {usagePart && <UsagePart data={usagePart.data} />}
                 </div>
               </div>
             );

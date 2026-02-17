@@ -17,6 +17,7 @@ Built on the [AI SDK](https://ai-sdk.dev) and Cloudflare Durable Objects, you ge
 - **Resumable streaming** — disconnected clients resume mid-stream without data loss
 - **Real-time sync** — messages broadcast to all connected clients via WebSocket
 - **Tool support** — server-side, client-side, and human-in-the-loop tool patterns
+- **Data parts** — attach typed JSON (citations, progress, usage) to messages alongside text
 - **Row size protection** — automatic compaction when messages approach SQLite limits
 
 ## Quick Start
@@ -514,6 +515,128 @@ const { messages, sendMessage } = useAgentChat({
   })
 });
 ```
+
+## Data Parts
+
+Data parts let you attach typed JSON to messages alongside text — progress indicators, source citations, token usage, or any structured data your UI needs.
+
+### Writing Data Parts (Server)
+
+Use `createUIMessageStream` with `writer.write()` to send data parts from the server:
+
+```ts
+import {
+  streamText,
+  convertToModelMessages,
+  createUIMessageStream,
+  createUIMessageStreamResponse
+} from "ai";
+
+export class ChatAgent extends AIChatAgent {
+  async onChatMessage() {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const stream = createUIMessageStream({
+      execute: async ({ writer }) => {
+        const result = streamText({
+          model: workersai("@cf/zai-org/glm-4.7-flash"),
+          messages: await convertToModelMessages(this.messages)
+        });
+
+        // Merge the LLM stream
+        writer.merge(result.toUIMessageStream());
+
+        // Write a data part — persisted to message.parts
+        writer.write({
+          type: "data-sources",
+          id: "src-1",
+          data: { query: "agents", status: "searching", results: [] }
+        });
+
+        // Later: update the same part in-place (same type + id)
+        writer.write({
+          type: "data-sources",
+          id: "src-1",
+          data: {
+            query: "agents",
+            status: "found",
+            results: ["Agents SDK docs", "Durable Objects guide"]
+          }
+        });
+      }
+    });
+
+    return createUIMessageStreamResponse({ stream });
+  }
+}
+```
+
+### Three Patterns
+
+| Pattern            | How                                              | Persisted? | Use case                              |
+| ------------------ | ------------------------------------------------ | ---------- | ------------------------------------- |
+| **Reconciliation** | Same `type` + `id` → updates in-place            | Yes        | Progressive state (searching → found) |
+| **Append**         | No `id`, or different `id` → appends             | Yes        | Log entries, multiple citations       |
+| **Transient**      | `transient: true` → not added to `message.parts` | No         | Ephemeral status (thinking indicator) |
+
+Transient parts are broadcast to connected clients in real time but excluded from SQLite persistence and `message.parts`. Use the `onData` callback to consume them.
+
+### Reading Data Parts (Client)
+
+Non-transient data parts appear in `message.parts`. Use the `UIMessage` generic to type them:
+
+```ts
+import { useAgentChat } from "@cloudflare/ai-chat/react";
+import type { UIMessage } from "ai";
+
+type ChatMessage = UIMessage<
+  unknown,
+  {
+    sources: { query: string; status: string; results: string[] };
+    usage: { model: string; inputTokens: number; outputTokens: number };
+  }
+>;
+
+const { messages } = useAgentChat<unknown, ChatMessage>({ agent });
+
+// Typed access — no casts needed
+for (const msg of messages) {
+  for (const part of msg.parts) {
+    if (part.type === "data-sources") {
+      console.log(part.data.results); // string[]
+    }
+  }
+}
+```
+
+### Transient Parts with `onData`
+
+Transient data parts are not in `message.parts`. Use the `onData` callback instead:
+
+```ts
+const [thinking, setThinking] = useState(false);
+
+const { messages } = useAgentChat<unknown, ChatMessage>({
+  agent,
+  onData(part) {
+    if (part.type === "data-thinking") {
+      setThinking(true);
+    }
+  }
+});
+```
+
+On the server, write transient parts with `transient: true`:
+
+```ts
+writer.write({
+  transient: true,
+  type: "data-thinking",
+  data: { model: "glm-4.7-flash", startedAt: new Date().toISOString() }
+});
+```
+
+`onData` fires on all code paths — new messages, stream resumption, and cross-tab broadcasts.
 
 ## Resumable Streaming
 

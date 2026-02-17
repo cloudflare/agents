@@ -321,13 +321,13 @@ const UnifiedModelSelector = ({
   const externalModels = EXTERNAL_MODELS[externalProvider] || [];
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {/* Mode Toggle */}
-      <div className="flex items-center gap-2 p-2 bg-kumo-control rounded-md">
+      <div className="flex items-center gap-1.5 p-1 bg-kumo-control rounded-md">
         <button
           type="button"
           onClick={() => onModeChange(false)}
-          className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+          className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition-colors ${
             !useExternalProvider
               ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
               : "text-kumo-secondary hover:text-kumo-default"
@@ -338,7 +338,7 @@ const UnifiedModelSelector = ({
         <button
           type="button"
           onClick={() => onModeChange(true)}
-          className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+          className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition-colors ${
             useExternalProvider
               ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
               : "text-kumo-secondary hover:text-kumo-default"
@@ -351,58 +351,56 @@ const UnifiedModelSelector = ({
       {!useExternalProvider ? (
         /* Workers AI Model Selector */
         <div className="relative">
-          <div className="mb-1">
-            <div className="flex justify-between items-center mb-1">
-              <label
-                htmlFor="model"
-                {...getLabelProps()}
-                className="font-semibold text-sm text-kumo-default"
-              >
-                Model
-              </label>
-              <div className="flex space-x-1 min-h-[26px]">
-                {!isLoadingWorkersAi &&
-                  Object.keys(filterState).map((tag) => (
-                    <button
-                      type="button"
-                      key={tag}
-                      onClick={(e) => toggleFilter(tag, e)}
-                      className={`text-[10px] px-2 py-1 rounded-full border ${
-                        filterState[tag] === "show"
-                          ? "bg-green-500/10 border-green-400 text-green-700"
-                          : filterState[tag] === "hide"
-                            ? "bg-red-500/10 border-red-400 text-red-700"
-                            : "bg-transparent border-transparent text-kumo-inactive"
-                      }`}
-                    >
-                      {tag}
-                      {filterState[tag] === "show" && " ✓"}
-                      {filterState[tag] === "hide" && " ✗"}
-                    </button>
-                  ))}
-              </div>
+          <div className="flex justify-between items-center mb-1">
+            <label
+              htmlFor="model"
+              {...getLabelProps()}
+              className="font-medium text-xs text-kumo-default"
+            >
+              Model
+            </label>
+            <div className="flex space-x-1 min-h-[22px]">
+              {!isLoadingWorkersAi &&
+                Object.keys(filterState).map((tag) => (
+                  <button
+                    type="button"
+                    key={tag}
+                    onClick={(e) => toggleFilter(tag, e)}
+                    className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                      filterState[tag] === "show"
+                        ? "bg-green-500/10 border-green-400 text-green-700"
+                        : filterState[tag] === "hide"
+                          ? "bg-red-500/10 border-red-400 text-red-700"
+                          : "bg-transparent border-transparent text-kumo-inactive"
+                    }`}
+                  >
+                    {tag}
+                    {filterState[tag] === "show" && " ✓"}
+                    {filterState[tag] === "hide" && " ✗"}
+                  </button>
+                ))}
             </div>
           </div>
-          <div className="bg-kumo-base flex items-center justify-between cursor-pointer w-full border border-kumo-line p-3 rounded-md relative">
+          <div className="bg-kumo-base flex items-center justify-between cursor-pointer w-full border border-kumo-line p-2 rounded-md relative">
             <input
-              className="absolute left-3 top-3 right-3 bg-transparent outline-none text-kumo-default"
+              className="absolute left-2 top-2 right-2 bg-transparent outline-none text-sm text-kumo-default"
               placeholder={isLoadingWorkersAi ? "Fetching models..." : ""}
               {...getInputProps({ ref: inputRef })}
               onBlur={() => setInputValue("")}
               disabled={isLoadingWorkersAi}
             />
-            <div className="flex-1 min-h-[24px]">
+            <div className="flex-1 min-h-[20px]">
               {!isLoadingWorkersAi && !inputValue && selectedItem && (
                 <ModelRow model={selectedItem} />
               )}
             </div>
             <span
-              className="shrink-0 px-2 text-kumo-secondary"
+              className="shrink-0 px-1 text-kumo-secondary"
               {...(isLoadingWorkersAi ? {} : getToggleButtonProps())}
             >
               {isLoadingWorkersAi ? (
                 <SpinnerIcon
-                  size={20}
+                  size={16}
                   className="animate-spin text-kumo-inactive"
                 />
               ) : isOpen ? (
@@ -412,28 +410,21 @@ const UnifiedModelSelector = ({
               )}
             </span>
           </div>
-          {selectedItem && !isOpen && (
-            <div className="p-2 bg-kumo-tint rounded-md mt-2">
-              <p className="text-sm leading-relaxed text-kumo-secondary">
-                {selectedItem.description}
-              </p>
-            </div>
-          )}
           <ul
-            className={`absolute left-0 right-0 bg-kumo-base mt-1 border border-kumo-line px-2 py-2 rounded-md shadow-lg max-h-80 overflow-scroll z-50 ${
+            className={`absolute left-0 right-0 bg-kumo-base mt-1 border border-kumo-line px-1.5 py-1.5 rounded-md shadow-lg max-h-72 overflow-scroll z-50 ${
               !isOpen && "hidden"
             }`}
             {...getMenuProps()}
           >
             {isOpen && inputItems.length === 0 && (
-              <li className="py-2 px-3 flex flex-col rounded-md text-kumo-secondary">
+              <li className="py-1.5 px-2 flex flex-col rounded-md text-kumo-secondary text-sm">
                 No models found
               </li>
             )}
             {isOpen &&
               inputItems.map((item, index) => (
                 <li
-                  className={`py-2 px-3 flex flex-col rounded-md text-kumo-default ${
+                  className={`py-1.5 px-2 flex flex-col rounded-md text-kumo-default ${
                     selectedItem === item && "font-bold"
                   } ${highlightedIndex === index && "bg-kumo-tint"}`}
                   key={item.id}
@@ -446,7 +437,7 @@ const UnifiedModelSelector = ({
         </div>
       ) : (
         /* External Provider Models Selector */
-        <div className="space-y-3">
+        <div className="space-y-2">
           <div>
             <label
               htmlFor="provider"
@@ -459,7 +450,7 @@ const UnifiedModelSelector = ({
               onChange={(e) =>
                 onExternalProviderChange(e.target.value as GatewayProvider)
               }
-              className="w-full p-2 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
+              className="w-full p-1.5 border border-kumo-line rounded-md text-xs bg-kumo-base text-kumo-default"
             >
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
@@ -475,13 +466,13 @@ const UnifiedModelSelector = ({
             >
               Model
             </label>
-            <div className="bg-kumo-base border border-kumo-line rounded-md p-2 max-h-40 overflow-y-auto">
+            <div className="bg-kumo-base border border-kumo-line rounded-md p-1.5 max-h-36 overflow-y-auto">
               {externalModels.map((model) => (
                 <button
                   key={model.id}
                   type="button"
                   onClick={() => onExternalModelSelect(model.id)}
-                  className={`w-full text-left py-2 px-2 rounded-md text-xs transition-colors mb-1 ${
+                  className={`w-full text-left py-1.5 px-2 rounded-md text-xs transition-colors mb-0.5 ${
                     externalModel === model.id
                       ? "bg-kumo-brand/10 border border-kumo-brand/30 text-kumo-default"
                       : "hover:bg-kumo-tint border border-transparent text-kumo-default"
@@ -506,15 +497,15 @@ const UnifiedModelSelector = ({
           <div>
             <label
               htmlFor="authentication"
-              className="text-xs text-kumo-secondary block mb-2"
+              className="text-xs text-kumo-secondary block mb-1"
             >
               Authentication
             </label>
-            <div className="flex gap-2 mb-3">
+            <div className="flex gap-1.5 mb-2">
               <button
                 type="button"
                 onClick={() => onAuthMethodChange("provider-key")}
-                className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+                className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition-colors ${
                   authMethod === "provider-key"
                     ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
                     : "bg-kumo-control text-kumo-secondary hover:text-kumo-default border border-transparent"
@@ -525,7 +516,7 @@ const UnifiedModelSelector = ({
               <button
                 type="button"
                 onClick={() => onAuthMethodChange("gateway")}
-                className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-colors ${
+                className={`flex-1 px-2 py-1.5 rounded text-xs font-medium transition-colors ${
                   authMethod === "gateway"
                     ? "bg-kumo-base shadow-sm border border-kumo-line text-kumo-default"
                     : "bg-kumo-control text-kumo-secondary hover:text-kumo-default border border-transparent"
@@ -557,7 +548,7 @@ const UnifiedModelSelector = ({
                     onChange={(e) => onProviderApiKeyChange(e.target.value)}
                     placeholder={`Enter your ${externalProvider === "xai" ? "xAI" : externalProvider} API key`}
                     required
-                    className="w-full p-2 pr-10 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
+                    className="w-full p-1.5 pr-8 border border-kumo-line rounded-md text-xs bg-kumo-base text-kumo-default"
                   />
                   <button
                     type="button"
@@ -565,19 +556,15 @@ const UnifiedModelSelector = ({
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-kumo-secondary hover:text-kumo-default"
                   >
                     {showProviderKey ? (
-                      <EyeSlashIcon size={16} />
+                      <EyeSlashIcon size={14} />
                     ) : (
-                      <EyeIcon size={16} />
+                      <EyeIcon size={14} />
                     )}
                   </button>
                 </div>
-                <p className="text-xs text-kumo-inactive mt-1">
-                  Your {externalProvider === "xai" ? "xAI" : externalProvider}{" "}
-                  API key for direct access
-                </p>
               </div>
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-2">
                 <div>
                   <label
                     htmlFor="account-id"
@@ -589,13 +576,10 @@ const UnifiedModelSelector = ({
                     type="text"
                     value={gatewayAccountId || ""}
                     onChange={(e) => onGatewayAccountIdChange(e.target.value)}
-                    placeholder="Enter your Cloudflare account ID"
+                    placeholder="Cloudflare account ID"
                     required
-                    className="w-full p-2 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
+                    className="w-full p-1.5 border border-kumo-line rounded-md text-xs bg-kumo-base text-kumo-default"
                   />
-                  <p className="text-xs text-kumo-inactive mt-1">
-                    Your Cloudflare account ID
-                  </p>
                 </div>
 
                 <div>
@@ -609,13 +593,10 @@ const UnifiedModelSelector = ({
                     type="text"
                     value={gatewayId || ""}
                     onChange={(e) => onGatewayIdChange(e.target.value)}
-                    placeholder="Enter your AI Gateway ID"
+                    placeholder="AI Gateway ID"
                     required
-                    className="w-full p-2 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
+                    className="w-full p-1.5 border border-kumo-line rounded-md text-xs bg-kumo-base text-kumo-default"
                   />
-                  <p className="text-xs text-kumo-inactive mt-1">
-                    The name/ID of your AI Gateway
-                  </p>
                 </div>
 
                 <div>
@@ -631,9 +612,9 @@ const UnifiedModelSelector = ({
                       type={showGatewayKey ? "text" : "password"}
                       value={gatewayApiKey || ""}
                       onChange={(e) => onGatewayApiKeyChange(e.target.value)}
-                      placeholder="Enter your Cloudflare API key"
+                      placeholder="Cloudflare API key"
                       required
-                      className="w-full p-2 pr-10 border border-kumo-line rounded-md text-sm bg-kumo-base text-kumo-default"
+                      className="w-full p-1.5 pr-8 border border-kumo-line rounded-md text-xs bg-kumo-base text-kumo-default"
                     />
                     <button
                       type="button"
@@ -641,28 +622,24 @@ const UnifiedModelSelector = ({
                       className="absolute right-2 top-1/2 -translate-y-1/2 text-kumo-secondary hover:text-kumo-default"
                     >
                       {showGatewayKey ? (
-                        <EyeSlashIcon size={16} />
+                        <EyeSlashIcon size={14} />
                       ) : (
-                        <EyeIcon size={16} />
+                        <EyeIcon size={14} />
                       )}
                     </button>
                   </div>
-                  <p className="text-xs text-kumo-inactive mt-1">
-                    Required: Cloudflare API key for AI Gateway authentication
-                  </p>
                 </div>
 
-                <div className="bg-kumo-info/10 border border-kumo-info/30 rounded-md p-2">
-                  <p className="text-xs text-kumo-info">
-                    <strong>Unified Billing:</strong> Uses Cloudflare credits
-                    for provider API calls. Load credits in your{" "}
+                <div className="bg-kumo-info/10 border border-kumo-info/30 rounded-md p-1.5">
+                  <p className="text-[11px] text-kumo-info leading-tight">
+                    <strong>Unified Billing:</strong> Uses Cloudflare credits.{" "}
                     <a
                       href="https://dash.cloudflare.com/?to=/:account/ai/ai-gateway"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="underline hover:opacity-80"
                     >
-                      Cloudflare dashboard
+                      Load credits
                     </a>
                     .
                   </p>
