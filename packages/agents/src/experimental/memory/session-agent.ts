@@ -1,12 +1,12 @@
 /**
- * @experimental SessionAgent — unstable, may change without notice.
+ * @experimental SessionAgent — unstable API, may change without notice.
  *
  * A subclass of Agent that adds session and event management.
  * Tables are created in the constructor (guaranteed to run).
  *
  * SQL-bound methods (loadEvents, appendEvents, etc.) are callable via RPC
- * from Workflows and Workers. WorkingContext helpers are protected (local only)
- * because class instances don't survive RPC serialization.
+ * from Workflows and Workers. WorkingContext helpers are protected
+ * (local only) because class instances don't survive RPC serialization.
  *
  * @example Inside the Agent
  * ```ts
