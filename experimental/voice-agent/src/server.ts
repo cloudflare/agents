@@ -263,8 +263,35 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   }
 }
 
+// --- SFU integration ---
+import { handleSFURequest } from "./sfu";
+
 export default {
   async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    // SFU routes (proxied API calls + WebSocket endpoints)
+    if (url.pathname.startsWith("/sfu/")) {
+      const appId = (env as unknown as Record<string, string>)
+        .CLOUDFLARE_REALTIME_SFU_APP_ID;
+      const apiToken = (env as unknown as Record<string, string>)
+        .CLOUDFLARE_REALTIME_SFU_API_TOKEN;
+
+      if (!appId || !apiToken) {
+        return Response.json(
+          { error: "SFU credentials not configured" },
+          { status: 500 }
+        );
+      }
+
+      const sfuResponse = await handleSFURequest(request, {
+        appId,
+        apiToken,
+        agentNamespace: env.MyVoiceAgent as unknown as DurableObjectNamespace
+      });
+      if (sfuResponse) return sfuResponse;
+    }
+
     return (
       (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })

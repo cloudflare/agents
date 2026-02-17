@@ -17,9 +17,10 @@ import {
   WarningCircleIcon,
   UserSwitchIcon
 } from "@phosphor-icons/react";
-import { PaperPlaneRightIcon } from "@phosphor-icons/react";
+import { PaperPlaneRightIcon, BroadcastIcon } from "@phosphor-icons/react";
 import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useSFUVoice } from "./use-sfu-voice";
 import { createRoot } from "react-dom/client";
 import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
 import { ModeToggle, PoweredByAgents } from "@cloudflare/agents-ui";
@@ -79,10 +80,244 @@ function getStatusDisplay(status: VoiceStatus) {
   }
 }
 
+// --- WebRTC (SFU) Mode ---
+
+function WebRTCApp() {
+  const sessionId = useRef(getSessionId()).current;
+
+  const {
+    status,
+    transcript,
+    metrics,
+    audioLevel,
+    isMuted,
+    connected,
+    error,
+    webrtcState,
+    startCall,
+    endCall,
+    toggleMute,
+    sendText
+  } = useSFUVoice({
+    agent: "my-voice-agent",
+    name: sessionId
+  });
+
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const [textInput, setTextInput] = useState("");
+
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [transcript]);
+
+  const isInCall = status !== "idle";
+  const statusDisplay = getStatusDisplay(status);
+  const StatusIcon = statusDisplay.icon;
+
+  return (
+    <>
+      {/* WebRTC status badge */}
+      <div className="mb-4 flex items-center justify-center gap-2">
+        <span
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+            webrtcState === "connected"
+              ? "bg-green-500/10 text-green-600"
+              : webrtcState === "checking" || webrtcState === "new"
+                ? "bg-amber-500/10 text-amber-600"
+                : "bg-kumo-fill text-kumo-secondary"
+          }`}
+        >
+          <BroadcastIcon size={14} weight="bold" />
+          WebRTC: {webrtcState}
+        </span>
+      </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="mb-4 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-sm text-red-600 dark:text-red-400">
+          {error}
+        </div>
+      )}
+
+      {/* Status indicator */}
+      <Surface className="rounded-xl px-4 py-3 text-center ring ring-kumo-line mb-4">
+        <div
+          className={`flex items-center justify-center gap-2 ${statusDisplay.color}`}
+        >
+          <StatusIcon
+            size={20}
+            weight="bold"
+            className={status === "thinking" ? "animate-spin" : ""}
+          />
+          <span className={`text-lg ${statusDisplay.color}`}>
+            {statusDisplay.text}
+          </span>
+        </div>
+        {isInCall && status === "listening" && (
+          <div className="mt-2 h-1.5 bg-kumo-fill rounded-full overflow-hidden">
+            <div
+              className="h-full bg-kumo-success rounded-full transition-all duration-75"
+              style={{ width: `${Math.min(audioLevel * 500, 100)}%` }}
+            />
+          </div>
+        )}
+      </Surface>
+
+      {/* Metrics */}
+      {metrics && (
+        <div className="mb-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
+          <span>
+            VAD <span className="text-kumo-default">{metrics.vad_ms}ms</span>
+          </span>
+          <span className="text-kumo-line">/</span>
+          <span>
+            STT <span className="text-kumo-default">{metrics.stt_ms}ms</span>
+          </span>
+          <span className="text-kumo-line">/</span>
+          <span>
+            LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
+          </span>
+          <span className="text-kumo-line">/</span>
+          <span>
+            TTS <span className="text-kumo-default">{metrics.tts_ms}ms</span>
+          </span>
+          <span className="text-kumo-line">/</span>
+          <span>
+            First audio{" "}
+            <span className="text-kumo-default">
+              {metrics.first_audio_ms}ms
+            </span>
+          </span>
+        </div>
+      )}
+
+      {/* Transcript */}
+      <Surface className="rounded-xl ring ring-kumo-line mb-6 h-72 overflow-y-auto">
+        {transcript.length === 0 ? (
+          <div className="h-full flex items-center justify-center text-kumo-secondary">
+            <Text size="sm">
+              {isInCall
+                ? "Start speaking..."
+                : connected
+                  ? "Click Call to start via WebRTC"
+                  : "Connecting to agent..."}
+            </Text>
+          </div>
+        ) : (
+          <div className="p-4 space-y-3">
+            {transcript.map((msg, i) => (
+              <div
+                key={i}
+                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+              >
+                <div className="flex flex-col gap-0.5 max-w-[80%]">
+                  <div
+                    className={`rounded-xl px-3 py-2 text-sm ${
+                      msg.role === "user"
+                        ? "bg-kumo-brand/15 text-kumo-default"
+                        : "bg-kumo-fill text-kumo-default"
+                    }`}
+                  >
+                    {msg.text || (
+                      <span className="text-kumo-secondary italic">...</span>
+                    )}
+                  </div>
+                  {msg.timestamp && (
+                    <span
+                      className={`text-[10px] text-kumo-secondary px-1 ${msg.role === "user" ? "text-right" : "text-left"}`}
+                    >
+                      {formatTime(new Date(msg.timestamp))}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
+            <div ref={transcriptEndRef} />
+          </div>
+        )}
+      </Surface>
+
+      {/* Controls */}
+      <div className="flex items-center justify-center gap-4">
+        {!isInCall ? (
+          <Button
+            onClick={startCall}
+            className="px-8 justify-center"
+            variant="primary"
+            disabled={!connected}
+            icon={<PhoneIcon size={20} weight="fill" />}
+          >
+            {connected ? "Start Call (WebRTC)" : "Connecting..."}
+          </Button>
+        ) : (
+          <>
+            <Button
+              onClick={toggleMute}
+              variant={isMuted ? "destructive" : "secondary"}
+              icon={
+                isMuted ? (
+                  <MicrophoneSlashIcon size={20} weight="fill" />
+                ) : (
+                  <MicrophoneIcon size={20} weight="fill" />
+                )
+              }
+            >
+              {isMuted ? "Unmute" : "Mute"}
+            </Button>
+            <Button
+              onClick={endCall}
+              variant="destructive"
+              icon={<PhoneDisconnectIcon size={20} weight="fill" />}
+            >
+              End Call
+            </Button>
+          </>
+        )}
+      </div>
+
+      {/* Text input */}
+      <form
+        className="mt-4 flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (textInput.trim() && connected) {
+            sendText(textInput.trim());
+            setTextInput("");
+          }
+        }}
+      >
+        <Input
+          value={textInput}
+          onChange={(e) => setTextInput(e.target.value)}
+          placeholder={connected ? "Type a message..." : "Connecting..."}
+          disabled={!connected || status === "thinking"}
+          className="flex-1"
+        />
+        <Button
+          type="submit"
+          variant="secondary"
+          disabled={!connected || !textInput.trim() || status === "thinking"}
+          icon={<PaperPlaneRightIcon size={16} weight="fill" />}
+        >
+          Send
+        </Button>
+      </form>
+
+      {/* Session info */}
+      <div className="mt-4 text-center text-[10px] text-kumo-secondary font-mono">
+        Session: {sessionId.slice(0, 8)}... (WebRTC/SFU)
+      </div>
+    </>
+  );
+}
+
 // --- Main App ---
 
 function App() {
   const sessionId = useRef(getSessionId()).current;
+  const [transport, setTransport] = useState<"websocket" | "webrtc">(
+    "websocket"
+  );
 
   const {
     status,
@@ -216,6 +451,56 @@ function App() {
   const statusDisplay = getStatusDisplay(status);
   const StatusIcon = statusDisplay.icon;
 
+  // If WebRTC transport is selected, render the SFU app
+  if (transport === "webrtc") {
+    return (
+      <div className="min-h-full flex items-center justify-center p-6">
+        <Surface className="w-full max-w-lg rounded-2xl p-8 ring ring-kumo-line">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex items-center gap-3">
+              <BroadcastIcon
+                size={28}
+                weight="duotone"
+                className="text-kumo-brand"
+              />
+              <Text variant="heading1">Voice Agent</Text>
+            </div>
+            <div className="flex items-center gap-3">
+              <ModeToggle />
+            </div>
+          </div>
+
+          {/* Transport toggle */}
+          <div className="mb-4 flex items-center justify-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<WifiHighIcon size={14} />}
+              onClick={() => setTransport("websocket")}
+            >
+              WebSocket
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<BroadcastIcon size={14} />}
+            >
+              WebRTC (SFU)
+            </Button>
+          </div>
+
+          <WebRTCApp />
+
+          {/* Footer */}
+          <div className="mt-4 flex justify-center">
+            <PoweredByAgents />
+          </div>
+        </Surface>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-full flex items-center justify-center p-6">
       <Surface className="w-full max-w-lg rounded-2xl p-8 ring ring-kumo-line">
@@ -243,6 +528,21 @@ function App() {
             </span>
             <ModeToggle />
           </div>
+        </div>
+
+        {/* Transport toggle */}
+        <div className="mb-4 flex items-center justify-center gap-2">
+          <Button variant="primary" size="sm" icon={<WifiHighIcon size={14} />}>
+            WebSocket
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<BroadcastIcon size={14} />}
+            onClick={() => setTransport("webrtc")}
+          >
+            WebRTC (SFU)
+          </Button>
         </div>
 
         {/* Toast notification */}
