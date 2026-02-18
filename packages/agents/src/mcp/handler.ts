@@ -22,6 +22,12 @@ export interface CreateMcpHandlerOptions {
    * If not provided, the handler will look for props in the execution context.
    */
   authContext?: McpAuthContext;
+  /**
+   * A pre-connected transport for stateful mode (e.g. McpAgent).
+   * When provided, the handler delegates directly to this transport
+   * without creating a new server or transport per request.
+   */
+  transport?: WebStandardStreamableHTTPServerTransport;
 }
 
 export function createMcpHandler(
@@ -65,13 +71,20 @@ export function createMcpHandler(
     };
 
     const handleRequest = async () => {
-      // Create a fresh server + transport per request (stateless mode)
+      if (options.transport) {
+        // Stateful mode: transport already connected, just handle the request.
+        // CORS headers are added by the caller (e.g. McpAgent.serve()).
+        return options.transport.handleRequest(request);
+      }
+
+      // Stateless mode: fresh server + transport per request
       const server = serverFactory();
       injectCfWorkerValidator(server);
       const transport = new WebStandardStreamableHTTPServerTransport();
 
       await server.connect(transport);
       const response = await transport.handleRequest(request);
+
       // Add CORS headers to the response
       const headers = corsHeaders(request, options.corsOptions);
       for (const [key, value] of Object.entries(headers)) {

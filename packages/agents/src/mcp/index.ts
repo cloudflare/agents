@@ -7,6 +7,7 @@ import { Agent, getAgentByName } from "../index";
 import type { MaybePromise, CORSOptions } from "./types";
 import { corsHeaders, handleCORS, isDurableObjectNamespace } from "./utils";
 import { injectCfWorkerValidator } from "./cf-validator";
+import { createMcpHandler } from "./handler";
 
 interface McpAgentServeOptions {
   /**
@@ -47,6 +48,7 @@ export abstract class McpAgent<
   private _mcpTransport?: WebStandardStreamableHTTPServerTransport;
   private _mcpServerConnected = false;
   private _mcpSetupPromise?: Promise<void>;
+  private _mcpHandler?: (request: Request) => Promise<Response>;
 
   /**
    * Override this method to register tools, resources, and prompts
@@ -107,6 +109,14 @@ export abstract class McpAgent<
     await server.connect(this._mcpTransport);
     this._mcpServerConnected = true;
 
+    // Create the request handler using createMcpHandler in stateful mode
+    const handler = createMcpHandler(() => server, {
+      transport: this._mcpTransport,
+      route: ""
+    });
+    this._mcpHandler = (request: Request) =>
+      handler(request, {} as unknown, {} as ExecutionContext);
+
     // Intercept onmessage AFTER server.connect (which sets the handler)
     // to capture initialize params for state persistence
     const serverOnMessage = this._mcpTransport.onmessage;
@@ -145,7 +155,7 @@ export abstract class McpAgent<
    * the original tool call's request handler.
    */
   async onRequest(request: Request): Promise<Response> {
-    if (!this._mcpTransport) {
+    if (!this._mcpHandler) {
       return new Response(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -156,7 +166,7 @@ export abstract class McpAgent<
       );
     }
 
-    return this._mcpTransport.handleRequest(request);
+    return this._mcpHandler(request);
   }
 
   /**
