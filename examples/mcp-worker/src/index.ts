@@ -30,9 +30,5 @@ function createServer() {
 }
 
 export default {
-  fetch: async (request: Request, env: Env, ctx: ExecutionContext) => {
-    //create the server instance every request
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
-  }
+  fetch: createMcpHandler(createServer)
 };

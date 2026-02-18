@@ -11,10 +11,3 @@ export interface CORSOptions {
   maxAge?: number;
   exposeHeaders?: string;
 }
-
-export interface ServeOptions {
-  binding?: string;
-  corsOptions?: CORSOptions;
-  transport?: BaseTransportType;
-  jurisdiction?: DurableObjectJurisdiction;
-}

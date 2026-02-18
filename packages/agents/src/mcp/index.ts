@@ -1,374 +1,192 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type {
-  JSONRPCMessage,
-  MessageExtraInfo
-} from "@modelcontextprotocol/sdk/types.js";
-import {
-  JSONRPCMessageSchema,
-  isJSONRPCErrorResponse,
-  isJSONRPCResultResponse,
-  type ElicitResult
-} from "@modelcontextprotocol/sdk/types.js";
-import type { Connection, ConnectionContext } from "../";
-import { Agent } from "../index";
-import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
-import {
-  createLegacySseHandler,
-  createStreamingHttpHandler,
-  handleCORS,
-  isDurableObjectNamespace,
-  MCP_HTTP_METHOD_HEADER,
-  MCP_MESSAGE_HEADER
-} from "./utils";
-import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import { Agent, getAgentByName } from "../index";
+import type { MaybePromise, CORSOptions } from "./types";
+import { corsHeaders, handleCORS, isDurableObjectNamespace } from "./utils";
+import { injectCfWorkerValidator } from "./cf-validator";
+import { createMcpHandler } from "./handler";
+
+interface McpAgentServeOptions {
+  /**
+   * The Durable Object binding name for the McpAgent.
+   * @default "MCP_OBJECT"
+   */
+  binding?: string;
+  /**
+   * CORS options for the handler.
+   */
+  corsOptions?: CORSOptions;
+  /**
+   * Jurisdiction for DO placement.
+   */
+  jurisdiction?: DurableObjectJurisdiction;
+}
 
 export abstract class McpAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
-  private _transport?: Transport;
+  /**
+   * The MCP server instance. Create this in your class definition.
+   *
+   * ```ts
+   * server = new McpServer({ name: "My Server", version: "1.0.0" });
+   * ```
+   */
+  abstract server: MaybePromise<McpServer | Server>;
+
+  /**
+   * Props passed from the Worker to this DO instance.
+   * Available after init() is called.
+   */
   props?: Props;
 
-  abstract server: MaybePromise<McpServer | Server>;
-  abstract init(): Promise<void>;
+  private _mcpTransport?: WebStandardStreamableHTTPServerTransport;
+  private _mcpServerConnected = false;
+  private _mcpSetupPromise?: Promise<void>;
+  private _mcpHandler?: (request: Request) => Promise<Response>;
 
-  /*
-   * Helpers
+  /**
+   * Override this method to register tools, resources, and prompts
+   * on the MCP server.
+   *
+   * ```ts
+   * async init() {
+   *   this.server.registerTool("add", { ... }, async () => { ... });
+   * }
+   * ```
    */
+  async init(): Promise<void> {}
 
-  async setInitializeRequest(initializeRequest: JSONRPCMessage) {
-    await this.ctx.storage.put("initializeRequest", initializeRequest);
-  }
-
-  async getInitializeRequest() {
-    return this.ctx.storage.get<JSONRPCMessage>("initializeRequest");
-  }
-
-  /** Read the transport type for this agent.
-   * This relies on the naming scheme being `sse:${sessionId}`
-   * or `streamable-http:${sessionId}`.
+  /**
+   * Internal: wrap onStart to handle props, user init(), and MCP setup.
    */
-  getTransportType(): BaseTransportType {
-    const [t, ..._] = this.name.split(":");
-    switch (t) {
-      case "sse":
-        return "sse";
-      case "streamable-http":
-        return "streamable-http";
-      default:
-        throw new Error(
-          "Invalid transport type. McpAgent must be addressed with a valid protocol."
-        );
-    }
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    const _userOnStart = this.onStart.bind(this);
+    this.onStart = async (props?: Props) => {
+      // Store props in DO storage so they survive hibernation
+      if (props) {
+        await this.ctx.storage.put("mcp:props", props);
+      }
+      this.props = (await this.ctx.storage.get<Props>("mcp:props")) ?? props;
+
+      // Call the parent onStart (Agent lifecycle)
+      await _userOnStart(props);
+
+      // Call user's init() (where they register tools, resources, etc.)
+      // Tools must be registered BEFORE connecting to the transport.
+      await this.init();
+
+      // Set up MCP transport and connect the server
+      await this._setupMcp();
+    };
   }
 
-  /** Read the sessionId for this agent.
-   * This relies on the naming scheme being `sse:${sessionId}`
-   * or `streamable-http:${sessionId}`.
+  /**
+   * Internal: set up the MCP transport and connect the server.
    */
-  getSessionId(): string {
-    const [_, sessionId] = this.name.split(":");
-    if (!sessionId) {
-      throw new Error(
-        "Invalid session id. McpAgent must be addressed with a valid session id."
-      );
-    }
-    return sessionId;
-  }
-
-  /** Get the unique WebSocket. SSE transport only. */
-  getWebSocket() {
-    const websockets = Array.from(this.getConnections());
-    if (websockets.length === 0) {
-      return null;
-    }
-    return websockets[0];
-  }
-
-  /** Returns a new transport matching the type of the Agent. */
-  private initTransport() {
-    switch (this.getTransportType()) {
-      case "sse": {
-        return new McpSSETransport();
-      }
-      case "streamable-http": {
-        const transport = new StreamableHTTPServerTransport({});
-        transport.messageInterceptor = async (message) => {
-          return this._handleElicitationResponse(message);
-        };
-        return transport;
-      }
-    }
-  }
-
-  /** Update and store the props */
-  async updateProps(props?: Props) {
-    await this.ctx.storage.put("props", props ?? {});
-    this.props = props;
-  }
-
-  async reinitializeServer() {
-    // If the agent was previously initialized, we have to populate
-    // the server again by sending the initialize request to make
-    // client information available to the server.
-    const initializeRequest = await this.getInitializeRequest();
-    if (initializeRequest) {
-      this._transport?.onmessage?.(initializeRequest);
-    }
-  }
-
-  /*
-   * Base Agent / Parykit Server overrides
-   */
-
-  /** Sets up the MCP transport and server every time the Agent is started.*/
-  async onStart(props?: Props) {
-    // If onStart was passed props, save them in storage
-    if (props) await this.updateProps(props);
-    this.props = await this.ctx.storage.get("props");
-
-    await this.init();
-    const server = await this.server;
-    // Connect to the MCP server
-    this._transport = this.initTransport();
-    await server.connect(this._transport);
-    await this.reinitializeServer();
-  }
-
-  /** Validates new WebSocket connections. */
-  async onConnect(
-    conn: Connection,
-    { request: req }: ConnectionContext
-  ): Promise<void> {
-    switch (this.getTransportType()) {
-      case "sse": {
-        // For SSE connections, we can only have one open connection per session
-        // If we get an upgrade while already connected, we should error
-        const websockets = Array.from(this.getConnections());
-        if (websockets.length > 1) {
-          conn.close(1008, "Websocket already connected");
-          return;
-        }
-        break;
-      }
-      case "streamable-http":
-        if (this._transport instanceof StreamableHTTPServerTransport) {
-          switch (req.headers.get(MCP_HTTP_METHOD_HEADER)) {
-            case "POST": {
-              // This returns the response directly to the client
-              const payloadHeader = req.headers.get(MCP_MESSAGE_HEADER);
-              let rawPayload: string;
-
-              if (!payloadHeader) {
-                rawPayload = "{}";
-              } else {
-                try {
-                  rawPayload = Buffer.from(payloadHeader, "base64").toString(
-                    "utf-8"
-                  );
-                } catch (_error) {
-                  throw new Error(
-                    "Internal Server Error: Failed to decode MCP message header"
-                  );
-                }
-              }
-
-              const parsedBody = JSON.parse(rawPayload);
-              this._transport?.handlePostRequest(req, parsedBody);
-              break;
-            }
-            case "GET":
-              this._transport?.handleGetRequest(req);
-              break;
-          }
-        }
-    }
-  }
-
-  /*
-   * Transport ingress and routing
-   */
-
-  /** Handles MCP Messages for the legacy SSE transport. */
-  async onSSEMcpMessage(
-    _sessionId: string,
-    messageBody: unknown,
-    extraInfo?: MessageExtraInfo
-  ): Promise<Error | null> {
-    // Since we address the DO via both the protocol and the session id,
-    // this should never happen, but let's enforce it just in case
-    if (this.getTransportType() !== "sse") {
-      return new Error("Internal Server Error: Expected SSE transport");
+  private async _setupMcp() {
+    if (this._mcpServerConnected) {
+      return;
     }
 
-    try {
-      let parsedMessage: JSONRPCMessage;
-      try {
-        parsedMessage = JSONRPCMessageSchema.parse(messageBody);
-      } catch (error) {
-        this._transport?.onerror?.(error as Error);
-        throw error;
-      }
+    // Create a stateful transport. The DO IS the session, so we use
+    // a fixed session ID derived from the DO name.
+    const sessionId = this.name;
 
-      // Check if this is an elicitation response before passing to transport
-      if (await this._handleElicitationResponse(parsedMessage)) {
-        return null; // Message was handled by elicitation system
-      }
-
-      this._transport?.onmessage?.(parsedMessage, extraInfo);
-      return null;
-    } catch (error) {
-      console.error("Error forwarding message to SSE:", error);
-      this._transport?.onerror?.(error as Error);
-      return error as Error;
-    }
-  }
-
-  /** Elicit user input with a message and schema */
-  async elicitInput(params: {
-    message: string;
-    requestedSchema: unknown;
-  }): Promise<ElicitResult> {
-    const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
-
-    // Store pending request in durable storage
-    await this.ctx.storage.put(`elicitation:${requestId}`, {
-      message: params.message,
-      requestedSchema: params.requestedSchema,
-      timestamp: Date.now()
+    this._mcpTransport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: () => sessionId
     });
 
-    const elicitRequest = {
-      jsonrpc: "2.0" as const,
-      id: requestId,
-      method: "elicitation/create",
-      params: {
-        message: params.message,
-        requestedSchema: params.requestedSchema
+    const server = await this.server;
+    injectCfWorkerValidator(server);
+    await server.connect(this._mcpTransport);
+    this._mcpServerConnected = true;
+
+    // Create the request handler using createMcpHandler in stateful mode
+    const handler = createMcpHandler(() => server, {
+      transport: this._mcpTransport,
+      route: ""
+    });
+    this._mcpHandler = (request: Request) =>
+      handler(request, {} as unknown, {} as ExecutionContext);
+
+    // Intercept onmessage AFTER server.connect (which sets the handler)
+    // to capture initialize params for state persistence
+    const serverOnMessage = this._mcpTransport.onmessage;
+    this._mcpTransport.onmessage = async (message, extra) => {
+      // Store initialize request params for replay on DO wake
+      if (isInitializeRequest(message)) {
+        await this.ctx.storage.put("mcp:initializeRequest", message);
       }
+
+      serverOnMessage?.call(this._mcpTransport, message, extra);
     };
 
-    // Send through MCP transport
-    if (this._transport) {
-      await this._transport.send(elicitRequest);
-    } else {
-      const connections = this.getConnections();
-      if (!connections || Array.from(connections).length === 0) {
-        await this.ctx.storage.delete(`elicitation:${requestId}`);
-        throw new Error("No active connections available for elicitation");
-      }
-
-      const connectionList = Array.from(connections);
-      for (const connection of connectionList) {
-        try {
-          connection.send(JSON.stringify(elicitRequest));
-        } catch (error) {
-          console.error("Failed to send elicitation request:", error);
-        }
-      }
-    }
-
-    // Wait for response through MCP
-    return this._waitForElicitationResponse(requestId);
+    // Restore state if DO was previously initialized
+    await this._restoreState();
   }
 
-  /** Wait for elicitation response through storage polling */
-  private async _waitForElicitationResponse(
-    requestId: string
-  ): Promise<ElicitResult> {
-    const startTime = Date.now();
-    const timeout = 60000; // 60 second timeout
-
-    try {
-      while (Date.now() - startTime < timeout) {
-        // Check if response has been stored
-        const response = await this.ctx.storage.get<ElicitResult>(
-          `elicitation:response:${requestId}`
-        );
-        if (response) {
-          // Immediately clean up both request and response
-          await this.ctx.storage.delete(`elicitation:${requestId}`);
-          await this.ctx.storage.delete(`elicitation:response:${requestId}`);
-          return response;
-        }
-
-        // Sleep briefly before checking again
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-
-      throw new Error("Elicitation request timed out");
-    } finally {
-      // Always clean up on timeout or error
-      await this.ctx.storage.delete(`elicitation:${requestId}`);
-      await this.ctx.storage.delete(`elicitation:response:${requestId}`);
+  /**
+   * Restore MCP transport state after DO wake from hibernation.
+   */
+  private async _restoreState() {
+    const initializeRequest = await this.ctx.storage.get<JSONRPCMessage>(
+      "mcp:initializeRequest"
+    );
+    if (initializeRequest && this._mcpTransport) {
+      // Replay the initialize request to restore server capabilities
+      this._mcpTransport.onmessage?.(initializeRequest);
     }
   }
 
-  /** Handle elicitation responses */
-  private async _handleElicitationResponse(
-    message: JSONRPCMessage
-  ): Promise<boolean> {
-    // Check if this is a response to an elicitation request
-    if (isJSONRPCResultResponse(message) && message.result) {
-      const requestId = message.id?.toString();
-      if (!requestId || !requestId.startsWith("elicit_")) return false;
-
-      // Check if we have a pending request for this ID
-      const pendingRequest = await this.ctx.storage.get(
-        `elicitation:${requestId}`
+  /**
+   * Handle an MCP HTTP request directly in the DO.
+   *
+   * The DO cannot hibernate while a request is being processed (the tool
+   * callback's Promise is pending), so no explicit keep-alive alarm is
+   * needed — even for elicitation which awaits a client response inside
+   * the original tool call's request handler.
+   */
+  async onRequest(request: Request): Promise<Response> {
+    if (!this._mcpHandler) {
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "MCP transport not initialized" },
+          id: null
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
       );
-      if (!pendingRequest) return false;
-
-      // Store the response in durable storage
-      await this.ctx.storage.put(
-        `elicitation:response:${requestId}`,
-        message.result as ElicitResult
-      );
-      return true;
     }
 
-    // Check if this is an error response to an elicitation request
-    if (isJSONRPCErrorResponse(message)) {
-      const requestId = message.id?.toString();
-      if (!requestId || !requestId.startsWith("elicit_")) return false;
-
-      // Check if we have a pending request for this ID
-      const pendingRequest = await this.ctx.storage.get(
-        `elicitation:${requestId}`
-      );
-      if (!pendingRequest) return false;
-
-      // Store error response
-      const errorResult: ElicitResult = {
-        action: "cancel",
-        content: {
-          error: message.error.message || "Elicitation request failed"
-        }
-      };
-      await this.ctx.storage.put(
-        `elicitation:response:${requestId}`,
-        errorResult
-      );
-      return true;
-    }
-
-    return false;
+    return this._mcpHandler(request);
   }
 
-  /** Return a handler for the given path for this MCP.
-   * Defaults to Streamable HTTP transport.
+  /**
+   * Return a Worker-side handler that routes MCP requests to this DO class.
+   *
+   * ```ts
+   * export default {
+   *   fetch(request, env, ctx) {
+   *     return MyMCP.serve("/mcp", { binding: "MyMCP" }).fetch(request, env, ctx);
+   *   }
+   * };
+   * ```
    */
   static serve(
     path: string,
     {
       binding = "MCP_OBJECT",
       corsOptions,
-      transport = "streamable-http",
       jurisdiction
-    }: ServeOptions = {}
+    }: McpAgentServeOptions = {}
   ) {
     return {
       async fetch<Env>(
@@ -377,22 +195,26 @@ export abstract class McpAgent<
         env: Env,
         ctx: ExecutionContext
       ): Promise<Response> {
+        const url = new URL(request.url);
+
+        // Check if this request matches our path
+        if (!url.pathname.startsWith(path)) {
+          return new Response("Not found", { status: 404 });
+        }
+
         // Handle CORS preflight
         const corsResponse = handleCORS(request, corsOptions);
         if (corsResponse) {
           return corsResponse;
         }
 
+        // Get the DO namespace binding
         const bindingValue = env[binding as keyof typeof env] as unknown;
-
-        // Ensure we have a binding of some sort
         if (bindingValue == null || typeof bindingValue !== "object") {
           throw new Error(
             `Could not find McpAgent binding for ${binding}. Did you update your wrangler configuration?`
           );
         }
-
-        // Ensure that the binding is to a DurableObject
         if (!isDurableObjectNamespace(bindingValue)) {
           throw new Error(
             `Invalid McpAgent binding for ${binding}. Make sure it's a Durable Object binding.`
@@ -400,47 +222,45 @@ export abstract class McpAgent<
         }
 
         const namespace =
-          bindingValue satisfies DurableObjectNamespace<McpAgent>;
+          bindingValue as unknown as DurableObjectNamespace<McpAgent>;
 
-        switch (transport) {
-          case "streamable-http": {
-            // Streamable HTTP transport handling
-            const handleStreamableHttp = createStreamingHttpHandler(
-              path,
-              namespace,
-              { corsOptions, jurisdiction }
-            );
-            return handleStreamableHttp(request, ctx);
-          }
-          case "sse": {
-            // Legacy SSE transport handling
-            const handleLegacySse = createLegacySseHandler(path, namespace, {
-              corsOptions,
-              jurisdiction
-            });
-            return handleLegacySse(request, ctx);
-          }
-          default:
-            return new Response(
-              "Invalid MCP transport mode. Only `streamable-http` or `sse` are allowed.",
-              { status: 500 }
-            );
+        // Route to the correct DO based on session ID
+        let sessionId = request.headers.get("mcp-session-id");
+
+        if (!sessionId) {
+          // No session ID — this should be an initialization request.
+          // Create a new DO with a unique ID.
+          sessionId = namespace.newUniqueId().toString();
         }
+
+        // Get the DO stub and forward the request directly
+        const agent = await getAgentByName(namespace, sessionId, {
+          props: ctx.props as Record<string, unknown> | undefined,
+          jurisdiction
+        });
+
+        // Forward the request to the DO's fetch handler
+        const doResponse = await agent.fetch(request);
+
+        // Create a new response with CORS headers added
+        // (DO responses may have immutable headers)
+        const cors = corsHeaders(request, corsOptions);
+        const responseHeaders = new Headers(doResponse.headers);
+        for (const [key, value] of Object.entries(cors)) {
+          responseHeaders.set(key, value);
+        }
+
+        return new Response(doResponse.body, {
+          status: doResponse.status,
+          statusText: doResponse.statusText,
+          headers: responseHeaders
+        });
       }
     };
   }
-  /**
-   * Legacy api
-   **/
-  static mount(path: string, opts: Omit<ServeOptions, "transport"> = {}) {
-    return McpAgent.serveSSE(path, opts);
-  }
-
-  static serveSSE(path: string, opts: Omit<ServeOptions, "transport"> = {}) {
-    return McpAgent.serve(path, { ...opts, transport: "sse" });
-  }
 }
 
+// Re-exports
 export {
   SSEEdgeClientTransport,
   StreamableHTTPEdgeClientTransport
@@ -468,8 +288,9 @@ export {
 
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
 
-export {
-  WorkerTransport,
-  type WorkerTransportOptions,
-  type TransportState
-} from "./worker-transport";
+/**
+ * @deprecated WorkerTransport has been removed. Use `WebStandardStreamableHTTPServerTransport`
+ * from `@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js` directly, or use
+ * `createMcpHandler` / `McpAgent` which handle transport creation for you.
+ */
+export const WorkerTransport = WebStandardStreamableHTTPServerTransport;

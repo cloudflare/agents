@@ -1,48 +1,22 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import {
-  createMcpHandler,
-  type TransportState,
-  WorkerTransport
-} from "agents/mcp";
+import { McpAgent } from "agents/mcp";
 import * as z from "zod";
-import { Agent, getAgentByName } from "agents";
-import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
-import { env } from "cloudflare:workers";
-
-const STATE_KEY = "mcp_transport_state";
 
 interface State {
   counter: number;
 }
 
-export class MyAgent extends Agent<Cloudflare.Env, State> {
-  server = new McpServer(
-    {
-      name: "test",
-      version: "1.0.0"
-    },
-    {
-      jsonSchemaValidator: new CfWorkerJsonSchemaValidator()
-    }
-  );
-
-  transport = new WorkerTransport({
-    sessionIdGenerator: () => this.name,
-    storage: {
-      get: () => {
-        return this.ctx.storage.kv.get<TransportState>(STATE_KEY);
-      },
-      set: (state: TransportState) => {
-        this.ctx.storage.kv.put<TransportState>(STATE_KEY, state);
-      }
-    }
+export class MyAgent extends McpAgent<Cloudflare.Env, State> {
+  server = new McpServer({
+    name: "test",
+    version: "1.0.0"
   });
 
   initialState = {
     counter: 0
   };
 
-  onStart(): void | Promise<void> {
+  async init() {
     this.server.registerTool(
       "increase-counter",
       {
@@ -113,19 +87,6 @@ export class MyAgent extends Agent<Cloudflare.Env, State> {
       }
     );
   }
-
-  async onMcpRequest(request: Request) {
-    return createMcpHandler(this.server, {
-      transport: this.transport
-    })(request, this.env, {} as ExecutionContext);
-  }
 }
 
-export default {
-  async fetch(request: Request) {
-    const sessionId =
-      request.headers.get("mcp-session-id") ?? crypto.randomUUID();
-    const agent = await getAgentByName(env.MyAgent, sessionId);
-    return await agent.onMcpRequest(request);
-  }
-};
+export default MyAgent.serve("/mcp", { binding: "MyAgent" });
