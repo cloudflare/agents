@@ -258,7 +258,6 @@ export abstract class McpAgent<
       }
     };
   }
-
 }
 
 // Re-exports

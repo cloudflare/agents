@@ -7,12 +7,10 @@ interface State {
 }
 
 export class MyAgent extends McpAgent<Cloudflare.Env, State> {
-  server = new McpServer(
-    {
-      name: "test",
-      version: "1.0.0"
-    }
-  );
+  server = new McpServer({
+    name: "test",
+    version: "1.0.0"
+  });
 
   initialState = {
     counter: 0

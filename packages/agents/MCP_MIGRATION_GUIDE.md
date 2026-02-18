@@ -13,14 +13,16 @@ McpAgent now uses the MCP SDK's `WebStandardStreamableHTTPServerTransport` direc
 `McpAgent.serveSSE()` and `McpAgent.mount()` have been removed. Only Streamable HTTP transport is supported via `McpAgent.serve()`.
 
 **Before:**
+
 ```ts
-MyMCP.serveSSE("/sse", { binding: "MyMCP" })
-MyMCP.mount("/sse", { binding: "MyMCP" })
+MyMCP.serveSSE("/sse", { binding: "MyMCP" });
+MyMCP.mount("/sse", { binding: "MyMCP" });
 ```
 
 **After:**
+
 ```ts
-MyMCP.serve("/mcp", { binding: "MyMCP" })
+MyMCP.serve("/mcp", { binding: "MyMCP" });
 ```
 
 ### 2. `WorkerTransport` removed
@@ -28,11 +30,13 @@ MyMCP.serve("/mcp", { binding: "MyMCP" })
 The custom `WorkerTransport` class has been removed. For low-level stateless MCP servers, use `createMcpHandler` (which now uses the SDK's `WebStandardStreamableHTTPServerTransport` under the hood) or use the SDK transport directly.
 
 **Before:**
+
 ```ts
 import { WorkerTransport } from "agents/mcp";
 ```
 
 **After:**
+
 ```ts
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 ```
@@ -50,6 +54,7 @@ For stateful MCP servers with session management, use `McpAgent`.
 ### 4. Internal transport classes removed
 
 The following internal classes are no longer exported:
+
 - `McpSSETransport`
 - `StreamableHTTPServerTransport` (the custom DO-based one)
 - `WorkerTransport`
@@ -64,6 +69,7 @@ The following internal classes are no longer exported:
 `createMcpHandler` now requires a factory function `() => McpServer | Server` instead of a direct server instance. The factory is called per request in stateless mode, ensuring clean server state for each request.
 
 **Before:**
+
 ```ts
 const server = new McpServer({ name: "My Server", version: "1.0.0" });
 server.registerTool("add", { ... }, async () => { ... });
@@ -71,6 +77,7 @@ export default { fetch: createMcpHandler(server) };
 ```
 
 **After:**
+
 ```ts
 function createServer() {
   const server = new McpServer({ name: "My Server", version: "1.0.0" });
@@ -85,6 +92,7 @@ export default { fetch: createMcpHandler(createServer) };
 Session management is now handled entirely by the MCP SDK transport inside each Durable Object. The Worker-level routing in `McpAgent.serve()` uses the `mcp-session-id` header to route requests to the correct DO instance. Session validation (accept header checks, content-type validation, JSON-RPC parsing) happens inside the DO, not in the Worker.
 
 This means:
+
 - An initialization request with a session ID will route to that DO and succeed (the DO is the session)
 - A non-init request to an uninitialized DO will return a 400 error from the SDK transport
 - Session IDs are DO instance names (not random transport-generated IDs)

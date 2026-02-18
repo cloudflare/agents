@@ -2,7 +2,6 @@ import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
-import { AuthHandler } from "./auth-handler";
 
 function createServer() {
   const server = new McpServer({
@@ -81,13 +80,11 @@ const apiHandler = {
 };
 
 export default new OAuthProvider({
-  authorizeEndpoint: "/authorize",
-  tokenEndpoint: "/oauth/token",
-  clientRegistrationEndpoint: "/oauth/register",
-
   apiRoute: "/mcp",
   apiHandler: apiHandler,
-
-  //@ts-expect-error
-  defaultHandler: AuthHandler
+  provider: AccessProvider({
+    id: "app-id",
+    secret: "app-secret",
+    redirectUri: "https://your-app.com/oauth/callback"
+  })
 });

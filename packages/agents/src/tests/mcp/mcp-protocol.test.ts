@@ -1,4 +1,4 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "../worker";
 import {
