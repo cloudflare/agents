@@ -13,7 +13,7 @@ export type PipelineSchemaConfig = {
   pipeline: RealtimePipelineComponent[];
   /** The agent URL for websocket connections */
   agentUrl: string;
-  /** The name of the parent agent class (for identifying the agent component) */
+  /** The constructor name of the parent RealtimeAgent class, used to identify the agent component in the pipeline */
   parentClassName: string;
   /** Optional meeting ID for RealtimeKit transport */
   meetingId?: string | null;
@@ -268,8 +268,6 @@ export function buildPipelineSchema(
       filters: [{ media_kind: "video" }]
     });
   }
-
-  console.log("layers", JSON.stringify(layers, null, 2));
 
   return { layers, elements, realtimeKitComponent };
 }

@@ -22,6 +22,7 @@ import {
 } from "./components";
 import { camelCaseToKebabCase } from "../client";
 import { randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
 
 // Re-export pipeline schema types and function from separate file for testability
 export {
@@ -42,13 +43,6 @@ export type SpeakResponse = {
   canInterrupt?: boolean;
 };
 
-export type TranscriptEntry = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  timestamp: number;
-};
-
 export type RealtimeSnapshot = {
   pipelineState: RealtimeState;
   flowId?: string;
@@ -64,17 +58,17 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   private agentUrl?: string;
   private token?: string;
   private agentName: string;
-  /** Array of transcript entries for the current conversation */
-  public transcriptHistory: TranscriptEntry[];
-  /** Last video frame received from the client */
-  public lastVideoFrame: Uint8Array | null = null;
+  /** Last audio frame received from the pipeline */
+  public lastAudioFrame?: Buffer;
+  /** Last video frame received from the pipeline */
+  public lastVideoFrame?: Buffer;
   /** Current flow ID for the conversation */
   public flowId?: string;
 
   #meeting?: RealtimeKitClient;
 
   onError(error: unknown): void | Promise<void> {
-    console.error("Error in realtime agentxxx", error);
+    console.error("Error in realtime agent", error);
   }
 
   constructor(ctx: AgentContext, env: Env) {
@@ -83,18 +77,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     this.agentName = camelCaseToKebabCase(
       Object.getPrototypeOf(this).constructor.name
     );
-
-    // Initialize transcript history table
-    this.sql`create table if not exists cf_realtime_agent_transcripts (
-      id text primary key,
-      role text not null,
-      text text not null,
-      timestamp integer not null,
-      created_at datetime default current_timestamp
-    )`;
-
-    // Load transcript history from database
-    this.transcriptHistory = this._loadTranscriptsFromDb();
 
     if (!this.ctx.storage.get("keepAlive")) {
       this.keepAlive();
@@ -136,80 +118,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   }
 
   /**
-   * Load transcript history from the database
-   */
-  private _loadTranscriptsFromDb(): TranscriptEntry[] {
-    const rows =
-      this
-        .sql`select * from cf_realtime_agent_transcripts order by timestamp` ||
-      [];
-    return rows
-      .map((row) => {
-        try {
-          return {
-            id: row.id as string,
-            role: row.role as "user" | "assistant",
-            text: row.text as string,
-            timestamp: row.timestamp as number
-          };
-        } catch (error) {
-          console.error(`Failed to parse transcript ${row.id}:`, error);
-          return null;
-        }
-      })
-      .filter((entry): entry is TranscriptEntry => entry !== null);
-  }
-
-  /**
-   * Persist transcript entries to the database
-   * @param entries Transcript entries to save
-   */
-  async persistTranscripts(entries: TranscriptEntry[]) {
-    for (const entry of entries) {
-      this.sql`
-        insert into cf_realtime_agent_transcripts (id, role, text, timestamp)
-        values (${entry.id}, ${entry.role}, ${entry.text}, ${entry.timestamp})
-        on conflict(id) do update set 
-          text = excluded.text,
-          timestamp = excluded.timestamp
-      `;
-    }
-
-    // Refresh in-memory transcript history
-    this.transcriptHistory = this._loadTranscriptsFromDb();
-  }
-
-  /**
-   * Add a transcript entry to the history
-   * @param role The role (user or assistant)
-   * @param text The transcript text
-   */
-  async addTranscript(role: "user" | "assistant", text: string) {
-    const entry: TranscriptEntry = {
-      id: randomUUID(),
-      role,
-      text,
-      timestamp: Date.now()
-    };
-    await this.persistTranscripts([entry]);
-  }
-
-  /**
-   * Clear all transcript history
-   */
-  async clearTranscriptHistory() {
-    this.sql`delete from cf_realtime_agent_transcripts`;
-    this.transcriptHistory = [];
-  }
-
-  /**
-   * Get transcript history
-   */
-  getTranscriptHistory() {
-    return this.transcriptHistory;
-  }
-
-  /**
    * Possibly undefined if no rtk element is configured.
    */
   get rtkMeeting(): RealtimeKitClient | undefined {
@@ -244,15 +152,22 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   }
 
   /**
-   * Called when the Agent receives a video frame from the Realtime pipeline
-   * Override this method to handle incoming video frames
-   * @param frame The video frame data
-   * @returns Response containing text to speak and whether it can be interrupted
+   * Called when the Agent receives a raw audio frame from the Realtime pipeline.
+   * Override this method to handle incoming audio frames.
+   * Use this.speak() to send a text response if needed.
+   * @param frame The raw audio frame data (base64-decoded)
    */
-  async onRealtimeVideoFrame(
-    frame: Uint8Array
-    // biome-ignore lint/suspicious/noConfusingVoidType: Users need not return a response
-  ): Promise<SpeakResponse | undefined | void> {
+  async onRealtimeAudio(frame: Buffer): Promise<void> {
+    return;
+  }
+
+  /**
+   * Called when the Agent receives a video frame from the Realtime pipeline.
+   * Override this method to handle incoming video frames.
+   * Use this.speak() to send a text response if needed.
+   * @param frame The video frame data (base64-decoded)
+   */
+  async onRealtimeVideoFrame(frame: Buffer): Promise<void> {
     return;
   }
 
@@ -265,13 +180,12 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       throw new Error("setPipeline must be called before init");
     }
 
-    const parentName = Object.getPrototypeOf(this).constructor.name;
-
     // Build pipeline schema using the extracted pure function
+    const parentClassName = Object.getPrototypeOf(this).constructor.name;
     const { layers, elements, realtimeKitComponent } = buildPipelineSchema({
       pipeline: this.pipeline,
       agentUrl: agentURL,
-      parentClassName: parentName,
+      parentClassName,
       meetingId
     });
 
@@ -294,15 +208,19 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     this.token = token;
 
     if (realtimeKitComponent) {
-      const realtimeKitElement = newElements.filter((e) => {
-        return e.name === realtimeKitComponent.name;
-      });
+      const realtimeKitElement = newElements.find(
+        (e) => e.name === realtimeKitComponent.name
+      );
       if (!realtimeKitElement) {
         throw new Error("RealtimeKit element not found in pipeline");
       }
-      realtimeKitComponent.authToken = (
-        realtimeKitElement[0] as { auth_token: string }
-      ).auth_token;
+      const authToken = realtimeKitElement.auth_token;
+      if (typeof authToken !== "string") {
+        throw new Error(
+          "RealtimeKit element missing auth_token in pipeline response"
+        );
+      }
+      realtimeKitComponent.authToken = authToken;
     }
   }
 
@@ -417,10 +335,8 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
 
   override onRequest(request: Request): Response | Promise<Response> {
     if (isRealtimeRequest(request)) {
-      console.log("realtime request yyy");
       return this.handleRealtimeRequest(request);
     }
-    console.log("realtime request nnn");
     return super.onRequest(request);
   }
 
@@ -428,17 +344,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     const requestUrl = new URL(request.url);
     if (!this.agentUrl) {
       this.buildAgentUrl(requestUrl, this.name);
-    }
-
-    if (requestUrl.pathname.includes("ping")) {
-      return new Response(null, {
-        status: 200,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type"
-        }
-      });
     }
 
     const path = requestUrl.pathname.split(
@@ -478,26 +383,23 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       case "/start": {
         const meetingId = requestUrl.searchParams.get("meetingId");
         await this.startRealtimePipeline(meetingId);
-        return new Response("{'success':true}", { status: 200 });
+        return Response.json({ success: true });
       }
 
       case "/stop": {
         await this.stopRealtimePipeline();
-        return new Response(null, { status: 200 });
+        return Response.json({ success: true });
       }
 
       case "/ping": {
-        return new Response(null, { status: 200 });
-      }
-
-      case "/get-transcripts": {
-        const transcripts = this._loadTranscriptsFromDb();
-        return Response.json(transcripts);
-      }
-
-      case "/clear-transcripts": {
-        await this.clearTranscriptHistory();
-        return Response.json({ success: true });
+        return new Response(null, {
+          status: 200,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+          }
+        });
       }
 
       default:
@@ -541,9 +443,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     let contextId: string | undefined = message.payload.context_id;
     const userText = message.payload.data;
 
-    // Store user transcript
-    await this.addTranscript("user", userText);
-
     const response = await this.onRealtimeTranscript(userText);
 
     if (!response) return;
@@ -554,8 +453,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     }
 
     if (typeof response.text === "string") {
-      // Store assistant response
-      await this.addTranscript("assistant", response.text);
       this.speak(response.text, contextId);
       return;
     }
@@ -563,96 +460,41 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     // Handle AI SDK streamText output (AsyncIterable<string>)
     // Check if it's an AsyncIterable that yields strings directly (AI SDK textStream)
     if (Symbol.asyncIterator in response.text) {
-      let fullResponse = "";
       for await (const chunk of response.text as AsyncIterable<string>) {
         if (typeof chunk === "string" && chunk) {
-          fullResponse += chunk;
           this.speak(chunk, contextId);
         }
-      }
-      if (fullResponse) {
-        await this.addTranscript("assistant", fullResponse);
       }
       return;
     }
 
-    // Handle ReadableStream<Uint8Array> (NDJSON format)
-    let fullResponse = "";
-    const stream = response.text as ReadableStream<Uint8Array>;
-    for await (const chunk of processNDJSONStream(stream.getReader())) {
-      if (chunk.response) {
-        fullResponse += chunk.response;
-        this.speak(chunk.response, contextId);
-      } else if (chunk.choices && chunk.choices.length > 0) {
-        const choice = chunk.choices[0];
-        if (choice.delta?.content && choice.delta?.role === "assistant") {
-          fullResponse += choice.delta.content;
-          this.speak(choice.delta.content, contextId);
+    if (response.text instanceof ReadableStream) {
+      // Handle ReadableStream<Uint8Array> (NDJSON format)
+      const stream = response.text;
+      for await (const chunk of processNDJSONStream(stream.getReader())) {
+        if (chunk.response) {
+          this.speak(chunk.response, contextId);
+        } else if (chunk.choices && chunk.choices.length > 0) {
+          const choice = chunk.choices[0];
+          if (choice.delta?.content && choice.delta?.role === "assistant") {
+            this.speak(choice.delta.content, contextId);
+          }
         }
       }
-    }
-
-    // Store the complete assistant response after streaming
-    if (fullResponse) {
-      await this.addTranscript("assistant", fullResponse);
+      return;
     }
   }
 
   async #handleAudioMessage(message: RealtimeWebsocketMessage) {
-    // Decode base64 audio data
-    const audioData = message.payload.data;
-    let frameData: Uint8Array;
-
-    if (typeof audioData === "string") {
-      // If data is base64 encoded string, decode it
-      const binaryString = atob(audioData);
-      frameData = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        frameData[i] = binaryString.charCodeAt(i);
-      }
-    } else if (
-      audioData &&
-      typeof audioData === "object" &&
-      "buffer" in audioData
-    ) {
-      // If data is already a Uint8Array or similar typed array
-      frameData = audioData as Uint8Array;
-    } else {
-      console.error("Invalid audio data format");
-      return;
-    }
-
-    // For now, audio frames are not handled by default
-    // Users can override onMediaFrame if needed
-    // TODO: Implement audio frame handling if needed
+    const frameData = Buffer.from(message.payload.data, "base64");
+    this.lastAudioFrame = frameData;
+    await this.onRealtimeAudio(frameData);
   }
 
   async #handleVideoMessage(message: RealtimeWebsocketMessage) {
-    // Decode base64 video data
-    const videoData = message.payload.data;
-    let frameData: Uint8Array;
-
-    if (typeof videoData === "string") {
-      // If data is base64 encoded string, decode it
-      const binaryString = atob(videoData);
-      frameData = new Uint8Array(binaryString.length);
-      for (let i = 0; i < binaryString.length; i++) {
-        frameData[i] = binaryString.charCodeAt(i);
-      }
-    } else if (
-      videoData &&
-      typeof videoData === "object" &&
-      "buffer" in videoData
-    ) {
-      // If data is already a Uint8Array or similar typed array
-      frameData = videoData as Uint8Array;
-    } else {
-      console.error("Invalid video data format");
-      return;
-    }
-
+    const frameData = Buffer.from(message.payload.data, "base64");
     this.lastVideoFrame = frameData;
-    this.onRealtimeVideoFrame(frameData);
+    await this.onRealtimeVideoFrame(frameData);
   }
 
   override getConnectionTags(

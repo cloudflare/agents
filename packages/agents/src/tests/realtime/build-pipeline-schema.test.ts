@@ -52,7 +52,7 @@ function createMockTTS(name = "mock_tts"): RealtimePipelineComponent {
 
 /**
  * Creates a mock Agent component (Text -> Text)
- * The class name is used to identify it as an agent
+ * Identified as the agent via constructor.name matching parentClassName in config
  */
 class MockAgent implements RealtimePipelineComponent {
   name = "agent";
@@ -69,7 +69,8 @@ class MockAgent implements RealtimePipelineComponent {
 
 /**
  * Creates a mock Agent component that accepts any input (for video/audio direct paths)
- * Used for testing scenarios where RTK connects directly to Agent
+ * Used for testing scenarios where RTK connects directly to Agent.
+ * Tests using this class must pass parentClassName: "MockMediaAgent" in config.
  */
 class MockMediaAgent implements RealtimePipelineComponent {
   name = "agent";
@@ -254,9 +255,7 @@ describe("buildPipelineSchema", () => {
         "mock_stt",
         "agent"
       ]);
-      expect(audioInputLayer?.filters).toEqual([
-        { media_kind: "audio", preset_name: "*" }
-      ]);
+      expect(audioInputLayer?.filters).toEqual([{ media_kind: "audio" }]);
     });
 
     it("should NOT add audio input layer when STT is not immediately followed by Agent", () => {
@@ -289,8 +288,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       // No audio layers since no STT -> Agent pattern
@@ -330,8 +329,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       // Find audio output layer
@@ -362,8 +361,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       const audioLayers = result.layers.filter(
@@ -381,8 +380,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       const audioLayers = result.layers.filter(
@@ -404,8 +403,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       const audioLayers = result.layers.filter(
@@ -462,8 +461,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       const videoLayers = result.layers.filter(
@@ -471,9 +470,7 @@ describe("buildPipelineSchema", () => {
       );
       expect(videoLayers.length).toBe(1);
       expect(videoLayers[0].elements).toEqual(["realtime_kit", "agent"]);
-      expect(videoLayers[0].filters).toEqual([
-        { media_kind: "video", preset_name: "*" }
-      ]);
+      expect(videoLayers[0].filters).toEqual([{ media_kind: "video" }]);
     });
 
     it("should NOT add video layer when consumeVideo is false (default)", () => {
@@ -485,8 +482,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       const videoLayers = result.layers.filter(
@@ -509,8 +506,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       const videoLayers = result.layers.filter(
@@ -529,8 +526,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       const videoLayers = result.layers.filter(
@@ -591,8 +588,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       // Should have 2 layers: video and screenshare (no audio layers since no STT/TTS pattern)
@@ -720,8 +717,8 @@ describe("buildPipelineSchema", () => {
 
       const result = buildPipelineSchema({
         ...defaultConfig,
-        pipeline,
-        parentClassName: "MockMediaAgent"
+        parentClassName: "MockMediaAgent",
+        pipeline
       });
 
       // Video layer should be named "default" since its the first layer

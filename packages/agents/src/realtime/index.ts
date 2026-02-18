@@ -17,8 +17,7 @@ export {
   type PipelineSchemaConfig,
   type PipelineSchemaResult,
   type RealtimeSnapshot,
-  type SpeakResponse,
-  type TranscriptEntry
+  type SpeakResponse
 } from "./realtime-agent";
 
 export {

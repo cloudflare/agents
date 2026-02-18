@@ -93,7 +93,8 @@ Callbacks to override:
 
 - `onRealtimeTranscript(text: string): Promise<SpeakResponse | undefined>`: called for each transcript message.
 - `onRealtimeMeeting?(meeting: RealtimeKitClient): void | Promise<void>`: called after the RealtimeKit client is initialized and before it joins the room. You can attach listeners to the meeting client here like participant joined, left, etc.
-- `onRealtimeVideoFrame?(frame: string): Promise<SpeakResponse | undefined>`: called when a video frame is received from the pipeline. Override this to handle video frames.
+- `onRealtimeAudio(frame: Buffer): Promise<void>`: called when a raw audio frame is received from the pipeline. Override this to handle audio frames directly. Use `this.speak()` to send a response.
+- `onRealtimeVideoFrame(frame: Buffer): Promise<void>`: called when a video frame is received from the pipeline. Override this to handle video frames. Use `this.speak()` to send a response.
 
 Key methods/properties:
 
@@ -104,15 +105,17 @@ Key methods/properties:
 - `pipelineState: RealtimeState`: `"idle" | "initializing" | "running" | "stopping" | "stopped"`.
 - `speak(text: string, contextId?: string)`: send text into the pipeline (typically into TTS and back to the meeting). The optional `contextId` can be used for advanced interruption behavior.
 - `rtkMeeting: RealtimeKitClient | undefined`: set after the pipeline starts (only if you included `RealtimeKitTransport`).
-
-The default implementation automatically records the user transcript before calling `onRealtimeTranscript`, and records your final response (including after streaming).
+- `lastAudioFrame: Buffer | undefined`: the most recently received audio frame.
+- `lastVideoFrame: Buffer | undefined`: the most recently received video frame.
 
 Built-in HTTP routes (under your Agent instance):
 
 - `/agents/<agent-name>/<instance-name>/realtime/start`: start the pipeline (accepts optional `?meetingId=...` query parameter).
 - `/agents/<agent-name>/<instance-name>/realtime/stop`: stop the pipeline.
 
-`<instance-name>` is the unique Agent instance id used by the SDK's routing (i.e. which Durable Object instance you are talking to). Each instance has its own pipeline, meeting connection, and persisted transcript history
+`<instance-name>` is the unique Agent instance id used by the SDK's routing (i.e. which Durable Object instance you are talking to). Each instance has its own pipeline and meeting connection.
+
+> **Note:** `RealtimeAgent` extends `Agent`, which is a Cloudflare Durable Object. You never construct it directly -- the Workers runtime instantiates it when accessed via `routeAgentRequest()` or a Durable Object namespace binding.
 
 [Read more about Routing](https://developers.cloudflare.com/agents/api-reference/routing/#how-routing-works)
 
@@ -120,16 +123,21 @@ Built-in HTTP routes (under your Agent instance):
 
 ```ts
 export type SpeakResponse = {
-  text: string | ReadableStream<Uint8Array>;
+  text:
+    | string
+    | ReadableStream<Uint8Array>
+    | (AsyncIterable<string> & ReadableStream<string>);
   canInterrupt?: boolean;
 };
 ```
+
+`text` can be a plain string, a `ReadableStream<Uint8Array>` (NDJSON format), or an AI SDK `textStream` (which is both an `AsyncIterable<string>` and `ReadableStream<string>`).
 
 `canInterrupt` controls whether user speech is allowed to barge-in while the agent is speaking.
 
 ### Pipeline primitives
 
-- `DataKind`: `Text | Media | Audio` (enum values: `"TEXT"`, `"MEDIA"`, `"AUDIO"`).
+- `DataKind`: `Text | Audio | Video` (enum values: `"TEXT"`, `"AUDIO"`, `"VIDEO"`).
 - `RealtimePipelineComponent`: `name`, `input_kind()`, `output_kind()`, `schema()`, and optional `setGatewayId()`.
 
 Provided components:
@@ -159,33 +167,58 @@ export type ElevenLabsConfig = {
 };
 ```
 
-Note: API keys for Deepgram and ElevenLabs can also be stored inside the AI Gateway with BYOK (Bring Your Own Key).
+Note: API keys for Deepgram and ElevenLabs can also be stored inside the AI Gateway with [BYOK (Bring Your Own Key)](https://developers.cloudflare.com/ai-gateway/providers/byok/). When using BYOK, you can omit the `apiKey` field in the component config.
 
-## Video
+## Media Configuration
 
-By default, `RealtimeKitTransport` only listens to audio from microphones. To receive video frames, you need to configure the `filters` option to include video streams.
+By default, `RealtimeKitTransport` only consumes audio from microphones. To receive raw audio frames, video, or screenshare frames, configure the `media` option.
 
-### `RealtimeKitMediaFilter`
+### `RealtimeKitMediaConfig`
 
 ```ts
-export type RealtimeKitMediaFilter =
-  | {
-      media_kind: "audio";
-      stream_kind: "screenshare" | "microphone";
-      preset_name: string;
-    }
-  | {
-      media_kind: "video";
-      stream_kind: "screenshare" | "webcam";
-      preset_name: string;
-    };
+export interface RealtimeKitMediaConfig {
+  /** Whether to consume audio from participants (defaults to true) */
+  consumeAudio?: boolean;
+  /** Whether to consume video from participants' webcams */
+  consumeVideo?: boolean;
+  /** Whether to consume screen share streams */
+  consumeScreenshare?: boolean;
+}
 ```
 
-Default filter (if not specified): `[{ media_kind: "audio", stream_kind: "microphone", preset_name: "*" }]`
+### Receiving Raw Audio Frames
+
+When an STT component is in the pipeline, transcripts are delivered to `onRealtimeTranscript`. If you also need access to the raw audio frames (e.g., for custom audio analysis or VAD), override `onRealtimeAudio`:
+
+```ts
+export class AudioAgent extends RealtimeAgent<Env> {
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+
+    const rtk = new RealtimeKitTransport();
+    const stt = new DeepgramSTT({ apiKey: env.DEEPGRAM_API_KEY });
+    const tts = new ElevenLabsTTS({ apiKey: env.ELEVENLABS_API_KEY });
+
+    this.setPipeline([rtk, stt, this, tts, rtk], env.AI, env.AI_GATEWAY_ID);
+  }
+
+  async onRealtimeTranscript(text: string): Promise<SpeakResponse | undefined> {
+    return { text: `You said: ${text}`, canInterrupt: true };
+  }
+
+  async onRealtimeAudio(frame: Buffer): Promise<void> {
+    // frame is base64-decoded raw audio data
+    // Process the audio frame (e.g., custom VAD, audio analysis)
+    // Use this.speak() to send a text response if needed
+  }
+}
+```
+
+The most recent audio frame is also available via `this.lastAudioFrame`.
 
 ### Receiving Video Frames
 
-To receive video frames in your agent, configure the `RealtimeKitTransport` with video filters and override the `onRealtimeVideoFrame` callback:
+To receive video frames in your agent, configure the `RealtimeKitTransport` with `consumeVideo: true` and override the `onRealtimeVideoFrame` callback:
 
 ```ts
 import {
@@ -201,12 +234,12 @@ export class VisionAgent extends RealtimeAgent<Env> {
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
-    // Configure filters to receive both audio and video
+    // Configure media to receive both audio and video
     const rtk = new RealtimeKitTransport({
-      filters: [
-        { media_kind: "audio", stream_kind: "microphone", preset_name: "*" },
-        { media_kind: "video", stream_kind: "webcam", preset_name: "*" }
-      ]
+      media: {
+        consumeAudio: true,
+        consumeVideo: true
+      }
     });
 
     const stt = new DeepgramSTT({ apiKey: env.DEEPGRAM_API_KEY });
@@ -220,14 +253,14 @@ export class VisionAgent extends RealtimeAgent<Env> {
     return { text: `You said: ${text}`, canInterrupt: true };
   }
 
-  async onRealtimeVideoFrame(
-    frame: string
-  ): Promise<SpeakResponse | undefined> {
-    // frame is base64-encoded video frame data
+  async onRealtimeVideoFrame(frame: Buffer): Promise<void> {
+    // frame is base64-decoded video frame data
     // Process the frame with a vision model, etc.
-    return undefined;
+    // Use this.speak() to send a text response if needed
   }
 }
 ```
 
-You can also listen to screenshare streams by using `stream_kind: "screenshare"` instead of `"webcam"`.
+The most recent video frame is also available via `this.lastVideoFrame`.
+
+To receive screenshare streams, set `consumeScreenshare: true` in the media config.
