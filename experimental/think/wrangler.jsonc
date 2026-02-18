@@ -7,13 +7,24 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/agents/*"]
   },
+  "r2_buckets": [
+    {
+      "binding": "WORKSPACE_FILES",
+      "bucket_name": "think-workspace-files"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
         "class_name": "ThinkAgent",
         "name": "ThinkAgent"
+      },
+      {
+        "class_name": "Workspace",
+        "name": "Workspace"
       }
-      // Chat is a facet, not a standalone DO binding
+      // Chat is still a facet; Workspace is now a standalone DO so Chat can
+      // reach it directly via env.Workspace.idFromName(workspaceId).
     ]
   },
   "main": "src/server.ts",
@@ -21,6 +32,10 @@
     {
       "new_sqlite_classes": ["ThinkAgent"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["Workspace"],
+      "tag": "v2"
     }
   ],
   "name": "think"

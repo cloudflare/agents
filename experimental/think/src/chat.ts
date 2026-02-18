@@ -3,13 +3,22 @@ import { createWorkersAI } from "workers-ai-provider";
 import { AgentFacet } from "./agent-facet";
 import { AgentLoop, type StepResult } from "./agent-loop";
 import type { BaseMessage, ThinkMessage } from "./shared";
+import type { WorkspaceFacet } from "./workspace";
+import { buildFileTools } from "./tools";
 
 export type { StepResult } from "./agent-loop";
 
 export type RunOptions = {
   model?: string;
   system?: string;
-  tools?: ToolSet;
+  /**
+   * Workspace registry ID. When provided, Chat constructs the workspace stub
+   * itself via env.Workspace.idFromName(workspaceId) and builds the file tools
+   * locally. Tool execution goes Chat → Workspace directly without any callback
+   * through ThinkAgent, avoiding the bi-directional RPC that caused
+   * WritableStream disconnect errors with the old tool-closure approach.
+   */
+  workspaceId?: string;
   maxSteps?: number;
 };
 
@@ -273,16 +282,48 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
   }
 
   // ── Agent loop ─────────────────────────────────────────────────────
+  //
+  // All three methods create a fresh AgentLoop because AgentLoop is
+  // stateless configuration — model, system prompt, tools, step limit.
+  // There is nothing to share or reuse between calls.
+  //
+  // The model must always be created here inside the facet: LanguageModel
+  // objects are not serializable and cannot cross the RPC boundary from
+  // ThinkAgent, so callers pass a model string ID instead.
 
   /**
-   * Run a single LLM call. Model is created inside the facet
-   * (LanguageModel objects can't cross the RPC boundary).
+   * Build the workspace stub and file tools from a workspaceId string.
+   * Runs inside the Chat facet so the stub is local — no RPC boundary crossed.
+   */
+  private _buildWorkspaceTools(workspaceId: string): ToolSet {
+    const ns = (this.env as unknown as { Workspace: DurableObjectNamespace })
+      .Workspace;
+    const stub = ns.get(
+      ns.idFromName(workspaceId)
+    ) as unknown as WorkspaceFacet;
+    return buildFileTools(stub);
+  }
+
+  private _resolveTools(options?: RunOptions): ToolSet | undefined {
+    if (options?.workspaceId)
+      return this._buildWorkspaceTools(options.workspaceId);
+    return undefined;
+  }
+
+  /**
+   * Single LLM call — no tool-call loop.
+   *
+   * Use for quick one-shot queries where you know the model won't need
+   * to call tools, or where you want to handle tool results manually
+   * (human-in-the-loop, tool approval, etc.).
+   *
+   * Persists whatever the model returns to message storage.
    */
   async runStep(options?: RunOptions): Promise<StepResult> {
     const loop = new AgentLoop({
       model: this._createModel(options?.model),
       system: options?.system,
-      tools: options?.tools
+      tools: this._resolveTools(options)
     });
 
     const result = await loop.step(this._messages as unknown as ModelMessage[]);
@@ -298,13 +339,19 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
   }
 
   /**
-   * Run the full agent loop. Model is created inside the facet.
+   * Full multi-step loop, non-streaming.
+   *
+   * Runs until the model produces text, calls `done`, or hits maxSteps.
+   * Blocks until the entire loop completes — suitable for background
+   * tasks or when the caller doesn't need incremental output.
+   *
+   * Persists all response messages (tool calls, results, final text).
    */
   async run(options?: RunOptions): Promise<StepResult> {
     const loop = new AgentLoop({
       model: this._createModel(options?.model),
       system: options?.system,
-      tools: options?.tools,
+      tools: this._resolveTools(options),
       maxSteps: options?.maxSteps
     });
 
@@ -321,14 +368,20 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
   }
 
   /**
-   * Stream a response into a WritableStream provided by the caller.
+   * Full multi-step loop with streaming — this is the primary path
+   * used by ThinkAgent for interactive conversations.
    *
-   * The caller (ThinkAgent) creates a TransformStream, passes the
-   * writable side here, and reads from the readable side. By writing
-   * directly into the caller's writable, the Workers RPC connection
-   * stays alive for the duration — no "disconnected prematurely" issue.
+   * The caller (ThinkAgent) creates a TransformStream and passes the
+   * writable side in. Chat writes NDJSON chunks to it as the model
+   * streams; ThinkAgent reads the readable side and forwards each chunk
+   * to connected clients as WebSocket messages.
    *
-   * Persists the final assistant message before returning.
+   * Writing directly into the caller's writable keeps the Workers RPC
+   * connection alive for the full duration of the stream — returning a
+   * ReadableStream over RPC causes premature disconnection.
+   *
+   * Persists only the final assistant text + reasoning after streaming
+   * completes (tool call/result messages are transient execution state).
    */
   async streamInto(
     writable: WritableStream<Uint8Array>,
@@ -339,7 +392,7 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
     const loop = new AgentLoop({
       model: this._createModel(options?.model),
       system: options?.system,
-      tools: options?.tools,
+      tools: this._resolveTools(options),
       maxSteps: options?.maxSteps
     });
 
@@ -364,9 +417,14 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
     } catch (err) {
       console.error("[Chat.streamInto] stream error:", err);
       try {
-        await writer.abort(err);
+        // Close rather than abort: writer.abort() propagates across the RPC
+        // boundary as a generic "remote context disconnected" error in ThinkAgent
+        // rather than a clean signal. Closing is semantically equivalent here —
+        // ThinkAgent's read loop terminates either way, and the error is already
+        // logged above. ThinkAgent will still broadcast STREAM_END.
+        await writer.close();
       } catch {
-        // ignore abort errors
+        // ignore if already closed or in an unwritable state
       }
     } finally {
       reader.releaseLock();
