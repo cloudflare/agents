@@ -44,23 +44,6 @@ describe("Auto Transport Mode", () => {
       expect(connection.tools).toBeDefined();
     });
 
-    it("should use connect using sse when available", async () => {
-      const connection = await initializeMCPClientConnection(
-        "http://example.com/sse",
-        "auto"
-      );
-
-      await connection.init();
-
-      expect(connection.connectionState).toBe("connected");
-
-      // Trigger discovery
-      await connection.discover();
-
-      expect(connection.connectionState).toBe("ready");
-      expect(connection.tools).toBeDefined();
-    });
-
     it("should not fallback for 5XX errors", async () => {
       const connection = await initializeMCPClientConnection(
         "http://example.com/500",

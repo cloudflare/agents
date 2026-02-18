@@ -585,7 +585,6 @@ export class MCPClientConnection {
     _request: ElicitRequest
   ): Promise<ElicitResult> {
     // Elicitation handling must be implemented by the platform
-    // For MCP servers, this should be handled by McpAgent.elicitInput()
     throw new Error(
       "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
     );

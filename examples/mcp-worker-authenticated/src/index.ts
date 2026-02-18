@@ -77,11 +77,7 @@ function createServer() {
  * This handler will receive requests that have a valid access token
  */
 const apiHandler = {
-  async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    //create the server instance every request
-    const server = createServer();
-    return createMcpHandler(server)(request, env, ctx);
-  }
+  fetch: createMcpHandler(createServer, { route: "/mcp" })
 };
 
 export default new OAuthProvider({

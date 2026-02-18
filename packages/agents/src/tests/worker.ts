@@ -115,10 +115,6 @@ export default {
       testValue: "123"
     };
 
-    if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-      return McpAgentImpl.serveSSE("/sse").fetch(request, env, ctx);
-    }
-
     if (url.pathname === "/mcp") {
       return McpAgentImpl.serve("/mcp").fetch(request, env, ctx);
     }

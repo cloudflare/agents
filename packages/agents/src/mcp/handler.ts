@@ -1,12 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  WorkerTransport,
-  type WorkerTransportOptions
-} from "./worker-transport";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
+import type { CORSOptions } from "./types";
+import { corsHeaders, handleCORS } from "./utils";
 
-export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
+export interface CreateMcpHandlerOptions {
   /**
    * The route path that this MCP handler should respond to.
    * If specified, the handler will only process requests that match this route.
@@ -14,19 +13,18 @@ export interface CreateMcpHandlerOptions extends WorkerTransportOptions {
    */
   route?: string;
   /**
+   * CORS options for the handler.
+   */
+  corsOptions?: CORSOptions;
+  /**
    * An optional auth context to use for handling MCP requests.
    * If not provided, the handler will look for props in the execution context.
    */
   authContext?: McpAuthContext;
-  /**
-   * An optional transport to use for handling MCP requests.
-   * If not provided, a WorkerTransport will be created with the provided WorkerTransportOptions.
-   */
-  transport?: WorkerTransport;
 }
 
 export function createMcpHandler(
-  server: McpServer | Server,
+  serverFactory: () => McpServer | Server,
   options: CreateMcpHandlerOptions = {}
 ): (
   request: Request,
@@ -45,15 +43,11 @@ export function createMcpHandler(
       return new Response("Not Found", { status: 404 });
     }
 
-    const transport =
-      options.transport ??
-      new WorkerTransport({
-        sessionIdGenerator: options.sessionIdGenerator,
-        enableJsonResponse: options.enableJsonResponse,
-        onsessioninitialized: options.onsessioninitialized,
-        corsOptions: options.corsOptions,
-        storage: options.storage
-      });
+    // Handle CORS preflight
+    const corsResponse = handleCORS(request, options.corsOptions);
+    if (corsResponse) {
+      return corsResponse;
+    }
 
     const buildAuthContext = () => {
       if (options.authContext) {
@@ -70,30 +64,21 @@ export function createMcpHandler(
     };
 
     const handleRequest = async () => {
-      return await transport.handleRequest(request);
+      // Create a fresh server + transport per request (stateless mode)
+      const server = serverFactory();
+      const transport = new WebStandardStreamableHTTPServerTransport();
+
+      await server.connect(transport);
+      const response = await transport.handleRequest(request);
+      // Add CORS headers to the response
+      const headers = corsHeaders(request, options.corsOptions);
+      for (const [key, value] of Object.entries(headers)) {
+        response.headers.set(key, value);
+      }
+      return response;
     };
 
     const authContext = buildAuthContext();
-
-    // Guard for stateful usage where a pre-connected transport is passed via options.
-    // If someone passes a transport that's already connected to this server, skip reconnecting.
-    // Note: If a developer incorrectly uses a global server with per-request transports,
-    // the MCP SDK 1.26.0+ will throw an error when trying to connect an already-connected server.
-    if (!transport.started) {
-      // Check if server is already connected (McpServer has isConnected(), Server uses transport getter)
-      const isServerConnected =
-        server instanceof McpServer
-          ? server.isConnected()
-          : server.transport !== undefined;
-
-      if (isServerConnected) {
-        throw new Error(
-          "Server is already connected to a transport. Create a new McpServer instance per request for stateless handlers."
-        );
-      }
-
-      await server.connect(transport);
-    }
 
     try {
       if (authContext) {
@@ -126,7 +111,7 @@ let didWarnAboutExperimentalCreateMcpHandler = false;
  * @deprecated This has been renamed to createMcpHandler, and experimental_createMcpHandler will be removed in the next major version
  */
 export function experimental_createMcpHandler(
-  server: McpServer | Server,
+  serverFactory: () => McpServer | Server,
   options: CreateMcpHandlerOptions = {}
 ): (
   request: Request,
@@ -139,5 +124,5 @@ export function experimental_createMcpHandler(
       "experimental_createMcpHandler is deprecated, use createMcpHandler instead. experimental_createMcpHandler will be removed in the next major version."
     );
   }
-  return createMcpHandler(server, options);
+  return createMcpHandler(serverFactory, options);
 }

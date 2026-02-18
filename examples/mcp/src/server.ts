@@ -24,7 +24,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
     counter: 1
   };
 
-  async init() {
+  async onStart() {
     // Register resource - Note: Current MCP SDK doesn't support icons in resource method yet
     // Icons are supported at the server implementation level
     this.server.resource("counter", "mcp://resource/counter", (uri) => {
@@ -104,22 +104,6 @@ export class MyMCP extends McpAgent<Env, State, {}> {
 
 export default {
   fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    const url = new URL(request.url);
-
-    // support both legacy SSE and new streamable-http
-
-    if (url.pathname.startsWith("/sse")) {
-      return MyMCP.serveSSE("/sse", { binding: "MyMCP" }).fetch(
-        request,
-        env,
-        ctx
-      );
-    }
-
-    if (url.pathname.startsWith("/mcp")) {
-      return MyMCP.serve("/mcp", { binding: "MyMCP" }).fetch(request, env, ctx);
-    }
-
-    return new Response("Not found", { status: 404 });
+    return MyMCP.serve("/mcp", { binding: "MyMCP" }).fetch(request, env, ctx);
   }
 };

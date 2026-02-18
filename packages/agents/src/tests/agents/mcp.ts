@@ -41,13 +41,11 @@ export class TestMcpAgent extends McpAgent<
       capabilities: {
         logging: {},
         tools: { listChanged: true }
-        // disable because types started failing in 1.22.0
-        // elicitation: { form: {}, url: {} }
       }
     }
   );
 
-  async init() {
+  async onStart() {
     this.server.registerTool(
       "greet",
       {
@@ -83,7 +81,6 @@ export class TestMcpAgent extends McpAgent<
         }
       },
       async ({ level, message }) => {
-        // Force a logging message to be sent when the tool is called
         await this.server.server.sendLoggingMessage({
           level,
           data: message
@@ -94,24 +91,29 @@ export class TestMcpAgent extends McpAgent<
       }
     );
 
-    this.server.tool(
+    this.server.registerTool(
       "elicitName",
-      "Test tool that elicits user input for a name",
-      {},
-      async () => {
-        const result = await this.server.server.elicitInput({
-          message: "What is your name?",
-          requestedSchema: {
-            type: "object",
-            properties: {
-              name: {
-                type: "string",
-                description: "Your name"
-              }
-            },
-            required: ["name"]
-          }
-        });
+      {
+        description: "Test tool that elicits user input for a name",
+        inputSchema: {}
+      },
+      async (_args, extra) => {
+        const result = await this.server.server.elicitInput(
+          {
+            message: "What is your name?",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                  description: "Your name"
+                }
+              },
+              required: ["name"]
+            }
+          },
+          { relatedRequestId: extra.requestId }
+        );
 
         if (result.action === "accept" && result.content?.name) {
           return {
@@ -131,7 +133,6 @@ export class TestMcpAgent extends McpAgent<
     );
 
     // Use `registerTool` so we can later remove it.
-    // Triggers notifications/tools/list_changed
     this.server.registerTool(
       "installTempTool",
       {
@@ -155,7 +156,6 @@ export class TestMcpAgent extends McpAgent<
       }
     );
 
-    // Remove the dynamically added tool.
     this.server.registerTool(
       "uninstallTempTool",
       {
@@ -176,35 +176,31 @@ export class TestMcpAgent extends McpAgent<
     );
 
     // Echo request info for testing header and auth passthrough
-    this.server.tool(
+    this.server.registerTool(
       "echoRequestInfo",
-      "Echo back request headers and auth info",
-      {},
+      {
+        description: "Echo back request headers and auth info",
+        inputSchema: {}
+      },
       async (_args, extra: ToolExtraInfo): Promise<CallToolResult> => {
-        // Extract headers from requestInfo, auth from authInfo
         const headers: IsomorphicHeaders = extra.requestInfo?.headers ?? {};
         const authInfo = extra.authInfo ?? null;
 
-        // Track non-function properties available in extra
         const extraRecord = extra as Record<string, unknown>;
         const extraKeys = Object.keys(extraRecord).filter(
           (key) => typeof extraRecord[key] !== "function"
         );
 
-        // Build response object with all available data
         const responseData: EchoResponseData = {
           headers,
           authInfo,
           hasRequestInfo: !!extra.requestInfo,
           hasAuthInfo: !!extra.authInfo,
           requestId: extra.requestId,
-          // Include any sessionId if it exists
           sessionId: extra.sessionId ?? null,
-          // List all available properties in extra
           availableExtraKeys: extraKeys
         };
 
-        // Add any other properties from extra that aren't already included
         extraKeys.forEach((key) => {
           if (
             !["requestInfo", "authInfo", "requestId", "sessionId"].includes(key)
@@ -235,7 +231,7 @@ export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
     { capabilities: { tools: {} } }
   );
 
-  async init() {
+  async onStart() {
     this.server.registerTool(
       "test-tool",
       {
@@ -253,7 +249,6 @@ export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
 export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
 
-  // Track resolved arguments from addMcpServer calls
   lastResolvedArgs: {
     serverName: string;
     url: string;
@@ -263,7 +258,6 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
     client?: unknown;
   } | null = null;
 
-  // Override to capture resolved arguments without actually connecting
   async addMcpServer(
     serverName: string,
     url: string,
@@ -281,7 +275,6 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
       transport?: { headers?: HeadersInit; type?: string };
     }
   ): Promise<{ id: string; state: "ready" }> {
-    // Normalize arguments - same logic as Agent.addMcpServer
     let resolvedCallbackHost: string | undefined;
     let resolvedAgentsPrefix: string;
     let resolvedOptions: typeof options;
@@ -290,7 +283,6 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
       typeof callbackHostOrOptions === "object" &&
       callbackHostOrOptions !== null
     ) {
-      // New API: options object as third parameter
       resolvedCallbackHost = callbackHostOrOptions.callbackHost;
       resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
       resolvedOptions = {
@@ -298,13 +290,11 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
         transport: callbackHostOrOptions.transport
       };
     } else {
-      // Legacy API: positional parameters
       resolvedCallbackHost = callbackHostOrOptions;
       resolvedAgentsPrefix = agentsPrefix ?? "agents";
       resolvedOptions = options;
     }
 
-    // Store resolved arguments for test verification
     this.lastResolvedArgs = {
       serverName,
       url,
@@ -314,7 +304,6 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
       client: resolvedOptions?.client
     };
 
-    // Return mock result without actually connecting
     return { id: "test-id", state: "ready" };
   }
 
@@ -324,7 +313,6 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
       agentsPrefix: "custom-agents",
       transport: { type: "sse", headers: { Authorization: "Bearer test" } }
     });
-    // Non-null assertion safe because addMcpServer always sets lastResolvedArgs
     return this.lastResolvedArgs!;
   }
 
