@@ -71,26 +71,33 @@ export function createMcpHandler(
     };
 
     const handleRequest = async () => {
+      let response: Response;
+
       if (options.transport) {
         // Stateful mode: transport already connected, just handle the request.
-        // CORS headers are added by the caller (e.g. McpAgent.serve()).
-        return options.transport.handleRequest(request);
+        response = await options.transport.handleRequest(request);
+      } else {
+        // Stateless mode: fresh server + transport per request
+        const server = serverFactory();
+        injectCfWorkerValidator(server);
+        const transport = new WebStandardStreamableHTTPServerTransport();
+
+        await server.connect(transport);
+        response = await transport.handleRequest(request);
       }
 
-      // Stateless mode: fresh server + transport per request
-      const server = serverFactory();
-      injectCfWorkerValidator(server);
-      const transport = new WebStandardStreamableHTTPServerTransport();
-
-      await server.connect(transport);
-      const response = await transport.handleRequest(request);
-
-      // Add CORS headers to the response
-      const headers = corsHeaders(request, options.corsOptions);
-      for (const [key, value] of Object.entries(headers)) {
-        response.headers.set(key, value);
+      // Add CORS headers. Clone the response since the transport may
+      // return responses with immutable headers.
+      const cors = corsHeaders(request, options.corsOptions);
+      const responseHeaders = new Headers(response.headers);
+      for (const [key, value] of Object.entries(cors)) {
+        responseHeaders.set(key, value);
       }
-      return response;
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: responseHeaders
+      });
     };
 
     const authContext = buildAuthContext();

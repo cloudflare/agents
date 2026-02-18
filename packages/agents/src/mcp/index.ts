@@ -5,7 +5,7 @@ import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Agent, getAgentByName } from "../index";
 import type { MaybePromise, CORSOptions } from "./types";
-import { corsHeaders, handleCORS, isDurableObjectNamespace } from "./utils";
+import { handleCORS, isDurableObjectNamespace } from "./utils";
 import { injectCfWorkerValidator } from "./cf-validator";
 import { createMcpHandler } from "./handler";
 
@@ -239,22 +239,9 @@ export abstract class McpAgent<
           jurisdiction
         });
 
-        // Forward the request to the DO's fetch handler
-        const doResponse = await agent.fetch(request);
-
-        // Create a new response with CORS headers added
-        // (DO responses may have immutable headers)
-        const cors = corsHeaders(request, corsOptions);
-        const responseHeaders = new Headers(doResponse.headers);
-        for (const [key, value] of Object.entries(cors)) {
-          responseHeaders.set(key, value);
-        }
-
-        return new Response(doResponse.body, {
-          status: doResponse.status,
-          statusText: doResponse.statusText,
-          headers: responseHeaders
-        });
+        // Forward the request to the DO's fetch handler.
+        // CORS response headers are added by createMcpHandler inside the DO.
+        return agent.fetch(request);
       }
     };
   }
