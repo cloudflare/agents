@@ -1,0 +1,30 @@
+{
+  "name": "@cloudflare/agents-think",
+  "description": "Experimental coding agent built on Workers + Durable Objects",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "test": "vitest run",
+    "test:workers": "vitest run -c tests/vitest.config.ts",
+    "test:e2e": "npx playwright test --config e2e/playwright.config.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.45",
+    "@ai-sdk/openai": "^3.0.29",
+    "@ai-sdk/react": "^3.0.90",
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.5.1",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "^6.0.88",
+    "workers-ai-provider": "^3.1.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.1.18"
+  }
+}

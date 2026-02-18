@@ -1,0 +1,19 @@
+{
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ThinkAgent",
+        "name": "ThinkAgent"
+      }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ThinkAgent"],
+      "tag": "v1"
+    }
+  ]
+}

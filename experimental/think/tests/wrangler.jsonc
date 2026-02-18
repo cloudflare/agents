@@ -1,0 +1,42 @@
+{
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "experimental",
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ThinkAgent",
+        "name": "ThinkAgent"
+      },
+      {
+        "class_name": "Chat",
+        "name": "Chat"
+      },
+      {
+        "class_name": "TestFacet",
+        "name": "TestFacet"
+      }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ThinkAgent"],
+      "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["Chat"],
+      "tag": "v2"
+    },
+    {
+      "new_sqlite_classes": ["TestFacet"],
+      "tag": "v3"
+    }
+  ]
+}
