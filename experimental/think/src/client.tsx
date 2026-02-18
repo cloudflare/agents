@@ -45,6 +45,9 @@ function Chat() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ThinkMessage[]>([]);
   const [threads, setThreads] = useState<ThreadInfo[]>([]);
+  const [streamingText, setStreamingText] = useState<string | null>(null);
+  const [reasoningText, setReasoningText] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(
     getThreadIdFromHash
   );
@@ -86,6 +89,9 @@ function Chat() {
           setActiveThreadId((current) => {
             if (data.threadId === current) {
               setMessages(data.messages);
+              setStreamingText(null);
+              setReasoningText(null);
+              setIsStreaming(false);
             }
             return current;
           });
@@ -94,6 +100,30 @@ function Chat() {
           setActiveThreadId((current) => {
             if (data.threadId === current) {
               setMessages([]);
+            }
+            return current;
+          });
+          break;
+        case MessageType.STREAM_DELTA:
+          setActiveThreadId((current) => {
+            if (data.threadId === current) {
+              setStreamingText((prev) => (prev ?? "") + data.delta);
+            }
+            return current;
+          });
+          break;
+        case MessageType.REASONING_DELTA:
+          setActiveThreadId((current) => {
+            if (data.threadId === current) {
+              setReasoningText((prev) => (prev ?? "") + data.delta);
+            }
+            return current;
+          });
+          break;
+        case MessageType.STREAM_END:
+          setActiveThreadId((current) => {
+            if (data.threadId === current) {
+              setIsStreaming(false);
             }
             return current;
           });
@@ -190,7 +220,7 @@ function Chat() {
 
   const send = useCallback(() => {
     const text = input.trim();
-    if (!text || !activeThreadId) return;
+    if (!text || !activeThreadId || isStreaming) return;
     setInput("");
 
     const message: ThinkMessage = {
@@ -201,6 +231,9 @@ function Chat() {
     };
 
     setMessages((prev) => [...prev, message]);
+    setStreamingText(null);
+    setReasoningText(null);
+    setIsStreaming(true);
 
     agent.send(
       JSON.stringify({
@@ -209,7 +242,14 @@ function Chat() {
         message
       })
     );
-  }, [input, agent, activeThreadId]);
+
+    agent.send(
+      JSON.stringify({
+        type: MessageType.RUN,
+        threadId: activeThreadId
+      })
+    );
+  }, [input, agent, activeThreadId, isStreaming]);
 
   const clearHistory = useCallback(() => {
     if (!activeThreadId) return;
@@ -254,6 +294,7 @@ function Chat() {
           {threads.map((thread) => (
             <div
               key={thread.id}
+              // oxlint-disable-next-line jsx_a11y/prefer-tag-over-role
               role="button"
               tabIndex={0}
               className={`group mb-1 flex w-full cursor-pointer items-center justify-between rounded-lg px-3 py-2 text-left transition-colors ${
@@ -338,17 +379,65 @@ function Chat() {
                           </div>
                         </div>
                       ) : (
-                        <div className="flex justify-start">
-                          <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base px-4 py-2.5 leading-relaxed text-kumo-default">
-                            <div className="whitespace-pre-wrap">
-                              {message.content}
+                        <>
+                          {message.reasoning && (
+                            <div className="flex justify-start">
+                              <details className="max-w-[85%] rounded-xl border border-kumo-line bg-kumo-elevated px-3 py-2 text-xs text-kumo-inactive">
+                                <summary className="cursor-pointer select-none font-medium">
+                                  Thinking
+                                </summary>
+                                <div className="mt-2 whitespace-pre-wrap font-mono opacity-70">
+                                  {message.reasoning}
+                                </div>
+                              </details>
+                            </div>
+                          )}
+                          <div className="flex justify-start">
+                            <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base px-4 py-2.5 leading-relaxed text-kumo-default">
+                              <div className="whitespace-pre-wrap">
+                                {message.content}
+                              </div>
                             </div>
                           </div>
-                        </div>
+                        </>
                       )}
                     </div>
                   );
                 })}
+
+                {(streamingText !== null || reasoningText !== null) && (
+                  <div className="space-y-2">
+                    {reasoningText && (
+                      <div className="flex justify-start">
+                        <details className="max-w-[85%] rounded-xl border border-kumo-line bg-kumo-elevated px-3 py-2 text-xs text-kumo-inactive">
+                          <summary className="cursor-pointer select-none font-medium">
+                            Thinking
+                            {isStreaming && streamingText === null && (
+                              <span className="ml-1 inline-block h-3 w-0.5 animate-pulse bg-kumo-inactive align-text-bottom" />
+                            )}
+                          </summary>
+                          <div className="mt-2 whitespace-pre-wrap font-mono opacity-70">
+                            {reasoningText}
+                          </div>
+                        </details>
+                      </div>
+                    )}
+                    <div className="flex justify-start">
+                      <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base px-4 py-2.5 leading-relaxed text-kumo-default">
+                        <div className="whitespace-pre-wrap">
+                          {streamingText || (
+                            <span className="text-kumo-inactive">
+                              Thinking...
+                            </span>
+                          )}
+                          {isStreaming && (
+                            <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-kumo-brand align-text-bottom" />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 <div ref={messagesEndRef} />
               </div>
@@ -372,8 +461,12 @@ function Chat() {
                         send();
                       }
                     }}
-                    placeholder="Describe what you want to build..."
-                    disabled={!isConnected}
+                    placeholder={
+                      isStreaming
+                        ? "Agent is responding..."
+                        : "Describe what you want to build..."
+                    }
+                    disabled={!isConnected || isStreaming}
                     rows={2}
                     className="flex-1 bg-transparent! shadow-none! outline-none! ring-0! focus:ring-0!"
                   />
@@ -382,8 +475,9 @@ function Chat() {
                     variant="primary"
                     shape="square"
                     aria-label="Send message"
-                    disabled={!input.trim() || !isConnected}
+                    disabled={!input.trim() || !isConnected || isStreaming}
                     icon={<PaperPlaneRightIcon size={18} />}
+                    loading={isStreaming}
                     className="mb-0.5"
                   />
                 </div>

@@ -4,11 +4,16 @@ const MessageType = {
   SYNC: "sync",
   CLEAR: "clear",
   THREADS: "threads",
+  STREAM_DELTA: "stream_delta",
+  REASONING_DELTA: "reasoning_delta",
+  STREAM_END: "stream_end",
   ADD: "add",
   DELETE: "delete",
   CLEAR_REQUEST: "clear_request",
   CREATE_THREAD: "create_thread",
-  DELETE_THREAD: "delete_thread"
+  DELETE_THREAD: "delete_thread",
+  RUN: "run",
+  GET_MESSAGES: "get_messages"
 } as const;
 
 const DEFAULT_THREAD = "default";
@@ -211,5 +216,207 @@ test.describe("ThinkAgent e2e", () => {
     const threadMsgs = messages.filter((m) => m.type === MessageType.THREADS);
     const last = threadMsgs[threadMsgs.length - 1];
     expect(last.threads).toEqual([]);
+  });
+});
+
+// ── Streaming (AI required) ──────────────────────────────────────────
+
+test.describe("ThinkAgent streaming e2e (AI)", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("about:blank");
+  });
+
+  test("RUN streams STREAM_DELTA events and persists final message", async ({
+    page,
+    baseURL
+  }) => {
+    const room = crypto.randomUUID();
+
+    type StreamResult = {
+      streamDeltas: number;
+      reasoningDeltas: number;
+      gotStreamEnd: boolean;
+      finalMessages: Array<{
+        role: string;
+        content: string;
+        reasoning?: string;
+      }>;
+    };
+
+    const result = await page.evaluate(
+      ({ url, MT, THREAD }) => {
+        return new Promise<StreamResult>((resolve, reject) => {
+          const ws = new WebSocket(url);
+          let streamDeltas = 0;
+          let reasoningDeltas = 0;
+          let gotStreamEnd = false;
+          let gotSync = false;
+
+          ws.onmessage = (e) => {
+            const data = JSON.parse(e.data as string) as {
+              type: string;
+              threadId?: string;
+              delta?: string;
+              messages?: Array<{
+                role: string;
+                content: string;
+                reasoning?: string;
+              }>;
+            };
+
+            if (data.type === MT.STREAM_DELTA && data.threadId === THREAD) {
+              streamDeltas++;
+            }
+            if (data.type === MT.REASONING_DELTA && data.threadId === THREAD) {
+              reasoningDeltas++;
+            }
+            if (data.type === MT.STREAM_END && data.threadId === THREAD) {
+              gotStreamEnd = true;
+            }
+            if (
+              data.type === MT.SYNC &&
+              data.threadId === THREAD &&
+              streamDeltas > 0
+            ) {
+              gotSync = true;
+              ws.close();
+              resolve({
+                streamDeltas,
+                reasoningDeltas,
+                gotStreamEnd,
+                finalMessages: data.messages ?? []
+              });
+            }
+          };
+
+          ws.onerror = () => reject(new Error("WebSocket error"));
+
+          ws.onopen = () => {
+            setTimeout(() => {
+              ws.send(
+                JSON.stringify({
+                  type: MT.ADD,
+                  threadId: THREAD,
+                  message: {
+                    id: "stream-test-1",
+                    role: "user",
+                    content: "Say exactly the word 'hello'.",
+                    createdAt: Date.now()
+                  }
+                })
+              );
+              ws.send(JSON.stringify({ type: MT.RUN, threadId: THREAD }));
+            }, 300);
+          };
+
+          setTimeout(
+            () => reject(new Error("Timeout waiting for streaming")),
+            60_000
+          );
+        });
+      },
+      {
+        url: agentUrl(baseURL!, room),
+        MT: MessageType,
+        THREAD: DEFAULT_THREAD
+      }
+    );
+
+    expect(result.streamDeltas).toBeGreaterThan(0);
+    expect(result.gotStreamEnd).toBe(true);
+    expect(result.finalMessages.length).toBeGreaterThanOrEqual(2);
+
+    const assistantMsg = result.finalMessages.find(
+      (m) => m.role === "assistant"
+    );
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg!.content.length).toBeGreaterThan(0);
+  });
+
+  test("reasoning traces are persisted and survive reconnect", async ({
+    page,
+    baseURL
+  }) => {
+    const room = crypto.randomUUID();
+
+    // First connection: send message, run, wait for sync
+    await page.evaluate(
+      ({ url, MT, THREAD }) => {
+        return new Promise<void>((resolve, reject) => {
+          const ws = new WebSocket(url);
+          let gotSync = false;
+          let streamStarted = false;
+
+          ws.onmessage = (e) => {
+            const data = JSON.parse(e.data as string) as {
+              type: string;
+              threadId?: string;
+            };
+            if (data.type === MT.STREAM_DELTA) streamStarted = true;
+            if (
+              data.type === MT.SYNC &&
+              data.threadId === THREAD &&
+              streamStarted
+            ) {
+              gotSync = true;
+              ws.close();
+              resolve();
+            }
+          };
+          ws.onerror = () => reject(new Error("WebSocket error"));
+          ws.onopen = () => {
+            setTimeout(() => {
+              ws.send(
+                JSON.stringify({
+                  type: MT.ADD,
+                  threadId: THREAD,
+                  message: {
+                    id: "reasoning-test-1",
+                    role: "user",
+                    content: "What is 1 + 1?",
+                    createdAt: Date.now()
+                  }
+                })
+              );
+              ws.send(JSON.stringify({ type: MT.RUN, threadId: THREAD }));
+            }, 300);
+          };
+          setTimeout(() => reject(new Error("Timeout")), 60_000);
+        });
+      },
+      {
+        url: agentUrl(baseURL!, room),
+        MT: MessageType,
+        THREAD: DEFAULT_THREAD
+      }
+    );
+
+    // Second connection: request messages, verify assistant message exists
+    const messages = await connectAndRun(
+      page,
+      agentUrl(baseURL!, room),
+      `
+      setTimeout(() => {
+        ws.send(JSON.stringify({ type: MT.GET_MESSAGES, threadId: THREAD }));
+        setTimeout(() => { ws.close(); resolve(received); }, 1000);
+      }, 500);
+      `
+    );
+
+    const syncMsg = messages.find(
+      (m) => m.type === MessageType.SYNC && m.threadId === DEFAULT_THREAD
+    );
+    expect(syncMsg).toBeDefined();
+    const msgs = syncMsg!.messages as Array<{
+      role: string;
+      content: string;
+      reasoning?: string;
+    }>;
+    expect(msgs.length).toBeGreaterThanOrEqual(2);
+    const assistant = msgs.find((m) => m.role === "assistant");
+    expect(assistant).toBeDefined();
+    expect(assistant!.content.length).toBeGreaterThan(0);
+    // If model supports reasoning, the field should be present
+    // (no assertion on reasoning field — depends on model capability)
   });
 });

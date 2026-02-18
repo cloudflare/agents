@@ -4,6 +4,7 @@ export { ThinkAgent, Chat } from "../src/server";
 
 type Env = {
   ThinkAgent: DurableObjectNamespace<import("../src/server").ThinkAgent>;
+  AI: Ai;
 };
 
 export default {

@@ -1,5 +1,17 @@
+import type { ModelMessage, ToolSet } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
 import { AgentFacet } from "./agent-facet";
+import { AgentLoop, type StepResult } from "./agent-loop";
 import type { BaseMessage, ThinkMessage } from "./shared";
+
+export type { StepResult } from "./agent-loop";
+
+export type RunOptions = {
+  model?: string;
+  system?: string;
+  tools?: ToolSet;
+  maxSteps?: number;
+};
 
 /** Typed facet stub — all methods become async over RPC. */
 export interface ChatFacet<M extends BaseMessage = ThinkMessage> {
@@ -12,16 +24,27 @@ export interface ChatFacet<M extends BaseMessage = ThinkMessage> {
   applyToolResult(toolCallId: string, output: unknown): Promise<boolean>;
   applyToolApproval(toolCallId: string, approved: boolean): Promise<boolean>;
   cancelRequest(requestId: string): Promise<void>;
+  runStep(options?: RunOptions): Promise<StepResult>;
+  run(options?: RunOptions): Promise<StepResult>;
+  streamInto(
+    writable: WritableStream<Uint8Array>,
+    options?: RunOptions
+  ): Promise<void>;
 }
 
 const textEncoder = new TextEncoder();
 
+const DEFAULT_MODEL = "@cf/zai-org/glm-4.7-flash";
+
 /**
  * Chat thread — a single conversation with message persistence,
- * tool state tracking, and streaming support.
+ * tool state tracking, streaming support, and an agent loop.
  *
  * Extends AgentFacet for sql, scheduling, abort, retry infrastructure.
  * The parent (ThinkAgent) calls these methods via facet RPC.
+ *
+ * The model is created INSIDE the facet (not passed across RPC)
+ * because LanguageModel objects aren't serializable.
  *
  * Generic over message type — only requires `{ id: string }`.
  */
@@ -54,6 +77,16 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
       )
     `;
     this._messages = this._loadMessages();
+  }
+
+  // ── Model creation (internal) ──────────────────────────────────────
+
+  private _createModel(modelId?: string) {
+    const workersai = createWorkersAI({
+      binding: (this.env as unknown as { AI: Ai }).AI
+    });
+    // @ts-expect-error -- model not yet in workers-ai-provider type list
+    return workersai(modelId ?? DEFAULT_MODEL);
   }
 
   // ── Public API: message CRUD ───────────────────────────────────────
@@ -237,6 +270,150 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
     }
 
     return updated;
+  }
+
+  // ── Agent loop ─────────────────────────────────────────────────────
+
+  /**
+   * Run a single LLM call. Model is created inside the facet
+   * (LanguageModel objects can't cross the RPC boundary).
+   */
+  async runStep(options?: RunOptions): Promise<StepResult> {
+    const loop = new AgentLoop({
+      model: this._createModel(options?.model),
+      system: options?.system,
+      tools: options?.tools
+    });
+
+    const result = await loop.step(this._messages as unknown as ModelMessage[]);
+
+    if (result.responseMessages.length > 0) {
+      this.persistMessages([
+        ...this._messages,
+        ...this._convertResponseMessages(result.responseMessages)
+      ]);
+    }
+
+    return result;
+  }
+
+  /**
+   * Run the full agent loop. Model is created inside the facet.
+   */
+  async run(options?: RunOptions): Promise<StepResult> {
+    const loop = new AgentLoop({
+      model: this._createModel(options?.model),
+      system: options?.system,
+      tools: options?.tools,
+      maxSteps: options?.maxSteps
+    });
+
+    const result = await loop.run(this._messages as unknown as ModelMessage[]);
+
+    if (result.responseMessages.length > 0) {
+      this.persistMessages([
+        ...this._messages,
+        ...this._convertResponseMessages(result.responseMessages)
+      ]);
+    }
+
+    return result;
+  }
+
+  /**
+   * Stream a response into a WritableStream provided by the caller.
+   *
+   * The caller (ThinkAgent) creates a TransformStream, passes the
+   * writable side here, and reads from the readable side. By writing
+   * directly into the caller's writable, the Workers RPC connection
+   * stays alive for the duration — no "disconnected prematurely" issue.
+   *
+   * Persists the final assistant message before returning.
+   */
+  async streamInto(
+    writable: WritableStream<Uint8Array>,
+    options?: RunOptions
+  ): Promise<void> {
+    console.log("[Chat.streamInto] starting");
+
+    const loop = new AgentLoop({
+      model: this._createModel(options?.model),
+      system: options?.system,
+      tools: options?.tools,
+      maxSteps: options?.maxSteps
+    });
+
+    const { textStream, result } = loop.stream(
+      this._messages as unknown as ModelMessage[]
+    );
+
+    const encoder = new TextEncoder();
+    const writer = writable.getWriter();
+    const reader = textStream.getReader();
+    let chunkCount = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunkCount++;
+        await writer.write(encoder.encode(value));
+      }
+      console.log(`[Chat.streamInto] done, ${chunkCount} chunks`);
+      await writer.close();
+    } catch (err) {
+      console.error("[Chat.streamInto] stream error:", err);
+      try {
+        await writer.abort(err);
+      } catch {
+        // ignore abort errors
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    try {
+      const r = await result;
+      if (r.text || r.reasoning) {
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const message = {
+          id,
+          role: "assistant",
+          content: r.text,
+          ...(r.reasoning ? { reasoning: r.reasoning } : {}),
+          createdAt: Date.now()
+        } as unknown as M;
+        this.persistMessages([...this._messages, message]);
+        console.log(
+          `[Chat.streamInto] persisted, reasoning=${r.reasoning?.length ?? 0} chars`
+        );
+      }
+    } catch (err) {
+      console.error("[Chat.streamInto] persist error:", err);
+    }
+  }
+
+  private _convertResponseMessages(messages: ModelMessage[]): M[] {
+    return messages.map((msg) => {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+
+      let content = "";
+      if (typeof msg.content === "string") {
+        content = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        content = msg.content
+          .filter((p) => "type" in p && p.type === "text")
+          .map((p) => ("text" in p ? (p.text as string) : ""))
+          .join("");
+      }
+
+      return {
+        id,
+        role: msg.role === "tool" ? "assistant" : msg.role,
+        content,
+        createdAt: Date.now()
+      } as unknown as M;
+    });
   }
 
   // ── Row size enforcement ───────────────────────────────────────────
