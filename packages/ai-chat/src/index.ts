@@ -675,6 +675,12 @@ export class AIChatAgent<
       // Forward unhandled messages to consumer's onMessage
       return _onMessage(connection, message);
     };
+
+    // since we're in a module that we know using ai-sdk, let's immediately ensure the .jsonSchema function is loaded
+    // todo: for some reason, wrapping this in a blockConcurrencyWhile is causing issues with the test runner
+    this.mcp.ensureJsonSchema().catch((error) => {
+      console.error("Error ensuring jsonSchema:", error);
+    });
   }
 
   /**
