@@ -8,6 +8,12 @@
     "enable_nodejs_http_modules",
     "enable_nodejs_perf_hooks_module"
   ],
+  "r2_buckets": [
+    {
+      "binding": "WORKSPACE_FILES",
+      "bucket_name": "think-workspace-files"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -19,8 +25,20 @@
         "name": "Chat"
       },
       {
+        "class_name": "Workspace",
+        "name": "Workspace"
+      },
+      {
         "class_name": "TestFacet",
         "name": "TestFacet"
+      },
+      {
+        "class_name": "TestChat",
+        "name": "TestChat"
+      },
+      {
+        "class_name": "TestWorkspace",
+        "name": "TestWorkspace"
       }
     ]
   },
@@ -37,6 +55,18 @@
     {
       "new_sqlite_classes": ["TestFacet"],
       "tag": "v3"
+    },
+    {
+      "new_sqlite_classes": ["Workspace"],
+      "tag": "v4"
+    },
+    {
+      "new_sqlite_classes": ["TestChat"],
+      "tag": "v5"
+    },
+    {
+      "new_sqlite_classes": ["TestWorkspace"],
+      "tag": "v6"
     }
   ]
 }

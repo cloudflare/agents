@@ -10,6 +10,7 @@
     "types": "wrangler types env.d.ts --include-runtime false",
     "test": "vitest run",
     "test:workers": "vitest run -c tests/vitest.config.ts",
+    "test:node": "vitest run --project think-node",
     "test:e2e": "npx playwright test --config e2e/playwright.config.ts"
   },
   "dependencies": {
@@ -19,8 +20,11 @@
     "@cloudflare/agents-ui": "*",
     "@cloudflare/kumo": "^1.5.1",
     "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.0.2",
     "agents": "*",
     "ai": "^6.0.88",
+    "just-bash": "^2.10.2",
+    "streamdown": "^2.2.0",
     "workers-ai-provider": "^3.1.1"
   },
   "devDependencies": {

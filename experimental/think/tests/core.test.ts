@@ -3,6 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { ThinkMessage } from "../src/shared";
 import type { Env } from "./worker";
 
+function getTestChat(name: string) {
+  return env.TestChat.get(env.TestChat.idFromName(name));
+}
+
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
@@ -607,5 +611,69 @@ describe("Chat reasoning field persistence", () => {
     await chat.persistMessages(msgs);
     const result = await chat.getMessages();
     expect(result[1].reasoning).toBe("Simple addition.");
+  });
+});
+
+// ── Storage resilience ────────────────────────────────────────────────
+
+describe("Chat storage resilience", () => {
+  it("silently skips rows with invalid JSON on load", async () => {
+    const name = `corrupt-json-${crypto.randomUUID()}`;
+    const chat = getTestChat(name);
+
+    // Write a valid message, then inject a corrupted row
+    await chat.addMessage(makeMessage("user", "valid message"));
+    await chat.injectCorruptedRow("bad-row-1");
+
+    // Reload by getting a fresh stub to the same DO instance
+    const chat2 = getTestChat(name);
+    const messages = await chat2.getMessages();
+
+    // Only the valid message should come back
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content).toBe("valid message");
+  });
+
+  it("silently skips rows where parsed JSON lacks an id field", async () => {
+    const name = `missing-id-${crypto.randomUUID()}`;
+    const chat = getTestChat(name);
+
+    await chat.addMessage(makeMessage("user", "keep this"));
+    await chat.injectMissingIdRow("no-id-row");
+
+    const chat2 = getTestChat(name);
+    const messages = await chat2.getMessages();
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content).toBe("keep this");
+  });
+
+  it("corrupted rows do not affect subsequent addMessage calls", async () => {
+    const name = `corrupt-add-${crypto.randomUUID()}`;
+    const chat = getTestChat(name);
+
+    await chat.injectCorruptedRow("corrupt-1");
+    await chat.injectCorruptedRow("corrupt-2");
+
+    // addMessage should still work normally despite corrupted storage
+    const result = await chat.addMessage(makeMessage("assistant", "recovery"));
+    expect(result).toHaveLength(1);
+    expect(result[0].content).toBe("recovery");
+  });
+
+  it("valid messages mixed with corrupted rows are all returned", async () => {
+    const name = `mixed-rows-${crypto.randomUUID()}`;
+    const chat = getTestChat(name);
+
+    await chat.addMessage(makeMessage("user", "first"));
+    await chat.injectCorruptedRow("bad-middle");
+    await chat.addMessage(makeMessage("assistant", "third"));
+
+    const chat2 = getTestChat(name);
+    const messages = await chat2.getMessages();
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0].content).toBe("first");
+    expect(messages[1].content).toBe("third");
   });
 });

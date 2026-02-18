@@ -2,6 +2,12 @@
   "ai": { "binding": "AI", "remote": true },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat", "experimental"],
+  "r2_buckets": [
+    {
+      "binding": "WORKSPACE_FILES",
+      "bucket_name": "think-workspace-files"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
