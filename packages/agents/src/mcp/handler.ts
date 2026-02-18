@@ -4,6 +4,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { runWithAuthContext, type McpAuthContext } from "./auth-context";
 import type { CORSOptions } from "./types";
 import { corsHeaders, handleCORS } from "./utils";
+import { injectCfWorkerValidator } from "./cf-validator";
 
 export interface CreateMcpHandlerOptions {
   /**
@@ -66,6 +67,7 @@ export function createMcpHandler(
     const handleRequest = async () => {
       // Create a fresh server + transport per request (stateless mode)
       const server = serverFactory();
+      injectCfWorkerValidator(server);
       const transport = new WebStandardStreamableHTTPServerTransport();
 
       await server.connect(transport);

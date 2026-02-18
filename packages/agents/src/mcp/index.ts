@@ -6,6 +6,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Agent, getAgentByName } from "../index";
 import type { MaybePromise, CORSOptions } from "./types";
 import { corsHeaders, handleCORS, isDurableObjectNamespace } from "./utils";
+import { injectCfWorkerValidator } from "./cf-validator";
 
 interface McpAgentServeOptions {
   /**
@@ -102,6 +103,7 @@ export abstract class McpAgent<
     });
 
     const server = await this.server;
+    injectCfWorkerValidator(server);
     await server.connect(this._mcpTransport);
     this._mcpServerConnected = true;
 
