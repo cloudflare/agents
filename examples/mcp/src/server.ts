@@ -24,7 +24,7 @@ export class MyMCP extends McpAgent<Env, State, {}> {
     counter: 1
   };
 
-  async onStart() {
+  async init() {
     // Register resource - Note: Current MCP SDK doesn't support icons in resource method yet
     // Icons are supported at the server implementation level
     this.server.resource("counter", "mcp://resource/counter", (uri) => {

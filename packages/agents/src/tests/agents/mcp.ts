@@ -45,7 +45,7 @@ export class TestMcpAgent extends McpAgent<
     }
   );
 
-  async onStart() {
+  async init() {
     this.server.registerTool(
       "greet",
       {
@@ -231,7 +231,7 @@ export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
     { capabilities: { tools: {} } }
   );
 
-  async onStart() {
+  async init() {
     this.server.registerTool(
       "test-tool",
       {

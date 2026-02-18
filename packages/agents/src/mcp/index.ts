@@ -39,7 +39,7 @@ export abstract class McpAgent<
 
   /**
    * Props passed from the Worker to this DO instance.
-   * Available after onStart() is called.
+   * Available after init() is called.
    */
   props?: Props;
 
@@ -48,8 +48,19 @@ export abstract class McpAgent<
   private _mcpSetupPromise?: Promise<void>;
 
   /**
-   * Internal: wrap onStart to handle props and MCP setup.
-   * The user's onStart() is called after props are stored and MCP is set up.
+   * Override this method to register tools, resources, and prompts
+   * on the MCP server.
+   *
+   * ```ts
+   * async init() {
+   *   this.server.registerTool("add", { ... }, async () => { ... });
+   * }
+   * ```
+   */
+  async init(): Promise<void> {}
+
+  /**
+   * Internal: wrap onStart to handle props, user init(), and MCP setup.
    */
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -62,9 +73,12 @@ export abstract class McpAgent<
       }
       this.props = (await this.ctx.storage.get<Props>("mcp:props")) ?? props;
 
-      // Call user's onStart first (where they register tools, resources, etc.)
-      // Tools must be registered BEFORE connecting to the transport.
+      // Call the parent onStart (Agent lifecycle)
       await _userOnStart(props);
+
+      // Call user's init() (where they register tools, resources, etc.)
+      // Tools must be registered BEFORE connecting to the transport.
+      await this.init();
 
       // Set up MCP transport and connect the server
       await this._setupMcp();
@@ -262,3 +276,10 @@ export {
 } from "./handler";
 
 export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
+
+/**
+ * @deprecated WorkerTransport has been removed. Use `WebStandardStreamableHTTPServerTransport`
+ * from `@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js` directly, or use
+ * `createMcpHandler` / `McpAgent` which handle transport creation for you.
+ */
+export const WorkerTransport = WebStandardStreamableHTTPServerTransport;

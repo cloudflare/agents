@@ -18,7 +18,7 @@ export class MyAgent extends McpAgent<Cloudflare.Env, State> {
     counter: 0
   };
 
-  async onStart() {
+  async init() {
     this.server.registerTool(
       "increase-counter",
       {
