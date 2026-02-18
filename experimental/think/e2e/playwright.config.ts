@@ -9,8 +9,8 @@ const configPath = join(e2eDir, "wrangler.jsonc");
 export default defineConfig({
   testDir: e2eDir,
   testMatch: "*.spec.ts",
-  timeout: 30_000,
-  retries: 3,
+  timeout: 90_000,
+  retries: 2,
   workers: 1,
   use: {
     baseURL: `http://localhost:${PORT}`

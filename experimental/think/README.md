@@ -1,78 +1,115 @@
 # Think — Coding Agent
 
-Experimental exploration of building a coding agent entirely on Workers, Durable Objects, and the Agents SDK. This is scaffolding for the infrastructure layer — message persistence, multi-thread management, and the facet-based architecture that the agent loop will run on.
+Experimental exploration of building a coding agent (and eventually a general personal assistant) entirely on Workers, Durable Objects, and the Agents SDK.
 
 ## Architecture
 
 ```
-ThinkAgent (Agent, owns WebSocket connections)
-  ├── threads table (own SQLite — thread registry)
-  ├── ctx.facets.get("thread-abc") → Chat (isolated SQLite)
-  ├── ctx.facets.get("thread-def") → Chat (isolated SQLite)
-  └── ctx.facets.get("thread-xyz") → Chat (isolated SQLite)
+ThinkAgent (Agent — session orchestrator)
+  ├── threads table (own SQLite)
+  ├── WebSocket transport to browser
+  ├── Gatekeeper for tool approval (future)
+  │
+  ├── Chat facet "thread-abc" (AgentFacet — isolated SQLite)
+  │     ├── Message persistence
+  │     ├── Tool state tracking
+  │     ├── Streaming message management
+  │     └── AgentLoop (step-at-a-time LLM execution)
+  │
+  ├── Chat facet "thread-def" (independent conversation)
+  └── Sandbox facet (future — code execution, restricted env)
 ```
 
-Two classes, two levels of storage:
+### Three layers
 
-**ThinkAgent** extends `Agent` and is the orchestrator. It owns WebSocket connections to the browser, maintains a thread registry in its own SQLite, and routes messages to per-thread Chat facets. All public methods (`createThread`, `deleteThread`, `renameThread`, `getThreads`) are callable via RPC — a parent gadget can drive ThinkAgent without WebSockets.
+**AgentFacet** (`src/agent-facet.ts`) — base class for all facets. Extends `DurableObject` with:
+- `this.sql` tagged template (same API as Agent)
+- Full scheduling (delayed, Date, cron, interval with overlap detection + hung timeout)
+- Abort controller lifecycle
+- `this.retry()` with jittered exponential backoff
+- `onError()` hook, `onStart()` lifecycle, `destroyed` flag
+- Static `options` for retry defaults and hung schedule timeout
 
-**Chat** extends `DurableObject` and is a facet — a child DO with isolated SQLite, created by the parent via `ctx.facets.get()`. Each Chat instance is one conversation thread. Its public API (`addMessage`, `deleteMessage`, `clearMessages`, `getMessages`) is the RPC surface that ThinkAgent calls. Chat has no opinion about transport — it doesn't know about WebSockets, clients, or broadcasting. It just persists messages.
+**Chat** (`src/chat.ts`) — extends AgentFacet. A single conversation thread:
+- Message CRUD + batch `persistMessages()` with incremental diffing
+- Row size limits (1.8MB cap, generic truncation of largest strings)
+- `maxPersistedMessages` with oldest-first eviction
+- OpenAI message sanitization (strips `itemId`, empty reasoning parts)
+- Tool state tracking (`applyToolResult`, `applyToolApproval`) for both streaming and persisted messages
+- Streaming message management (`startStreamingMessage` / `completeStreamingMessage`)
+- Generic over message type — only requires `{ id: string }`
+
+**ThinkAgent** (`src/server.ts`) — extends Agent. The session orchestrator:
+- Thread registry (create, delete, rename, list) in its own SQLite
+- Routes messages to per-thread Chat facets via `ctx.facets.get()`
+- WebSocket transport to the browser (thread-aware protocol)
+- All public methods are RPC-callable — a parent gadget can drive it without WebSockets
+
+### AgentLoop
+
+The agent loop (`src/agent-loop.ts`) is a standalone class — not a DO, not a facet. It:
+- Takes a model + tools + messages, calls `generateText`, returns a structured result
+- Runs one LLM call per `step()` invocation (step-at-a-time, not auto-looping)
+- Has no opinion about persistence or transport — the caller decides
+- Is testable with mock models and in-memory arrays
+
+Chat wires the loop to its storage via `runStep()`. The loop is shared infrastructure — future facet types (task runner, research agent) compose differently with the same loop.
 
 ### Why facets
 
-Facets (`ctx.facets`, experimental) give each thread its own SQLite database, co-located on the same machine as the parent. This means:
+Facets (`ctx.facets`, experimental) give each thread its own SQLite database, co-located on the same machine as the parent:
 
-- Thread isolation is structural, not by-convention. Each Chat cannot access another Chat's data.
-- The parent controls the lifecycle — it can create, delete, and restrict capabilities of each thread.
-- When the facet API ships, this architecture maps directly. For now, it works in dev with the `"experimental"` compatibility flag.
+- Thread isolation is structural, not by-convention
+- The parent controls lifecycle (create, delete, restrict capabilities)
+- Each facet inherits scheduling, SQL, retry from AgentFacet
+- Works in dev with the `"experimental"` compatibility flag
 
 ### Why not AIChatAgent
 
-`@cloudflare/ai-chat` bundles together message persistence, the AI SDK streaming protocol, tool handling, stream resumption, and WebSocket transport. That's great for chat apps, but a coding agent needs different things:
+`@cloudflare/ai-chat` bundles message persistence, streaming protocol, tool handling, and WebSocket transport into one class. A personal assistant needs different things:
 
-- The agent loop may run for minutes or hours (long tool calls, hibernation, resume). The loop needs to be manually stepped, not driven by a streaming response.
-- Messages might come from the agent itself (tool results, status updates), not just from user input or LLM output.
-- The transport is pluggable — when running inside a gadget, the parent communicates via RPC, not WebSocket.
-- Thread management is first-class — a single agent manages multiple independent conversations.
-
-So we built the message layer from scratch, keeping it generic enough to swap the message format later (the sync layer only requires `{ id: string }`).
-
-### Message format
-
-The sync layer is parameterized over the message type via `BaseMessage = { id: string }`. The current concrete type is `ThinkMessage` (role + content + createdAt), but this will switch to AI SDK's `UIMessage` when the agent loop lands. The persistence layer stores messages as opaque JSON blobs — it doesn't inspect the shape beyond the `id` field.
+- The agent loop may run for minutes or hours (long tool calls, hibernation, resume)
+- Messages come from multiple sources (user, agent, tools, system)
+- The transport is pluggable (WebSocket for browser, RPC for gadgets)
+- Thread management is first-class
+- The gatekeeper pattern needs structural separation between the loop and the policy layer
 
 ### WebSocket protocol
 
-Every message in the protocol carries a `threadId`. The server sends:
+Every message carries a `threadId`. The server sends:
 
-- `THREADS` — the full thread list (on connect + after thread mutations)
-- `SYNC` — all messages for a specific thread (after message mutations)
-- `CLEAR` — a thread was cleared
+- `THREADS` — full thread list (on connect + after mutations)
+- `SYNC` — messages for a thread (after mutations or on `GET_MESSAGES` request)
+- `CLEAR` — thread was cleared
 
 The client sends:
 
 - `ADD` / `DELETE` / `CLEAR_REQUEST` — message operations, scoped to a thread
 - `CREATE_THREAD` / `DELETE_THREAD` / `RENAME_THREAD` — thread management
+- `GET_MESSAGES` — request messages for a thread (used on select/refresh)
 
-The protocol is defined as discriminated unions in `src/shared.ts` and is the same whether the client is a browser or another agent.
+URL routing: `/#threadId` maps to the active thread. Survives refresh, supports browser back/forward.
 
 ## What's here
 
 ```
 src/
-  server.ts   ThinkAgent — orchestrator, thread registry, WebSocket transport
-  chat.ts     Chat — facet, message persistence, RPC surface
-  shared.ts   Types and protocol (BaseMessage, ThinkMessage, ThreadInfo, MessageType)
-  client.tsx  React UI with thread sidebar
-  index.tsx   React entry point
-  styles.css  Tailwind + Kumo theme
+  agent-facet.ts  AgentFacet — base class (sql, scheduling, abort, retry)
+  agent-loop.ts   AgentLoop — step-at-a-time LLM execution
+  chat.ts         Chat — conversation facet (messages, tools, streaming)
+  server.ts       ThinkAgent — session orchestrator (threads, WebSocket)
+  shared.ts       Types and protocol
+  client.tsx      React UI with thread sidebar + hash routing
+  index.tsx       React entry point
+  styles.css      Tailwind + Kumo theme
 
 tests/
-  core.test.ts   Chat tested via DO stub (same as facet RPC) — 10 tests
-  sync.test.ts   ThinkAgent tested via WebSocket + RPC — 14 tests
+  agent-facet.test.ts  AgentFacet via DO stub (sql, scheduling, destroy)
+  core.test.ts         Chat via DO stub (CRUD, batch, tools, streaming, sanitization)
+  sync.test.ts         ThinkAgent via WebSocket + RPC (threads, sync, GET_MESSAGES)
 
 e2e/
-  sync.spec.ts   Full-stack Playwright tests — 4 tests
+  sync.spec.ts         Full-stack Playwright tests
 ```
 
 ## Run
@@ -84,13 +121,12 @@ npm install && npm run start
 ## Test
 
 ```bash
-npm run test:workers   # vitest-pool-workers (Chat + ThinkAgent)
+npm run test:workers   # vitest-pool-workers (AgentFacet + Chat + ThinkAgent)
 npm run test:e2e       # Playwright (full stack)
 ```
 
-## What's next
+## Design influences
 
-- Agent loop: step-at-a-time `generateText` calls, tool dispatch, suspend/resume via alarms
-- Switch `ThinkMessage` to AI SDK `UIMessage` (parts-based, supports tool calls and reasoning)
-- Sandbox facet for code execution (isolated, restricted capabilities)
-- Long-running tool support: persist pending tool calls, hibernate, resume when results arrive
+- **PI / OpenClaw** — layered agent framework (pi-ai → pi-agent-core → pi-coding-agent). Same separation: LLM provider → agent loop → session/tools. PI validates the step-at-a-time loop + composable tools pattern. Key ideas borrowed: `steer` (interrupt mid-loop) vs `followUp` (queue for after), extensions as lifecycle hooks, tool factories with operations override for sandboxing.
+- **@cloudflare/ai-chat** — message persistence patterns (incremental diffing, row size limits, OpenAI sanitization, tool state tracking). Adapted for facet isolation instead of single-DO-does-everything.
+- **Gadgets experiments** — facet architecture, parent-child RPC, structural capability control.

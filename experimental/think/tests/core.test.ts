@@ -515,9 +515,8 @@ describe("Chat streaming message", () => {
     expect(applied).toBe(true);
 
     const streaming = await chat.getStreamingMessage();
-    const parts = (streaming as Record<string, unknown>).parts as Array<
-      Record<string, unknown>
-    >;
+    const parts = (streaming as unknown as Record<string, unknown>)
+      .parts as Array<Record<string, unknown>>;
     const toolPart = parts.find((p) => p.toolCallId === toolCallId);
     expect(toolPart!.state).toBe("output-available");
     expect(toolPart!.output).toEqual({ temp: 15 });
@@ -549,3 +548,64 @@ describe("Chat streaming message", () => {
 });
 
 // Abort/cancel tests moved to agent-facet.test.ts (inherited from AgentFacet)
+
+// ── Reasoning field persistence ──────────────────────────────────────
+
+describe("Chat reasoning field persistence", () => {
+  it("persists a message with a reasoning field", async () => {
+    const chat = getChat(`reasoning-${crypto.randomUUID()}`);
+    const msg: ThinkMessage = {
+      id: "r-1",
+      role: "assistant",
+      content: "2 + 2 = 4",
+      reasoning: "The user asked a simple math question.",
+      createdAt: Date.now()
+    };
+    await chat.addMessage(msg);
+    const messages = await chat.getMessages();
+    expect(messages[0].reasoning).toBe(
+      "The user asked a simple math question."
+    );
+  });
+
+  it("reasoning field survives storage roundtrip (hibernation simulation)", async () => {
+    const name = `reasoning-persist-${crypto.randomUUID()}`;
+    const chat1 = getChat(name);
+    await chat1.addMessage({
+      id: "r-2",
+      role: "assistant",
+      content: "The answer is 42",
+      reasoning: "Thinking deeply...",
+      createdAt: Date.now()
+    });
+
+    const chat2 = getChat(name);
+    const messages = await chat2.getMessages();
+    expect(messages[0].reasoning).toBe("Thinking deeply...");
+    expect(messages[0].content).toBe("The answer is 42");
+  });
+
+  it("messages without reasoning field remain unchanged", async () => {
+    const chat = getChat(`no-reasoning-${crypto.randomUUID()}`);
+    await chat.addMessage(makeMessage("user", "Hello"));
+    const messages = await chat.getMessages();
+    expect((messages[0] as Record<string, unknown>).reasoning).toBeUndefined();
+  });
+
+  it("reasoning field included in batch persistMessages", async () => {
+    const chat = getChat(`reasoning-batch-${crypto.randomUUID()}`);
+    const msgs: ThinkMessage[] = [
+      makeMessage("user", "what is 1+1?"),
+      {
+        id: "r-batch",
+        role: "assistant",
+        content: "2",
+        reasoning: "Simple addition.",
+        createdAt: Date.now()
+      }
+    ];
+    await chat.persistMessages(msgs);
+    const result = await chat.getMessages();
+    expect(result[1].reasoning).toBe("Simple addition.");
+  });
+});

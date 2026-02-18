@@ -181,6 +181,121 @@ export class ThinkAgent extends Agent<Env> {
         });
         break;
       }
+
+      case MessageType.RUN: {
+        if (!data.threadId) return;
+        this._ensureThread(data.threadId);
+        const threadId = data.threadId;
+        console.log(`[ThinkAgent] RUN thread=${threadId}`);
+
+        // ThinkAgent owns the TransformStream — creates writable + readable,
+        // passes writable to Chat (which writes chunks into it), reads
+        // readable and broadcasts deltas. The RPC call stays alive while
+        // Chat writes, then resolves when Chat finishes and persists.
+        // Workers RPC serializes streams as byte streams, so we use
+        // Uint8Array and TextDecoder around the RPC boundary.
+        const { readable, writable } = new TransformStream<
+          Uint8Array,
+          Uint8Array
+        >();
+
+        // Start the Chat stream (don't await — we read concurrently)
+        const streamDone = this._thread(threadId).streamInto(writable, {
+          system: "You are a helpful coding assistant. Be concise and helpful.",
+          maxSteps: 5
+        });
+
+        // Read NDJSON byte chunks, decode, parse, broadcast appropriately.
+        // Each line is {"t":"text","d":"..."} or {"t":"think","d":"..."}.
+        const reader = readable.getReader();
+        const decoder = new TextDecoder();
+        let textDeltas = 0;
+        let reasoningDeltas = 0;
+        // oxlint-disable-next-line prefer-const
+        let buf = "";
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop() ?? "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const chunk = JSON.parse(line) as {
+                  t: "text" | "think";
+                  d: string;
+                };
+                if (chunk.t === "text") {
+                  textDeltas++;
+                  this._broadcastAll({
+                    type: MessageType.STREAM_DELTA,
+                    threadId,
+                    delta: chunk.d
+                  });
+                } else if (chunk.t === "think") {
+                  reasoningDeltas++;
+                  this._broadcastAll({
+                    type: MessageType.REASONING_DELTA,
+                    threadId,
+                    delta: chunk.d
+                  });
+                }
+              } catch {
+                // skip malformed lines
+              }
+            }
+          }
+          // flush remaining buffer
+          if (buf.trim()) {
+            try {
+              const chunk = JSON.parse(buf) as {
+                t: "text" | "think";
+                d: string;
+              };
+              if (chunk.t === "text") {
+                textDeltas++;
+                this._broadcastAll({
+                  type: MessageType.STREAM_DELTA,
+                  threadId,
+                  delta: chunk.d
+                });
+              } else if (chunk.t === "think") {
+                reasoningDeltas++;
+                this._broadcastAll({
+                  type: MessageType.REASONING_DELTA,
+                  threadId,
+                  delta: chunk.d
+                });
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+          console.log(
+            `[ThinkAgent] stream done: ${textDeltas} text, ${reasoningDeltas} reasoning deltas`
+          );
+        } catch (err) {
+          console.error(`[ThinkAgent] stream read error:`, err);
+        } finally {
+          reader.releaseLock();
+        }
+
+        // Wait for Chat to finish persisting
+        await streamDone;
+
+        this._broadcastAll({
+          type: MessageType.STREAM_END,
+          threadId
+        });
+
+        this._touchThread(threadId);
+        const updatedMessages = await this._thread(threadId).getMessages();
+        this._broadcastSync(threadId, updatedMessages);
+        this._broadcastThreads();
+        break;
+      }
     }
   }
 

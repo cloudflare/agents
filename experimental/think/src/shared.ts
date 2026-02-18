@@ -15,6 +15,7 @@ export type BaseMessage = { id: string };
 export type ThinkMessage = BaseMessage & {
   role: "user" | "assistant";
   content: string;
+  reasoning?: string;
   createdAt: number;
 };
 
@@ -34,6 +35,12 @@ export enum MessageType {
   CLEAR = "clear",
   /** Server → Client: full thread list */
   THREADS = "threads",
+  /** Server → Client: streaming text delta */
+  STREAM_DELTA = "stream_delta",
+  /** Server → Client: streaming reasoning/thinking delta */
+  REASONING_DELTA = "reasoning_delta",
+  /** Server → Client: streaming finished */
+  STREAM_END = "stream_end",
 
   /** Client → Server: add a message to a thread */
   ADD = "add",
@@ -50,13 +57,19 @@ export enum MessageType {
   RENAME_THREAD = "rename_thread",
 
   /** Client → Server: request messages for a thread */
-  GET_MESSAGES = "get_messages"
+  GET_MESSAGES = "get_messages",
+
+  /** Client → Server: run the agent loop on a thread */
+  RUN = "run"
 }
 
 export type ServerMessage<M extends BaseMessage = BaseMessage> =
   | { type: MessageType.SYNC; threadId: string; messages: M[] }
   | { type: MessageType.CLEAR; threadId: string }
-  | { type: MessageType.THREADS; threads: ThreadInfo[] };
+  | { type: MessageType.THREADS; threads: ThreadInfo[] }
+  | { type: MessageType.STREAM_DELTA; threadId: string; delta: string }
+  | { type: MessageType.REASONING_DELTA; threadId: string; delta: string }
+  | { type: MessageType.STREAM_END; threadId: string };
 
 export type ClientMessage<M extends BaseMessage = BaseMessage> =
   | { type: MessageType.ADD; threadId: string; message: M }
@@ -65,4 +78,5 @@ export type ClientMessage<M extends BaseMessage = BaseMessage> =
   | { type: MessageType.CREATE_THREAD; name?: string }
   | { type: MessageType.DELETE_THREAD; threadId: string }
   | { type: MessageType.RENAME_THREAD; threadId: string; name: string }
-  | { type: MessageType.GET_MESSAGES; threadId: string };
+  | { type: MessageType.GET_MESSAGES; threadId: string }
+  | { type: MessageType.RUN; threadId: string };
