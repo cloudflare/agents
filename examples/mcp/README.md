@@ -9,7 +9,7 @@ npm install
 npm start
 ```
 
-This will start an MCP server on `http://localhost:5174/mcp` and open the MCP inspector in your browser.
+This will start a stateful MCP server on `http://localhost:5174/mcp` and open the MCP inspector in your browser.
 
 Set your **Transport Type** to **Streamable HTTP** and your **URL** to `http://localhost:5174/mcp`, then click **Connect**. You should see the following:
 

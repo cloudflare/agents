@@ -349,14 +349,14 @@ describe("MCPClientManager OAuth Integration", () => {
       );
     });
 
-    it("should throw error for callback without matching URL", async () => {
+    it("should return auth error for callback without matching URL", async () => {
       const callbackRequest = new Request(
         "http://localhost:3000/unknown?code=test&state=invalid.format"
       );
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("No server found with id");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("No server found with id");
     });
 
     it("should handle OAuth error response from provider", async () => {
@@ -434,25 +434,25 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.authError).toBe("Unauthorized: no code provided");
     });
 
-    it("should throw error for callback without state", async () => {
+    it("should return auth error for callback without state", async () => {
       const callbackUrl = "http://localhost:3000/callback";
       const callbackRequest = new Request(`${callbackUrl}?code=test`);
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("Unauthorized: no state provided");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toBe("Unauthorized: no state provided");
     });
 
-    it("should throw error for callback with non-existent server", async () => {
+    it("should return auth error for callback with non-existent server", async () => {
       const stateStorage = createMockStateStorage();
       const state = stateStorage.createState("non-existent");
       const callbackRequest = new Request(
         `http://localhost:3000/callback?code=test&state=${state}`
       );
 
-      await expect(
-        manager.handleCallbackRequest(callbackRequest)
-      ).rejects.toThrow("No server found with id");
+      const result = await manager.handleCallbackRequest(callbackRequest);
+      expect(result.authSuccess).toBe(false);
+      expect(result.authError).toContain("No server found with id");
     });
 
     it("should handle duplicate callback when already in ready state", async () => {
@@ -935,7 +935,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(result.authError).toBe("server_error");
     });
 
-    it("should escape XSS payloads in error_description", async () => {
+    it("should pass through raw error_description without escaping", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -970,19 +970,11 @@ describe("MCPClientManager OAuth Integration", () => {
       const result = await manager.handleCallbackRequest(callbackRequest);
 
       expect(result.authSuccess).toBe(false);
-      // Verify XSS payload is escaped
-      expect(result.authError).toBe(
-        "&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;"
-      );
-      expect(connection.connectionError).toBe(
-        "&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt;"
-      );
-      // Should not contain raw script tag
-      expect(result.authError).not.toContain("<script>");
-      expect(result.authError).not.toContain("</script>");
+      expect(result.authError).toBe(xssPayload);
+      expect(connection.connectionError).toBe(xssPayload);
     });
 
-    it("should escape XSS payloads in error parameter when description is absent", async () => {
+    it("should pass through raw error parameter without escaping when description is absent", async () => {
       const serverId = "test-server";
       const callbackUrl = "http://localhost:3000/callback";
       const stateStorage = createMockStateStorage();
@@ -1017,12 +1009,8 @@ describe("MCPClientManager OAuth Integration", () => {
       const result = await manager.handleCallbackRequest(callbackRequest);
 
       expect(result.authSuccess).toBe(false);
-      expect(result.authError).toBe(
-        "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
-      );
-      expect(connection.connectionError).toBe(
-        "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
-      );
+      expect(result.authError).toBe(xssPayload);
+      expect(connection.connectionError).toBe(xssPayload);
     });
 
     it("should handle token exchange failure", async () => {

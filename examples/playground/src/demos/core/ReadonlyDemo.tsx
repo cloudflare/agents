@@ -3,10 +3,10 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Button, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { ConnectionStatus } from "../../components";
+import { useUserId } from "../../hooks";
 import type { ReadonlyAgent, ReadonlyAgentState } from "./readonly-agent";
 
 const AGENT_NAME = "readonly-agent";
-const INSTANCE_NAME = "readonly-demo";
 
 const initialState: ReadonlyAgentState = {
   counter: 0,
@@ -23,6 +23,7 @@ const MAX_TOASTS = 5;
 
 /** A single connection panel — editor or viewer depending on `mode`. */
 function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
+  const userId = useUserId();
   const isViewer = mode === "view";
   const [state, setState] = useState<ReadonlyAgentState>(initialState);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -46,7 +47,7 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
 
   const agent = useAgent<ReadonlyAgent, ReadonlyAgentState>({
     agent: AGENT_NAME,
-    name: INSTANCE_NAME,
+    name: `readonly-demo-${userId}`,
     // The viewer connects with ?mode=view, which the agent checks in shouldConnectionBeReadonly
     query: isViewer ? { mode: "view" } : undefined,
     onStateUpdate: (newState) => {

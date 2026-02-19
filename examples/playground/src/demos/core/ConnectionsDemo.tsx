@@ -3,13 +3,14 @@ import { useState } from "react";
 import { Button, Input, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type {
   ConnectionsAgent,
   ConnectionsAgentState
 } from "./connections-agent";
 
 export function ConnectionsDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [connectionCount, setConnectionCount] = useState(0);
   const [broadcastMessage, setBroadcastMessage] = useState(
@@ -21,7 +22,7 @@ export function ConnectionsDemo() {
 
   const agent = useAgent<ConnectionsAgent, ConnectionsAgentState>({
     agent: "connections-agent",
-    name: "connections-demo",
+    name: `connections-demo-${userId}`,
     onOpen: () => {
       addLog("info", "connected");
       refreshConnectionCount();

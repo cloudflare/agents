@@ -18,7 +18,7 @@ import {
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type {
   SecureEmailAgent,
   SecureEmailState,
@@ -29,6 +29,7 @@ import type {
 type TabType = "inbox" | "outbox";
 
 export function SecureDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [activeTab, setActiveTab] = useState<TabType>("inbox");
   const [selectedEmail, setSelectedEmail] = useState<ParsedEmail | null>(null);
@@ -44,7 +45,7 @@ export function SecureDemo() {
 
   const agent = useAgent<SecureEmailAgent, SecureEmailState>({
     agent: "secure-email-agent",
-    name: "demo",
+    name: `email-secure-${userId}`,
     onStateUpdate: (newState) => {
       if (newState) {
         setState(newState);

@@ -164,6 +164,17 @@ function App() {
                 />
                 {server.state} (id: {id})
               </div>
+              {server.state === "failed" && server.error && (
+                <div
+                  style={{
+                    color: "#c00",
+                    fontSize: "0.85em",
+                    marginTop: "4px"
+                  }}
+                >
+                  Error: {server.error}
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", gap: "8px" }}>
               {server.state === "authenticating" && server.auth_url && (

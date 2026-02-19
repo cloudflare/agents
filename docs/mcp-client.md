@@ -264,8 +264,8 @@ for (const prompt of state.prompts) {
 const state = this.getMcpServers();
 
 for (const [id, server] of Object.entries(state.servers)) {
-  console.log(`${server.name}: ${server.connectionState}`);
-  // connectionState: "ready" | "authenticating" | "connecting" | "not-connected"
+  console.log(`${server.name}: ${server.state}`);
+  // state: "ready" | "authenticating" | "connecting" | "connected" | "discovering" | "failed"
 }
 ```
 
@@ -363,7 +363,8 @@ For fine-grained control, use `this.mcp` directly:
 ### Step-by-Step Connection
 
 ```typescript
-// 1. Register the server
+// 1. Register the server (saves to storage and creates in-memory connection)
+const id = "my-server";
 await this.mcp.registerServer(id, {
   url: "https://mcp.example.com/mcp",
   name: "My Server",
@@ -371,7 +372,7 @@ await this.mcp.registerServer(id, {
   transport: { type: "auto" }
 });
 
-// 2. Connect
+// 2. Connect (initializes transport, handles OAuth if needed)
 const connectResult = await this.mcp.connectToServer(id);
 
 if (connectResult.state === "failed") {
@@ -380,37 +381,43 @@ if (connectResult.state === "failed") {
 }
 
 if (connectResult.state === "authenticating") {
-  // Handle OAuth...
+  console.log("OAuth required:", connectResult.authUrl);
   return;
 }
 
-// 3. Discover capabilities
-const discoverResult = await this.mcp.discoverIfConnected(id);
+// 3. Discover capabilities (transitions from "connected" to "ready")
+if (connectResult.state === "connected") {
+  const discoverResult = await this.mcp.discoverIfConnected(id);
 
-if (!discoverResult?.success) {
-  console.error("Discovery failed:", discoverResult?.error);
+  if (!discoverResult?.success) {
+    console.error("Discovery failed:", discoverResult?.error);
+  }
 }
 ```
 
 ### Event Subscription
 
 ```typescript
-// Listen for state changes
-this.mcp.onServerStateChanged(() => {
+// Listen for state changes (onServerStateChanged is an Event<void>)
+const disposable = this.mcp.onServerStateChanged(() => {
   console.log("MCP server state changed");
   this.broadcastMcpServers(); // Notify connected clients
 });
+
+// Clean up the subscription when no longer needed
+// disposable.dispose();
 ```
 
 ### Error Recovery
 
 ```typescript
 async retryConnection(serverId: string) {
-  // Retry connection for a registered server
   const result = await this.mcp.connectToServer(serverId);
 
   if (result.state === "connected") {
     await this.mcp.discoverIfConnected(serverId);
+  } else if (result.state === "failed") {
+    console.error("Reconnection failed:", result.error);
   }
 }
 ```
@@ -467,11 +474,12 @@ async addMcpServer(
   url: string,
   options?: {
     callbackHost?: string;
+    callbackPath?: string; // custom callback URL path (bypasses default /agents/{class}/{name}/callback)
     agentsPrefix?: string;
     client?: ClientOptions;
     transport?: {
       headers?: HeadersInit;
-      type?: "sse" | "streamable-http" | "auto"; // default: "streamable-http"
+      type?: "sse" | "streamable-http" | "auto"; // default: "auto"
     };
     retry?: RetryOptions; // retry options for connection/reconnection
   }
@@ -528,9 +536,15 @@ type MCPServer = {
   name: string;
   server_url: string;
   auth_url: string | null;
-  connectionState: "ready" | "authenticating" | "connecting" | "not-connected";
-  tools?: Tool[];
-  resources?: Resource[];
-  prompts?: Prompt[];
+  state:
+    | "ready"
+    | "authenticating"
+    | "connecting"
+    | "connected"
+    | "discovering"
+    | "failed";
+  error: string | null;
+  instructions: string | null;
+  capabilities: ServerCapabilities | null;
 };
 ```

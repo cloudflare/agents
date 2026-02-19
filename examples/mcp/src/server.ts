@@ -102,24 +102,4 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   }
 }
 
-export default {
-  fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    const url = new URL(request.url);
-
-    // support both legacy SSE and new streamable-http
-
-    if (url.pathname.startsWith("/sse")) {
-      return MyMCP.serveSSE("/sse", { binding: "MyMCP" }).fetch(
-        request,
-        env,
-        ctx
-      );
-    }
-
-    if (url.pathname.startsWith("/mcp")) {
-      return MyMCP.serve("/mcp", { binding: "MyMCP" }).fetch(request, env, ctx);
-    }
-
-    return new Response("Not found", { status: 404 });
-  }
-};
+export default MyMCP.serve("/mcp", { binding: "MyMCP" });

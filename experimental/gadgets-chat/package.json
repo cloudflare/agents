@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/kumo": "^1.5.1",
+    "@cloudflare/kumo": "^1.6.0",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.0.2",
     "agents": "*",
@@ -19,6 +19,6 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.1.18"
+    "tailwindcss": "^4.2.0"
   }
 }

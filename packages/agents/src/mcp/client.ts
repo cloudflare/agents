@@ -1,5 +1,4 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import escapeHtml from "escape-html";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
@@ -53,7 +52,7 @@ export type MCPServerOptions = {
  */
 export type MCPOAuthCallbackResult =
   | { serverId: string; authSuccess: true; authError?: undefined }
-  | { serverId: string; authSuccess: false; authError: string };
+  | { serverId?: string; authSuccess: false; authError: string };
 
 /**
  * Options for registering an MCP server
@@ -106,11 +105,14 @@ export type MCPClientOAuthCallbackConfig = {
   customHandler?: (result: MCPClientOAuthResult) => Response;
 };
 
-export type MCPClientOAuthResult = {
-  serverId: string;
-  authSuccess: boolean;
-  authError?: string;
-};
+export type MCPClientOAuthResult =
+  | { serverId: string; authSuccess: true; authError?: undefined }
+  | {
+      serverId?: string;
+      authSuccess: false;
+      /** May contain untrusted content from external OAuth providers. Escape appropriately for your output context. */
+      authError: string;
+    };
 
 export type MCPClientManagerOptions = {
   storage: DurableObjectStorage;
@@ -723,39 +725,93 @@ export class MCPClientManager {
     });
   }
 
-  async handleCallbackRequest(req: Request): Promise<MCPOAuthCallbackResult> {
+  private validateCallbackRequest(
+    req: Request
+  ):
+    | { valid: true; serverId: string; code: string; state: string }
+    | { valid: false; serverId?: string; error: string } {
     const url = new URL(req.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     const error = url.searchParams.get("error");
     const errorDescription = url.searchParams.get("error_description");
 
-    // Early validation - these throw because we can't identify the connection
+    // Early validation - return errors because we can't identify the connection
     if (!state) {
-      throw new Error("Unauthorized: no state provided");
+      return {
+        valid: false,
+        error: "Unauthorized: no state provided"
+      };
     }
 
     const serverId = this.extractServerIdFromState(state);
     if (!serverId) {
-      throw new Error(
-        "No serverId found in state parameter. Expected format: {nonce}.{serverId}"
-      );
+      return {
+        valid: false,
+        error:
+          "No serverId found in state parameter. Expected format: {nonce}.{serverId}"
+      };
+    }
+
+    if (error) {
+      return {
+        serverId: serverId,
+        valid: false,
+        error: errorDescription || error
+      };
+    }
+
+    if (!code) {
+      return {
+        serverId: serverId,
+        valid: false,
+        error: "Unauthorized: no code provided"
+      };
     }
 
     const servers = this.getServersFromStorage();
     const serverExists = servers.some((server) => server.id === serverId);
     if (!serverExists) {
-      throw new Error(
-        `No server found with id "${serverId}". Was the request matched with \`isCallbackRequest()\`?`
-      );
+      return {
+        serverId: serverId,
+        valid: false,
+        error: `No server found with id "${serverId}". Was the request matched with \`isCallbackRequest()\`?`
+      };
     }
 
     if (this.mcpConnections[serverId] === undefined) {
-      throw new Error(`Could not find serverId: ${serverId}`);
+      return {
+        serverId: serverId,
+        valid: false,
+        error: `No connection found for serverId "${serverId}".`
+      };
     }
 
-    // We have a valid connection - all errors from here should fail the connection
-    const conn = this.mcpConnections[serverId];
+    return {
+      valid: true,
+      serverId,
+      code: code,
+      state: state
+    };
+  }
+
+  async handleCallbackRequest(req: Request): Promise<MCPOAuthCallbackResult> {
+    const validation = this.validateCallbackRequest(req);
+
+    if (!validation.valid) {
+      if (validation.serverId && this.mcpConnections[validation.serverId]) {
+        return this.failConnection(validation.serverId, validation.error);
+      }
+
+      return {
+        serverId: validation.serverId,
+        authSuccess: false,
+        authError: validation.error
+      };
+    }
+
+    const { serverId, code, state } = validation;
+    const conn = this.mcpConnections[serverId]; // We have a valid connection - all errors from here should fail the connection
 
     try {
       if (!conn.options.transport.authProvider) {
@@ -772,15 +828,6 @@ export class MCPClientManager {
       const stateValidation = await authProvider.checkState(state);
       if (!stateValidation.valid) {
         throw new Error(stateValidation.error || "Invalid state");
-      }
-
-      if (error) {
-        // Escape external OAuth error params to prevent XSS
-        throw new Error(escapeHtml(errorDescription || error));
-      }
-
-      if (!code) {
-        throw new Error("Unauthorized: no code provided");
       }
 
       // Already authenticated - just return success

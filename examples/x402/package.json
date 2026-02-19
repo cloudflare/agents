@@ -6,8 +6,8 @@
     "@x402/fetch": "^2.3.0",
     "@x402/hono": "^2.3.0",
     "agents": "*",
-    "hono": "^4.11.9",
-    "viem": "^2.46.1"
+    "hono": "^4.12.0",
+    "viem": "^2.46.2"
   },
   "keywords": [],
   "name": "@cloudflare/agents-x402-example",

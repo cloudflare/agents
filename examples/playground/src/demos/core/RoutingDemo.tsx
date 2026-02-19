@@ -4,19 +4,10 @@ import { useState, useEffect } from "react";
 import { Button, Input, Surface, Text, Radio } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { RoutingAgent, RoutingAgentState } from "./routing-agent";
 
 type RoutingStrategy = "per-user" | "shared" | "per-session" | "custom-path";
-
-function getStoredUserId(): string {
-  if (typeof window === "undefined") return "user-1";
-  const stored = localStorage.getItem("playground-user-id");
-  if (stored) return stored;
-  const newId = `user-${nanoid(6)}`;
-  localStorage.setItem("playground-user-id", newId);
-  return newId;
-}
 
 function getSessionId(): string {
   if (typeof window === "undefined") return "session-1";
@@ -29,8 +20,9 @@ function getSessionId(): string {
 }
 
 export function RoutingDemo() {
+  const initialUserId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
-  const [userId, setUserId] = useState(getStoredUserId);
+  const [userId, setUserId] = useState(initialUserId);
   const [strategy, setStrategy] = useState<RoutingStrategy>("per-user");
   const [connectionCount, setConnectionCount] = useState(0);
   const [agentInstanceName, setAgentInstanceName] = useState<string>("");

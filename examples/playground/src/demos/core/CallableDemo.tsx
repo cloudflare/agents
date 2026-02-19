@@ -3,10 +3,11 @@ import { useState } from "react";
 import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { CallableAgent } from "./callable-agent";
 
 export function CallableDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [methods, setMethods] = useState<
     Array<{ name: string; description?: string }>
@@ -20,7 +21,7 @@ export function CallableDemo() {
 
   const agent = useAgent<CallableAgent, {}>({
     agent: "callable-agent",
-    name: "callable-demo",
+    name: `callable-demo-${userId}`,
     onOpen: () => addLog("info", "connected"),
     onClose: () => addLog("info", "disconnected"),
     onError: () => addLog("error", "error", "Connection error")

@@ -283,6 +283,7 @@ export type MCPServer = {
   // Scope outside of that can't be relied upon because when the DO sleeps, there's no way
   // to communicate a change to a non-ready state.
   state: MCPConnectionState;
+  /** May contain untrusted content from external OAuth providers. Escape appropriately for your output context. */
   error: string | null;
   instructions: string | null;
   capabilities: ServerCapabilities | null;
@@ -4053,7 +4054,6 @@ export class Agent<
       }
     }
 
-    // Default: redirect to base URL
     return Response.redirect(baseOrigin);
   }
 }

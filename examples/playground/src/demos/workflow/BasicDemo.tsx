@@ -20,7 +20,7 @@ import {
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type {
   BasicWorkflowAgent,
   BasicWorkflowState,
@@ -105,6 +105,7 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
 }
 
 export function WorkflowBasicDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [workflowName, setWorkflowName] = useState("Data Processing");
   const [stepCount, setStepCount] = useState(4);
@@ -113,7 +114,7 @@ export function WorkflowBasicDemo() {
 
   const agent = useAgent<BasicWorkflowAgent, BasicWorkflowState>({
     agent: "basic-workflow-agent",
-    name: "demo",
+    name: `workflow-basic-${userId}`,
     onStateUpdate: (newState) => {
       if (newState) {
         addLog("in", "state_update", {

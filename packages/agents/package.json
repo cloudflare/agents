@@ -27,7 +27,6 @@
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/sdk": "1.26.0",
     "cron-schedule": "^6.0.0",
-    "escape-html": "^1.0.3",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.28",
@@ -37,15 +36,14 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/openai": "^3.0.29",
-    "@ai-sdk/react": "^3.0.90",
+    "@ai-sdk/openai": "^3.0.30",
+    "@ai-sdk/react": "^3.0.93",
     "@cloudflare/workers-oauth-provider": "^0.2.3",
-    "@types/escape-html": "^1.0.4",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
     "@x402/core": "^2.3.1",
     "@x402/evm": "^2.3.1",
-    "ai": "^6.0.88",
+    "ai": "^6.0.91",
     "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
     "zod": "^4.3.6"

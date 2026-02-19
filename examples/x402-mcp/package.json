@@ -10,6 +10,6 @@
   "type": "module",
   "dependencies": {
     "agents": "*",
-    "viem": "^2.46.1"
+    "viem": "^2.46.2"
   }
 }

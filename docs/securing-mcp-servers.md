@@ -5,7 +5,7 @@ Model Context Protocol servers, like every other web application, need to be sec
 Cloudflare's `workers-oauth-provider` lets you secure your MCP Server (or any application) running on a Cloudflare Worker. The provider handles token management, client registration, and access token validation automatically.
 
 ```typescript
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { OAuthProvider, OAuthError } from "@cloudflare/workers-oauth-provider";
 import { createMcpHandler } from "agents/mcp";
 
 // A Worker that exposes an MCP server

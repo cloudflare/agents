@@ -1,8 +1,102 @@
-# Creating your own MCP Server with an McpAgent
+# Creating MCP Servers
 
-This guide aims to help you get familiar with `McpAgent` and guide you through writing your own MCP servers.
+This guide covers the different ways to create MCP servers with the Agents SDK and helps you choose the right approach.
 
-## Writing TinyMCP
+## Choosing an Approach
+
+| Approach                                       | Stateful? | Requires Durable Objects? | Best for                                       |
+| ---------------------------------------------- | --------- | ------------------------- | ---------------------------------------------- |
+| `createMcpHandler()`                           | No        | No                        | Stateless tools, simplest setup                |
+| `McpAgent`                                     | Yes       | Yes                       | Stateful tools, per-session state, elicitation |
+| Raw `WebStandardStreamableHTTPServerTransport` | No        | No                        | Full control, no SDK dependency                |
+
+- **`createMcpHandler()`** is the fastest way to get a stateless MCP server running. Use it when your tools do not need per-session state.
+- **`McpAgent`** gives you a Durable Object per session with built-in state management, elicitation support, and both SSE and Streamable HTTP transports.
+- **Raw transport** gives you full control if you want to use the `@modelcontextprotocol/sdk` directly without the Agents SDK helpers.
+
+## Stateless MCP Server with `createMcpHandler()`
+
+The simplest way to create an MCP server. No Durable Objects or bindings required:
+
+```typescript
+import { createMcpHandler } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+function createServer() {
+  const server = new McpServer({
+    name: "Hello MCP Server",
+    version: "1.0.0"
+  });
+
+  server.registerTool(
+    "hello",
+    {
+      description: "Returns a greeting message",
+      inputSchema: { name: z.string().optional() }
+    },
+    async ({ name }) => ({
+      content: [{ text: `Hello, ${name ?? "World"}!`, type: "text" }]
+    })
+  );
+
+  return server;
+}
+
+export default {
+  fetch: async (request: Request, env: Env, ctx: ExecutionContext) => {
+    const server = createServer();
+    return createMcpHandler(server)(request, env, ctx);
+  }
+};
+```
+
+> **Important:** Create a new `McpServer` instance per request. The MCP SDK does not allow connecting an already-connected server to a new transport.
+
+### `createMcpHandler` Options
+
+```typescript
+createMcpHandler(server, {
+  route: "/mcp",              // path to handle (default: "/mcp")
+  enableJsonResponse: true,   // use JSON responses instead of SSE streaming
+  sessionIdGenerator: () => crypto.randomUUID(),
+  corsOptions: { ... },       // CORS configuration
+  authContext: { props: {} },  // manually set auth context
+  transport: workerTransport   // provide your own WorkerTransport instance
+});
+```
+
+### Accessing Authenticated User Context
+
+When your MCP server is wrapped with `OAuthProvider` from `@cloudflare/workers-oauth-provider`, authenticated user information is available inside tools via `getMcpAuthContext()`:
+
+```typescript
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
+
+server.registerTool(
+  "whoami",
+  { description: "Returns the authenticated user" },
+  async () => {
+    const auth = getMcpAuthContext();
+    return {
+      content: [
+        {
+          type: "text",
+          text: auth ? JSON.stringify(auth.props) : "Not authenticated"
+        }
+      ]
+    };
+  }
+);
+```
+
+The `OAuthProvider` sets `ctx.props` on the execution context, which `createMcpHandler` automatically picks up and makes available via `getMcpAuthContext()`.
+
+## Stateful MCP Server with `McpAgent`
+
+`McpAgent` gives each client session its own Durable Object with persistent state. Use this when your tools need to track per-session data.
+
+### Writing TinyMCP
 
 Prototyping is very easy! If you want to quickly deploy an MCP, it only takes ~20 lines of code:
 
@@ -24,7 +118,7 @@ export class TinyMcp extends McpAgent {
       },
       async ({ number }) => ({
         content: [{ type: "text", text: String(number ** 2) }]
-      }
+      })
     );
   }
 }
@@ -39,7 +133,7 @@ Your `wrangler.jsonc` would look something like:
 {
   "name": "tinymcp",
   "main": "src/index.ts",
-  "compatibility_date": "2025-08-26",
+  "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {
     "bindings": [
@@ -80,7 +174,10 @@ To get a feel of what a more realistic MCP might look like, let's deploy an MCP 
 ```typescript
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import {
+  OAuthProvider,
+  type OAuthHelpers
+} from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import { env } from "cloudflare:workers";
 
@@ -178,8 +275,13 @@ function passwordPage(opts: { query: string; error?: string }) {
 }
 
 // This is the default handler of our worker BEFORE requests are authenticated.
+interface StorageEnv {
+  OAUTH_PROVIDER: OAuthHelpers;
+  SHARED_PASSWORD: string;
+}
+
 const defaultHandler = {
-  async fetch(request: Request, env: any) {
+  async fetch(request: Request, env: StorageEnv) {
     const provider = env.OAUTH_PROVIDER;
     const url = new URL(request.url);
 
@@ -324,6 +426,101 @@ The `jurisdiction` option accepts any value supported by [Cloudflare's Durable O
 - `"eu"` - European Union
 - `"fedramp"` - FedRAMP compliant locations
 
+## Elicitation (Human-in-the-Loop)
+
+MCP servers can request additional input from the user during a tool call using elicitation. This is useful for confirmation dialogs, requesting amounts, or any interactive tool flow.
+
+Elicitation is supported via `McpAgent` (which manages the request/response lifecycle through Durable Object storage) or via `WorkerTransport` (for stateful non-McpAgent setups).
+
+```typescript
+import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+export class MyMCP extends McpAgent<Env, { counter: number }> {
+  server = new McpServer({ name: "Elicitation Demo", version: "1.0.0" });
+
+  initialState = { counter: 0 };
+
+  async init() {
+    this.server.registerTool(
+      "increase-counter",
+      {
+        description: "Increase the counter",
+        inputSchema: {
+          confirm: z.boolean().describe("Do you want to increase the counter?")
+        }
+      },
+      async ({ confirm }, extra) => {
+        if (!confirm) {
+          return { content: [{ type: "text", text: "Cancelled." }] };
+        }
+
+        const result = await this.server.server.elicitInput(
+          {
+            message: "By how much?",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                amount: { type: "number", title: "Amount" }
+              },
+              required: ["amount"]
+            }
+          },
+          { relatedRequestId: extra.requestId }
+        );
+
+        if (result.action !== "accept" || !result.content?.amount) {
+          return { content: [{ type: "text", text: "Cancelled." }] };
+        }
+
+        const amount = Number(result.content.amount);
+        this.setState({ counter: this.state.counter + amount });
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Counter increased by ${amount}, now ${this.state.counter}`
+            }
+          ]
+        };
+      }
+    );
+  }
+}
+
+export default MyMCP.serve("/mcp");
+```
+
+See the [`examples/mcp-elicitation`](https://github.com/cloudflare/agents/tree/main/examples/mcp-elicitation) example for a full working demo.
+
+## WorkerTransport
+
+`WorkerTransport` is a server-side transport for running MCP servers in stateless Workers while optionally persisting session state. It is used internally by `createMcpHandler()` but can also be used directly for advanced scenarios like stateful sessions without `McpAgent`.
+
+```typescript
+import { WorkerTransport, type TransportState } from "agents/mcp";
+
+const transport = new WorkerTransport({
+  sessionIdGenerator: () => crypto.randomUUID(),
+  enableJsonResponse: false,
+  storage: {
+    get: () => kv.get<TransportState>("mcp_state"),
+    set: (state: TransportState) => kv.put<TransportState>("mcp_state", state)
+  }
+});
+```
+
+Key options:
+
+| Option               | Description                                                                    |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `sessionIdGenerator` | Function that returns a session ID for new sessions                            |
+| `enableJsonResponse` | Return JSON instead of SSE streams (default: `false`)                          |
+| `storage`            | Optional `{ get, set }` adapter for persisting transport state across requests |
+| `corsOptions`        | CORS configuration                                                             |
+
 ### Read more
 
-To find out how to use your favorite providers for your authorization flow and more complex examples, have a look at the demos [here](https://github.com/cloudflare/ai/tree/main/demos).
+For more complex examples including authentication with third-party providers, see the [examples directory](https://github.com/cloudflare/agents/tree/main/examples).

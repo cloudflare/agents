@@ -14,10 +14,10 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.45",
     "@ai-sdk/google": "^3.0.29",
-    "@ai-sdk/openai": "^3.0.29",
+    "@ai-sdk/openai": "^3.0.30",
     "@cloudflare/agents-ui": "*",
     "@streamdown/code": "^1.0.2",
-    "ai": "^6.0.88",
+    "ai": "^6.0.91",
     "ai-gateway-provider": "^3.1.1",
     "downshift": "^9.3.1",
     "nanoid": "^5.1.6",

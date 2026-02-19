@@ -11,10 +11,11 @@ import {
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { SqlAgent } from "./sql-agent";
 
 export function SqlDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [tables, setTables] = useState<Array<{ name: string; type: string }>>(
     []
@@ -29,7 +30,7 @@ export function SqlDemo() {
 
   const agent = useAgent<SqlAgent, {}>({
     agent: "sql-agent",
-    name: "sql-demo",
+    name: `sql-demo-${userId}`,
     onOpen: () => {
       addLog("info", "connected");
       loadTables();

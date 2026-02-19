@@ -3,10 +3,11 @@ import { useState } from "react";
 import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { RetryAgent, RetryAgentState } from "./retry-agent";
 
 export function RetryDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [succeedOn, setSucceedOn] = useState("3");
   const [failCount, setFailCount] = useState("2");
@@ -15,7 +16,7 @@ export function RetryDemo() {
 
   const agent = useAgent<RetryAgent, RetryAgentState>({
     agent: "retry-agent",
-    name: "retry-demo",
+    name: `retry-demo-${userId}`,
     onOpen: () => addLog("info", "connected"),
     onClose: () => addLog("info", "disconnected"),
     onError: () => addLog("error", "error", "Connection error"),

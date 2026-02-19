@@ -92,6 +92,9 @@ export default new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler: apiHandler,
 
-  //@ts-expect-error
-  defaultHandler: AuthHandler
+  defaultHandler: {
+    async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
+      return AuthHandler.fetch(request, env as Record<string, unknown>, ctx);
+    }
+  }
 });
