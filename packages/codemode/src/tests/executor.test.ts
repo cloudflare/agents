@@ -8,20 +8,22 @@ import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { DynamicWorkerExecutor, ToolDispatcher } from "../executor";
 
+type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
+
 describe("ToolDispatcher", () => {
   it("should dispatch tool calls and return JSON result", async () => {
-    const fns = {
-      double: vi.fn(async (args: Record<string, unknown>) => ({
-        doubled: (args.n as number) * 2
-      }))
-    };
+    const double = vi.fn(async (...args: unknown[]) => {
+      const input = args[0] as Record<string, unknown>;
+      return { doubled: (input.n as number) * 2 };
+    });
+    const fns: ToolFns = { double };
     const dispatcher = new ToolDispatcher(fns);
 
     const resJson = await dispatcher.call("double", JSON.stringify({ n: 5 }));
     const data = JSON.parse(resJson);
 
     expect(data.result).toEqual({ doubled: 10 });
-    expect(fns.double).toHaveBeenCalledWith({ n: 5 });
+    expect(double).toHaveBeenCalledWith({ n: 5 });
   });
 
   it("should return error for unknown tool", async () => {
@@ -34,7 +36,7 @@ describe("ToolDispatcher", () => {
   });
 
   it("should return error when tool function throws", async () => {
-    const fns = {
+    const fns: ToolFns = {
       broken: async () => {
         throw new Error("something broke");
       }
@@ -48,16 +50,15 @@ describe("ToolDispatcher", () => {
   });
 
   it("should handle empty args string", async () => {
-    const fns = {
-      noArgs: vi.fn(async () => "ok")
-    };
+    const noArgs = vi.fn(async () => "ok");
+    const fns: ToolFns = { noArgs };
     const dispatcher = new ToolDispatcher(fns);
 
     const resJson = await dispatcher.call("noArgs", "");
     const data = JSON.parse(resJson);
 
     expect(data.result).toBe("ok");
-    expect(fns.noArgs).toHaveBeenCalledWith({});
+    expect(noArgs).toHaveBeenCalledWith({});
   });
 });
 
@@ -71,12 +72,11 @@ describe("DynamicWorkerExecutor", () => {
   });
 
   it("should call tool functions via codemode proxy", async () => {
-    const fns = {
-      add: vi.fn(
-        async (args: Record<string, unknown>) =>
-          (args.a as number) + (args.b as number)
-      )
-    };
+    const add = vi.fn(async (...args: unknown[]) => {
+      const input = args[0] as Record<string, unknown>;
+      return (input.a as number) + (input.b as number);
+    });
+    const fns: ToolFns = { add };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
@@ -85,16 +85,16 @@ describe("DynamicWorkerExecutor", () => {
     );
 
     expect(result.result).toBe(7);
-    expect(fns.add).toHaveBeenCalledWith({ a: 3, b: 4 });
+    expect(add).toHaveBeenCalledWith({ a: 3, b: 4 });
   });
 
   it("should handle multiple sequential tool calls", async () => {
-    const fns = {
-      getWeather: vi.fn(async () => ({ temp: 72 })),
-      searchWeb: vi.fn(async (args: Record<string, unknown>) => ({
-        results: [`news about ${args.query as string}`]
-      }))
-    };
+    const getWeather = vi.fn(async () => ({ temp: 72 }));
+    const searchWeb = vi.fn(async (...args: unknown[]) => {
+      const input = args[0] as Record<string, unknown>;
+      return { results: [`news about ${input.query as string}`] };
+    });
+    const fns: ToolFns = { getWeather, searchWeb };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const code = `async () => {
@@ -108,8 +108,8 @@ describe("DynamicWorkerExecutor", () => {
       weather: { temp: 72 },
       news: { results: ["news about temp 72"] }
     });
-    expect(fns.getWeather).toHaveBeenCalledTimes(1);
-    expect(fns.searchWeb).toHaveBeenCalledTimes(1);
+    expect(getWeather).toHaveBeenCalledTimes(1);
+    expect(searchWeb).toHaveBeenCalledTimes(1);
   });
 
   it("should return error when code throws", async () => {
@@ -123,11 +123,10 @@ describe("DynamicWorkerExecutor", () => {
   });
 
   it("should return error when tool function throws", async () => {
-    const fns = {
-      fail: vi.fn(async () => {
-        throw new Error("tool error");
-      })
-    };
+    const fail = vi.fn(async () => {
+      throw new Error("tool error");
+    });
+    const fns: ToolFns = { fail };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
@@ -138,9 +137,10 @@ describe("DynamicWorkerExecutor", () => {
   });
 
   it("should handle concurrent tool calls via Promise.all", async () => {
-    const fns = {
-      slow: async (args: Record<string, unknown>) => {
-        return { id: args.id as number };
+    const fns: ToolFns = {
+      slow: async (...args: unknown[]) => {
+        const input = args[0] as Record<string, unknown>;
+        return { id: input.id as number };
       }
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
@@ -196,7 +196,7 @@ describe("DynamicWorkerExecutor", () => {
 
   it("should preserve closures in tool functions", async () => {
     const secret = "api-key-123";
-    const fns = {
+    const fns: ToolFns = {
       getSecret: async () => ({ key: secret })
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });

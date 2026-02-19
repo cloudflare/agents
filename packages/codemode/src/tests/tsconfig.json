@@ -6,5 +6,5 @@
     ]
   },
   "extends": "../../../../tsconfig.base.json",
-  "include": ["./**/*.ts", "../**/*.ts"]
+  "include": ["./**/*.ts", "./**/*.d.ts", "../**/*.ts"]
 }
