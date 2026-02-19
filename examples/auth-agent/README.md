@@ -97,23 +97,12 @@ const jwks = createLocalJWKSet({
 const { payload } = await jwtVerify(token, jwks);
 ```
 
-### Why createAuth is a factory function
-
-Workers are stateless — `env` bindings (D1, secrets) are only available per-request. You can't create a better-auth instance at module level because there's no `env` at that point. Each request creates a fresh instance:
-
-```ts
-if (url.pathname.startsWith("/api/auth")) {
-  const auth = createAuth(env);
-  return auth.handler(request);
-}
-```
-
 ## File overview
 
 | File | Purpose |
 |---|---|
 | `src/server.ts` | Worker fetch handler — routes to auth, agents, or SPA. Exports `SecuredChatAgent` DO. |
-| `src/auth.ts` | `createAuth()` factory + `verifyToken()` — D1 dialect, JWT verification via jose |
+| `src/auth.ts` | `getAuth()` lazy singleton + `verifyToken()` — D1 via kysely-d1, JWT verification via jose |
 | `src/auth-client.ts` | Browser auth client — `fetchAndStoreJwt()`, `clearTokens()` |
 | `src/client.tsx` | React UI — auth form + chat view |
 | `db/setup.sql` | Creates better-auth tables (user, session, account, jwks) |
