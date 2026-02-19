@@ -8,7 +8,7 @@
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import type { StreamTextOnFinishCallback, ToolSet } from "ai";
 import { routeAgentRequest } from "agents";
-import { createAuth, verifyToken } from "./auth";
+import { getAuth, verifyToken } from "./auth";
 
 // Agent — the Durable Object authenticated users connect to.
 // Replace onChatMessage with your own logic (e.g. streamText with an LLM).
@@ -33,8 +33,7 @@ export default {
 
     // Auth routes — handled by better-auth
     if (url.pathname.startsWith("/api/auth")) {
-      const auth = createAuth(env);
-      return auth.handler(request);
+      return getAuth().handler(request);
     }
 
     // Agent routes — protected by JWT
@@ -49,7 +48,7 @@ export default {
               { status: 401 }
             );
 
-          const payload = await verifyToken(token, env);
+          const payload = await verifyToken(token);
           if (!payload)
             return Response.json({ error: "Unauthorized" }, { status: 401 });
           return req;
@@ -63,7 +62,7 @@ export default {
           if (!token)
             return Response.json({ error: "Missing token" }, { status: 401 });
 
-          const payload = await verifyToken(token, env);
+          const payload = await verifyToken(token);
           if (!payload)
             return Response.json({ error: "Unauthorized" }, { status: 401 });
           return req;
