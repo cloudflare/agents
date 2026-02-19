@@ -1,6 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "agents-playground",
+  "ai": { "binding": "AI", "remote": true },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
@@ -18,6 +19,7 @@
       { "name": "RetryAgent", "class_name": "RetryAgent" },
       // AI demo agents
       { "name": "ChatAgent", "class_name": "ChatAgent" },
+      { "name": "ToolsAgent", "class_name": "ToolsAgent" },
       // Multi-agent demo agents
       { "name": "SupervisorAgent", "class_name": "SupervisorAgent" },
       { "name": "ChildAgent", "class_name": "ChildAgent" },
@@ -59,6 +61,7 @@
         "RetryAgent",
         // AI demo agents
         "ChatAgent",
+        "ToolsAgent",
         // Multi-agent demo agents
         "SupervisorAgent",
         "ChildAgent",

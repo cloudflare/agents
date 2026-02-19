@@ -16,7 +16,8 @@
     "cronstrue": "^3.12.0",
     "nanoid": "^5.1.6",
     "postal-mime": "^2.7.3",
-    "react-router-dom": "^7.13.0"
+    "react-router-dom": "^7.13.0",
+    "streamdown": "^2.2.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
