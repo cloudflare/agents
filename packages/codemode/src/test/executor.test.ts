@@ -8,12 +8,6 @@ import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { DynamicWorkerExecutor, ToolDispatcher } from "../executor";
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv {
-    LOADER: WorkerLoader;
-  }
-}
-
 describe("ToolDispatcher", () => {
   it("should dispatch tool calls and return JSON result", async () => {
     const fns = {
