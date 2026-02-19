@@ -13,6 +13,7 @@
   "dependencies": {
     "@cloudflare/codemode": "*",
     "agents": "*",
+    "streamdown": "^2.2.0",
     "workers-ai-provider": "*"
   }
 }

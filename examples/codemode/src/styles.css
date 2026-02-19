@@ -28,6 +28,46 @@
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
 }
 
+/* ── Streamdown theme ── */
+.sd-theme {
+  --color-primary: var(--accent);
+  --color-primary-foreground: #ffffff;
+  --color-foreground: var(--text);
+  --color-background: var(--bg-base);
+  --color-muted: var(--bg-raised);
+  --color-muted-foreground: var(--text-secondary);
+  --color-border: var(--border);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.sd-theme .rounded-xl:has(pre) {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0.5rem 0;
+  background: none;
+}
+.sd-theme .rounded-xl:has(pre) > :not(:has(pre)):not(pre) {
+  display: none !important;
+}
+.sd-theme pre {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  background: var(--bg-raised);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  border: 1px solid var(--border-dim);
+  margin: 0;
+}
+.sd-theme pre code {
+  all: unset;
+  font: inherit;
+}
+
 /* ── Base ── */
 * {
   box-sizing: border-box;
@@ -196,7 +236,6 @@ body {
   font-size: 0.9375rem;
   line-height: 1.65;
   color: var(--text);
-  white-space: pre-wrap;
   word-break: break-word;
 }
 

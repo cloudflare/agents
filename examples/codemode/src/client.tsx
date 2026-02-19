@@ -3,6 +3,7 @@ import { useAgent } from "agents/react";
 import "./styles.css";
 import { generateId, type UIMessage } from "ai";
 import { useState, useEffect, useRef } from "react";
+import { Streamdown } from "streamdown";
 import type { Codemode, ExecutorType } from "./server";
 
 interface ToolPart {
@@ -154,7 +155,13 @@ function ResetIcon() {
 
 // ── Components ──
 
-function ReasoningBlock({ text }: { text: string }) {
+function ReasoningBlock({
+  text,
+  isStreaming
+}: {
+  text: string;
+  isStreaming: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   if (!text?.trim()) return null;
 
@@ -168,7 +175,17 @@ function ReasoningBlock({ text }: { text: string }) {
         <ChevronIcon expanded={expanded} />
         <span className="reasoning-label">Thinking</span>
       </button>
-      {expanded && <div className="reasoning-content">{text}</div>}
+      {expanded && (
+        <div className="reasoning-content">
+          <Streamdown
+            className="sd-theme"
+            controls={false}
+            isAnimating={isStreaming}
+          >
+            {text}
+          </Streamdown>
+        </div>
+      )}
     </div>
   );
 }
@@ -260,15 +277,29 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
   );
 }
 
-function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
+function MessagePart({
+  part,
+  isStreaming
+}: {
+  part: UIMessage["parts"][0];
+  isStreaming: boolean;
+}) {
   if (part.type === "text") {
-    return <span className="message-text">{part.text}</span>;
+    return (
+      <Streamdown
+        className="sd-theme message-text"
+        controls={false}
+        isAnimating={isStreaming}
+      >
+        {part.text}
+      </Streamdown>
+    );
   }
 
   if (part.type === "step-start") return null;
 
   if (part.type === "reasoning") {
-    return <ReasoningBlock text={part.text} />;
+    return <ReasoningBlock text={part.text} isStreaming={isStreaming} />;
   }
 
   if (part.type === "file") {
@@ -541,25 +572,32 @@ function App() {
               />
             )}
 
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`message message--${message.role}`}
-              >
-                {message.role === "assistant" && (
-                  <div className="message-avatar">
-                    <span>&#9670;</span>
-                  </div>
-                )}
-                <div className="message-body">
-                  {message.parts.map((part, index) => (
-                    <div key={`${message.id}-${index}`}>
-                      <MessagePart part={part} />
+            {messages.map((message, msgIndex) => {
+              const isLastAssistant =
+                message.role === "assistant" &&
+                msgIndex === messages.length - 1;
+              const isStreaming = loading && isLastAssistant;
+
+              return (
+                <div
+                  key={message.id}
+                  className={`message message--${message.role}`}
+                >
+                  {message.role === "assistant" && (
+                    <div className="message-avatar">
+                      <span>&#9670;</span>
                     </div>
-                  ))}
+                  )}
+                  <div className="message-body">
+                    {message.parts.map((part, index) => (
+                      <div key={`${message.id}-${index}`}>
+                        <MessagePart part={part} isStreaming={isStreaming} />
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
 
             {loading && (
               <div className="message message--assistant">
