@@ -302,7 +302,7 @@ describe("createCodeTool", () => {
       const { executor, calls } = createMockExecutor();
       const codeTool = createCodeTool({ tools, executor });
 
-      const code = "async () => { return `hello ${\"world\"}`; }";
+      const code = 'async () => { return `hello ${"world"}`; }';
       await codeTool.execute?.(
         { code },
         {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]

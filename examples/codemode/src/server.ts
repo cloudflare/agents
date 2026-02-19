@@ -213,7 +213,10 @@ export default {
       // parts: ["node-executor-callback", agentName, execId, toolName]
       const agentName = parts[1];
       if (!agentName) {
-        return Response.json({ error: "Missing agent name in callback URL" }, { status: 400 });
+        return Response.json(
+          { error: "Missing agent name in callback URL" },
+          { status: 400 }
+        );
       }
       const agent = await getAgentByName(env.Codemode, agentName);
       return agent.fetch(request);

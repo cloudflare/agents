@@ -234,9 +234,7 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
             <div className="tool-card-section">
               <div className="tool-card-section-label">Result</div>
               <pre className="tool-card-code">
-                <code>
-                  {JSON.stringify(toolPart.output.result, null, 2)}
-                </code>
+                <code>{JSON.stringify(toolPart.output.result, null, 2)}</code>
               </pre>
             </div>
           )}
@@ -340,9 +338,7 @@ function SettingsPanel({
             <select
               className="settings-select"
               value={executor}
-              onChange={(e) =>
-                onExecutorChange(e.target.value as ExecutorType)
-              }
+              onChange={(e) => onExecutorChange(e.target.value as ExecutorType)}
               disabled={loading}
             >
               {EXECUTORS.map((exec) => (
@@ -421,9 +417,7 @@ function EmptyState({
         </span>
         <span
           className="suggestion"
-          onClick={() =>
-            onSuggestionClick("Add a sprint for next week")
-          }
+          onClick={() => onSuggestionClick("Add a sprint for next week")}
         >
           Add a sprint
         </span>
@@ -597,9 +591,7 @@ function App() {
           <div className="input-footer">
             <span>Powered by codemode</span>
             <span className="input-footer-dot">&middot;</span>
-            <span>
-              {EXECUTORS.find((e) => e.value === executor)?.label}
-            </span>
+            <span>{EXECUTORS.find((e) => e.value === executor)?.label}</span>
           </div>
         </div>
       </main>

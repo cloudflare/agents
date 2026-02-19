@@ -103,58 +103,62 @@ export class DynamicWorkerExecutor implements Executor {
 
     const modulePrefix = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
-      '',
-      'export default class CodeExecutor extends WorkerEntrypoint {',
-      '  async evaluate(dispatcher) {',
-      '    const __logs = [];',
+      "",
+      "export default class CodeExecutor extends WorkerEntrypoint {",
+      "  async evaluate(dispatcher) {",
+      "    const __logs = [];",
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
-      '    const codemode = new Proxy({}, {',
-      '      get: (_, toolName) => async (args) => {',
-      '        const resJson = await dispatcher.call(String(toolName), JSON.stringify(args ?? {}));',
-      '        const data = JSON.parse(resJson);',
-      '        if (data.error) throw new Error(data.error);',
-      '        return data.result;',
-      '      }',
-      '    });',
-      '',
-      '    try {',
-      '      const result = await Promise.race([',
-      '        (',
-    ].join('\n');
+      "    const codemode = new Proxy({}, {",
+      "      get: (_, toolName) => async (args) => {",
+      "        const resJson = await dispatcher.call(String(toolName), JSON.stringify(args ?? {}));",
+      "        const data = JSON.parse(resJson);",
+      "        if (data.error) throw new Error(data.error);",
+      "        return data.result;",
+      "      }",
+      "    });",
+      "",
+      "    try {",
+      "      const result = await Promise.race([",
+      "        ("
+    ].join("\n");
 
     const moduleSuffix = [
-      ')(),',
-      '        new Promise((_, reject) => setTimeout(() => reject(new Error("Execution timed out")), ' + timeoutMs + '))',
-      '      ]);',
-      '      return { result, logs: __logs };',
-      '    } catch (err) {',
-      '      return { result: undefined, err: err.message, stack: err.stack, logs: __logs };',
-      '    }',
-      '  }',
-      '}',
-    ].join('\n');
+      ")(),",
+      '        new Promise((_, reject) => setTimeout(() => reject(new Error("Execution timed out")), ' +
+        timeoutMs +
+        "))",
+      "      ]);",
+      "      return { result, logs: __logs };",
+      "    } catch (err) {",
+      "      return { result: undefined, err: err.message, stack: err.stack, logs: __logs };",
+      "    }",
+      "  }",
+      "}"
+    ].join("\n");
 
     const executorModule = modulePrefix + code + moduleSuffix;
 
     const dispatcher = new ToolDispatcher(fns);
 
-    const worker = this.#loader.get(
-      `codemode-${crypto.randomUUID()}`,
-      () => ({
-        compatibilityDate: "2025-06-01",
-        compatibilityFlags: ["nodejs_compat"],
-        mainModule: "executor.js",
-        modules: {
-          "executor.js": executorModule
-        },
-        globalOutbound: this.#globalOutbound
-      })
-    );
+    const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
+      compatibilityDate: "2025-06-01",
+      compatibilityFlags: ["nodejs_compat"],
+      mainModule: "executor.js",
+      modules: {
+        "executor.js": executorModule
+      },
+      globalOutbound: this.#globalOutbound
+    }));
 
     const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(dispatcher: ToolDispatcher): Promise<{ result: unknown; err?: string; stack?: string; logs?: string[] }>;
+      evaluate(dispatcher: ToolDispatcher): Promise<{
+        result: unknown;
+        err?: string;
+        stack?: string;
+        logs?: string[];
+      }>;
     };
     const response = await entrypoint.evaluate(dispatcher);
 

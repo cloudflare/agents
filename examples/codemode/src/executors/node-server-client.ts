@@ -27,10 +27,7 @@ export class NodeServerExecutor implements Executor {
     this.#registry = options.registry;
   }
 
-  async execute(
-    code: string,
-    fns: ToolFns
-  ): Promise<ExecuteResult> {
+  async execute(code: string, fns: ToolFns): Promise<ExecuteResult> {
     const execId = crypto.randomUUID();
 
     // Register tool functions so the DO's onRequest can find them
@@ -43,8 +40,8 @@ export class NodeServerExecutor implements Executor {
         body: JSON.stringify({
           code,
           callbackUrl: `${this.#callbackUrl}/${execId}`,
-          tools: Object.keys(fns),
-        }),
+          tools: Object.keys(fns)
+        })
       });
 
       const data = (await res.json()) as {
@@ -82,7 +79,10 @@ export async function handleToolCallback(
 
   if (!execId || !toolName) {
     return Response.json(
-      { error: "Invalid callback path — expected /node-executor-callback/{agent}/{execId}/{toolName}" },
+      {
+        error:
+          "Invalid callback path — expected /node-executor-callback/{agent}/{execId}/{toolName}"
+      },
       { status: 400 }
     );
   }

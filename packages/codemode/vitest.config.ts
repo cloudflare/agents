@@ -8,7 +8,10 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "cloudflare:workers": path.resolve(__dirname, "src/test/__mocks__/cloudflare-workers.ts")
+      "cloudflare:workers": path.resolve(
+        __dirname,
+        "src/test/__mocks__/cloudflare-workers.ts"
+      )
     }
   }
 });

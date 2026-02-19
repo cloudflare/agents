@@ -163,7 +163,9 @@ describe("ToolDispatcher", () => {
 
   it("should return error when tool function throws", async () => {
     const fns = {
-      broken: async () => { throw new Error("something broke"); }
+      broken: async () => {
+        throw new Error("something broke");
+      }
     };
     const dispatcher = new ToolDispatcher(fns);
 
@@ -198,22 +200,17 @@ function createMockLoader() {
   let capturedConfig: MockWorkerConfig | null = null;
   let capturedDispatcher: ToolDispatcher | null = null;
   const mockLoader = {
-    get: vi.fn(
-      (
-        _name: string,
-        factory: () => MockWorkerConfig
-      ) => {
-        capturedConfig = factory();
-        return {
-          getEntrypoint: () => ({
-            evaluate: async (dispatcher: ToolDispatcher) => {
-              capturedDispatcher = dispatcher;
-              return { result: null };
-            }
-          })
-        };
-      }
-    )
+    get: vi.fn((_name: string, factory: () => MockWorkerConfig) => {
+      capturedConfig = factory();
+      return {
+        getEntrypoint: () => ({
+          evaluate: async (dispatcher: ToolDispatcher) => {
+            capturedDispatcher = dispatcher;
+            return { result: null };
+          }
+        })
+      };
+    })
   };
   return {
     mockLoader,
@@ -287,7 +284,7 @@ describe("DynamicWorkerExecutor", () => {
       loader: mockLoader as unknown as DynamicWorkerExecutorOptions["loader"]
     });
 
-    const codeWithBackticks = "async () => { return `hello ${\"world\"}`; }";
+    const codeWithBackticks = 'async () => { return `hello ${"world"}`; }';
     await executor.execute(codeWithBackticks, {});
 
     const executorCode = getConfig().modules["executor.js"];
@@ -343,22 +340,17 @@ describe("DynamicWorkerExecutor", () => {
 
   it("should return logs from worker response", async () => {
     const mockLoader = {
-      get: vi.fn(
-        (
-          _name: string,
-          factory: () => MockWorkerConfig
-        ) => {
-          factory();
-          return {
-            getEntrypoint: () => ({
-              evaluate: async () => ({
-                result: "ok",
-                logs: ["log line 1", "[warn] warning"]
-              })
+      get: vi.fn((_name: string, factory: () => MockWorkerConfig) => {
+        factory();
+        return {
+          getEntrypoint: () => ({
+            evaluate: async () => ({
+              result: "ok",
+              logs: ["log line 1", "[warn] warning"]
             })
-          };
-        }
-      )
+          })
+        };
+      })
     };
 
     const executor = new DynamicWorkerExecutor({
@@ -372,22 +364,17 @@ describe("DynamicWorkerExecutor", () => {
 
   it("should return error from worker response", async () => {
     const mockLoader = {
-      get: vi.fn(
-        (
-          _name: string,
-          factory: () => MockWorkerConfig
-        ) => {
-          factory(); // consume
-          return {
-            getEntrypoint: () => ({
-              evaluate: async () => ({
-                result: undefined,
-                err: "runtime error"
-              })
+      get: vi.fn((_name: string, factory: () => MockWorkerConfig) => {
+        factory(); // consume
+        return {
+          getEntrypoint: () => ({
+            evaluate: async () => ({
+              result: undefined,
+              err: "runtime error"
             })
-          };
-        }
-      )
+          })
+        };
+      })
     };
 
     const executor = new DynamicWorkerExecutor({

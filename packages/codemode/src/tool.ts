@@ -52,7 +52,10 @@ function normalizeCode(code: string): string {
     if (last?.type === "ExpressionStatement") {
       const exprStmt = last as acorn.ExpressionStatement;
       const before = trimmed.slice(0, last.start);
-      const exprText = trimmed.slice(exprStmt.expression.start, exprStmt.expression.end);
+      const exprText = trimmed.slice(
+        exprStmt.expression.start,
+        exprStmt.expression.end
+      );
       return `async () => {\n${before}return (${exprText})\n}`;
     }
 
@@ -105,7 +108,9 @@ export function createCodeTool(
         const logCtx = executeResult.logs?.length
           ? `\n\nConsole output:\n${executeResult.logs.join("\n")}`
           : "";
-        throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
+        throw new Error(
+          `Code execution failed: ${executeResult.error}${logCtx}`
+        );
       }
 
       const output: CodeOutput = { code, result: executeResult.result };

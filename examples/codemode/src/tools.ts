@@ -49,24 +49,28 @@ export function createTools(sql: SqlStorage) {
       description: "Create a new project",
       inputSchema: z.object({
         name: z.string().describe("Project name"),
-        description: z.string().optional().describe("Project description"),
+        description: z.string().optional().describe("Project description")
       }),
       execute: async ({ name, description }) => {
         const id = crypto.randomUUID();
         sql.exec(
           "INSERT INTO projects (id, name, description) VALUES (?, ?, ?)",
-          id, name, description ?? ""
+          id,
+          name,
+          description ?? ""
         );
         return { id, name, description: description ?? "" };
-      },
+      }
     }),
 
     listProjects: tool({
       description: "List all projects",
       inputSchema: z.object({}),
       execute: async () => {
-        return sql.exec("SELECT * FROM projects ORDER BY created_at DESC").toArray();
-      },
+        return sql
+          .exec("SELECT * FROM projects ORDER BY created_at DESC")
+          .toArray();
+      }
     }),
 
     createTask: tool({
@@ -75,12 +79,26 @@ export function createTools(sql: SqlStorage) {
         projectId: z.string().describe("Project ID"),
         title: z.string().describe("Task title"),
         description: z.string().optional().describe("Task description"),
-        status: z.enum(["todo", "in_progress", "in_review", "done"]).optional().describe("Task status"),
-        priority: z.enum(["low", "medium", "high", "urgent"]).optional().describe("Priority level"),
+        status: z
+          .enum(["todo", "in_progress", "in_review", "done"])
+          .optional()
+          .describe("Task status"),
+        priority: z
+          .enum(["low", "medium", "high", "urgent"])
+          .optional()
+          .describe("Priority level"),
         assignee: z.string().optional().describe("Assignee name"),
-        sprintId: z.string().optional().describe("Sprint ID"),
+        sprintId: z.string().optional().describe("Sprint ID")
       }),
-      execute: async ({ projectId, title, description, status, priority, assignee, sprintId }) => {
+      execute: async ({
+        projectId,
+        title,
+        description,
+        status,
+        priority,
+        assignee,
+        sprintId
+      }) => {
         const id = crypto.randomUUID();
         sql.exec(
           `INSERT INTO tasks (id, project_id, title, description, status, priority, assignee, sprint_id)
@@ -92,10 +110,16 @@ export function createTools(sql: SqlStorage) {
           status ?? "todo",
           priority ?? "medium",
           assignee ?? "",
-          sprintId ?? null,
+          sprintId ?? null
         );
-        return { id, projectId, title, status: status ?? "todo", priority: priority ?? "medium" };
-      },
+        return {
+          id,
+          projectId,
+          title,
+          status: status ?? "todo",
+          priority: priority ?? "medium"
+        };
+      }
     }),
 
     listTasks: tool({
@@ -105,19 +129,34 @@ export function createTools(sql: SqlStorage) {
         status: z.string().optional().describe("Filter by status"),
         priority: z.string().optional().describe("Filter by priority"),
         assignee: z.string().optional().describe("Filter by assignee"),
-        sprintId: z.string().optional().describe("Filter by sprint ID"),
+        sprintId: z.string().optional().describe("Filter by sprint ID")
       }),
       execute: async ({ projectId, status, priority, assignee, sprintId }) => {
         let query = "SELECT * FROM tasks WHERE 1=1";
         const params: unknown[] = [];
-        if (projectId) { query += " AND project_id = ?"; params.push(projectId); }
-        if (status) { query += " AND status = ?"; params.push(status); }
-        if (priority) { query += " AND priority = ?"; params.push(priority); }
-        if (assignee) { query += " AND assignee = ?"; params.push(assignee); }
-        if (sprintId) { query += " AND sprint_id = ?"; params.push(sprintId); }
+        if (projectId) {
+          query += " AND project_id = ?";
+          params.push(projectId);
+        }
+        if (status) {
+          query += " AND status = ?";
+          params.push(status);
+        }
+        if (priority) {
+          query += " AND priority = ?";
+          params.push(priority);
+        }
+        if (assignee) {
+          query += " AND assignee = ?";
+          params.push(assignee);
+        }
+        if (sprintId) {
+          query += " AND sprint_id = ?";
+          params.push(sprintId);
+        }
         query += " ORDER BY created_at DESC";
         return sql.exec(query, ...params).toArray();
-      },
+      }
     }),
 
     updateTask: tool({
@@ -126,10 +165,16 @@ export function createTools(sql: SqlStorage) {
         id: z.string().describe("Task ID"),
         title: z.string().optional().describe("New title"),
         description: z.string().optional().describe("New description"),
-        status: z.enum(["todo", "in_progress", "in_review", "done"]).optional().describe("New status"),
-        priority: z.enum(["low", "medium", "high", "urgent"]).optional().describe("New priority"),
+        status: z
+          .enum(["todo", "in_progress", "in_review", "done"])
+          .optional()
+          .describe("New status"),
+        priority: z
+          .enum(["low", "medium", "high", "urgent"])
+          .optional()
+          .describe("New priority"),
         assignee: z.string().optional().describe("New assignee"),
-        sprintId: z.string().optional().describe("New sprint ID"),
+        sprintId: z.string().optional().describe("New sprint ID")
       }),
       execute: async ({ id, ...fields }) => {
         const fieldToColumn: Record<string, string> = {
@@ -138,7 +183,7 @@ export function createTools(sql: SqlStorage) {
           status: "status",
           priority: "priority",
           assignee: "assignee",
-          sprintId: "sprint_id",
+          sprintId: "sprint_id"
         };
 
         const sets: string[] = [];
@@ -154,20 +199,24 @@ export function createTools(sql: SqlStorage) {
         sets.push("updated_at = datetime('now')");
         params.push(id);
         sql.exec(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`, ...params);
-        return sql.exec("SELECT * FROM tasks WHERE id = ?", id).toArray()[0] ?? { error: "Task not found" };
-      },
+        return (
+          sql.exec("SELECT * FROM tasks WHERE id = ?", id).toArray()[0] ?? {
+            error: "Task not found"
+          }
+        );
+      }
     }),
 
     deleteTask: tool({
       description: "Delete a task and its comments",
       inputSchema: z.object({
-        id: z.string().describe("Task ID to delete"),
+        id: z.string().describe("Task ID to delete")
       }),
       execute: async ({ id }) => {
         sql.exec("DELETE FROM comments WHERE task_id = ?", id);
         sql.exec("DELETE FROM tasks WHERE id = ?", id);
         return { deleted: id };
-      },
+      }
     }),
 
     createSprint: tool({
@@ -176,29 +225,40 @@ export function createTools(sql: SqlStorage) {
         projectId: z.string().describe("Project ID"),
         name: z.string().describe("Sprint name"),
         startDate: z.string().optional().describe("Start date (ISO 8601)"),
-        endDate: z.string().optional().describe("End date (ISO 8601)"),
+        endDate: z.string().optional().describe("End date (ISO 8601)")
       }),
       execute: async ({ projectId, name, startDate, endDate }) => {
         const id = crypto.randomUUID();
         sql.exec(
           "INSERT INTO sprints (id, project_id, name, start_date, end_date) VALUES (?, ?, ?, ?, ?)",
-          id, projectId, name, startDate ?? null, endDate ?? null,
+          id,
+          projectId,
+          name,
+          startDate ?? null,
+          endDate ?? null
         );
         return { id, projectId, name, startDate, endDate, status: "planned" };
-      },
+      }
     }),
 
     listSprints: tool({
       description: "List sprints, optionally by project",
       inputSchema: z.object({
-        projectId: z.string().optional().describe("Filter by project ID"),
+        projectId: z.string().optional().describe("Filter by project ID")
       }),
       execute: async ({ projectId }) => {
         if (projectId) {
-          return sql.exec("SELECT * FROM sprints WHERE project_id = ? ORDER BY created_at DESC", projectId).toArray();
+          return sql
+            .exec(
+              "SELECT * FROM sprints WHERE project_id = ? ORDER BY created_at DESC",
+              projectId
+            )
+            .toArray();
         }
-        return sql.exec("SELECT * FROM sprints ORDER BY created_at DESC").toArray();
-      },
+        return sql
+          .exec("SELECT * FROM sprints ORDER BY created_at DESC")
+          .toArray();
+      }
     }),
 
     addComment: tool({
@@ -206,26 +266,34 @@ export function createTools(sql: SqlStorage) {
       inputSchema: z.object({
         taskId: z.string().describe("Task ID"),
         content: z.string().describe("Comment content"),
-        author: z.string().optional().describe("Author name"),
+        author: z.string().optional().describe("Author name")
       }),
       execute: async ({ taskId, content, author }) => {
         const id = crypto.randomUUID();
         sql.exec(
           "INSERT INTO comments (id, task_id, author, content) VALUES (?, ?, ?, ?)",
-          id, taskId, author ?? "user", content,
+          id,
+          taskId,
+          author ?? "user",
+          content
         );
         return { id, taskId, author: author ?? "user", content };
-      },
+      }
     }),
 
     listComments: tool({
       description: "List comments on a task",
       inputSchema: z.object({
-        taskId: z.string().describe("Task ID"),
+        taskId: z.string().describe("Task ID")
       }),
       execute: async ({ taskId }) => {
-        return sql.exec("SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC", taskId).toArray();
-      },
-    }),
+        return sql
+          .exec(
+            "SELECT * FROM comments WHERE task_id = ? ORDER BY created_at ASC",
+            taskId
+          )
+          .toArray();
+      }
+    })
   };
 }
