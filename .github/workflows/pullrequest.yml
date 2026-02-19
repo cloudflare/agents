@@ -92,5 +92,8 @@ jobs:
 
             pkg_dir=$(dirname "$pkg_json")
             echo "Publishing $pkg_dir"
-            npx pkg-pr-new publish "$pkg_dir"
+            (
+              cd "$pkg_dir"
+              npx pkg-pr-new publish --comment create
+            )
           done
