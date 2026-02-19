@@ -710,17 +710,12 @@ describe("ThinkAgent RUN queue", () => {
 });
 
 // ── RUN with workspace attached ───────────────────────────────────────────────
-//
-// These tests verify that passing a workspace to Chat (rather than pre-built
-// tool closures) doesn't break the streaming pipeline. Without a real AI
-// binding the run will error internally, but STREAM_END must still arrive.
 
 describe("ThinkAgent RUN with workspace", () => {
   it("RUN with attached workspace still delivers STREAM_END (no RPC disconnect)", async () => {
     const room = `ws-run-${crypto.randomUUID()}`;
     const agent = await getAgentByName(env.ThinkAgent, room);
 
-    // Create a workspace and thread, attach them
     const wsInfo = await agent.createWorkspace("CodeWS");
     const thread = await agent.createThread("CodeThread");
     await agent.attachWorkspace(thread.id, wsInfo.id);
@@ -740,16 +735,13 @@ describe("ThinkAgent RUN with workspace", () => {
     const streamEndPromise = waitForType(ws, MessageType.STREAM_END, 6000);
     ws.send(JSON.stringify({ type: MessageType.RUN, threadId: thread.id }));
 
-    // STREAM_END must arrive even though the AI binding isn't available.
-    // The critical thing: no "WritableStream disconnected" crash — the run
-    // must fail gracefully and still signal completion to the client.
     const msg = await streamEndPromise;
     expect(msg.type).toBe(MessageType.STREAM_END);
 
     ws.close();
   }, 8000);
 
-  it("RUN with workspace attached then detached sends STREAM_END for both", async () => {
+  it("RUN with workspace attached then detached sends STREAM_END", async () => {
     const room = `ws-detach-run-${crypto.randomUUID()}`;
     const agent = await getAgentByName(env.ThinkAgent, room);
 
@@ -778,4 +770,122 @@ describe("ThinkAgent RUN with workspace", () => {
 
     ws.close();
   }, 8000);
+});
+
+// ── WorkspaceLoopback proxy methods (ws* on ThinkAgent) ──────────────────────
+//
+// These tests verify the full loopback chain:
+//   ThinkAgent.ws*() → facet access → Workspace facet → plain data returned
+//
+// We write files directly to the Workspace DO (via env.Workspace in tests)
+// and then call the ws* methods on ThinkAgent to verify the loopback works.
+
+describe("ThinkAgent workspace proxy (ws* methods)", () => {
+  async function setup() {
+    const room = `ws-proxy-${crypto.randomUUID()}`;
+    const agent = await getAgentByName(env.ThinkAgent, room);
+    const wsInfo = await agent.createWorkspace("ProxyWS");
+    return { agent, workspaceId: wsInfo.id };
+  }
+
+  it("wsWriteFile + wsReadFile round-trip", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsWriteFile(workspaceId, "/hello.txt", "hello world");
+    const content = await agent.wsReadFile(workspaceId, "/hello.txt");
+
+    expect(content).toBe("hello world");
+  });
+
+  it("wsReadFile returns null for missing file", async () => {
+    const { agent, workspaceId } = await setup();
+    const content = await agent.wsReadFile(workspaceId, "/nope.txt");
+    expect(content).toBeNull();
+  });
+
+  it("wsFileExists returns true after write, false before", async () => {
+    const { agent, workspaceId } = await setup();
+
+    expect(await agent.wsFileExists(workspaceId, "/test.ts")).toBe(false);
+    await agent.wsWriteFile(workspaceId, "/test.ts", "export {}");
+    expect(await agent.wsFileExists(workspaceId, "/test.ts")).toBe(true);
+  });
+
+  it("wsDeleteFile removes a file", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsWriteFile(workspaceId, "/tmp.txt", "temp");
+    expect(await agent.wsDeleteFile(workspaceId, "/tmp.txt")).toBe(true);
+    expect(await agent.wsFileExists(workspaceId, "/tmp.txt")).toBe(false);
+  });
+
+  it("wsStat returns file metadata", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsWriteFile(workspaceId, "/data.json", '{"a":1}');
+    const stat = await agent.wsStat(workspaceId, "/data.json");
+
+    expect(stat).not.toBeNull();
+    expect(stat!.type).toBe("file");
+    expect(stat!.name).toBe("data.json");
+    expect(stat!.size).toBeGreaterThan(0);
+  });
+
+  it("wsListFiles returns directory entries", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsWriteFile(workspaceId, "/a.txt", "a");
+    await agent.wsWriteFile(workspaceId, "/b.txt", "b");
+    await agent.wsMkdir(workspaceId, "/src");
+
+    const entries = await agent.wsListFiles(workspaceId, "/");
+    expect(entries.length).toBe(3);
+
+    const names = entries.map((e: { name: string }) => e.name);
+    expect(names).toContain("a.txt");
+    expect(names).toContain("b.txt");
+    expect(names).toContain("src");
+  });
+
+  it("wsMkdir creates a directory", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsMkdir(workspaceId, "/deep/nested/dir", { recursive: true });
+    const stat = await agent.wsStat(workspaceId, "/deep/nested/dir");
+    expect(stat).not.toBeNull();
+    expect(stat!.type).toBe("directory");
+  });
+
+  it("wsRm removes files and directories", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsWriteFile(workspaceId, "/dir/file.ts", "content");
+    await agent.wsRm(workspaceId, "/dir", { recursive: true });
+    expect(await agent.wsFileExists(workspaceId, "/dir/file.ts")).toBe(false);
+  });
+
+  it("wsBash executes commands against the workspace filesystem", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsWriteFile(workspaceId, "/greeting.txt", "hello bash");
+    const result = await agent.wsBash(workspaceId, "cat /greeting.txt");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("hello bash");
+  });
+
+  it("wsGetInfo returns workspace stats", async () => {
+    const { agent, workspaceId } = await setup();
+
+    await agent.wsWriteFile(workspaceId, "/f1.ts", "file 1");
+    await agent.wsWriteFile(workspaceId, "/f2.ts", "file 2");
+
+    const info = await agent.wsGetInfo(workspaceId);
+    expect(info.fileCount).toBe(2);
+    expect(info.totalBytes).toBeGreaterThan(0);
+  });
+
+  // Ownership rejection is already tested by the "LIST_FILES is silently
+  // ignored for a workspace not owned by this agent" test in the file browser
+  // protocol suite. The ws* methods use the same _ownedWorkspace() guard.
 });
