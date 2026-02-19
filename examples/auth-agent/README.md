@@ -39,7 +39,7 @@ Browser (React SPA)
 1. User signs in → better-auth sets a **session cookie** (same-origin, automatic)
 2. Client calls `authClient.token()` → `GET /api/auth/token` (authenticated via cookie) → returns a short-lived **JWT**
 3. JWT stored in `localStorage`
-4. `useAgent({ query: { token } })` passes JWT as a WebSocket query parameter
+4. `useAgent({ query: async () => ({ token }) })` passes JWT as a WebSocket query parameter
 5. Server's `onBeforeConnect` verifies JWT using JWKS read from D1
 
 ## Key decisions
@@ -60,7 +60,7 @@ better-auth uses [Kysely](https://kysely.dev/) internally as its query builder. 
 better-auth → Kysely → kysely-d1 → D1
 ```
 
-This is the only adapter chain that works for better-auth on D1. You pass it directly to better-auth's `database` config:
+This is the adapter chain we use (Drizzle with `drizzle-orm/d1` is another option). You pass it directly to better-auth's `database` config:
 
 ```ts
 database: {
@@ -82,6 +82,7 @@ The JWKS endpoint (`/api/auth/jwks`) lives on the same Worker that needs to veri
 Instead, we read the JWKS keys directly from D1 (the `jwks` table that better-auth's JWT plugin manages) and build a local key set with [`jose`](https://github.com/panva/jose):
 
 ```ts
+// Simplified — see auth.ts for full typed version
 const result = await env.AUTH_DB.prepare(
   "SELECT id, publicKey, privateKey, createdAt FROM jwks"
 ).all();
@@ -138,6 +139,7 @@ if (url.pathname.startsWith("/api/auth")) {
 ## Stack
 
 - **Runtime**: Cloudflare Workers + Durable Objects + D1
+- **Agent**: [@cloudflare/ai-chat](https://www.npmjs.com/package/@cloudflare/ai-chat) (`AIChatAgent` base class + `useAgentChat` React hook)
 - **Auth**: [better-auth](https://www.better-auth.com/) with JWT + bearer plugins
 - **JWT verification**: [jose](https://github.com/panva/jose) with `createLocalJWKSet`
 - **Database adapter**: [kysely-d1](https://github.com/nickkatsios/kysely-d1)
