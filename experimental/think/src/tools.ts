@@ -50,12 +50,15 @@ export function buildFileTools(workspace: WorkspaceFacet) {
           )
       }),
       execute: async ({ path }) => {
+        console.log(`[tool:readFile] path=${path}`);
         try {
           const content = await workspace.readFile(path);
           if (content === null)
             return { error: `ENOENT: file not found: ${path}` };
+          console.log(`[tool:readFile] ok, ${content.length} chars`);
           return { path, content };
         } catch (e) {
+          console.error(`[tool:readFile] error:`, e);
           return { error: String(e) };
         }
       }
@@ -80,13 +83,14 @@ export function buildFileTools(workspace: WorkspaceFacet) {
           )
       }),
       execute: async ({ path, content, mimeType }) => {
+        console.log(`[tool:writeFile] path=${path} size=${content.length}`);
         try {
           await workspace.writeFile(path, content, mimeType);
-          return {
-            path,
-            bytesWritten: new TextEncoder().encode(content).byteLength
-          };
+          const bytes = new TextEncoder().encode(content).byteLength;
+          console.log(`[tool:writeFile] ok, ${bytes} bytes`);
+          return { path, bytesWritten: bytes };
         } catch (e) {
+          console.error(`[tool:writeFile] error:`, e);
           return { error: String(e) };
         }
       }
@@ -98,10 +102,12 @@ export function buildFileTools(workspace: WorkspaceFacet) {
         path: z.string().describe("Absolute path of the file to delete.")
       }),
       execute: async ({ path }) => {
+        console.log(`[tool:deleteFile] path=${path}`);
         try {
           const deleted = await workspace.deleteFile(path);
           return { path, deleted };
         } catch (e) {
+          console.error(`[tool:deleteFile] error:`, e);
           return { error: String(e) };
         }
       }
@@ -237,7 +243,17 @@ export function buildFileTools(workspace: WorkspaceFacet) {
           )
       }),
       execute: async ({ command }) => {
-        return await workspace.bash(command);
+        console.log(`[tool:bash] command=${command.slice(0, 200)}`);
+        try {
+          const result = await workspace.bash(command);
+          console.log(
+            `[tool:bash] exit=${result.exitCode} stdout=${result.stdout.length} stderr=${result.stderr.length}`
+          );
+          return result;
+        } catch (e) {
+          console.error(`[tool:bash] error:`, e);
+          return { stdout: "", stderr: String(e), exitCode: 1 };
+        }
       }
     }),
 

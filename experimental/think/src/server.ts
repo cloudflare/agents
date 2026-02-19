@@ -45,32 +45,51 @@ export class WorkspaceLoopback extends WorkerEntrypoint<
   Env,
   WorkspaceLoopbackProps
 > {
-  private _facet: WorkspaceFacet;
+  private _agent: DurableObjectStub<ThinkAgent>;
+  private _workspaceId: string;
 
   constructor(ctx: ExecutionContext<WorkspaceLoopbackProps>, env: Env) {
     super(ctx, env);
 
-    // Reach back to the ThinkAgent that owns this workspace facet.
     // @ts-expect-error — ctx.exports is experimental
     const ns = ctx.exports.ThinkAgent as DurableObjectNamespace<ThinkAgent>;
-    const stub = ns.get(ns.idFromString(ctx.props.agentId));
-    this._facet = stub.getWorkspaceFacet(ctx.props.workspaceId);
-
-    // Return a proxy so the caller can call WorkspaceFacet methods directly
-    // on this WorkerEntrypoint instance — they all forward to the facet.
-    return new Proxy(this._facet, {
-      get(target, prop, _receiver) {
-        return Reflect.get(target, prop, target);
-      },
-      getPrototypeOf() {
-        return WorkerEntrypoint.prototype;
-      }
-    }) as unknown as WorkspaceLoopback;
+    this._agent = ns.get(ns.idFromString(ctx.props.agentId));
+    this._workspaceId = ctx.props.workspaceId;
   }
 
-  // Required: the runtime won't register a WorkerEntrypoint with zero methods.
-  _ping() {
-    return "pong";
+  // Each method calls a corresponding `ws_*` method on ThinkAgent which
+  // accesses the facet locally and returns plain data. This avoids passing
+  // facet stubs across RPC (they're not serializable across boundaries).
+
+  async readFile(path: string) {
+    return this._agent.wsReadFile(this._workspaceId, path);
+  }
+  async writeFile(path: string, content: string, mimeType?: string) {
+    return this._agent.wsWriteFile(this._workspaceId, path, content, mimeType);
+  }
+  async deleteFile(path: string) {
+    return this._agent.wsDeleteFile(this._workspaceId, path);
+  }
+  async fileExists(path: string) {
+    return this._agent.wsFileExists(this._workspaceId, path);
+  }
+  async stat(path: string) {
+    return this._agent.wsStat(this._workspaceId, path);
+  }
+  async listFiles(dir?: string, options?: { limit?: number; offset?: number }) {
+    return this._agent.wsListFiles(this._workspaceId, dir, options);
+  }
+  async mkdir(path: string, options?: { recursive?: boolean }) {
+    return this._agent.wsMkdir(this._workspaceId, path, options);
+  }
+  async rm(path: string, options?: { recursive?: boolean; force?: boolean }) {
+    return this._agent.wsRm(this._workspaceId, path, options);
+  }
+  async bash(command: string) {
+    return this._agent.wsBash(this._workspaceId, command);
+  }
+  async getInfo() {
+    return this._agent.wsGetInfo(this._workspaceId);
   }
 }
 
@@ -120,6 +139,18 @@ export class ThinkAgent extends Agent<Env> {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `;
+    this._ensureDefaultWorkspace();
+  }
+
+  /** Ensure a "default" workspace always exists for this agent. */
+  private _ensureDefaultWorkspace() {
+    const exists =
+      this.sql<{ cnt: number }>`
+        SELECT COUNT(*) AS cnt FROM workspaces WHERE id = 'default'
+      `?.[0]?.cnt ?? 0;
+    if (exists === 0) {
+      this.sql`INSERT INTO workspaces (id, name) VALUES ('default', 'Default')`;
+    }
   }
 
   // ── Facet access ───────────────────────────────────────────────────
@@ -140,21 +171,68 @@ export class ThinkAgent extends Agent<Env> {
     })) as WorkspaceFacet;
   }
 
-  /**
-   * Public method called by WorkspaceLoopback to access a workspace facet.
-   * The loopback reaches back to this ThinkAgent via ctx.exports and calls
-   * this method to get the facet — Chat never touches the facet directly.
-   *
-   * Validates that the workspace belongs to this agent's registry before
-   * returning the facet — prevents cross-agent workspace access.
-   */
-  getWorkspaceFacet(workspaceId: string): WorkspaceFacet {
+  // ── Workspace proxy methods (called by WorkspaceLoopback) ─────────
+  //
+  // Each method accesses the workspace facet locally and returns plain data.
+  // Facet stubs can't survive being returned across RPC boundaries, so the
+  // loopback calls these methods instead of getting the facet directly.
+  // All methods validate workspace ownership before accessing the facet.
+
+  private _ownedWorkspace(workspaceId: string): WorkspaceFacet {
     if (!this._ownsWorkspace(workspaceId)) {
       throw new Error(
         `Workspace ${workspaceId} not found in this agent's registry`
       );
     }
     return this._workspace(workspaceId);
+  }
+
+  async wsReadFile(workspaceId: string, path: string) {
+    return this._ownedWorkspace(workspaceId).readFile(path);
+  }
+  async wsWriteFile(
+    workspaceId: string,
+    path: string,
+    content: string,
+    mimeType?: string
+  ) {
+    return this._ownedWorkspace(workspaceId).writeFile(path, content, mimeType);
+  }
+  async wsDeleteFile(workspaceId: string, path: string) {
+    return this._ownedWorkspace(workspaceId).deleteFile(path);
+  }
+  async wsFileExists(workspaceId: string, path: string) {
+    return this._ownedWorkspace(workspaceId).fileExists(path);
+  }
+  async wsStat(workspaceId: string, path: string) {
+    return this._ownedWorkspace(workspaceId).stat(path);
+  }
+  async wsListFiles(
+    workspaceId: string,
+    dir?: string,
+    options?: { limit?: number; offset?: number }
+  ) {
+    return this._ownedWorkspace(workspaceId).listFiles(dir, options);
+  }
+  async wsMkdir(
+    workspaceId: string,
+    path: string,
+    options?: { recursive?: boolean }
+  ) {
+    return this._ownedWorkspace(workspaceId).mkdir(path, options);
+  }
+  async wsRm(
+    workspaceId: string,
+    path: string,
+    options?: { recursive?: boolean; force?: boolean }
+  ) {
+    return this._ownedWorkspace(workspaceId).rm(path, options);
+  }
+  async wsBash(workspaceId: string, command: string) {
+    return this._ownedWorkspace(workspaceId).bash(command);
+  }
+  async wsGetInfo(workspaceId: string) {
+    return this._ownedWorkspace(workspaceId).getInfo();
   }
 
   // ── Thread registry ────────────────────────────────────────────────
@@ -196,7 +274,8 @@ export class ThinkAgent extends Agent<Env> {
       `?.[0]?.cnt ?? 0;
     if (exists === 0) {
       this.sql`
-        INSERT INTO threads (id, name) VALUES (${threadId}, ${threadId})
+        INSERT INTO threads (id, name, workspace_id)
+        VALUES (${threadId}, ${threadId}, 'default')
       `;
     }
   }
@@ -204,7 +283,8 @@ export class ThinkAgent extends Agent<Env> {
   createThread(name?: string): ThreadInfo {
     const id = crypto.randomUUID().slice(0, 8);
     const threadName = name || `Thread ${id}`;
-    this.sql`INSERT INTO threads (id, name) VALUES (${id}, ${threadName})`;
+    this
+      .sql`INSERT INTO threads (id, name, workspace_id) VALUES (${id}, ${threadName}, 'default')`;
     return this._listThreads().find((t) => t.id === id)!;
   }
 

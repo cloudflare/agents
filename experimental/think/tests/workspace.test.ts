@@ -574,9 +574,12 @@ describe("Workspace complex scenarios", () => {
 // ── ThinkAgent workspace management (RPC) ────────────────────────────
 
 describe("ThinkAgent workspace management (RPC)", () => {
-  it("starts with no workspaces", async () => {
+  it("starts with the default workspace", async () => {
     const agent = await getThinkAgent(`no-ws-${crypto.randomUUID()}`);
-    expect(await agent.getWorkspaces()).toEqual([]);
+    const workspaces = await agent.getWorkspaces();
+    expect(workspaces).toHaveLength(1);
+    expect(workspaces[0].id).toBe("default");
+    expect(workspaces[0].name).toBe("Default");
   });
 
   it("creates a workspace", async () => {
@@ -585,7 +588,8 @@ describe("ThinkAgent workspace management (RPC)", () => {
 
     expect(ws.id).toBeTruthy();
     expect(ws.name).toBe("My Workspace");
-    expect(await agent.getWorkspaces()).toHaveLength(1);
+    // default + the new one
+    expect(await agent.getWorkspaces()).toHaveLength(2);
   });
 
   it("creates workspace with auto-generated name", async () => {
@@ -598,7 +602,8 @@ describe("ThinkAgent workspace management (RPC)", () => {
     const agent = await getThinkAgent(`del-ws-${crypto.randomUUID()}`);
     const ws = await agent.createWorkspace("To Delete");
     await agent.deleteWorkspace(ws.id);
-    expect(await agent.getWorkspaces()).toHaveLength(0);
+    // Only the default workspace remains
+    expect(await agent.getWorkspaces()).toHaveLength(1);
   });
 
   it("renames a workspace", async () => {
@@ -606,7 +611,7 @@ describe("ThinkAgent workspace management (RPC)", () => {
     const ws = await agent.createWorkspace("Old Name");
     await agent.renameWorkspace(ws.id, "New Name");
     const workspaces = await agent.getWorkspaces();
-    expect(workspaces[0].name).toBe("New Name");
+    expect(workspaces.find((w) => w.id === ws.id)?.name).toBe("New Name");
   });
 
   it("attaches a workspace to a thread", async () => {
@@ -644,10 +649,10 @@ describe("ThinkAgent workspace management (RPC)", () => {
     expect(threads.find((t) => t.id === thread.id)?.workspaceId).toBeNull();
   });
 
-  it("thread starts with null workspaceId", async () => {
+  it("thread starts with default workspace attached", async () => {
     const agent = await getThinkAgent(`thread-nows-${crypto.randomUUID()}`);
     const thread = await agent.createThread("Plain Thread");
-    expect(thread.workspaceId).toBeNull();
+    expect(thread.workspaceId).toBe("default");
   });
 
   it("multiple threads can attach to the same workspace", async () => {

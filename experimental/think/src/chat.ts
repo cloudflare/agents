@@ -296,10 +296,14 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
    * This creates a clean RPC channel — no bidirectional streaming conflict.
    */
   private _buildWorkspaceTools(workspaceId: string, agentId: string): ToolSet {
+    console.log(
+      `[Chat._buildWorkspaceTools] workspaceId=${workspaceId} agentId=${agentId}`
+    );
     // @ts-expect-error — ctx.exports.WorkspaceLoopback is experimental
     const loopback = this.ctx.exports.WorkspaceLoopback({
       props: { agentId, workspaceId }
     }) as unknown as WorkspaceFacet;
+    console.log(`[Chat._buildWorkspaceTools] loopback created`);
     return buildFileTools(loopback);
   }
 
