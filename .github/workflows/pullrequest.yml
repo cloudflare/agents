@@ -83,17 +83,4 @@ jobs:
       - run: npm run build
 
       - name: Publish packages to pkg.pr.new
-        run: |
-          for pkg_json in packages/*/package.json; do
-            if node -e "const pkg=require('./' + process.argv[1]); process.exit(pkg.private ? 0 : 1)" "$pkg_json"; then
-              echo "Skipping private package: $pkg_json"
-              continue
-            fi
-
-            pkg_dir=$(dirname "$pkg_json")
-            echo "Publishing $pkg_dir"
-            (
-              cd "$pkg_dir"
-              npx pkg-pr-new publish --comment create
-            )
-          done
+        run: npx pkg-pr-new publish --peerDeps ./packages/*
