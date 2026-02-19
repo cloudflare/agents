@@ -1,6 +1,6 @@
 import { routeAgentRequest } from "agents";
 
-export { ThinkAgent, Chat } from "../src/server";
+export { ThinkAgent, Chat, Workspace, WorkspaceLoopback } from "../src/server";
 
 type Env = {
   ThinkAgent: DurableObjectNamespace<import("../src/server").ThinkAgent>;

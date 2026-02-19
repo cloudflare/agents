@@ -13,14 +13,16 @@ ThinkAgent (Agent — session orchestrator)
   ├── Chat facet "thread-abc" (AgentFacet — isolated SQLite)
   │     ├── Message persistence + incremental diffing
   │     ├── AgentLoop (multi-step LLM execution + streaming)
-  │     └── Tool state tracking
+  │     └── Tool execution via WorkspaceLoopback → Workspace facet
   │
   ├── Chat facet "thread-def" (independent conversation)
   │
-  └── Workspace facet "ws-xyz" (AgentFacet — isolated SQLite + R2)
-        ├── Virtual filesystem (files, directories, metadata)
-        ├── Hybrid storage: inline SQLite < 1.5 MB, R2 overflow ≥ 1.5 MB
-        └── Bash execution via just-bash
+  ├── Workspace facet "ws-xyz" (AgentFacet — isolated SQLite + R2)
+  │     ├── Virtual filesystem (files, directories, metadata)
+  │     ├── Hybrid storage: inline SQLite < 1.5 MB, R2 overflow ≥ 1.5 MB
+  │     └── Bash execution via just-bash
+  │
+  └── WorkspaceLoopback (WorkerEntrypoint — bridges Chat → Workspace)
 ```
 
 ### Layers
@@ -53,6 +55,8 @@ ThinkAgent (Agent — session orchestrator)
 - Thread and workspace registries in its own SQLite
 - Routes agent runs to per-thread `Chat` facets; pipes streaming NDJSON to connected clients
 - Workspace attach/detach: a workspace can move between threads
+- Exports `WorkspaceLoopback` entrypoint for Chat → Workspace communication
+- RUN queue: concurrent runs for the same thread are queued (cap 1), not dropped
 - All public methods are RPC-callable — a parent gadget can drive it without WebSockets
 
 **Workspace** (`src/workspace.ts`) — extends `AgentFacet`. A durable, attachable filesystem:
@@ -62,24 +66,41 @@ ThinkAgent (Agent — session orchestrator)
 - `bash()` via `just-bash` — full bash in the Workers runtime, bridged to the virtual filesystem
 - Shareable: one workspace can be attached to multiple threads, or detached and reattached later
 
+**WorkspaceLoopback** (`src/server.ts`) — `WorkerEntrypoint` that bridges Chat ↔ Workspace:
+
+- Chat calls `ctx.exports.WorkspaceLoopback({props: {agentId, workspaceId}})` to get a ServiceStub
+- The loopback constructor reaches back to ThinkAgent via `ctx.exports.ThinkAgent`, calls `getWorkspaceFacet(id)`
+- All WorkspaceFacet methods are proxied directly — Chat never touches the facet itself
+- This avoids bidirectional RPC on the streaming channel (which caused WritableStream disconnects)
+
 ### Streaming pipeline
 
 ```
-Chat.streamInto(writable)
-  └── AgentLoop.stream(messages)         runs streamText + stopWhen
-        └── fullStream events
-              ├── text-delta    → {"t":"text","d":"..."}   \
-              ├── reasoning-delta → {"t":"think","d":"..."} } NDJSON
-              └── tool-call     → {"t":"tool","n":"..."}   /
-                                                            ↓
-ThinkAgent.onMessage(RUN)               reads the TransformStream
+ThinkAgent._executeRun(threadId)
+  └── Chat.streamInto(writable, {workspaceId, agentId})
+        └── AgentLoop.stream(messages, tools)
+              │
+              │  Tool execution path (when workspace attached):
+              │    tool.execute()
+              │      → ctx.exports.WorkspaceLoopback({props})   [ServiceStub]
+              │        → ThinkAgent.getWorkspaceFacet(id)        [facet access]
+              │          → Workspace.readFile / writeFile / bash  [facet method]
+              │
+              └── fullStream events → NDJSON over WritableStream
+                    ├── {"t":"text","d":"..."}     text delta
+                    ├── {"t":"think","d":"..."}    reasoning delta
+                    └── {"t":"tool","n":"..."}     tool call started
+                                                    ↓
+ThinkAgent reads the TransformStream
   └── parses NDJSON
         ├── STREAM_DELTA    → broadcast to all clients
         ├── REASONING_DELTA → broadcast
         └── TOOL_CALL       → broadcast (shows live tool badge in UI)
 ```
 
-The `Chat` facet writes into a `WritableStream<Uint8Array>` owned by `ThinkAgent` (not the other way around). This keeps the Workers RPC connection alive for the full duration — returning a `ReadableStream` across RPC causes premature disconnection.
+Chat writes into a `WritableStream<Uint8Array>` owned by ThinkAgent. This keeps the Workers RPC connection alive for the full duration.
+
+Tool execution uses the **WorkspaceLoopback** pattern: Chat gets a `ServiceStub` to a `WorkerEntrypoint` via `ctx.exports`, which creates a clean, independent RPC channel. The loopback proxies all calls back through ThinkAgent to the Workspace facet. This avoids bidirectional RPC on the same streaming channel — the original approach of passing tool closures across RPC caused WritableStream disconnect errors.
 
 ### Tools
 
@@ -118,6 +139,10 @@ The `done` tool has no `execute` — calling it terminates the agent loop. The m
 | C → S     | `ATTACH_WORKSPACE` / `DETACH_WORKSPACE`                      | Attach workspace to thread           |
 | C → S     | `GET_MESSAGES`                                               | Request messages for a thread        |
 | C → S     | `RUN`                                                        | Trigger the agent loop on a thread   |
+| C → S     | `LIST_FILES`                                                 | List files in a workspace directory  |
+| S → C     | `FILE_LIST`                                                  | Directory listing result             |
+| C → S     | `READ_FILE`                                                  | Read a file from a workspace         |
+| S → C     | `FILE_CONTENT`                                               | File content result (max 100 KB)     |
 
 URL routing: `/#threadId` maps to the active thread — survives refresh, supports back/forward.
 
@@ -146,25 +171,28 @@ R2/SQLite write ordering: R2 `put` first; if the subsequent SQL update fails, th
 
 ```
 src/
-  agent-facet.ts   AgentFacet — base class (sql, scheduling, abort, retry)
-  agent-loop.ts    AgentLoop  — multi-step LLM execution + streaming
-  chat.ts          Chat       — conversation facet (messages, streaming, persistence)
-  server.ts        ThinkAgent — orchestrator (threads, workspaces, WebSocket)
+  agent-facet.ts   AgentFacet        — base class (sql, scheduling, abort, retry)
+  agent-loop.ts    AgentLoop         — multi-step LLM execution + streaming
+  chat.ts          Chat              — conversation facet (messages, streaming, persistence)
+  server.ts        ThinkAgent        — orchestrator + WorkspaceLoopback entrypoint
+  prompts.ts       buildSystemPrompt — system prompt with workspace snapshot injection
   shared.ts        Types and WebSocket protocol
   tools.ts         Default tool set (filesystem + bash + done)
-  workspace.ts     Workspace  — virtual filesystem facet (SQLite + R2 + just-bash)
-  client.tsx       React UI   — thread sidebar, workspace panel, streaming UI
+  workspace.ts     Workspace         — virtual filesystem facet (SQLite + R2 + just-bash)
+  client.tsx       React UI          — thread sidebar, workspace panel, file browser, streaming
   index.tsx        React entry point
   styles.css       Tailwind + Kumo + Streamdown theme
 
 tests/
-  agent-facet.test.ts  AgentFacet via DO stub (sql, scheduling, destroy)
-  core.test.ts         Chat via DO stub (CRUD, batch, streaming, resilience)
-  workspace.test.ts    Workspace via DO stub (filesystem, R2 hybrid, bash, pagination)
-  sync.test.ts         ThinkAgent via WebSocket + RPC (threads, workspaces, streaming)
+  agent-facet.test.ts          AgentFacet via DO stub (sql, scheduling, destroy)
+  agent-loop.node.test.ts      AgentLoop via mock model (multi-step, done, context trimming)
+  core.test.ts                 Chat via DO stub (CRUD, batch, streaming, resilience)
+  system-prompt.node.test.ts   buildSystemPrompt + renderFileTree (pure Node)
+  workspace.test.ts            Workspace via DO stub (filesystem, R2 hybrid, bash, pagination)
+  sync.test.ts                 ThinkAgent via WebSocket + RPC (threads, workspaces, file browser, RUN queue)
 
 e2e/
-  sync.spec.ts         Full-stack Playwright tests (Wrangler dev)
+  sync.spec.ts                 Full-stack Playwright tests (streaming, tool calls, file creation)
 ```
 
 ## Run
@@ -185,4 +213,4 @@ npm run test:e2e       # Playwright end-to-end (requires wrangler dev)
 
 - **PI / OpenClaw** — layered agent framework (pi-agent-core → pi-coding-agent). Same separation of concerns: LLM provider → agent loop → session/tools. Key ideas: step-at-a-time loop, composable tools, `steer` vs `followUp` (interrupt vs queue), extensions as lifecycle hooks.
 - **@cloudflare/ai-chat** — message persistence patterns (incremental diffing, row size limits, OpenAI sanitization, tool state tracking). Adapted for facet isolation rather than single-DO-does-everything.
-- **Gadgets experiments** — facet architecture, parent-child RPC, structural capability control, workspace-as-shareable-attachment.
+- **Gadgets / Minions** — facet architecture, parent-child RPC, structural capability control, workspace-as-shareable-attachment. The `WorkspaceLoopback` pattern is directly modelled on `GatekeeperLoopback` from the Minions codebase — a `WorkerEntrypoint` that uses `ctx.exports` to reach back to the parent DO and proxy calls to a sibling facet.

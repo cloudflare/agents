@@ -2,7 +2,7 @@ import { routeAgentRequest } from "agents";
 import { AgentFacet } from "../src/agent-facet";
 import { Chat, Workspace } from "../src/server";
 
-export { ThinkAgent, Chat, Workspace } from "../src/server";
+export { ThinkAgent, Chat, Workspace, WorkspaceLoopback } from "../src/server";
 
 /**
  * Chat subclass that exposes internals needed for corruption resilience tests.

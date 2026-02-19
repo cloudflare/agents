@@ -18,13 +18,9 @@
       {
         "class_name": "ThinkAgent",
         "name": "ThinkAgent"
-      },
-      {
-        "class_name": "Workspace",
-        "name": "Workspace"
       }
-      // Chat is still a facet; Workspace is now a standalone DO so Chat can
-      // reach it directly via env.Workspace.idFromName(workspaceId).
+      // Chat and Workspace are facets of ThinkAgent.
+      // Chat reaches Workspace via WorkspaceLoopback (a WorkerEntrypoint).
     ]
   },
   "main": "src/server.ts",
@@ -32,10 +28,6 @@
     {
       "new_sqlite_classes": ["ThinkAgent"],
       "tag": "v1"
-    },
-    {
-      "new_sqlite_classes": ["Workspace"],
-      "tag": "v2"
     }
   ],
   "name": "think"

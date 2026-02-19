@@ -11,14 +11,10 @@ export type { StepResult } from "./agent-loop";
 export type RunOptions = {
   model?: string;
   system?: string;
-  /**
-   * Workspace registry ID. When provided, Chat constructs the workspace stub
-   * itself via env.Workspace.idFromName(workspaceId) and builds the file tools
-   * locally. Tool execution goes Chat → Workspace directly without any callback
-   * through ThinkAgent, avoiding the bi-directional RPC that caused
-   * WritableStream disconnect errors with the old tool-closure approach.
-   */
+  /** Workspace registry ID — if set, tools are built for this workspace. */
   workspaceId?: string;
+  /** ThinkAgent's DO id (hex) — needed to construct the WorkspaceLoopback. */
+  agentId?: string;
   maxSteps?: number;
 };
 
@@ -292,21 +288,31 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
   // ThinkAgent, so callers pass a model string ID instead.
 
   /**
-   * Build the workspace stub and file tools from a workspaceId string.
-   * Runs inside the Chat facet so the stub is local — no RPC boundary crossed.
+   * Build file tools that access a Workspace facet via the WorkspaceLoopback.
+   *
+   * The loopback is a WorkerEntrypoint exported from the same worker.
+   * We get a ServiceStub to it via ctx.exports, passing props that tell it
+   * which ThinkAgent instance to reach and which workspace facet to proxy.
+   * This creates a clean RPC channel — no bidirectional streaming conflict.
    */
-  private _buildWorkspaceTools(workspaceId: string): ToolSet {
-    const ns = (this.env as unknown as { Workspace: DurableObjectNamespace })
-      .Workspace;
-    const stub = ns.get(
-      ns.idFromName(workspaceId)
-    ) as unknown as WorkspaceFacet;
-    return buildFileTools(stub);
+  private _buildWorkspaceTools(workspaceId: string, agentId: string): ToolSet {
+    // @ts-expect-error — ctx.exports.WorkspaceLoopback is experimental
+    const loopback = this.ctx.exports.WorkspaceLoopback({
+      props: { agentId, workspaceId }
+    }) as unknown as WorkspaceFacet;
+    return buildFileTools(loopback);
   }
 
   private _resolveTools(options?: RunOptions): ToolSet | undefined {
-    if (options?.workspaceId)
-      return this._buildWorkspaceTools(options.workspaceId);
+    if (options?.workspaceId) {
+      if (!options.agentId) {
+        console.error(
+          "[Chat._resolveTools] workspaceId provided without agentId — tools will not be available"
+        );
+        return undefined;
+      }
+      return this._buildWorkspaceTools(options.workspaceId, options.agentId);
+    }
     return undefined;
   }
 
