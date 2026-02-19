@@ -4,7 +4,7 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
-  "ai": { "binding": "AI" },
+  "ai": { "binding": "AI", "remote": true },
   "observability": { "enabled": true },
   "assets": {
     "not_found_handling": "single-page-application",

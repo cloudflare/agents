@@ -12,7 +12,7 @@
   "dependencies": {
     "@cloudflare/agents-ui": "*",
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^1.5.0",
+    "@cloudflare/kumo": "^1.6.0",
     "@opencode-ai/sdk": "^1.1.40",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
@@ -20,6 +20,6 @@
   "devDependencies": {
     "@cloudflare/sandbox": "^0.7.4",
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.1.18"
+    "tailwindcss": "^4.2.0"
   }
 }
