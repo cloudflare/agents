@@ -57,6 +57,11 @@ export class TestChatAgent extends AIChatAgent<Env> {
     // It's a nested async function called from within onChatMessage
     await this._simulateToolExecute();
 
+    // Random delay to simulate variable LLM response times.
+    // This proves queue serialization works — without it, concurrent
+    // messages with random delays would complete in random order.
+    await new Promise((r) => setTimeout(r, Math.random() * 50));
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
