@@ -536,7 +536,13 @@ type MCPServer = {
   name: string;
   server_url: string;
   auth_url: string | null;
-  state: "ready" | "authenticating" | "connecting" | "connected" | "discovering" | "failed";
+  state:
+    | "ready"
+    | "authenticating"
+    | "connecting"
+    | "connected"
+    | "discovering"
+    | "failed";
   error: string | null;
   instructions: string | null;
   capabilities: ServerCapabilities | null;

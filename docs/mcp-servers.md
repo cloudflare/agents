@@ -4,11 +4,11 @@ This guide covers the different ways to create MCP servers with the Agents SDK a
 
 ## Choosing an Approach
 
-| Approach | Stateful? | Requires Durable Objects? | Best for |
-| --- | --- | --- | --- |
-| `createMcpHandler()` | No | No | Stateless tools, simplest setup |
-| `McpAgent` | Yes | Yes | Stateful tools, per-session state, elicitation |
-| Raw `WebStandardStreamableHTTPServerTransport` | No | No | Full control, no SDK dependency |
+| Approach                                       | Stateful? | Requires Durable Objects? | Best for                                       |
+| ---------------------------------------------- | --------- | ------------------------- | ---------------------------------------------- |
+| `createMcpHandler()`                           | No        | No                        | Stateless tools, simplest setup                |
+| `McpAgent`                                     | Yes       | Yes                       | Stateful tools, per-session state, elicitation |
+| Raw `WebStandardStreamableHTTPServerTransport` | No        | No                        | Full control, no SDK dependency                |
 
 - **`createMcpHandler()`** is the fastest way to get a stateless MCP server running. Use it when your tools do not need per-session state.
 - **`McpAgent`** gives you a Durable Object per session with built-in state management, elicitation support, and both SSE and Streamable HTTP transports.
@@ -79,10 +79,12 @@ server.registerTool(
   async () => {
     const auth = getMcpAuthContext();
     return {
-      content: [{
-        type: "text",
-        text: auth ? JSON.stringify(auth.props) : "Not authenticated"
-      }]
+      content: [
+        {
+          type: "text",
+          text: auth ? JSON.stringify(auth.props) : "Not authenticated"
+        }
+      ]
     };
   }
 );
@@ -172,7 +174,10 @@ To get a feel of what a more realistic MCP might look like, let's deploy an MCP 
 ```typescript
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { OAuthProvider, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import {
+  OAuthProvider,
+  type OAuthHelpers
+} from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import { env } from "cloudflare:workers";
 
@@ -473,10 +478,12 @@ export class MyMCP extends McpAgent<Env, { counter: number }> {
         this.setState({ counter: this.state.counter + amount });
 
         return {
-          content: [{
-            type: "text",
-            text: `Counter increased by ${amount}, now ${this.state.counter}`
-          }]
+          content: [
+            {
+              type: "text",
+              text: `Counter increased by ${amount}, now ${this.state.counter}`
+            }
+          ]
         };
       }
     );
@@ -507,12 +514,12 @@ const transport = new WorkerTransport({
 
 Key options:
 
-| Option | Description |
-| --- | --- |
-| `sessionIdGenerator` | Function that returns a session ID for new sessions |
-| `enableJsonResponse` | Return JSON instead of SSE streams (default: `false`) |
-| `storage` | Optional `{ get, set }` adapter for persisting transport state across requests |
-| `corsOptions` | CORS configuration |
+| Option               | Description                                                                    |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `sessionIdGenerator` | Function that returns a session ID for new sessions                            |
+| `enableJsonResponse` | Return JSON instead of SSE streams (default: `false`)                          |
+| `storage`            | Optional `{ get, set }` adapter for persisting transport state across requests |
+| `corsOptions`        | CORS configuration                                                             |
 
 ### Read more
 

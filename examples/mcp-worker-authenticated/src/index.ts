@@ -93,6 +93,8 @@ export default new OAuthProvider({
   apiHandler: apiHandler,
 
   defaultHandler: {
-    fetch: AuthHandler.fetch
+    async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
+      return AuthHandler.fetch(request, env as Record<string, unknown>, ctx);
+    }
   }
 });
