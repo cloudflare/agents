@@ -1,223 +1,225 @@
-import { routeAgentRequest, Agent, callable, type Connection } from "agents";
-
+import {
+  routeAgentRequest,
+  getAgentByName,
+  Agent,
+  callable,
+  type Connection
+} from "agents";
 import { getSchedulePrompt } from "agents/schedule";
-
-import { experimental_codemode as codemode } from "@cloudflare/codemode/ai";
+import {
+  createCodeTool,
+  DynamicWorkerExecutor,
+  generateTypes,
+  type Executor
+} from "@cloudflare/codemode";
 import {
   streamText,
   type UIMessage,
   stepCountIs,
   convertToModelMessages,
-  type ToolSet,
   readUIMessageStream,
   generateId
 } from "ai";
-import { openai } from "@ai-sdk/openai";
-import { tools } from "./tools";
-import { env } from "cloudflare:workers";
+import { createWorkersAI } from "workers-ai-provider";
+import { initDatabase, createTools } from "./tools";
+import {
+  NodeServerExecutor,
+  handleToolCallback
+} from "./executors/node-server-client";
 
-// export this WorkerEntryPoint that lets you
-// reroute function calls back to a caller
-export { CodeModeProxy } from "@cloudflare/codemode/ai";
+export type ExecutorType = "dynamic-worker" | "node-server";
 
-// inline this until enable_ctx_exports is supported by default
-declare global {
-  interface ExecutionContext<Props = unknown> {
-    readonly exports: Cloudflare.Exports;
-    readonly props: Props;
-  }
-
-  interface DurableObjectState<Props = unknown> {
-    readonly exports: Cloudflare.Exports;
-    readonly props: Props;
-  }
-}
-
-const model = openai("gpt-5");
-
-export const globalOutbound = {
-  fetch: async (
-    input: string | URL | RequestInfo,
-    init?: RequestInit<CfProperties<unknown>> | undefined
-  ): Promise<Response> => {
-    const url = new URL(
-      typeof input === "string"
-        ? input
-        : typeof input === "object" && "url" in input
-          ? input.url
-          : input.toString()
-    );
-    if (url.hostname === "example.com" && url.pathname === "/sub-path") {
-      return new Response("Not allowed", { status: 403 });
-    }
-    return fetch(input, init);
-  }
-};
+type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
 type State = {
-  messages: UIMessage<typeof tools>[];
+  messages: UIMessage[];
   loading: boolean;
+  executor: ExecutorType;
 };
 
 export class Codemode extends Agent<Env, State> {
-  /**
-   * Handles incoming chat messages and manages the response stream
-   */
-  tools: ToolSet = {};
-
   observability = undefined;
-
   lastMessageRepliedTo: string | undefined;
+
+  /** Registry for in-flight Node executor tool callbacks — lives on the DO instance. */
+  nodeExecutorRegistry = new Map<string, ToolFns>();
+
+  /** PM tools wired to this DO's SQLite — built once in onStart. */
+  tools!: ReturnType<typeof createTools>;
+
+  /** Cached tool definition for the frontend — built once in onStart. */
+  toolDefinition!: { name: string; description: string; inputSchema: unknown };
 
   initialState: State = {
     messages: [],
-    loading: false
+    loading: false,
+    executor: "dynamic-worker"
   };
 
   async onStart() {
+    initDatabase(this.ctx.storage.sql);
+    this.tools = createTools(this.ctx.storage.sql);
+
+    // Build tool definition once — used both for LLM context and frontend display.
+    // createCodeTool uses the package's DEFAULT_DESCRIPTION when description is
+    // omitted, which interpolates {{types}} automatically. We build the same
+    // description here so the frontend can display it.
+    const types = generateTypes(this.tools);
+    const description = [
+      "Execute code to achieve a goal.",
+      "",
+      "Available:",
+      types,
+      "",
+      "Write an async arrow function that returns the result.",
+      "Do NOT define named functions then call them — just write the arrow function body directly.",
+      "",
+      'Example: async () => { const r = await codemode.searchWeb({ query: "test" }); return r; }'
+    ].join("\n");
+
+    this.toolDefinition = {
+      name: "codemode",
+      description,
+      inputSchema: {
+        type: "object",
+        properties: {
+          code: {
+            type: "string",
+            description: "JavaScript async arrow function to execute"
+          }
+        },
+        required: ["code"]
+      }
+    };
+
     this.lastMessageRepliedTo =
       this.state.messages[this.state.messages.length - 1]?.id;
   }
 
-  @callable({
-    description: "Add an MCP server to the agent"
-  })
-  addMcp({ name, url }: { name: string; url: string }) {
-    void this.addMcpServer(name, url, { callbackHost: "http://localhost:5173" })
-      .then(() => {
-        console.log("mcpServer added", name, url);
-      })
-      .catch((error) => {
-        console.error("mcpServer addition failed", error);
-      });
+  /** Handle HTTP requests forwarded to this DO (tool callbacks from Node executor). */
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/node-executor-callback/")) {
+      return handleToolCallback(request, this.nodeExecutorRegistry);
+    }
+    return new Response("Not found", { status: 404 });
   }
 
-  @callable({
-    description: "Remove an MCP server from the agent"
-  })
-  removeMcp(id: string) {
-    void this.removeMcpServer(id);
-  }
-
-  callTool(functionName: string, args: unknown[]) {
-    return this.tools[functionName]?.execute?.(args, {
-      abortSignal: new AbortController().signal,
-      toolCallId: "123",
-      messages: []
+  @callable({ description: "Set the executor type" })
+  setExecutor(executorType: ExecutorType) {
+    this.setState({
+      ...this.state,
+      executor: executorType
     });
   }
 
-  async onStateChanged(state: State, source: Connection | "server") {
-    if (source === "server") {
-      return;
+  @callable({ description: "Get the codemode tool definition" })
+  getToolDefinition() {
+    return this.toolDefinition;
+  }
+
+  createExecutor(): Executor {
+    switch (this.state.executor) {
+      case "node-server":
+        return new NodeServerExecutor({
+          serverUrl: "http://localhost:3001",
+          callbackUrl: `http://localhost:5173/node-executor-callback/${this.name}`,
+          registry: this.nodeExecutorRegistry
+        });
+      case "dynamic-worker":
+      default:
+        return new DynamicWorkerExecutor({
+          loader: this.env.LOADER
+        });
     }
+  }
+
+  async onStateUpdate(state: State, source: Connection | "server") {
+    if (source === "server") return;
+
+    const lastMessage = state.messages[state.messages.length - 1];
     if (
       state.messages.length > 0 &&
-      this.lastMessageRepliedTo !==
-        state.messages[state.messages.length - 1]?.id
+      this.lastMessageRepliedTo !== lastMessage?.id
     ) {
       await this.onChatMessage();
-      this.lastMessageRepliedTo = state.messages[state.messages.length - 1]?.id;
+      this.lastMessageRepliedTo = lastMessage?.id;
     }
   }
 
   async onChatMessage() {
-    // Collect all tools, including MCP tools
-    this.setState({ messages: this.state.messages, loading: true });
-    const allTools = {
-      ...tools,
-      ...this.mcp.getAITools()
-    };
+    this.setState({ ...this.state, loading: true });
 
-    this.tools = allTools;
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    // @ts-expect-error -- model not yet in workers-ai-provider type list
+    const model = workersai("@cf/zai-org/glm-4.7-flash");
 
-    const { prompt, tools: wrappedTools } = await codemode({
-      model,
-      prompt: `You are a helpful assistant that can do various tasks... 
-
-${getSchedulePrompt({ date: new Date() })}
-
-If the user asks to schedule a task, use the schedule tool to schedule the task.
-`,
-      tools: allTools,
-      globalOutbound: env.globalOutbound,
-      loader: env.LOADER,
-      proxy: this.ctx.exports.CodeModeProxy({
-        props: {
-          binding: "Codemode",
-          name: this.name,
-          callback: "callTool"
-        }
-      })
+    const executor = this.createExecutor();
+    const codemode = createCodeTool({
+      tools: this.tools,
+      executor,
+      description: this.toolDefinition.description
     });
 
     const result = streamText({
-      system: prompt,
+      system: `You are a helpful project management assistant. You can create and manage projects, tasks, sprints, and comments using the codemode tool.
 
+When you need to perform operations, use the codemode tool to write JavaScript that calls the available functions on the \`codemode\` object.
+
+Current executor: ${this.state.executor}
+
+${getSchedulePrompt({ date: new Date() })}
+`,
       messages: await convertToModelMessages(this.state.messages),
       model,
-      // tools: allTools,
-      tools: wrappedTools,
-
-      onError: (error) => {
-        console.error("error", error);
-      },
-      // onFinish: ({response}) => {
-      //   this.setState({ messages: this.state.messages, loading: false });
-      // },
-
+      tools: { codemode },
+      onError: (error) => console.error("error", error),
       stopWhen: stepCountIs(10)
     });
 
-    for await (const uiMessage of readUIMessageStream<UIMessage<typeof tools>>({
-      stream: result.toUIMessageStream({
-        generateMessageId: generateId
-      }),
-      onError: (error) => {
-        console.error("error", error);
-      }
+    for await (const uiMessage of readUIMessageStream<UIMessage>({
+      stream: result.toUIMessageStream({ generateMessageId: generateId }),
+      onError: (error) => console.error("error", error)
     })) {
-      // console.log("Current message state:", uiMessage);
       this.setState({
-        messages: updateMessages(this.state.messages, uiMessage),
-        loading: this.state.loading
+        ...this.state,
+        messages: updateMessages(this.state.messages, uiMessage)
       });
     }
-    this.setState({
-      messages: this.state.messages,
-      loading: false
-    });
+
+    this.setState({ ...this.state, loading: false });
   }
 }
 
-function updateMessages(
-  messages: UIMessage<typeof tools>[],
-  newMessage: UIMessage<typeof tools>
-) {
-  const finalMessages = [];
-  let updated = false;
-  for (const message of messages) {
-    if (message.id === newMessage.id) {
-      finalMessages.push(newMessage);
-      updated = true;
-    } else {
-      finalMessages.push(message);
-    }
+function updateMessages(messages: UIMessage[], newMessage: UIMessage) {
+  const index = messages.findIndex((m) => m.id === newMessage.id);
+  if (index >= 0) {
+    return [
+      ...messages.slice(0, index),
+      newMessage,
+      ...messages.slice(index + 1)
+    ];
   }
-  if (!updated) {
-    finalMessages.push(newMessage);
-  }
-
-  return finalMessages;
+  return [...messages, newMessage];
 }
 
-/**
- * Worker entry point that routes incoming requests to the appropriate handler
- */
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
+    const url = new URL(request.url);
+
+    // Forward tool callback requests to the correct Codemode DO instance
+    if (url.pathname.startsWith("/node-executor-callback/")) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      // parts: ["node-executor-callback", agentName, execId, toolName]
+      const agentName = parts[1];
+      if (!agentName) {
+        return Response.json({ error: "Missing agent name in callback URL" }, { status: 400 });
+      }
+      const agent = await getAgentByName(env.Codemode, agentName);
+      return agent.fetch(request);
+    }
+
     return (
-      // Route the request to our agent or return 404 if not found
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );

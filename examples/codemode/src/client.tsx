@@ -3,431 +3,616 @@ import { useAgent } from "agents/react";
 import "./styles.css";
 import { generateId, type UIMessage } from "ai";
 import { useState, useEffect, useRef } from "react";
-import type { Codemode } from "./server";
-import type { MCPServersState } from "agents";
+import type { Codemode, ExecutorType } from "./server";
 
-/**
- * The AI SDK exports ToolUIPart, but it's generic over tool definitions.
- * Since this component accesses codemode-specific fields (functionDescription,
- * code) that aren't on the generic type, we define a local interface instead.
- * Fields mirror UIToolInvocation from the AI SDK (toolCallId, state, input,
- * output, errorText) with codemode-specific input/output shapes.
- */
 interface ToolPart {
   type: string;
   toolCallId?: string;
   state?: string;
   errorText?: string;
   input?: { functionDescription?: string; [key: string]: unknown };
-  output?: { code?: string; result?: string; [key: string]: unknown };
+  output?: {
+    code?: string;
+    result?: string;
+    logs?: string[];
+    [key: string]: unknown;
+  };
 }
 
-/** Runtime check: returns the part as a ToolPart if it's a tool-* type, or null. */
 function asToolPart(part: UIMessage["parts"][0]): ToolPart | null {
   if (!part.type.startsWith("tool-")) return null;
-  // The AI SDK's ToolUIPart has the same fields (toolCallId, state, input,
-  // output, errorText) but its generic type is incompatible with our local
-  // ToolPart. A runtime coercion is safe here because we only read known fields.
   return part as unknown as ToolPart;
 }
 
-// Component to render different types of message parts
+const EXECUTORS: { value: ExecutorType; label: string; description: string }[] =
+  [
+    {
+      value: "dynamic-worker",
+      label: "Dynamic Worker",
+      description: "Sandboxed Cloudflare Worker via WorkerLoader"
+    },
+    {
+      value: "node-server",
+      label: "Node Server",
+      description: "Node.js VM via external HTTP server"
+    }
+  ];
+
+const TOOLS: { name: string; description: string }[] = [
+  { name: "createProject", description: "Create a new project" },
+  { name: "listProjects", description: "List all projects" },
+  { name: "createTask", description: "Create a task in a project" },
+  { name: "listTasks", description: "List tasks with optional filters" },
+  { name: "updateTask", description: "Update a task's fields" },
+  { name: "deleteTask", description: "Delete a task and its comments" },
+  { name: "createSprint", description: "Create a sprint for a project" },
+  {
+    name: "listSprints",
+    description: "List sprints, optionally by project"
+  },
+  { name: "addComment", description: "Add a comment to a task" },
+  { name: "listComments", description: "List comments on a task" }
+];
+
+function extractFunctionCalls(code?: string): string[] {
+  if (!code) return [];
+  const matches = code.match(/codemode\.(\w+)/g);
+  if (!matches) return [];
+  return [...new Set(matches.map((m) => m.replace("codemode.", "")))];
+}
+
+// ── Icons ──
+
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      style={{
+        transform: expanded ? "rotate(90deg)" : "none",
+        transition: "transform 0.15s ease"
+      }}
+    >
+      <path
+        d="M6 4l4 4-4 4"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function BoltIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M9 1.5L3 9.5h4.5L7 14.5l6-8H8.5L9 1.5z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M8 10a2 2 0 100-4 2 2 0 000 4z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <path
+        d="M13.4 6.5l-.7-.4a5.5 5.5 0 00-.5-.9l.1-.8a.5.5 0 00-.2-.5l-1-.6a.5.5 0 00-.5 0l-.7.5a5 5 0 00-1 0l-.7-.5a.5.5 0 00-.5 0l-1 .6a.5.5 0 00-.2.5l.1.8a5 5 0 00-.5.9l-.7.4a.5.5 0 00-.3.4v1.2a.5.5 0 00.3.4l.7.4c.1.3.3.6.5.9l-.1.8a.5.5 0 00.2.5l1 .6a.5.5 0 00.5 0l.7-.5a5 5 0 001 0l.7.5a.5.5 0 00.5 0l1-.6a.5.5 0 00.2-.5l-.1-.8c.2-.3.4-.6.5-.9l.7-.4a.5.5 0 00.3-.4V6.9a.5.5 0 00-.3-.4z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+    </svg>
+  );
+}
+
+function SendIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M14 2L7 9M14 2l-4.5 12L7 9M14 2L2 6.5 7 9"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function ResetIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path
+        d="M2.5 2.5v4h4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4.5 10a5 5 0 107-7l-8 3.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+// ── Components ──
+
+function ReasoningBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!text?.trim()) return null;
+
+  return (
+    <div className="reasoning-block">
+      <button
+        className="reasoning-toggle"
+        onClick={() => setExpanded(!expanded)}
+        type="button"
+      >
+        <ChevronIcon expanded={expanded} />
+        <span className="reasoning-label">Thinking</span>
+      </button>
+      {expanded && <div className="reasoning-content">{text}</div>}
+    </div>
+  );
+}
+
+function ToolCard({ toolPart }: { toolPart: ToolPart }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasError = toolPart.state === "output-error" || !!toolPart.errorText;
+  const isComplete = toolPart.state === "output-available";
+  const isRunning = !isComplete && !hasError;
+
+  const functionCalls = extractFunctionCalls(
+    toolPart.output?.code || (toolPart.input?.code as string)
+  );
+  const summary =
+    functionCalls.length > 0 ? functionCalls.join(", ") : "code execution";
+
+  return (
+    <div
+      className={`tool-card ${hasError ? "tool-card--error" : ""} ${isComplete ? "tool-card--complete" : ""}`}
+    >
+      <button
+        className="tool-card-header"
+        onClick={() => setExpanded(!expanded)}
+        type="button"
+      >
+        <ChevronIcon expanded={expanded} />
+        <BoltIcon />
+        <span className="tool-card-summary">
+          <span className="tool-card-action">Ran code</span>
+          {functionCalls.length > 0 && (
+            <>
+              <span className="tool-card-dot">&middot;</span>
+              <span className="tool-card-fns">{summary}</span>
+            </>
+          )}
+        </span>
+        <span className="tool-card-status">
+          {isComplete && <span className="status-dot status-dot--success" />}
+          {hasError && <span className="status-dot status-dot--error" />}
+          {isRunning && <span className="status-spinner" />}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="tool-card-body">
+          {toolPart.output?.code && (
+            <div className="tool-card-section">
+              <div className="tool-card-section-label">Code</div>
+              <pre className="tool-card-code">
+                <code>{toolPart.output.code}</code>
+              </pre>
+            </div>
+          )}
+          {!toolPart.output?.code && toolPart.input && (
+            <div className="tool-card-section">
+              <div className="tool-card-section-label">Input</div>
+              <pre className="tool-card-code">
+                <code>{JSON.stringify(toolPart.input, null, 2)}</code>
+              </pre>
+            </div>
+          )}
+          {toolPart.output?.result !== undefined && (
+            <div className="tool-card-section">
+              <div className="tool-card-section-label">Result</div>
+              <pre className="tool-card-code">
+                <code>
+                  {JSON.stringify(toolPart.output.result, null, 2)}
+                </code>
+              </pre>
+            </div>
+          )}
+          {toolPart.output?.logs && toolPart.output.logs.length > 0 && (
+            <div className="tool-card-section">
+              <div className="tool-card-section-label">Console</div>
+              <pre className="tool-card-code">
+                <code>{toolPart.output.logs.join("\n")}</code>
+              </pre>
+            </div>
+          )}
+          {toolPart.errorText && (
+            <div className="tool-card-section tool-card-section--error">
+              <div className="tool-card-section-label">Error</div>
+              <pre className="tool-card-code tool-card-code--error">
+                <code>{toolPart.errorText}</code>
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
   if (part.type === "text") {
-    return <span>{part.text}</span>;
+    return <span className="message-text">{part.text}</span>;
   }
 
-  // Don't show step-start blocks
-  if (part.type === "step-start") {
-    return null;
-  }
+  if (part.type === "step-start") return null;
 
   if (part.type === "reasoning") {
-    // Only show reasoning blocks if they have content
-    if (!part.text || part.text.trim() === "") {
-      return null;
-    }
-
-    return (
-      <div className="part-block reasoning-block">
-        <div className="part-header">
-          <span className="part-icon">🧠</span>
-          <span className="part-title">Reasoning</span>
-        </div>
-        <div className="part-content">{part.text}</div>
-      </div>
-    );
+    return <ReasoningBlock text={part.text} />;
   }
 
   if (part.type === "file") {
     return (
-      <div className="part-block file-block">
-        <div className="part-header">
-          <span className="part-icon">📄</span>
-          <span className="part-title">
-            File: {part.filename || "Untitled"}
-          </span>
-        </div>
-        <div className="part-content">
-          <div className="file-info">
-            <span className="file-type">{part.mediaType}</span>
-            {part.url && (
-              <a
-                href={part.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="file-link"
-              >
-                View File
-              </a>
-            )}
-          </div>
-        </div>
+      <div className="file-block">
+        <span className="file-name">{part.filename || "Untitled"}</span>
+        {part.mediaType && <span className="file-type">{part.mediaType}</span>}
+        {part.url && (
+          <a
+            href={part.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="file-link"
+          >
+            View
+          </a>
+        )}
       </div>
     );
   }
 
   const toolPart = asToolPart(part);
   if (toolPart) {
-    const toolName = toolPart.type.replace("tool-", "");
-    return (
-      <div className="part-block tool-block">
-        <div className="part-header">
-          <span className="part-icon">🔧</span>
-          <span className="part-title">Tool: {toolName}</span>
-          {toolPart.state && (
-            <span className={`tool-state ${toolPart.state}`}>
-              {toolPart.state}
-            </span>
-          )}
-        </div>
-        <div className="part-content">
-          {toolPart.input && (
-            <div className="tool-section">
-              <div className="tool-section-title">Input:</div>
-              <div className="tool-data-container">
-                {toolPart.input.functionDescription ? (
-                  <div className="input-description">
-                    <div className="input-header">
-                      <span className="input-icon">📝</span>
-                      <span className="input-title">Function Description</span>
-                    </div>
-                    <div className="input-content">
-                      {toolPart.input.functionDescription}
-                    </div>
-                  </div>
-                ) : null}
-                {Object.keys(toolPart.input).length > 1 ||
-                !toolPart.input.functionDescription ? (
-                  <div className="input-raw">
-                    <div className="input-raw-header">Raw Input:</div>
-                    <pre className="tool-data">
-                      {JSON.stringify(toolPart.input, null, 2)}
-                    </pre>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          )}
-          {toolPart.output && (
-            <div className="tool-section">
-              <div className="tool-section-title">Output:</div>
-              <div className="tool-data-container">
-                {toolPart.output.code ? (
-                  <div className="code-output">
-                    <div className="code-header">
-                      <span className="code-language">JavaScript</span>
-                      <button
-                        type="button"
-                        className="copy-button"
-                        onClick={() =>
-                          toolPart.output?.code &&
-                          navigator.clipboard.writeText(toolPart.output.code)
-                        }
-                        title="Copy code"
-                      >
-                        📋
-                      </button>
-                    </div>
-                    <pre className="code-content">
-                      <code>{toolPart.output.code}</code>
-                    </pre>
-                  </div>
-                ) : null}
-                {toolPart.output.result && (
-                  <div className="result-output">
-                    <div className="result-header">Result:</div>
-                    <pre className="result-data">
-                      {JSON.stringify(toolPart.output.result, null, 2)}
-                    </pre>
-                  </div>
-                )}
-                {!toolPart.output.code && !toolPart.output.result && (
-                  <pre className="tool-data">
-                    {JSON.stringify(toolPart.output, null, 2)}
-                  </pre>
-                )}
-              </div>
-            </div>
-          )}
-          {toolPart.errorText && (
-            <div className="tool-section error">
-              <div className="tool-section-title">Error:</div>
-              <div className="tool-data-container">
-                <pre className="tool-data error-data">{toolPart.errorText}</pre>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    );
+    return <ToolCard toolPart={toolPart} />;
   }
 
-  // Fallback for unknown part types
   return (
-    <div className="part-block unknown-block">
-      <div className="part-header">
-        <span className="part-icon">❓</span>
-        <span className="part-title">{part.type}</span>
-      </div>
-      <div className="part-content">
-        <pre className="part-data">{JSON.stringify(part, null, 2)}</pre>
+    <div className="unknown-block">
+      <pre>{JSON.stringify(part, null, 2)}</pre>
+    </div>
+  );
+}
+
+function SettingsPanel({
+  executor,
+  onExecutorChange,
+  toolDef,
+  loading,
+  onClose
+}: {
+  executor: ExecutorType;
+  onExecutorChange: (e: ExecutorType) => void;
+  toolDef: {
+    name: string;
+    description: string;
+    inputSchema: unknown;
+  } | null;
+  loading: boolean;
+  onClose: () => void;
+}) {
+  const [showSchema, setShowSchema] = useState(false);
+
+  return (
+    <>
+      <div className="settings-backdrop" onClick={onClose} />
+      <aside className="settings-panel">
+        <div className="settings-header">
+          <h3>Settings</h3>
+          <button className="settings-close" onClick={onClose} type="button">
+            &times;
+          </button>
+        </div>
+
+        <div className="settings-body">
+          <div className="settings-section">
+            <label className="settings-label">Executor</label>
+            <select
+              className="settings-select"
+              value={executor}
+              onChange={(e) =>
+                onExecutorChange(e.target.value as ExecutorType)
+              }
+              disabled={loading}
+            >
+              {EXECUTORS.map((exec) => (
+                <option key={exec.value} value={exec.value}>
+                  {exec.label}
+                </option>
+              ))}
+            </select>
+            <p className="settings-hint">
+              {EXECUTORS.find((e) => e.value === executor)?.description}
+            </p>
+          </div>
+
+          <div className="settings-section">
+            <label className="settings-label">Available Functions</label>
+            <div className="tools-grid">
+              {TOOLS.map((tool) => (
+                <div key={tool.name} className="tool-chip">
+                  <span className="tool-chip-name">{tool.name}</span>
+                  <span className="tool-chip-desc">{tool.description}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {toolDef && (
+            <div className="settings-section">
+              <button
+                className="settings-toggle"
+                onClick={() => setShowSchema(!showSchema)}
+                type="button"
+              >
+                <ChevronIcon expanded={showSchema} />
+                <span>Tool Schema</span>
+              </button>
+              {showSchema && (
+                <pre className="settings-schema">
+                  {JSON.stringify(toolDef.inputSchema, null, 2)}
+                </pre>
+              )}
+            </div>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function EmptyState({
+  onSuggestionClick
+}: {
+  onSuggestionClick: (text: string) => void;
+}) {
+  return (
+    <div className="empty-state">
+      <div className="empty-state-icon">&#9670;</div>
+      <h2>Welcome to Planwise</h2>
+      <p>
+        Your AI-powered project management assistant. Ask me to help organize
+        projects, tasks, sprints, and more.
+      </p>
+      <div className="empty-state-suggestions">
+        <span
+          className="suggestion"
+          onClick={() =>
+            onSuggestionClick('Create a new project called "Alpha"')
+          }
+        >
+          Create a new project
+        </span>
+        <span
+          className="suggestion"
+          onClick={() => onSuggestionClick("List all my tasks")}
+        >
+          List all tasks
+        </span>
+        <span
+          className="suggestion"
+          onClick={() =>
+            onSuggestionClick("Add a sprint for next week")
+          }
+        >
+          Add a sprint
+        </span>
       </div>
     </div>
   );
 }
 
+// ── App ──
+
 function App() {
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [inputMessage, setInputMessage] = useState("");
-  const [mcpServers, setMcpServers] = useState<MCPServersState>();
-  const [newServerName, setNewServerName] = useState("");
-  const [newServerUrl, setNewServerUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [executor, setExecutor] = useState<ExecutorType>("dynamic-worker");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [toolDef, setToolDef] = useState<{
+    name: string;
+    description: string;
+    inputSchema: unknown;
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const agent = useAgent<Codemode, { messages: UIMessage[]; loading: boolean }>(
-    {
-      agent: "codemode",
-      onStateUpdate: (state) => {
-        setMessages(state.messages);
-        setLoading(state.loading);
-      },
-      onMcpUpdate: (mcpServers) => {
-        setMcpServers(mcpServers);
+  const toolDefFetched = useRef(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const agent = useAgent<
+    Codemode,
+    { messages: UIMessage[]; loading: boolean; executor: ExecutorType }
+  >({
+    agent: "codemode",
+    onStateUpdate: (state) => {
+      setMessages(state.messages);
+      setLoading(state.loading);
+      setExecutor(state.executor);
+      if (!toolDefFetched.current) {
+        toolDefFetched.current = true;
+        agent.call("getToolDefinition", []).then((def: unknown) => {
+          setToolDef(def as typeof toolDef);
+        });
       }
     }
-  );
+  });
 
-  const addMCPServer = () => {
-    if (!newServerName.trim() || !newServerUrl.trim()) return;
-
-    agent.call("addMcp", [
-      { name: newServerName.trim(), url: newServerUrl.trim() }
-    ]);
-    setNewServerName("");
-    setNewServerUrl("");
-  };
-
-  const removeMCPServer = (id: string) => {
-    agent.call("removeMcp", [id]);
+  const handleExecutorChange = (newExecutor: ExecutorType) => {
+    setExecutor(newExecutor);
+    agent.call("setExecutor", [newExecutor]);
   };
 
   const sendMessage = async () => {
     if (!inputMessage.trim()) return;
-
     const userMessage: UIMessage = {
       id: generateId(),
       role: "user",
-      parts: [
-        {
-          type: "text",
-          text: inputMessage
-        }
-      ]
+      parts: [{ type: "text", text: inputMessage }]
     };
-
-    agent.setState({ messages: [...messages, userMessage], loading }); // setMessages((prev) => [...prev, userMessage]);
+    agent.setState({ messages: [...messages, userMessage], loading, executor });
     setInputMessage("");
-
-    // Simulate AI response
-    // setTimeout(() => {
-    //   const aiMessage: UIMessage = {
-    //     id: (Date.now() + 1).toString(),
-    //     role: "assistant",
-    //     parts: [
-    //       {
-    //         type: "text",
-    //         text: `I received your message: "${inputMessage}". This is a simulated response.`
-    //       }
-    //     ]
-    //   };
-    //   setMessages((prev) => [...prev, aiMessage]);
-    // }, 1000);
   };
 
   const resetMessages = () => {
-    agent.setState({ messages: [], loading: false });
+    agent.setState({ messages: [], loading: false, executor });
   };
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  // const getStatusColor = (status: MCPServer["status"]) => {
-  //   switch (status) {
-  //     case "connected":
-  //       return "#4ade80";
-  //     case "connecting":
-  //       return "#fbbf24";
-  //     case "disconnected":
-  //       return "#6b7280";
-  //     case "error":
-  //       return "#ef4444";
-  //     default:
-  //       return "#6b7280";
-  //   }
-  // };
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   return (
     <div className="app">
       <header className="header">
-        <h1>CodeMode Testing App</h1>
-        <p>Test MCP servers and chat with LLM</p>
+        <div className="header-left">
+          <span className="header-logo">&#9670;</span>
+          <h1>Planwise</h1>
+        </div>
+        <div className="header-right">
+          <button
+            className="header-btn"
+            onClick={resetMessages}
+            disabled={messages.length === 0}
+            title="New conversation"
+            type="button"
+          >
+            <ResetIcon />
+            <span>New Chat</span>
+          </button>
+          <button
+            className="header-btn header-btn--icon"
+            onClick={() => setSettingsOpen(!settingsOpen)}
+            title="Settings"
+            type="button"
+          >
+            <GearIcon />
+          </button>
+        </div>
       </header>
 
-      <div className="main-content">
-        {/* MCP Servers Section */}
-        <section className="mcp-section">
-          <h2>MCP Servers</h2>
+      <main className="chat-main">
+        <div className="messages-scroll">
+          <div className="messages-container">
+            {messages.length === 0 && !loading && (
+              <EmptyState
+                onSuggestionClick={(text) => {
+                  setInputMessage(text);
+                  inputRef.current?.focus();
+                }}
+              />
+            )}
 
-          {/* Add Server Form */}
-          <div className="add-server-form">
-            <div className="form-group">
-              <input
-                type="text"
-                placeholder="Server Name"
-                value={newServerName}
-                onChange={(e) => setNewServerName(e.target.value)}
-              />
-              <input
-                type="url"
-                placeholder="Server URL"
-                value={newServerUrl}
-                onChange={(e) => setNewServerUrl(e.target.value)}
-              />
-              <button
-                type="button"
-                onClick={addMCPServer}
-                disabled={!newServerName.trim() || !newServerUrl.trim()}
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={`message message--${message.role}`}
               >
-                Add
-              </button>
-            </div>
-          </div>
-
-          {/* Server List */}
-          <div className="server-list">
-            {Object.entries(mcpServers?.servers ?? {}).map(([id, server]) => (
-              <div key={id} className="server-card">
-                <div className="server-header">
-                  <div className="server-info">
-                    <h3>{server.name}</h3>
-                    <p className="server-url">{server.server_url}</p>
+                {message.role === "assistant" && (
+                  <div className="message-avatar">
+                    <span>&#9670;</span>
                   </div>
-                  <div className="server-actions">
-                    {/* <div
-                      className="status-indicator"
-                      style={{ backgroundColor: getStatusColor(server.state) }}
-                      title={server.status}
-                    /> */}
-                    <button
-                      type="button"
-                      onClick={() => removeMCPServer(id)}
-                      className="remove-btn"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-
-                {
-                  // server.status === "connected" && server.tools.length > 0 && (
-                  <div className="server-tools">
-                    <h4>Available Tools:</h4>
-                    <div className="tools-list">
-                      {mcpServers?.tools
-                        .filter((tool) => tool.serverId === id)
-                        .map((tool) => (
-                          <span key={tool.name} className="tool-tag">
-                            {tool.name}
-                          </span>
-                        ))}
+                )}
+                <div className="message-body">
+                  {message.parts.map((part, index) => (
+                    <div key={`${message.id}-${index}`}>
+                      <MessagePart part={part} />
                     </div>
-                  </div>
-                  //)
-                }
+                  ))}
+                </div>
               </div>
             ))}
-          </div>
-        </section>
 
-        {/* Chat Section */}
-        <section className="chat-section">
-          <div className="chat-header">
-            <h2>Chat with LLM</h2>
+            {loading && (
+              <div className="message message--assistant">
+                <div className="message-avatar">
+                  <span>&#9670;</span>
+                </div>
+                <div className="message-body">
+                  <div className="loading-dots">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        <div className="input-area">
+          <div className="input-container">
+            <input
+              ref={inputRef}
+              type="text"
+              placeholder="Ask me to manage your projects..."
+              value={inputMessage}
+              onChange={(e) => setInputMessage(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+              disabled={loading}
+            />
             <button
+              className="send-btn"
+              onClick={sendMessage}
+              disabled={!inputMessage.trim() || loading}
               type="button"
-              onClick={resetMessages}
-              className="reset-btn"
-              disabled={messages.length === 0}
             >
-              Reset Chat
+              <SendIcon />
             </button>
           </div>
-
-          <div className="chat-container">
-            <div className="messages">
-              {messages.map((message) => (
-                <div key={message.id} className={`message ${message.role}`}>
-                  <div className="message-content">
-                    {message.parts.map((part, index) => (
-                      <div key={`${message.id}-part-${index}`}>
-                        <MessagePart part={part} />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              {loading && (
-                <div className="message assistant">
-                  <div className="message-content">
-                    <div className="loading-indicator">...</div>
-                  </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="chat-input">
-              <input
-                type="text"
-                placeholder="Type your message..."
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onKeyPress={(e) => e.key === "Enter" && sendMessage()}
-              />
-              <button
-                type="button"
-                onClick={sendMessage}
-                disabled={!inputMessage.trim()}
-              >
-                Send
-              </button>
-            </div>
+          <div className="input-footer">
+            <span>Powered by codemode</span>
+            <span className="input-footer-dot">&middot;</span>
+            <span>
+              {EXECUTORS.find((e) => e.value === executor)?.label}
+            </span>
           </div>
-        </section>
-      </div>
+        </div>
+      </main>
+
+      {settingsOpen && (
+        <SettingsPanel
+          executor={executor}
+          onExecutorChange={handleExecutorChange}
+          toolDef={toolDef}
+          loading={loading}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </div>
   );
 }

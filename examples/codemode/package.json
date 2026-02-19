@@ -5,12 +5,14 @@
   "keywords": [],
   "private": true,
   "scripts": {
-    "start": "vite dev",
+    "start": "tsx node-executor-server.ts & vite dev",
+    "start:node-executor": "tsx node-executor-server.ts",
     "types": "wrangler types env.d.ts --include-runtime false",
     "deploy": "vite build && wrangler deploy"
   },
   "dependencies": {
     "@cloudflare/codemode": "*",
-    "agents": "*"
+    "agents": "*",
+    "workers-ai-provider": "*"
   }
 }
