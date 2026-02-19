@@ -1,0 +1,12 @@
+@import "tailwindcss";
+@import "@cloudflare/kumo/styles/tailwind";
+@import "@cloudflare/agents-ui/theme/workers.css";
+@source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}

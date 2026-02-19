@@ -1,0 +1,6 @@
+{
+  "compilerOptions": {
+    "target": "ES2021"
+  },
+  "extends": "../../tsconfig.base.json"
+}

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en" data-theme="workers">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Push Notification Reminders — Agents SDK</title>
+    <script>
+      (() => {
+        const mode = localStorage.getItem("theme") || "light";
+        document.documentElement.setAttribute("data-mode", mode);
+        document.documentElement.style.colorScheme = mode;
+      })();
+    </script>
+  </head>
+  <body class="h-full bg-kumo-base text-kumo-default antialiased">
+    <div id="root" class="h-full"></div>
+    <script type="module" src="/src/client.tsx"></script>
+  </body>
+</html>

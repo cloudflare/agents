@@ -1,0 +1,25 @@
+{
+  "name": "@cloudflare/agents-push-notifications",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Push notifications with Cloudflare Agents — reminders that work even when the tab is closed",
+  "scripts": {
+    "start": "vite dev",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "generate-vapid-keys": "node -e \"crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign']).then(async k=>{const pub=new Uint8Array(await crypto.subtle.exportKey('raw',k.publicKey));const priv=await crypto.subtle.exportKey('jwk',k.privateKey);const b64=b=>btoa(String.fromCharCode(...b)).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'');console.log('VAPID_PUBLIC_KEY='+b64(pub));console.log('VAPID_PRIVATE_KEY='+priv.d)})\""
+  },
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
+  }
+}
