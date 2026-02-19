@@ -23,6 +23,7 @@
 
 - [Email Routing](./email.md) - Receiving and responding to emails
 - [Webhooks](./webhooks.md) - Receiving and sending webhook events
+- [Push Notifications](./push-notifications.md) - Browser push notifications via Web Push API and scheduled delivery
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)
 - TODO: [Voice & Audio](./voice-audio.md) - Voice calls, audio streaming, and speech-to-text
 - TODO: [Messengers](./messengers.md) - Slack, Discord, Telegram, and other chat platforms

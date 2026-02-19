@@ -24,6 +24,7 @@ These docs are complete and should be added to the official Cloudflare docs site
 | [client-tools-continuation.md](./client-tools-continuation.md)     | Client-side tool call handling                                           | Low                |
 | [codemode.md](./codemode.md)                                       | Experimental CodeAct pattern                                             | Low (experimental) |
 | [retries.md](./retries.md)                                         | Retry utilities: `this.retry()`, per-task retry options, backoff         | Medium             |
+| [push-notifications.md](./push-notifications.md)                   | Browser push notifications with Web Push API, VAPID, scheduling          | Medium             |
 | [resumable-streaming.md](./resumable-streaming.md)                 | Handling interrupted streams                                             | Low                |
 | [migration-to-ai-sdk-v5.md](./migration-to-ai-sdk-v5.md)           | AI SDK v5 migration guide                                                | Low                |
 | [migration-to-ai-sdk-v6.md](./migration-to-ai-sdk-v6.md)           | AI SDK v6 migration guide                                                | Low                |

@@ -47,6 +47,7 @@
     "@types/node": "^25.3.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/web-push": "^3.6.4",
     "@vitejs/plugin-react": "^5.1.4",
     "@vitest/browser": "^3.2.4",
     "@vitest/runner": "^3.2.4",
