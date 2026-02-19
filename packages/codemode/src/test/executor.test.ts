@@ -11,7 +11,9 @@ import { DynamicWorkerExecutor, ToolDispatcher } from "../executor";
 describe("ToolDispatcher", () => {
   it("should dispatch tool calls and return JSON result", async () => {
     const fns = {
-      double: vi.fn(async (args: any) => ({ doubled: args.n * 2 }))
+      double: vi.fn(async (args: Record<string, unknown>) => ({
+        doubled: (args.n as number) * 2
+      }))
     };
     const dispatcher = new ToolDispatcher(fns);
 
@@ -70,7 +72,10 @@ describe("DynamicWorkerExecutor", () => {
 
   it("should call tool functions via codemode proxy", async () => {
     const fns = {
-      add: vi.fn(async (args: any) => args.a + args.b)
+      add: vi.fn(
+        async (args: Record<string, unknown>) =>
+          (args.a as number) + (args.b as number)
+      )
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
@@ -86,8 +91,8 @@ describe("DynamicWorkerExecutor", () => {
   it("should handle multiple sequential tool calls", async () => {
     const fns = {
       getWeather: vi.fn(async () => ({ temp: 72 })),
-      searchWeb: vi.fn(async (args: any) => ({
-        results: [`news about ${args.query}`]
+      searchWeb: vi.fn(async (args: Record<string, unknown>) => ({
+        results: [`news about ${args.query as string}`]
       }))
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
@@ -134,8 +139,8 @@ describe("DynamicWorkerExecutor", () => {
 
   it("should handle concurrent tool calls via Promise.all", async () => {
     const fns = {
-      slow: async (args: any) => {
-        return { id: args.id };
+      slow: async (args: Record<string, unknown>) => {
+        return { id: args.id as number };
       }
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });

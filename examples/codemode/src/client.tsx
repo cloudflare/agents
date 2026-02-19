@@ -323,7 +323,12 @@ function SettingsPanel({
 
   return (
     <>
-      <div className="settings-backdrop" onClick={onClose} />
+      <button
+        type="button"
+        className="settings-backdrop"
+        onClick={onClose}
+        aria-label="Close settings"
+      />
       <aside className="settings-panel">
         <div className="settings-header">
           <h3>Settings</h3>
@@ -334,8 +339,11 @@ function SettingsPanel({
 
         <div className="settings-body">
           <div className="settings-section">
-            <label className="settings-label">Executor</label>
+            <label className="settings-label" htmlFor="executor-select">
+              Executor
+            </label>
             <select
+              id="executor-select"
               className="settings-select"
               value={executor}
               onChange={(e) => onExecutorChange(e.target.value as ExecutorType)}
@@ -353,7 +361,7 @@ function SettingsPanel({
           </div>
 
           <div className="settings-section">
-            <label className="settings-label">Available Functions</label>
+            <span className="settings-label">Available Functions</span>
             <div className="tools-grid">
               {TOOLS.map((tool) => (
                 <div key={tool.name} className="tool-chip">
@@ -401,26 +409,29 @@ function EmptyState({
         projects, tasks, sprints, and more.
       </p>
       <div className="empty-state-suggestions">
-        <span
+        <button
+          type="button"
           className="suggestion"
           onClick={() =>
             onSuggestionClick('Create a new project called "Alpha"')
           }
         >
           Create a new project
-        </span>
-        <span
+        </button>
+        <button
+          type="button"
           className="suggestion"
           onClick={() => onSuggestionClick("List all my tasks")}
         >
           List all tasks
-        </span>
-        <span
+        </button>
+        <button
+          type="button"
           className="suggestion"
           onClick={() => onSuggestionClick("Add a sprint for next week")}
         >
           Add a sprint
-        </span>
+        </button>
       </div>
     </div>
   );
