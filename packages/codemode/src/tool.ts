@@ -108,7 +108,9 @@ export function createCodeTool(
         throw new Error(`Code execution failed: ${executeResult.error}${logCtx}`);
       }
 
-      return { code, result: executeResult.result, logs: executeResult.logs };
+      const output: CodeOutput = { code, result: executeResult.result };
+      if (executeResult.logs) output.logs = executeResult.logs;
+      return output;
     }
   });
 }

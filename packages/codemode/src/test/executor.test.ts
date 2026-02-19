@@ -46,7 +46,7 @@ describe("Executor interface", () => {
 
   it("should call tool functions via codemode", async () => {
     const fns = {
-      add: vi.fn(async (args: { a: number; b: number }) => args.a + args.b)
+      add: vi.fn(async (args: any) => args.a + args.b)
     };
 
     const result = await executor.execute(
@@ -61,7 +61,7 @@ describe("Executor interface", () => {
   it("should handle multiple sequential tool calls", async () => {
     const fns = {
       getWeather: vi.fn(async () => ({ temp: 72 })),
-      searchWeb: vi.fn(async (args: { query: string }) => ({
+      searchWeb: vi.fn(async (args: any) => ({
         results: [`news about ${args.query}`]
       }))
     };
@@ -118,7 +118,7 @@ describe("Executor interface", () => {
 
   it("should handle concurrent tool calls", async () => {
     const fns = {
-      slow: async (args: { id: number }) => {
+      slow: async (args: any) => {
         await new Promise((r) => setTimeout(r, 1));
         return { id: args.id };
       }
@@ -141,7 +141,7 @@ describe("Executor interface", () => {
 describe("ToolDispatcher", () => {
   it("should dispatch tool calls and return JSON result", async () => {
     const fns = {
-      double: vi.fn(async (args: { n: number }) => ({ doubled: args.n * 2 }))
+      double: vi.fn(async (args: any) => ({ doubled: args.n * 2 }))
     };
     const dispatcher = new ToolDispatcher(fns);
 
@@ -224,7 +224,7 @@ function createMockLoader() {
 
 describe("DynamicWorkerExecutor", () => {
   it("should pass ToolDispatcher to evaluate() via RPC", async () => {
-    const executeFn = vi.fn(async (args: { n: number }) => ({
+    const executeFn = vi.fn(async (args: any) => ({
       doubled: args.n * 2
     }));
 

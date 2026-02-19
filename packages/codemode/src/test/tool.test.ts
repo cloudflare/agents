@@ -210,7 +210,7 @@ describe("createCodeTool", () => {
       {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
     );
 
-    expect(output?.logs).toEqual(["log line 1", "log line 2"]);
+    expect((output as any)?.logs).toEqual(["log line 1", "log line 2"]);
   });
 
   describe("code normalization", () => {
@@ -367,8 +367,8 @@ describe("createCodeTool", () => {
       {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
     );
 
-    expect(r1?.result).toEqual({ count: 1 });
-    expect(r2?.result).toEqual({ count: 2 });
+    expect((r1 as any)?.result).toEqual({ count: 1 });
+    expect((r2 as any)?.result).toEqual({ count: 2 });
     expect(counter).toBe(2);
   });
 });
