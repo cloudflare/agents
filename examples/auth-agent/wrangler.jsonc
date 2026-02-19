@@ -1,0 +1,36 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    // Auth routes and agent routes are handled by the Worker
+    "run_worker_first": ["/api/auth/*", "/agents/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "AUTH_DB",
+      "database_name": "auth-agent-db",
+      "database_id": "local"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "SecuredChatAgent",
+        "name": "SecuredChatAgent"
+      }
+    ]
+  },
+  "vars": {
+    "BETTER_AUTH_URL": "http://localhost:5173"
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["SecuredChatAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "auth-agent"
+}
