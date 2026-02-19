@@ -99,31 +99,31 @@ const { payload } = await jwtVerify(token, jwks);
 
 ## File overview
 
-| File | Purpose |
-|---|---|
-| `src/server.ts` | Worker fetch handler — routes to auth, agents, or SPA. Exports `SecuredChatAgent` DO. |
-| `src/auth.ts` | `getAuth()` lazy singleton + `verifyToken()` — D1 via kysely-d1, JWT verification via jose |
-| `src/auth-client.ts` | Browser auth client — `fetchAndStoreJwt()`, `clearTokens()` |
-| `src/client.tsx` | React UI — auth form + chat view |
-| `db/setup.sql` | Creates better-auth tables (user, session, account, jwks) |
-| `db/reset.sql` | Drops and recreates all tables |
+| File                 | Purpose                                                                                    |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| `src/server.ts`      | Worker fetch handler — routes to auth, agents, or SPA. Exports `SecuredChatAgent` DO.      |
+| `src/auth.ts`        | `getAuth()` lazy singleton + `verifyToken()` — D1 via kysely-d1, JWT verification via jose |
+| `src/auth-client.ts` | Browser auth client — `fetchAndStoreJwt()`, `clearTokens()`                                |
+| `src/client.tsx`     | React UI — auth form + chat view                                                           |
+| `db/setup.sql`       | Creates better-auth tables (user, session, account, jwks)                                  |
+| `db/reset.sql`       | Drops and recreates all tables                                                             |
 
 ## Scripts
 
-| Script | Description |
-|---|---|
-| `npm start` | Start Vite dev server |
-| `npm run db:setup` | Create D1 tables locally |
+| Script             | Description                  |
+| ------------------ | ---------------------------- |
+| `npm start`        | Start Vite dev server        |
+| `npm run db:setup` | Create D1 tables locally     |
 | `npm run db:reset` | Drop and recreate all tables |
-| `npm run deploy` | Build and deploy to Workers |
-| `npm run types` | Regenerate `env.d.ts` |
+| `npm run deploy`   | Build and deploy to Workers  |
+| `npm run types`    | Regenerate `env.d.ts`        |
 
 ## Environment variables
 
-| Variable | Required | Description |
-|---|---|---|
-| `BETTER_AUTH_SECRET` | Yes | Secret for signing sessions/tokens. Min 32 chars. Put in `.dev.vars`. |
-| `BETTER_AUTH_URL` | No | Set in `wrangler.jsonc`. Defaults to `http://localhost:5173`. |
+| Variable             | Required | Description                                                           |
+| -------------------- | -------- | --------------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET` | Yes      | Secret for signing sessions/tokens. Min 32 chars. Put in `.dev.vars`. |
+| `BETTER_AUTH_URL`    | No       | Set in `wrangler.jsonc`. Defaults to `http://localhost:5173`.         |
 
 ## Stack
 
