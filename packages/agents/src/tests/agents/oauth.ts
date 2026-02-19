@@ -272,4 +272,41 @@ export class TestCustomOAuthAgent extends Agent<Record<string, unknown>> {
       callbackUrl: this._customProviderCallbackUrl
     };
   }
+
+  async testRestoreUsesOverride(): Promise<{
+    overrideWasCalled: boolean;
+    restoredProviderClientId: string | undefined;
+  }> {
+    const serverId = "restore-override-test";
+    const callbackUrl = "http://example.com/restore-callback";
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_mcp_servers (
+        id, name, server_url, client_id, auth_url, callback_url, server_options
+      ) VALUES (
+        ${serverId},
+        ${"Restore Test Server"},
+        ${"http://restore-test.com"},
+        ${null},
+        ${"https://auth.example.com/authorize"},
+        ${callbackUrl},
+        ${null}
+      )
+    `;
+
+    // Reset restored flag so restoreConnectionsFromStorage runs again
+    // @ts-expect-error - accessing private property for testing
+    this.mcp._isRestored = false;
+    // Clear any existing connection for this server
+    delete this.mcp.mcpConnections[serverId];
+
+    this._customProviderCallbackUrl = undefined;
+    await this.mcp.restoreConnectionsFromStorage(this.name);
+
+    const conn = this.mcp.mcpConnections[serverId];
+    return {
+      overrideWasCalled: this._customProviderCallbackUrl === callbackUrl,
+      restoredProviderClientId: conn?.options.transport.authProvider?.clientId
+    };
+  }
 }

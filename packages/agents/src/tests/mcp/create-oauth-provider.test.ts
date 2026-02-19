@@ -35,4 +35,18 @@ describe("createMcpOAuthProvider", () => {
     expect(result.clientId).toBe("custom-client-id");
     expect(result.callbackUrl).toBe("http://example.com/custom-callback");
   });
+
+  it("should use the custom provider override during restoreConnectionsFromStorage", async () => {
+    const agentId = env.TestCustomOAuthAgent.idFromName(
+      "test-restore-override"
+    );
+    const agentStub = env.TestCustomOAuthAgent.get(agentId);
+
+    await agentStub.setName("restore-test");
+
+    const result = await agentStub.testRestoreUsesOverride();
+
+    expect(result.overrideWasCalled).toBe(true);
+    expect(result.restoredProviderClientId).toBe("custom-client-id");
+  });
 });

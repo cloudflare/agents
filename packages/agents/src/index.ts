@@ -252,10 +252,11 @@ function getNextCronTime(cron: string) {
 
 export type { TransportType } from "./mcp/types";
 export type { RetryOptions } from "./retries";
-export type {
-  AgentMcpOAuthProvider,
+export {
+  DurableObjectOAuthClientProvider,
+  type AgentMcpOAuthProvider,
   /** @deprecated Use {@link AgentMcpOAuthProvider} instead. */
-  AgentsOAuthProvider
+  type AgentsOAuthProvider
 } from "./mcp/do-oauth-client-provider";
 
 /**
@@ -823,7 +824,9 @@ export class Agent<
 
     // Initialize MCPClientManager AFTER tables are created
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
-      storage: this.ctx.storage
+      storage: this.ctx.storage,
+      createAuthProvider: (callbackUrl) =>
+        this.createMcpOAuthProvider(callbackUrl)
     });
 
     // Broadcast server state whenever MCP state changes (register, connect, OAuth, remove, etc.)

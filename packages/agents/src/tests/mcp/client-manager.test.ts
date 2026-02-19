@@ -2280,6 +2280,225 @@ describe("MCPClientManager OAuth Integration", () => {
     });
   });
 
+  describe("restoreConnectionsFromStorage() - createAuthProvider factory", () => {
+    it("should use the injected factory when restoring connections", async () => {
+      const serverId = "factory-test";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Factory Test Server",
+        server_url: "http://factory.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledWith(callbackUrl);
+      const conn = factoryManager.mcpConnections[serverId];
+      expect(conn).toBeDefined();
+      expect(conn.options.transport.authProvider).toBe(mockProvider);
+    });
+
+    it("should set serverId and clientId on the provider returned by the factory", async () => {
+      const serverId = "factory-ids-test";
+      const clientId = "custom-client-123";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "IDs Test Server",
+        server_url: "http://ids-test.com",
+        callback_url: callbackUrl,
+        client_id: clientId,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(mockProvider.serverId).toBe(serverId);
+      expect(mockProvider.clientId).toBe(clientId);
+    });
+
+    it("should fall back to default createAuthProvider when no factory is provided", async () => {
+      const serverId = "no-factory-test";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "No Factory Server",
+        server_url: "http://no-factory.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      vi.spyOn(manager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await manager.restoreConnectionsFromStorage("test-agent");
+
+      const conn = manager.mcpConnections[serverId];
+      expect(conn).toBeDefined();
+      expect(conn.options.transport.authProvider).toBeDefined();
+      expect(conn.options.transport.authProvider?.serverId).toBe(serverId);
+    });
+
+    it("should use the factory for OAuth servers with auth_url set", async () => {
+      const serverId = "factory-oauth-test";
+      const callbackUrl = "http://localhost:3000/callback";
+      const clientId = "oauth-client-id";
+
+      saveServerToMock({
+        id: serverId,
+        name: "OAuth Factory Server",
+        server_url: "http://oauth-factory.com",
+        callback_url: callbackUrl,
+        client_id: clientId,
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledWith(callbackUrl);
+      const conn = factoryManager.mcpConnections[serverId];
+      expect(conn).toBeDefined();
+      expect(conn.connectionState).toBe("authenticating");
+      expect(mockProvider.serverId).toBe(serverId);
+      expect(mockProvider.clientId).toBe(clientId);
+    });
+
+    it("should use the factory when recreating failed connections", async () => {
+      const serverId = "factory-failed-test";
+      const callbackUrl = "http://localhost:3000/callback";
+
+      saveServerToMock({
+        id: serverId,
+        name: "Failed Server",
+        server_url: "http://failed-factory.com",
+        callback_url: callbackUrl,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      const mockProvider = createMockAuthProvider(createMockStateStorage());
+      const factory = vi.fn().mockReturnValue(mockProvider);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      // Pre-populate with a failed connection
+      const failedConnection = new MCPClientConnection(
+        new URL("http://failed-factory.com"),
+        { name: "test-client", version: "1.0.0" },
+        { transport: { type: "auto" }, client: {} }
+      );
+      failedConnection.connectionState = "failed";
+      failedConnection.client.close = vi.fn().mockResolvedValue(undefined);
+      factoryManager.mcpConnections[serverId] = failedConnection;
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledWith(callbackUrl);
+      expect(factoryManager.mcpConnections[serverId]).not.toBe(
+        failedConnection
+      );
+    });
+
+    it("should call the factory once per server in mixed restore", async () => {
+      const callbackUrl1 = "http://localhost:3000/callback/s1";
+      const callbackUrl2 = "http://localhost:3000/callback/s2";
+
+      saveServerToMock({
+        id: "server-1",
+        name: "Server 1",
+        server_url: "http://s1.com",
+        callback_url: callbackUrl1,
+        client_id: null,
+        auth_url: null,
+        server_options: null
+      });
+
+      saveServerToMock({
+        id: "server-2",
+        name: "Server 2",
+        server_url: "http://s2.com",
+        callback_url: callbackUrl2,
+        client_id: "client-2",
+        auth_url: "https://auth.example.com/authorize",
+        server_options: null
+      });
+
+      const mockProvider1 = createMockAuthProvider(createMockStateStorage());
+      const mockProvider2 = createMockAuthProvider(createMockStateStorage());
+      const factory = vi
+        .fn()
+        .mockReturnValueOnce(mockProvider1)
+        .mockReturnValueOnce(mockProvider2);
+
+      const factoryManager = new TestMCPClientManager("test-client", "1.0.0", {
+        storage: manager["_storage"],
+        createAuthProvider: factory
+      });
+
+      vi.spyOn(factoryManager, "connectToServer").mockResolvedValue({
+        state: "connected"
+      });
+
+      await factoryManager.restoreConnectionsFromStorage("test-agent");
+
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(factory).toHaveBeenCalledWith(callbackUrl1);
+      expect(factory).toHaveBeenCalledWith(callbackUrl2);
+    });
+  });
+
   describe("connectToServer() - Connection States", () => {
     it("should return connected state for successful non-OAuth connection", async () => {
       const serverId = "non-oauth-connect-test";

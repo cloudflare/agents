@@ -116,6 +116,7 @@ export type MCPClientOAuthResult =
 
 export type MCPClientManagerOptions = {
   storage: DurableObjectStorage;
+  createAuthProvider?: (callbackUrl: string) => AgentMcpOAuthProvider;
 };
 
 /**
@@ -127,6 +128,9 @@ export class MCPClientManager {
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
   private _storage: DurableObjectStorage;
+  private _createAuthProviderFn?: (
+    callbackUrl: string
+  ) => AgentMcpOAuthProvider;
   private _isRestored = false;
 
   /** @internal Protected for testing purposes. */
@@ -159,6 +163,7 @@ export class MCPClientManager {
       );
     }
     this._storage = options.storage;
+    this._createAuthProviderFn = options.createAuthProvider;
   }
 
   // SQL helper - runs a query and returns results as array
@@ -317,12 +322,18 @@ export class MCPClientManager {
         ? JSON.parse(server.server_options)
         : null;
 
-      const authProvider = this.createAuthProvider(
-        server.id,
-        server.callback_url,
-        clientName,
-        server.client_id ?? undefined
-      );
+      const authProvider = this._createAuthProviderFn
+        ? this._createAuthProviderFn(server.callback_url)
+        : this.createAuthProvider(
+            server.id,
+            server.callback_url,
+            clientName,
+            server.client_id ?? undefined
+          );
+      authProvider.serverId = server.id;
+      if (server.client_id) {
+        authProvider.clientId = server.client_id;
+      }
 
       // Create the in-memory connection object (no need to save to storage - we just read from it!)
       const conn = this.createConnection(server.id, server.server_url, {
