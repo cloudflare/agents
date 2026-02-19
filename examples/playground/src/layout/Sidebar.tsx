@@ -30,6 +30,7 @@ import {
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
 import { Button, Link } from "@cloudflare/kumo";
+import { PoweredByAgents } from "@cloudflare/agents-ui";
 import { useTheme } from "../hooks/useTheme";
 
 interface NavItem {
@@ -296,8 +297,7 @@ export function Sidebar() {
   return (
     <aside className="w-56 h-full border-r border-kumo-line bg-kumo-base flex flex-col">
       <div className="p-4 border-b border-kumo-line">
-        <h1 className="font-bold text-lg text-kumo-default">Agents SDK</h1>
-        <p className="text-xs text-kumo-subtle">Playground</p>
+        <PoweredByAgents />
       </div>
 
       <nav className="flex-1 overflow-y-auto p-2">

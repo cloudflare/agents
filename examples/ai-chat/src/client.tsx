@@ -122,7 +122,7 @@ function Chat() {
             <Empty
               icon={<CloudSunIcon size={32} />}
               title="Start a conversation"
-              description='Try "What is the weather in London?" or "What timezone am I in?" or "Calculate 150 * 3 (amount: $450)"'
+              description='Try "What is the weather in London?" or "What timezone am I in?" or "What is 5000 + 3000?"'
             />
           )}
 

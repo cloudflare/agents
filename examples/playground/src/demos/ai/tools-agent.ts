@@ -1,5 +1,4 @@
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import {
   streamText,
@@ -10,17 +9,7 @@ import {
 } from "ai";
 import { z } from "zod";
 
-/**
- * AI Chat Agent showcasing @cloudflare/ai-chat features:
- * - streamText with toUIMessageStreamResponse (simplest pattern)
- * - Server-side tools with execute
- * - Client-side tools (no execute, handled via onToolCall)
- * - Tool approval with needsApproval
- * - Message pruning for long conversations
- * - Storage management with maxPersistedMessages
- */
-export class ChatAgent extends AIChatAgent {
-  // Keep the last 200 messages in SQLite storage
+export class ToolsAgent extends AIChatAgent<Env> {
   maxPersistedMessages = 200;
 
   async onChatMessage() {
@@ -30,24 +19,25 @@ export class ChatAgent extends AIChatAgent {
       // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
-        "You are a helpful assistant. You can check the weather, get the user's timezone, " +
-        "and run calculations. For calculations with large numbers (over 1000), you need user approval first.",
-      // Prune old tool calls and reasoning to save tokens on long conversations
+        "You are a helpful assistant that demonstrates three kinds of tool execution:\n" +
+        "1. Server-side tools (getWeather, rollDice) — run automatically on the server.\n" +
+        "2. Client-side tools (getUserTimezone, getScreenSize) — executed in the user's browser, no execute function on the server.\n" +
+        "3. Approval-required tools (calculate, deleteFile) — need user confirmation before running. Calculate requires approval when either number exceeds 1000.\n\n" +
+        "When asked, use the appropriate tools. Explain which type of tool you're using.",
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
         reasoning: "before-last-message"
       }),
       tools: {
-        // Server-side tool: executes automatically
+        // ── Server-side tools (execute automatically) ──
         getWeather: tool({
           description: "Get the current weather for a city",
           inputSchema: z.object({
             city: z.string().describe("City name")
           }),
           execute: async ({ city }) => {
-            // In a real app, call a weather API
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
+            const conditions = ["sunny", "cloudy", "rainy", "snowy", "windy"];
             const temp = Math.floor(Math.random() * 30) + 5;
             return {
               city,
@@ -59,15 +49,48 @@ export class ChatAgent extends AIChatAgent {
           }
         }),
 
-        // Client-side tool: no execute, handled by onToolCall in the client
-        getUserTimezone: tool({
-          description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
-          inputSchema: z.object({})
-          // No execute -- the client provides the result via onToolCall
+        rollDice: tool({
+          description: "Roll one or more dice with a given number of sides",
+          inputSchema: z.object({
+            count: z
+              .number()
+              .int()
+              .min(1)
+              .max(10)
+              .describe("Number of dice to roll"),
+            sides: z
+              .number()
+              .int()
+              .min(2)
+              .max(100)
+              .describe("Number of sides per die")
+          }),
+          execute: async ({ count, sides }) => {
+            const rolls = Array.from(
+              { length: count },
+              () => Math.floor(Math.random() * sides) + 1
+            );
+            return {
+              rolls,
+              total: rolls.reduce((a, b) => a + b, 0),
+              description: `${count}d${sides}`
+            };
+          }
         }),
 
-        // Tool with approval: requires user confirmation before executing
+        // ── Client-side tools (no execute — handled via onToolCall) ──
+        getUserTimezone: tool({
+          description:
+            "Get the user's timezone and local time from their browser",
+          inputSchema: z.object({})
+        }),
+
+        getScreenSize: tool({
+          description: "Get the user's screen dimensions from their browser",
+          inputSchema: z.object({})
+        }),
+
+        // ── Approval-required tools (need user confirmation) ──
         calculate: tool({
           description:
             "Perform a math calculation with two numbers. Requires approval for large numbers.",
@@ -96,6 +119,22 @@ export class ChatAgent extends AIChatAgent {
               result: ops[operator](a, b)
             };
           }
+        }),
+
+        deleteFile: tool({
+          description:
+            "Delete a file by path. Always requires approval before proceeding.",
+          inputSchema: z.object({
+            path: z.string().describe("File path to delete")
+          }),
+          needsApproval: async () => true,
+          execute: async ({ path }) => {
+            return {
+              path,
+              deleted: true,
+              message: `File "${path}" has been deleted (simulated)`
+            };
+          }
         })
       },
       stopWhen: stepCountIs(5)
@@ -104,12 +143,3 @@ export class ChatAgent extends AIChatAgent {
     return result.toUIMessageStreamResponse();
   }
 }
-
-export default {
-  async fetch(request: Request, env: Env) {
-    return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
-    );
-  }
-} satisfies ExportedHandler<Env>;

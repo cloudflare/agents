@@ -36,7 +36,8 @@ export class ForeverChatAgent extends DurableChatAgent<Env> {
         "You are a helpful assistant running as a durable agent. " +
         "Your streaming connection is kept alive via keepAlive(), " +
         "so even long responses won't be interrupted by idle timeouts. " +
-        "You can check the weather and perform calculations.",
+        "You can check the weather and perform calculations. " +
+        "For calculations with large numbers (over 1000), you need user approval first.",
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
@@ -69,22 +70,31 @@ export class ForeverChatAgent extends DurableChatAgent<Env> {
 
         calculate: tool({
           description:
-            "Perform a calculation. Requires approval for large amounts.",
+            "Perform a math calculation with two numbers. Requires approval for large numbers.",
           inputSchema: z.object({
-            expression: z.string().describe("Math expression to evaluate"),
-            amount: z
-              .number()
-              .optional()
-              .describe("Dollar amount involved, if any")
+            a: z.number().describe("First number"),
+            b: z.number().describe("Second number"),
+            operator: z
+              .enum(["+", "-", "*", "/", "%"])
+              .describe("Arithmetic operator")
           }),
-          needsApproval: async ({ amount }) => (amount ?? 0) > 100,
-          execute: async ({ expression }) => {
-            try {
-              const result = new Function(`return ${expression}`)();
-              return { expression, result: Number(result) };
-            } catch {
-              return { expression, error: "Invalid expression" };
+          needsApproval: async ({ a, b }) =>
+            Math.abs(a) > 1000 || Math.abs(b) > 1000,
+          execute: async ({ a, b, operator }) => {
+            const ops: Record<string, (x: number, y: number) => number> = {
+              "+": (x, y) => x + y,
+              "-": (x, y) => x - y,
+              "*": (x, y) => x * y,
+              "/": (x, y) => x / y,
+              "%": (x, y) => x % y
+            };
+            if (operator === "/" && b === 0) {
+              return { error: "Division by zero" };
             }
+            return {
+              expression: `${a} ${operator} ${b}`,
+              result: ops[operator](a, b)
+            };
           }
         })
       },
