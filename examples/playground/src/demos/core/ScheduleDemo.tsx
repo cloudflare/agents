@@ -4,10 +4,11 @@ import { useState, useEffect, useCallback } from "react";
 import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { ScheduleAgent, ScheduleAgentState } from "./schedule-agent";
 
 export function ScheduleDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [delaySeconds, setDelaySeconds] = useState("5");
@@ -17,7 +18,7 @@ export function ScheduleDemo() {
 
   const agent = useAgent<ScheduleAgent, ScheduleAgentState>({
     agent: "schedule-agent",
-    name: "schedule-demo",
+    name: `schedule-demo-${userId}`,
     onOpen: () => {
       addLog("info", "connected");
       refreshSchedules();

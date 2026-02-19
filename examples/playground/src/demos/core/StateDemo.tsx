@@ -3,10 +3,11 @@ import { useState } from "react";
 import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { StateAgent, StateAgentState } from "./state-agent";
 
 export function StateDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [newItem, setNewItem] = useState("");
   const [customValue, setCustomValue] = useState("0");
@@ -18,7 +19,7 @@ export function StateDemo() {
 
   const agent = useAgent<StateAgent, StateAgentState>({
     agent: "state-agent",
-    name: "state-demo",
+    name: `state-demo-${userId}`,
     onStateUpdate: (newState, source) => {
       addLog("in", "state_update", { source, state: newState });
       if (newState) setState(newState);

@@ -9,7 +9,7 @@ import {
 import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type {
   ReceiveEmailAgent,
   ReceiveEmailState,
@@ -17,6 +17,7 @@ import type {
 } from "./receive-email-agent";
 
 export function ReceiveDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [selectedEmail, setSelectedEmail] = useState<ParsedEmail | null>(null);
 
@@ -27,7 +28,7 @@ export function ReceiveDemo() {
 
   const agent = useAgent<ReceiveEmailAgent, ReceiveEmailState>({
     agent: "receive-email-agent",
-    name: "demo",
+    name: `email-receive-${userId}`,
     onStateUpdate: (newState) => {
       if (newState) {
         setState(newState);

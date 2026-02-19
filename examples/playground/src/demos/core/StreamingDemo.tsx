@@ -3,10 +3,11 @@ import { useState } from "react";
 import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { StreamingAgent } from "./streaming-agent";
 
 export function StreamingDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [chunks, setChunks] = useState<unknown[]>([]);
   const [finalResult, setFinalResult] = useState<unknown>(null);
@@ -17,7 +18,7 @@ export function StreamingDemo() {
 
   const agent = useAgent<StreamingAgent, {}>({
     agent: "streaming-agent",
-    name: "streaming-demo",
+    name: `streaming-demo-${userId}`,
     onOpen: () => addLog("info", "connected"),
     onClose: () => addLog("info", "disconnected"),
     onError: () => addLog("error", "error", "Connection error")

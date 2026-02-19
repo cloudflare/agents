@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type { ChildState } from "./child-agent";
 import type { SupervisorAgent, SupervisorState } from "./supervisor-agent";
 
@@ -14,13 +14,14 @@ interface ChildInfo {
 }
 
 export function SupervisorDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [children, setChildren] = useState<ChildInfo[]>([]);
   const [stats, setStats] = useState({ totalChildren: 0, totalCounter: 0 });
 
   const agent = useAgent<SupervisorAgent, SupervisorState>({
     agent: "supervisor-agent",
-    name: "demo-supervisor",
+    name: `demo-supervisor-${userId}`,
     onOpen: () => {
       addLog("info", "connected");
       refreshStats();

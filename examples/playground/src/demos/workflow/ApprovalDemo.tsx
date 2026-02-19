@@ -19,7 +19,7 @@ import {
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
 import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs } from "../../hooks";
+import { useLogs, useUserId } from "../../hooks";
 import type {
   ApprovalAgent,
   ApprovalAgentState,
@@ -146,6 +146,7 @@ function ApprovalCard({
 }
 
 export function WorkflowApprovalDemo() {
+  const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -154,7 +155,7 @@ export function WorkflowApprovalDemo() {
 
   const agent = useAgent<ApprovalAgent, ApprovalAgentState>({
     agent: "approval-agent",
-    name: "demo",
+    name: `workflow-approval-${userId}`,
     onStateUpdate: () => {
       refreshRequests();
     },
