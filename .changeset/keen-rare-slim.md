@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-Fix MCPClientManager OAuth callback tests to match current `handleCallbackRequest` behavior. The method now returns `{ authSuccess: false, authError }` result objects instead of throwing, so update three tests that used `.rejects.toThrow()` to assert on the resolved result instead.
+Fix: MCP OAuth callback errors are now returned as structured results instead of throwing unhandled exceptions. Errors with an active connection properly transition to "failed" state and are surfaced to clients via WebSocket broadcast.

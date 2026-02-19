@@ -14,7 +14,7 @@ export class MyAgent extends Agent {
         // Show error briefly, then close the popup
         const error = result.authError || "Unknown error";
         return new Response(`Authentication Failed: ${error}`, {
-          headers: { "content-type": "text/html" },
+          headers: { "content-type": "text/plain" },
           status: 400
         });
       }

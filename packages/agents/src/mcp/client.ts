@@ -1,5 +1,4 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import escapeHtml from "escape-html";
 import type { RequestOptions } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type {
   CallToolRequest,
@@ -107,8 +106,13 @@ export type MCPClientOAuthCallbackConfig = {
 };
 
 export type MCPClientOAuthResult =
-  | { serverId: string; authSuccess: true; authError?: string }
-  | { serverId?: string; authSuccess: false; authError: string };
+  | { serverId: string; authSuccess: true; authError?: undefined }
+  | {
+      serverId?: string;
+      authSuccess: false;
+      /** May contain untrusted content from external OAuth providers. Escape appropriately for your output context. */
+      authError: string;
+    };
 
 export type MCPClientManagerOptions = {
   storage: DurableObjectStorage;
@@ -732,7 +736,7 @@ export class MCPClientManager {
     const error = url.searchParams.get("error");
     const errorDescription = url.searchParams.get("error_description");
 
-    // Early validation - these throw because we can't identify the connection
+    // Early validation - return errors because we can't identify the connection
     if (!state) {
       return {
         valid: false,
@@ -753,7 +757,7 @@ export class MCPClientManager {
       return {
         serverId: serverId,
         valid: false,
-        error: `${escapeHtml(errorDescription || error)}`
+        error: errorDescription || error
       };
     }
 
@@ -779,7 +783,7 @@ export class MCPClientManager {
       return {
         serverId: serverId,
         valid: false,
-        error: `No connection found for serverId "${serverId}". `
+        error: `No connection found for serverId "${serverId}".`
       };
     }
 
