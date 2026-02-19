@@ -1,3 +1,4 @@
+import { WorkerEntrypoint } from "cloudflare:workers";
 import {
   Agent,
   routeAgentRequest,
@@ -19,20 +20,74 @@ import { buildSystemPrompt } from "./prompts";
 export { Chat } from "./chat";
 export { Workspace } from "./workspace";
 
-/**
- * ThinkAgent — the orchestrator.
- *
- * Owns WebSocket connections to the browser. Maintains a thread
- * registry and workspace registry in its own SQLite. Routes messages
- * to per-thread Chat facets and provides file tools backed by the
- * thread's attached Workspace facet.
- *
- * Sandbox is the durable workspace. Threads are interfaces to it —
- * multiple threads can be attached to the same workspace.
- */
+// ── WorkspaceLoopback ─────────────────────────────────────────────────────────
+//
+// A WorkerEntrypoint that lets the Chat facet reach a Workspace facet without
+// crossing the ThinkAgent RPC boundary during streaming. Follows the same
+// pattern as GatekeeperLoopback in the Minions codebase:
+//
+//   Chat tool execute → WorkspaceLoopback (ServiceStub, clean boundary)
+//     → ThinkAgent.getWorkspaceFacet(id) → Workspace facet
+//
+// The Chat facet gets a ServiceStub to WorkspaceLoopback via ctx.exports.
+// ServiceStubs are serializable and create a clean RPC channel, unlike passing
+// tool closures that capture RPC stubs (which caused the WritableStream
+// disconnect errors).
+
+type WorkspaceLoopbackProps = {
+  /** ThinkAgent DO id as a hex string — used to reach back to the parent. */
+  agentId: string;
+  /** Workspace registry ID — identifies which workspace facet to access. */
+  workspaceId: string;
+};
+
+export class WorkspaceLoopback extends WorkerEntrypoint<
+  Env,
+  WorkspaceLoopbackProps
+> {
+  private _facet: WorkspaceFacet;
+
+  constructor(ctx: ExecutionContext<WorkspaceLoopbackProps>, env: Env) {
+    super(ctx, env);
+
+    // Reach back to the ThinkAgent that owns this workspace facet.
+    // @ts-expect-error — ctx.exports is experimental
+    const ns = ctx.exports.ThinkAgent as DurableObjectNamespace<ThinkAgent>;
+    const stub = ns.get(ns.idFromString(ctx.props.agentId));
+    this._facet = stub.getWorkspaceFacet(ctx.props.workspaceId);
+
+    // Return a proxy so the caller can call WorkspaceFacet methods directly
+    // on this WorkerEntrypoint instance — they all forward to the facet.
+    return new Proxy(this._facet, {
+      get(target, prop, _receiver) {
+        return Reflect.get(target, prop, target);
+      },
+      getPrototypeOf() {
+        return WorkerEntrypoint.prototype;
+      }
+    }) as unknown as WorkspaceLoopback;
+  }
+
+  // Required: the runtime won't register a WorkerEntrypoint with zero methods.
+  _ping() {
+    return "pong";
+  }
+}
+
 /** Max bytes returned by READ_FILE to avoid sending huge files over WebSocket. */
 const READ_FILE_MAX_BYTES = 100_000; // 100 KB
 
+/**
+ * ThinkAgent — the session orchestrator.
+ *
+ * Owns WebSocket connections to the browser. Maintains a thread registry
+ * and workspace registry in its own SQLite. Routes messages to per-thread
+ * Chat facets and provides file tools backed by Workspace facets.
+ *
+ * Chat reaches Workspace via the WorkspaceLoopback entrypoint — a clean
+ * RPC channel that avoids the bidirectional streaming conflicts that occur
+ * when tool closures are passed across the facet RPC boundary.
+ */
 export class ThinkAgent extends Agent<Env> {
   /**
    * Threads with an active agent run. Guards against concurrent execution
@@ -67,7 +122,7 @@ export class ThinkAgent extends Agent<Env> {
     `;
   }
 
-  // ── DO access ─────────────────────────────────────────────────────
+  // ── Facet access ───────────────────────────────────────────────────
 
   private _thread(threadId: string): ChatFacet {
     // @ts-expect-error — ctx.facets and ctx.exports are experimental
@@ -77,16 +132,29 @@ export class ThinkAgent extends Agent<Env> {
     })) as ChatFacet;
   }
 
-  /**
-   * Access a Workspace DO by its registry ID using a stable name-based ID.
-   * Both ThinkAgent and Chat facets can reach the same DO via this same key,
-   * making it safe to pass workspaceId (a plain string) over RPC to Chat and
-   * have Chat construct the workspace stub directly from its own env binding.
-   */
   private _workspace(workspaceId: string): WorkspaceFacet {
-    const ns = (this.env as unknown as { Workspace: DurableObjectNamespace })
-      .Workspace;
-    return ns.get(ns.idFromName(workspaceId)) as unknown as WorkspaceFacet;
+    // @ts-expect-error — ctx.facets and ctx.exports are experimental
+    return this.ctx.facets.get(`workspace-${workspaceId}`, () => ({
+      // @ts-expect-error — ctx.exports is experimental
+      class: this.ctx.exports.Workspace
+    })) as WorkspaceFacet;
+  }
+
+  /**
+   * Public method called by WorkspaceLoopback to access a workspace facet.
+   * The loopback reaches back to this ThinkAgent via ctx.exports and calls
+   * this method to get the facet — Chat never touches the facet directly.
+   *
+   * Validates that the workspace belongs to this agent's registry before
+   * returning the facet — prevents cross-agent workspace access.
+   */
+  getWorkspaceFacet(workspaceId: string): WorkspaceFacet {
+    if (!this._ownsWorkspace(workspaceId)) {
+      throw new Error(
+        `Workspace ${workspaceId} not found in this agent's registry`
+      );
+    }
+    return this._workspace(workspaceId);
   }
 
   // ── Thread registry ────────────────────────────────────────────────
@@ -411,10 +479,17 @@ export class ThinkAgent extends Agent<Env> {
     console.log(`[ThinkAgent] RUN thread=${threadId}`);
 
     // Build system prompt injecting a live workspace snapshot.
+    // Best-effort: if the snapshot fails (e.g. workspace not yet initialized)
+    // the agent runs without the directory listing but is otherwise functional.
     const workspaceId = this._getThreadWorkspaceId(threadId);
-    const workspaceSnapshot = workspaceId
-      ? await this._workspace(workspaceId).listFiles("/")
-      : null;
+    let workspaceSnapshot = null;
+    if (workspaceId) {
+      try {
+        workspaceSnapshot = await this._workspace(workspaceId).listFiles("/");
+      } catch (err) {
+        console.error(`[ThinkAgent] workspace snapshot failed:`, err);
+      }
+    }
 
     const system = buildSystemPrompt(workspaceSnapshot);
 
@@ -423,13 +498,13 @@ export class ThinkAgent extends Agent<Env> {
       Uint8Array
     >();
 
-    // Pass workspaceId as a plain string. Chat constructs the workspace stub
-    // itself via env.Workspace.idFromName(workspaceId), so tool execution goes
-    // directly Chat → Workspace without any callback through ThinkAgent. This
-    // eliminates the bi-directional RPC that caused WritableStream disconnects.
+    // Pass workspaceId and the parent agent's DO id as plain strings.
+    // Chat uses ctx.exports.WorkspaceLoopback to reach the workspace facet
+    // via a clean ServiceStub boundary — no bi-directional RPC.
     const streamDone = this._thread(threadId).streamInto(writable, {
       system,
       workspaceId: workspaceId ?? undefined,
+      agentId: this.ctx.id.toString(),
       maxSteps: 10
     });
 
