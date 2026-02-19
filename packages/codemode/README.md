@@ -27,22 +27,22 @@ const tools = {
   getWeather: tool({
     description: "Get weather for a location",
     inputSchema: z.object({ location: z.string() }),
-    execute: async ({ location }) => `Weather in ${location}: 72°F, sunny`,
+    execute: async ({ location }) => `Weather in ${location}: 72°F, sunny`
   }),
   sendEmail: tool({
     description: "Send an email",
     inputSchema: z.object({
       to: z.string(),
       subject: z.string(),
-      body: z.string(),
+      body: z.string()
     }),
-    execute: async ({ to, subject, body }) => `Email sent to ${to}`,
-  }),
+    execute: async ({ to, subject, body }) => `Email sent to ${to}`
+  })
 };
 
 // 2. Create an executor (runs code in an isolated Worker)
 const executor = new DynamicWorkerExecutor({
-  loader: env.LOADER,
+  loader: env.LOADER
 });
 
 // 3. Create the codemode tool
@@ -53,7 +53,7 @@ const result = streamText({
   model,
   system: "You are a helpful assistant.",
   messages,
-  tools: { codemode },
+  tools: { codemode }
 });
 ```
 
@@ -66,7 +66,7 @@ async () => {
     await codemode.sendEmail({
       to: "team@example.com",
       subject: "Nice day!",
-      body: `It's ${weather}`,
+      body: `It's ${weather}`
     });
   }
   return { weather, notified: true };
@@ -104,7 +104,7 @@ To allow controlled outbound access, pass a `Fetcher`:
 ```ts
 const executor = new DynamicWorkerExecutor({
   loader: env.LOADER,
-  globalOutbound: null, // default — fully isolated
+  globalOutbound: null // default — fully isolated
   // globalOutbound: env.MY_OUTBOUND_SERVICE, // route through a Fetcher
 });
 ```
@@ -159,19 +159,19 @@ class NodeVMExecutor implements Executor {
 
 ### DynamicWorkerExecutor options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `loader` | `WorkerLoader` | required | Worker Loader binding from `env.LOADER` |
-| `timeout` | `number` | `30000` | Execution timeout in ms |
-| `globalOutbound` | `Fetcher \| null` | `null` | Network access control. `null` = blocked, `Fetcher` = routed |
+| Option           | Type              | Default  | Description                                                  |
+| ---------------- | ----------------- | -------- | ------------------------------------------------------------ |
+| `loader`         | `WorkerLoader`    | required | Worker Loader binding from `env.LOADER`                      |
+| `timeout`        | `number`          | `30000`  | Execution timeout in ms                                      |
+| `globalOutbound` | `Fetcher \| null` | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
 
 ### createCodeTool options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `tools` | `ToolSet \| ToolDescriptors` | required | Your tools (AI SDK `tool()` or raw descriptors) |
-| `executor` | `Executor` | required | Where to run the generated code |
-| `description` | `string` | auto-generated | Custom tool description. Use `{{types}}` for type defs |
+| Option        | Type                         | Default        | Description                                            |
+| ------------- | ---------------------------- | -------------- | ------------------------------------------------------ |
+| `tools`       | `ToolSet \| ToolDescriptors` | required       | Your tools (AI SDK `tool()` or raw descriptors)        |
+| `executor`    | `Executor`                   | required       | Where to run the generated code                        |
+| `description` | `string`                     | auto-generated | Custom tool description. Use `{{types}}` for type defs |
 
 ## Agent Integration
 
@@ -185,12 +185,12 @@ import { streamText, convertToModelMessages, stepCountIs } from "ai";
 export class MyAgent extends Agent<Env, State> {
   async onChatMessage() {
     const executor = new DynamicWorkerExecutor({
-      loader: this.env.LOADER,
+      loader: this.env.LOADER
     });
 
     const codemode = createCodeTool({
       tools: myTools,
-      executor,
+      executor
     });
 
     const result = streamText({
@@ -198,7 +198,7 @@ export class MyAgent extends Agent<Env, State> {
       system: "You are a helpful assistant.",
       messages: await convertToModelMessages(this.state.messages),
       tools: { codemode },
-      stopWhen: stepCountIs(10),
+      stopWhen: stepCountIs(10)
     });
 
     // Stream response back to client...
@@ -214,9 +214,9 @@ MCP tools work the same way — just merge them into the tool set:
 const codemode = createCodeTool({
   tools: {
     ...myTools,
-    ...this.mcp.getAITools(),
+    ...this.mcp.getAITools()
   },
-  executor,
+  executor
 });
 ```
 
