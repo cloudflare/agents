@@ -38,7 +38,7 @@ export class Codemode extends AIChatAgent<Env> {
     if (url.pathname.startsWith("/node-executor-callback/")) {
       return handleToolCallback(request, this.nodeExecutorRegistry);
     }
-    return new Response("Not found", { status: 404 });
+    return super.onRequest(request);
   }
 
   @callable({ description: "Set the executor type" })
