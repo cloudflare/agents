@@ -1,5 +1,15 @@
 # @cloudflare/agents
 
+## 0.5.1
+
+### Patch Changes
+
+- [#954](https://github.com/cloudflare/agents/pull/954) [`943c407`](https://github.com/cloudflare/agents/commit/943c4070992bb836625abb5bf4e3271a6f52f7a2) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [#944](https://github.com/cloudflare/agents/pull/944) [`e729b5d`](https://github.com/cloudflare/agents/commit/e729b5d393f7f81de64c9c1c0f3ede41a7a784c0) Thanks [@threepointone](https://github.com/threepointone)! - Export `DurableObjectOAuthClientProvider` from top-level `agents` package and fix `restoreConnectionsFromStorage()` to use the Agent's `createMcpOAuthProvider()` override instead of hardcoding the default provider
+
+- [#850](https://github.com/cloudflare/agents/pull/850) [`2cb12df`](https://github.com/cloudflare/agents/commit/2cb12dfc0c8fc3bcf316cfb2d04e87ee5f049d62) Thanks [@Muhammad-Bin-Ali](https://github.com/Muhammad-Bin-Ali)! - Fix: MCP OAuth callback errors are now returned as structured results instead of throwing unhandled exceptions. Errors with an active connection properly transition to "failed" state and are surfaced to clients via WebSocket broadcast.
+
 ## 0.5.0
 
 This release adds per-connection protocol message control and a built-in retry system. Agents can now suppress JSON protocol frames for binary-only clients (MQTT, IoT devices) while keeping RPC and regular messaging working — useful for Durable Objects that serve mixed connection types. The new `this.retry()` method and per-task retry options bring exponential backoff with jitter to scheduling, queues, and MCP connections without external dependencies. This release also improves scheduling ergonomics with synchronous getter methods, a cleaner discriminated union schema, and fixes for hibernation, deep type recursion, and SSE keepalives.

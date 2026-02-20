@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/codemode",
-  "version": "0.0.8",
+  "version": "0.1.0",
   "description": "Code Mode: use LLMs to generate executable code that performs tool calls",
   "repository": {
     "directory": "packages/codemode",
