@@ -5,7 +5,7 @@ async function main() {
   await build({
     clean: true,
     dts: true,
-    entry: ["src/index.ts"],
+    entry: ["src/index.ts", "src/ai.ts"],
     external: ["cloudflare:workers", "agents"],
     format: "esm",
     sourcemap: true

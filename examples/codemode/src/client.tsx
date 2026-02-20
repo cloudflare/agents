@@ -2,8 +2,37 @@ import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import "./styles.css";
 import { generateId, type UIMessage } from "ai";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Streamdown } from "streamdown";
+import {
+  Button,
+  Surface,
+  Text,
+  InputArea,
+  Empty,
+  Badge
+} from "@cloudflare/kumo";
+import {
+  PaperPlaneRightIcon,
+  TrashIcon,
+  GearIcon,
+  LightningIcon,
+  CaretRightIcon,
+  XIcon,
+  CodeIcon,
+  TerminalIcon,
+  WarningCircleIcon,
+  CheckCircleIcon,
+  CircleNotchIcon,
+  BrainIcon,
+  CaretDownIcon
+} from "@phosphor-icons/react";
+import {
+  ModeToggle,
+  PoweredByAgents,
+  ConnectionIndicator,
+  type ConnectionStatus
+} from "@cloudflare/agents-ui";
 import type { Codemode, ExecutorType } from "./server";
 
 interface ToolPart {
@@ -47,10 +76,7 @@ const TOOLS: { name: string; description: string }[] = [
   { name: "updateTask", description: "Update a task's fields" },
   { name: "deleteTask", description: "Delete a task and its comments" },
   { name: "createSprint", description: "Create a sprint for a project" },
-  {
-    name: "listSprints",
-    description: "List sprints, optionally by project"
-  },
+  { name: "listSprints", description: "List sprints, optionally by project" },
   { name: "addComment", description: "Add a comment to a task" },
   { name: "listComments", description: "List comments on a task" }
 ];
@@ -61,99 +87,6 @@ function extractFunctionCalls(code?: string): string[] {
   if (!matches) return [];
   return [...new Set(matches.map((m) => m.replace("codemode.", "")))];
 }
-
-// ── Icons ──
-
-function ChevronIcon({ expanded }: { expanded: boolean }) {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      style={{
-        transform: expanded ? "rotate(90deg)" : "none",
-        transition: "transform 0.15s ease"
-      }}
-    >
-      <path
-        d="M6 4l4 4-4 4"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function BoltIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M9 1.5L3 9.5h4.5L7 14.5l6-8H8.5L9 1.5z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function GearIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M8 10a2 2 0 100-4 2 2 0 000 4z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-      <path
-        d="M13.4 6.5l-.7-.4a5.5 5.5 0 00-.5-.9l.1-.8a.5.5 0 00-.2-.5l-1-.6a.5.5 0 00-.5 0l-.7.5a5 5 0 00-1 0l-.7-.5a.5.5 0 00-.5 0l-1 .6a.5.5 0 00-.2.5l.1.8a5 5 0 00-.5.9l-.7.4a.5.5 0 00-.3.4v1.2a.5.5 0 00.3.4l.7.4c.1.3.3.6.5.9l-.1.8a.5.5 0 00.2.5l1 .6a.5.5 0 00.5 0l.7-.5a5 5 0 001 0l.7.5a.5.5 0 00.5 0l1-.6a.5.5 0 00.2-.5l-.1-.8c.2-.3.4-.6.5-.9l.7-.4a.5.5 0 00.3-.4V6.9a.5.5 0 00-.3-.4z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-    </svg>
-  );
-}
-
-function SendIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M14 2L7 9M14 2l-4.5 12L7 9M14 2L2 6.5 7 9"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function ResetIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-      <path
-        d="M2.5 2.5v4h4"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M4.5 10a5 5 0 107-7l-8 3.5"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-// ── Components ──
 
 function ReasoningBlock({
   text,
@@ -166,26 +99,34 @@ function ReasoningBlock({
   if (!text?.trim()) return null;
 
   return (
-    <div className="reasoning-block">
-      <button
-        className="reasoning-toggle"
-        onClick={() => setExpanded(!expanded)}
-        type="button"
-      >
-        <ChevronIcon expanded={expanded} />
-        <span className="reasoning-label">Thinking</span>
-      </button>
-      {expanded && (
-        <div className="reasoning-content">
-          <Streamdown
-            className="sd-theme"
-            controls={false}
-            isAnimating={isStreaming}
-          >
-            {text}
-          </Streamdown>
-        </div>
-      )}
+    <div className="flex justify-start">
+      <Surface className="max-w-[80%] rounded-xl bg-purple-500/10 border border-purple-500/20 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center gap-2 px-3 py-2 cursor-pointer"
+        >
+          <BrainIcon size={14} className="text-purple-400" />
+          <Text size="xs" bold>
+            Thinking
+          </Text>
+          <CaretDownIcon
+            size={12}
+            className={`ml-auto text-kumo-secondary transition-transform ${expanded ? "rotate-180" : ""}`}
+          />
+        </button>
+        {expanded && (
+          <div className="px-3 pb-3">
+            <Streamdown
+              className="sd-theme text-xs"
+              controls={false}
+              isAnimating={isStreaming}
+            >
+              {text}
+            </Streamdown>
+          </div>
+        )}
+      </Surface>
     </div>
   );
 }
@@ -203,77 +144,107 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
     functionCalls.length > 0 ? functionCalls.join(", ") : "code execution";
 
   return (
-    <div
-      className={`tool-card ${hasError ? "tool-card--error" : ""} ${isComplete ? "tool-card--complete" : ""}`}
+    <Surface
+      className={`rounded-xl ring ${hasError ? "ring-2 ring-red-500/30" : "ring-kumo-line"} overflow-hidden`}
     >
       <button
-        className="tool-card-header"
-        onClick={() => setExpanded(!expanded)}
         type="button"
+        className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
+        onClick={() => setExpanded(!expanded)}
       >
-        <ChevronIcon expanded={expanded} />
-        <BoltIcon />
-        <span className="tool-card-summary">
-          <span className="tool-card-action">Ran code</span>
+        <CaretRightIcon
+          size={12}
+          className={`text-kumo-secondary transition-transform ${expanded ? "rotate-90" : ""}`}
+        />
+        <LightningIcon size={14} className="text-kumo-inactive" />
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <Text size="xs" bold>
+            Ran code
+          </Text>
           {functionCalls.length > 0 && (
             <>
-              <span className="tool-card-dot">&middot;</span>
-              <span className="tool-card-fns">{summary}</span>
+              <span className="text-kumo-inactive">&middot;</span>
+              <span className="font-mono text-xs text-kumo-secondary truncate">
+                {summary}
+              </span>
             </>
           )}
-        </span>
-        <span className="tool-card-status">
-          {isComplete && <span className="status-dot status-dot--success" />}
-          {hasError && <span className="status-dot status-dot--error" />}
-          {isRunning && <span className="status-spinner" />}
-        </span>
+        </div>
+        {isComplete && (
+          <CheckCircleIcon size={14} className="text-green-500 shrink-0" />
+        )}
+        {hasError && (
+          <WarningCircleIcon size={14} className="text-red-500 shrink-0" />
+        )}
+        {isRunning && (
+          <CircleNotchIcon
+            size={14}
+            className="text-kumo-inactive animate-spin shrink-0"
+          />
+        )}
       </button>
 
       {expanded && (
-        <div className="tool-card-body">
+        <div className="px-3 pb-3 border-t border-kumo-line space-y-2 pt-2">
           {toolPart.output?.code && (
-            <div className="tool-card-section">
-              <div className="tool-card-section-label">Code</div>
-              <pre className="tool-card-code">
-                <code>{toolPart.output.code}</code>
+            <div>
+              <div className="flex items-center gap-1 mb-1">
+                <CodeIcon size={10} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Code
+                </Text>
+              </div>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap break-words">
+                {toolPart.output.code}
               </pre>
             </div>
           )}
           {!toolPart.output?.code && toolPart.input && (
-            <div className="tool-card-section">
-              <div className="tool-card-section-label">Input</div>
-              <pre className="tool-card-code">
-                <code>{JSON.stringify(toolPart.input, null, 2)}</code>
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Input
+              </Text>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {JSON.stringify(toolPart.input, null, 2)}
               </pre>
             </div>
           )}
           {toolPart.output?.result !== undefined && (
-            <div className="tool-card-section">
-              <div className="tool-card-section-label">Result</div>
-              <pre className="tool-card-code">
-                <code>{JSON.stringify(toolPart.output.result, null, 2)}</code>
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Result
+              </Text>
+              <pre className="font-mono text-xs text-kumo-subtle bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {JSON.stringify(toolPart.output.result, null, 2)}
               </pre>
             </div>
           )}
           {toolPart.output?.logs && toolPart.output.logs.length > 0 && (
-            <div className="tool-card-section">
-              <div className="tool-card-section-label">Console</div>
-              <pre className="tool-card-code">
-                <code>{toolPart.output.logs.join("\n")}</code>
+            <div>
+              <div className="flex items-center gap-1 mb-1">
+                <TerminalIcon size={10} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Console
+                </Text>
+              </div>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                {toolPart.output.logs.join("\n")}
               </pre>
             </div>
           )}
           {toolPart.errorText && (
-            <div className="tool-card-section tool-card-section--error">
-              <div className="tool-card-section-label">Error</div>
-              <pre className="tool-card-code tool-card-code--error">
-                <code>{toolPart.errorText}</code>
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Error
+              </Text>
+              <pre className="font-mono text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {toolPart.errorText}
               </pre>
             </div>
           )}
         </div>
       )}
-    </div>
+    </Surface>
   );
 }
 
@@ -285,9 +256,10 @@ function MessagePart({
   isStreaming: boolean;
 }) {
   if (part.type === "text") {
+    if (!part.text || part.text.trim() === "") return null;
     return (
       <Streamdown
-        className="sd-theme message-text"
+        className="sd-theme text-sm leading-relaxed"
         controls={false}
         isAnimating={isStreaming}
       >
@@ -302,35 +274,12 @@ function MessagePart({
     return <ReasoningBlock text={part.text} isStreaming={isStreaming} />;
   }
 
-  if (part.type === "file") {
-    return (
-      <div className="file-block">
-        <span className="file-name">{part.filename || "Untitled"}</span>
-        {part.mediaType && <span className="file-type">{part.mediaType}</span>}
-        {part.url && (
-          <a
-            href={part.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="file-link"
-          >
-            View
-          </a>
-        )}
-      </div>
-    );
-  }
-
   const toolPart = asToolPart(part);
   if (toolPart) {
     return <ToolCard toolPart={toolPart} />;
   }
 
-  return (
-    <div className="unknown-block">
-      <pre>{JSON.stringify(part, null, 2)}</pre>
-    </div>
-  );
+  return null;
 }
 
 function SettingsPanel({
@@ -356,26 +305,30 @@ function SettingsPanel({
     <>
       <button
         type="button"
-        className="settings-backdrop"
+        className="fixed inset-0 bg-black/40 z-40"
         onClick={onClose}
         aria-label="Close settings"
       />
-      <aside className="settings-panel">
-        <div className="settings-header">
-          <h3>Settings</h3>
-          <button className="settings-close" onClick={onClose} type="button">
-            &times;
-          </button>
+      <aside className="fixed top-0 right-0 bottom-0 w-[360px] max-w-[90vw] bg-kumo-base border-l border-kumo-line z-50 flex flex-col shadow-xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-kumo-line">
+          <Text variant="heading3">Settings</Text>
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            icon={<XIcon size={16} />}
+            onClick={onClose}
+            aria-label="Close"
+          />
         </div>
 
-        <div className="settings-body">
-          <div className="settings-section">
-            <label className="settings-label" htmlFor="executor-select">
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
+          <div>
+            <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
               Executor
-            </label>
+            </span>
             <select
-              id="executor-select"
-              className="settings-select"
+              className="w-full px-3 py-2 bg-kumo-elevated border border-kumo-line rounded-lg text-kumo-default text-sm outline-none focus:ring-2 focus:ring-kumo-ring"
               value={executor}
               onChange={(e) => onExecutorChange(e.target.value as ExecutorType)}
               disabled={loading}
@@ -386,35 +339,49 @@ function SettingsPanel({
                 </option>
               ))}
             </select>
-            <p className="settings-hint">
-              {EXECUTORS.find((e) => e.value === executor)?.description}
-            </p>
+            <div className="mt-1">
+              <Text size="xs" variant="secondary">
+                {EXECUTORS.find((e) => e.value === executor)?.description}
+              </Text>
+            </div>
           </div>
 
-          <div className="settings-section">
-            <span className="settings-label">Available Functions</span>
-            <div className="tools-grid">
+          <div>
+            <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
+              Available Functions
+            </span>
+            <div className="border border-kumo-line rounded-lg overflow-hidden divide-y divide-kumo-line">
               {TOOLS.map((tool) => (
-                <div key={tool.name} className="tool-chip">
-                  <span className="tool-chip-name">{tool.name}</span>
-                  <span className="tool-chip-desc">{tool.description}</span>
+                <div
+                  key={tool.name}
+                  className="flex items-baseline gap-3 px-3 py-2 bg-kumo-elevated hover:bg-kumo-base transition-colors"
+                >
+                  <span className="text-xs font-semibold font-mono text-kumo-brand shrink-0">
+                    {tool.name}
+                  </span>
+                  <span className="text-xs text-kumo-secondary truncate">
+                    {tool.description}
+                  </span>
                 </div>
               ))}
             </div>
           </div>
 
           {toolDef && (
-            <div className="settings-section">
+            <div>
               <button
-                className="settings-toggle"
-                onClick={() => setShowSchema(!showSchema)}
                 type="button"
+                className="flex items-center gap-2 w-full px-3 py-2 border border-kumo-line rounded-lg text-sm text-kumo-secondary hover:bg-kumo-elevated transition-colors cursor-pointer"
+                onClick={() => setShowSchema(!showSchema)}
               >
-                <ChevronIcon expanded={showSchema} />
+                <CaretRightIcon
+                  size={12}
+                  className={`transition-transform ${showSchema ? "rotate-90" : ""}`}
+                />
                 <span>Tool Schema</span>
               </button>
               {showSchema && (
-                <pre className="settings-schema">
+                <pre className="mt-2 p-3 bg-kumo-elevated border border-kumo-line rounded-lg font-mono text-xs text-kumo-subtle overflow-x-auto whitespace-pre-wrap leading-relaxed">
                   {JSON.stringify(toolDef.inputSchema, null, 2)}
                 </pre>
               )}
@@ -426,56 +393,14 @@ function SettingsPanel({
   );
 }
 
-function EmptyState({
-  onSuggestionClick
-}: {
-  onSuggestionClick: (text: string) => void;
-}) {
-  return (
-    <div className="empty-state">
-      <div className="empty-state-icon">&#9670;</div>
-      <h2>Welcome to Planwise</h2>
-      <p>
-        Your AI-powered project management assistant. Ask me to help organize
-        projects, tasks, sprints, and more.
-      </p>
-      <div className="empty-state-suggestions">
-        <button
-          type="button"
-          className="suggestion"
-          onClick={() =>
-            onSuggestionClick('Create a new project called "Alpha"')
-          }
-        >
-          Create a new project
-        </button>
-        <button
-          type="button"
-          className="suggestion"
-          onClick={() => onSuggestionClick("List all my tasks")}
-        >
-          List all tasks
-        </button>
-        <button
-          type="button"
-          className="suggestion"
-          onClick={() => onSuggestionClick("Add a sprint for next week")}
-        >
-          Add a sprint
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ── App ──
-
 function App() {
   const [messages, setMessages] = useState<UIMessage[]>([]);
-  const [inputMessage, setInputMessage] = useState("");
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [executor, setExecutor] = useState<ExecutorType>("dynamic-worker");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [connectionStatus, setConnectionStatus] =
+    useState<ConnectionStatus>("connecting");
   const [toolDef, setToolDef] = useState<{
     name: string;
     description: string;
@@ -483,13 +408,15 @@ function App() {
   } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const toolDefFetched = useRef(false);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const agent = useAgent<
     Codemode,
     { messages: UIMessage[]; loading: boolean; executor: ExecutorType }
   >({
     agent: "codemode",
+    onOpen: useCallback(() => setConnectionStatus("connected"), []),
+    onClose: useCallback(() => setConnectionStatus("disconnected"), []),
+    onError: useCallback(() => setConnectionStatus("disconnected"), []),
     onStateUpdate: (state) => {
       setMessages(state.messages);
       setLoading(state.loading);
@@ -503,147 +430,177 @@ function App() {
     }
   });
 
-  const handleExecutorChange = (newExecutor: ExecutorType) => {
-    setExecutor(newExecutor);
-    agent.call("setExecutor", [newExecutor]);
-  };
+  const handleExecutorChange = useCallback(
+    (newExecutor: ExecutorType) => {
+      setExecutor(newExecutor);
+      agent.call("setExecutor", [newExecutor]);
+    },
+    [agent]
+  );
 
-  const sendMessage = async () => {
-    if (!inputMessage.trim()) return;
+  const sendMessage = useCallback(() => {
+    const text = input.trim();
+    if (!text) return;
     const userMessage: UIMessage = {
       id: generateId(),
       role: "user",
-      parts: [{ type: "text", text: inputMessage }]
+      parts: [{ type: "text", text }]
     };
     agent.setState({ messages: [...messages, userMessage], loading, executor });
-    setInputMessage("");
-  };
+    setInput("");
+  }, [input, messages, loading, executor, agent]);
 
-  const resetMessages = () => {
+  const resetMessages = useCallback(() => {
     agent.setState({ messages: [], loading: false, executor });
-  };
+  }, [agent, executor]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+  const isConnected = connectionStatus === "connected";
 
   return (
-    <div className="app">
-      <header className="header">
-        <div className="header-left">
-          <span className="header-logo">&#9670;</span>
-          <h1>Planwise</h1>
-        </div>
-        <div className="header-right">
-          <button
-            className="header-btn"
-            onClick={resetMessages}
-            disabled={messages.length === 0}
-            title="New conversation"
-            type="button"
-          >
-            <ResetIcon />
-            <span>New Chat</span>
-          </button>
-          <button
-            className="header-btn header-btn--icon"
-            onClick={() => setSettingsOpen(!settingsOpen)}
-            title="Settings"
-            type="button"
-          >
-            <GearIcon />
-          </button>
+    <div className="flex flex-col h-screen bg-kumo-elevated">
+      <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
+        <div className="max-w-3xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h1 className="text-lg font-semibold text-kumo-default">
+              Codemode
+            </h1>
+            <Badge variant="secondary">
+              <LightningIcon size={12} weight="bold" className="mr-1" />
+              {EXECUTORS.find((e) => e.value === executor)?.label}
+            </Badge>
+          </div>
+          <div className="flex items-center gap-3">
+            <ConnectionIndicator status={connectionStatus} />
+            <ModeToggle />
+            <Button
+              variant="ghost"
+              shape="square"
+              size="sm"
+              icon={<GearIcon size={16} />}
+              onClick={() => setSettingsOpen(!settingsOpen)}
+              aria-label="Settings"
+            />
+            <Button
+              variant="secondary"
+              icon={<TrashIcon size={16} />}
+              onClick={resetMessages}
+              disabled={messages.length === 0}
+            >
+              Clear
+            </Button>
+          </div>
         </div>
       </header>
 
-      <main className="chat-main">
-        <div className="messages-scroll">
-          <div className="messages-container">
-            {messages.length === 0 && !loading && (
-              <EmptyState
-                onSuggestionClick={(text) => {
-                  setInputMessage(text);
-                  inputRef.current?.focus();
-                }}
-              />
-            )}
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
+          {messages.length === 0 && !loading && (
+            <Empty
+              icon={<LightningIcon size={32} />}
+              title="Welcome to Codemode"
+              description="AI-powered project management. Ask me to create projects, manage tasks, plan sprints, and more."
+            />
+          )}
 
-            {messages.map((message, msgIndex) => {
-              const isLastAssistant =
-                message.role === "assistant" &&
-                msgIndex === messages.length - 1;
-              const isStreaming = loading && isLastAssistant;
+          {messages.map((message, msgIndex) => {
+            const isUser = message.role === "user";
+            const isLastAssistant =
+              message.role === "assistant" && msgIndex === messages.length - 1;
+            const isStreaming = loading && isLastAssistant;
 
+            if (isUser) {
               return (
-                <div
-                  key={message.id}
-                  className={`message message--${message.role}`}
-                >
-                  {message.role === "assistant" && (
-                    <div className="message-avatar">
-                      <span>&#9670;</span>
-                    </div>
-                  )}
-                  <div className="message-body">
-                    {message.parts.map((part, index) => (
-                      <div key={`${message.id}-${index}`}>
-                        <MessagePart part={part} isStreaming={isStreaming} />
-                      </div>
-                    ))}
+                <div key={message.id} className="flex justify-end">
+                  <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed text-sm">
+                    {message.parts
+                      .filter((p) => p.type === "text")
+                      .map((p) => (p.type === "text" ? p.text : ""))
+                      .join("")}
                   </div>
                 </div>
               );
-            })}
+            }
 
-            {loading && (
-              <div className="message message--assistant">
-                <div className="message-avatar">
-                  <span>&#9670;</span>
-                </div>
-                <div className="message-body">
-                  <div className="loading-dots">
-                    <span />
-                    <span />
-                    <span />
+            return (
+              <div key={message.id} className="space-y-2">
+                {message.parts.map((part, index) => (
+                  <div
+                    key={`${message.id}-${index}`}
+                    className="flex justify-start"
+                  >
+                    <div className="max-w-[80%]">
+                      <MessagePart part={part} isStreaming={isStreaming} />
+                    </div>
                   </div>
-                </div>
+                ))}
               </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-        </div>
+            );
+          })}
 
-        <div className="input-area">
-          <div className="input-container">
-            <input
-              ref={inputRef}
-              type="text"
-              placeholder="Ask me to manage your projects..."
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-              disabled={loading}
-            />
-            <button
-              className="send-btn"
-              onClick={sendMessage}
-              disabled={!inputMessage.trim() || loading}
-              type="button"
-            >
-              <SendIcon />
-            </button>
-          </div>
-          <div className="input-footer">
-            <span>Powered by codemode</span>
-            <span className="input-footer-dot">&middot;</span>
-            <span>{EXECUTORS.find((e) => e.value === executor)?.label}</span>
-          </div>
+          {loading && messages[messages.length - 1]?.role !== "assistant" && (
+            <div className="flex justify-start">
+              <Surface className="px-4 py-2.5 rounded-2xl rounded-bl-md ring ring-kumo-line">
+                <div className="flex gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-kumo-inactive animate-bounce" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-kumo-inactive animate-bounce [animation-delay:0.15s]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-kumo-inactive animate-bounce [animation-delay:0.3s]" />
+                </div>
+              </Surface>
+            </div>
+          )}
+
+          <div ref={messagesEndRef} />
         </div>
-      </main>
+      </div>
+
+      <div className="border-t border-kumo-line bg-kumo-base">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            sendMessage();
+          }}
+          className="max-w-3xl mx-auto px-5 py-4"
+        >
+          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm focus-within:ring-2 focus-within:ring-kumo-ring focus-within:border-transparent transition-shadow">
+            <InputArea
+              value={input}
+              onValueChange={setInput}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendMessage();
+                }
+              }}
+              placeholder={
+                isConnected
+                  ? "Ask me to manage your projects..."
+                  : "Connecting..."
+              }
+              disabled={!isConnected || loading}
+              rows={2}
+              className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
+            />
+            <Button
+              type="submit"
+              variant="primary"
+              shape="square"
+              size="sm"
+              aria-label="Send message"
+              disabled={!input.trim() || !isConnected || loading}
+              icon={<PaperPlaneRightIcon size={18} />}
+              loading={loading}
+              className="mb-0.5"
+            />
+          </div>
+        </form>
+        <div className="flex justify-center pb-3">
+          <PoweredByAgents />
+        </div>
+      </div>
 
       {settingsOpen && (
         <SettingsPanel

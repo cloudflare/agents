@@ -6,8 +6,8 @@ import {
   type Connection
 } from "agents";
 import { getSchedulePrompt } from "agents/schedule";
+import { createCodeTool } from "@cloudflare/codemode/ai";
 import {
-  createCodeTool,
   DynamicWorkerExecutor,
   generateTypes,
   type Executor
@@ -134,7 +134,7 @@ export class Codemode extends Agent<Env, State> {
     }
   }
 
-  async onStateUpdate(state: State, source: Connection | "server") {
+  async onStateChanged(state: State, source: Connection | "server") {
     if (source === "server") return;
 
     const lastMessage = state.messages[state.messages.length - 1];

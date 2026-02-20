@@ -1,5 +1,5 @@
-// @cloudflare/codemode/ai has been removed.
-// Use createCodeTool from @cloudflare/codemode instead.
+// @cloudflare/codemode/ai has been rewritten.
+// Use createCodeTool from @cloudflare/codemode/ai instead.
 throw new Error(
-  "@cloudflare/codemode/ai has been removed. Use createCodeTool() from @cloudflare/codemode instead."
+  "This entrypoint has been removed. Use createCodeTool() from @cloudflare/codemode/ai instead."
 );

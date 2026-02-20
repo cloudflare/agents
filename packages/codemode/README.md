@@ -17,9 +17,9 @@ npm install @cloudflare/codemode agents ai zod
 `createCodeTool` takes your tools and an executor, and returns a single AI SDK tool that lets the LLM write code instead of making individual tool calls.
 
 ```ts
-import { createCodeTool, DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { streamText } from "ai";
-import { tool } from "ai";
+import { createCodeTool } from "@cloudflare/codemode/ai";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { streamText, tool } from "ai";
 import { z } from "zod";
 
 // 1. Define your tools using the AI SDK tool() wrapper
@@ -179,7 +179,8 @@ The user sends a message, the agent passes it to an LLM with the codemode tool, 
 
 ```ts
 import { Agent } from "agents";
-import { createCodeTool, DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { createCodeTool } from "@cloudflare/codemode/ai";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { streamText, convertToModelMessages, stepCountIs } from "ai";
 
 export class MyAgent extends Agent<Env, State> {

@@ -10,7 +10,7 @@
     "durable objects",
     "workflows"
   ],
-  "author": "Sunil Pai <spai@cloudflare.com>",
+  "author": "Cloudflare Agents <1800-agents@cloudflare.com>",
   "private": true,
   "scripts": {
     "build": "npm run build -w agents -w hono-agents -w @cloudflare/ai-chat -w @cloudflare/codemode",

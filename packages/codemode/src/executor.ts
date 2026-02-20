@@ -132,7 +132,7 @@ export class DynamicWorkerExecutor implements Executor {
       "      ]);",
       "      return { result, logs: __logs };",
       "    } catch (err) {",
-      "      return { result: undefined, err: err.message, stack: err.stack, logs: __logs };",
+      "      return { result: undefined, error: err.message, logs: __logs };",
       "    }",
       "  }",
       "}"
@@ -155,15 +155,14 @@ export class DynamicWorkerExecutor implements Executor {
     const entrypoint = worker.getEntrypoint() as unknown as {
       evaluate(dispatcher: ToolDispatcher): Promise<{
         result: unknown;
-        err?: string;
-        stack?: string;
+        error?: string;
         logs?: string[];
       }>;
     };
     const response = await entrypoint.evaluate(dispatcher);
 
-    if (response.err) {
-      return { result: undefined, error: response.err, logs: response.logs };
+    if (response.error) {
+      return { result: undefined, error: response.error, logs: response.logs };
     }
 
     return { result: response.result, logs: response.logs };
