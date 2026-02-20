@@ -675,6 +675,17 @@ export class AIChatAgent<
       // Forward unhandled messages to consumer's onMessage
       return _onMessage(connection, message);
     };
+
+    const _onRequest = this.onRequest.bind(this);
+    this.onRequest = async (request: Request) => {
+      return this._tryCatchChat(async () => {
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/get-messages")) {
+          return Response.json(this._loadMessagesFromDb());
+        }
+        return _onRequest(request);
+      });
+    };
   }
 
   /**
@@ -869,19 +880,6 @@ export class AIChatAgent<
         }
       })
       .filter((msg): msg is ChatMessage => msg !== null);
-  }
-
-  override async onRequest(request: Request): Promise<Response> {
-    return this._tryCatchChat(async () => {
-      const url = new URL(request.url);
-
-      if (url.pathname.endsWith("/get-messages")) {
-        const messages = this._loadMessagesFromDb();
-        return Response.json(messages);
-      }
-
-      return super.onRequest(request);
-    });
   }
 
   private async _tryCatchChat<T>(fn: () => T | Promise<T>) {
