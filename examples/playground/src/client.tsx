@@ -41,6 +41,7 @@ import { RetryDemo } from "./demos/core/RetryDemo";
 // AI demos
 import { ChatDemo } from "./demos/ai/ChatDemo";
 import { ToolsDemo } from "./demos/ai/ToolsDemo";
+import { CodemodeDemo } from "./demos/ai/CodemodeDemo";
 
 // MCP demos
 import { McpServerDemo } from "./demos/mcp/ServerDemo";
@@ -85,6 +86,7 @@ function App() {
               {/* AI */}
               <Route path="ai/chat" element={<ChatDemo />} />
               <Route path="ai/tools" element={<ToolsDemo />} />
+              <Route path="ai/codemode" element={<CodemodeDemo />} />
 
               {/* MCP */}
               <Route path="mcp/server" element={<McpServerDemo />} />

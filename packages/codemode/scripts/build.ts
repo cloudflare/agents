@@ -1,18 +1,20 @@
+import { execSync } from "node:child_process";
 import { build } from "tsdown";
-import { execSync } from "child_process";
 
 async function main() {
   await build({
     clean: true,
     dts: true,
     entry: ["src/index.ts", "src/ai.ts"],
-    external: ["cloudflare:workers", "agents"],
+    skipNodeModulesBundle: true,
+    external: ["cloudflare:workers"],
     format: "esm",
-    sourcemap: true
+    sourcemap: true,
+    fixedExtension: false
   });
 
   // then run oxfmt on the generated .d.ts files
-  execSync("oxfmt --write './dist/*.d.{ts,mts}'");
+  execSync("oxfmt --write ./dist/*.d.ts");
 
   process.exit(0);
 }

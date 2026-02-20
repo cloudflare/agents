@@ -20,6 +20,7 @@
       // AI demo agents
       { "name": "ChatAgent", "class_name": "ChatAgent" },
       { "name": "ToolsAgent", "class_name": "ToolsAgent" },
+      { "name": "CodemodeAgent", "class_name": "CodemodeAgent" },
       // Multi-agent demo agents
       { "name": "SupervisorAgent", "class_name": "SupervisorAgent" },
       { "name": "ChildAgent", "class_name": "ChildAgent" },
@@ -62,6 +63,7 @@
         // AI demo agents
         "ChatAgent",
         "ToolsAgent",
+        "CodemodeAgent",
         // Multi-agent demo agents
         "SupervisorAgent",
         "ChildAgent",
@@ -80,6 +82,7 @@
     // For production, use: wrangler secret put EMAIL_SECRET
     "EMAIL_SECRET": "demo-secret-change-in-production"
   },
+  "worker_loaders": [{ "binding": "LOADER" }],
   "observability": {
     "enabled": true
   },

@@ -152,6 +152,79 @@ describe("createCodeTool", () => {
     expect(capturedFnNames).not.toContain("withoutExecute");
   });
 
+  it("should exclude tools with needsApproval: true from fns and description", async () => {
+    const testTools = {
+      safeTool: {
+        description: "Safe tool",
+        inputSchema: z.object({}),
+        execute: async () => ({ ok: true })
+      },
+      dangerousTool: {
+        description: "Dangerous tool",
+        inputSchema: z.object({}),
+        execute: async () => ({ deleted: true }),
+        needsApproval: true
+      }
+    };
+
+    let capturedFnNames: string[] = [];
+    const executor: Executor = {
+      execute: vi.fn(async (_code, fns) => {
+        capturedFnNames = Object.keys(fns);
+        return { result: null };
+      })
+    };
+
+    const codeTool = createCodeTool({ tools: testTools, executor });
+
+    expect(codeTool.description).toContain("safeTool");
+    expect(codeTool.description).not.toContain("dangerousTool");
+
+    await codeTool.execute?.(
+      { code: "async () => null" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    expect(capturedFnNames).toContain("safeTool");
+    expect(capturedFnNames).not.toContain("dangerousTool");
+  });
+
+  it("should exclude tools with needsApproval as a function", async () => {
+    const testTools = {
+      normalTool: {
+        description: "Normal",
+        inputSchema: z.object({}),
+        execute: async () => ({})
+      },
+      approvalFnTool: {
+        description: "Approval fn",
+        inputSchema: z.object({}),
+        execute: async () => ({}),
+        needsApproval: async () => true
+      }
+    };
+
+    let capturedFnNames: string[] = [];
+    const executor: Executor = {
+      execute: vi.fn(async (_code, fns) => {
+        capturedFnNames = Object.keys(fns);
+        return { result: null };
+      })
+    };
+
+    const codeTool = createCodeTool({ tools: testTools, executor });
+
+    expect(codeTool.description).not.toContain("approvalFnTool");
+
+    await codeTool.execute?.(
+      { code: "async () => null" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    expect(capturedFnNames).toContain("normalTool");
+    expect(capturedFnNames).not.toContain("approvalFnTool");
+  });
+
   it("should return { code, result } on success", async () => {
     const { executor } = createMockExecutor({ result: { answer: 42 } });
     const codeTool = createCodeTool({ tools, executor });

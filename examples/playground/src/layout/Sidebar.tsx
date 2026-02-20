@@ -111,6 +111,11 @@ const navigation: NavCategory[] = [
         label: "Tools",
         path: "/ai/tools",
         icon: <WrenchIcon size={16} />
+      },
+      {
+        label: "Codemode",
+        path: "/ai/codemode",
+        icon: <LightningIcon size={16} />
       }
     ]
   },

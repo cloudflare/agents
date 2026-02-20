@@ -18,6 +18,7 @@ export { RetryAgent } from "./demos/core/retry-agent";
 // AI agents
 export { ChatAgent } from "./demos/ai/chat-agent";
 export { ToolsAgent } from "./demos/ai/tools-agent";
+export { CodemodeAgent } from "./demos/ai/codemode-agent";
 
 // Multi-agent demos
 export { SupervisorAgent } from "./demos/multi-agent/supervisor-agent";

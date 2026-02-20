@@ -1,7 +1,8 @@
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { isToolUIPart } from "ai";
 import "./styles.css";
-import { generateId, type UIMessage } from "ai";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Streamdown } from "streamdown";
 import {
@@ -33,7 +34,8 @@ import {
   ConnectionIndicator,
   type ConnectionStatus
 } from "@cloudflare/agents-ui";
-import type { Codemode, ExecutorType } from "./server";
+import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
+import type { ExecutorType } from "./server";
 
 interface ToolPart {
   type: string;
@@ -47,11 +49,6 @@ interface ToolPart {
     logs?: string[];
     [key: string]: unknown;
   };
-}
-
-function asToolPart(part: UIMessage["parts"][0]): ToolPart | null {
-  if (!part.type.startsWith("tool-")) return null;
-  return part as unknown as ToolPart;
 }
 
 const EXECUTORS: { value: ExecutorType; label: string; description: string }[] =
@@ -194,7 +191,7 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
                   Code
                 </Text>
               </div>
-              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap break-words">
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
                 {toolPart.output.code}
               </pre>
             </div>
@@ -248,59 +245,17 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
   );
 }
 
-function MessagePart({
-  part,
-  isStreaming
-}: {
-  part: UIMessage["parts"][0];
-  isStreaming: boolean;
-}) {
-  if (part.type === "text") {
-    if (!part.text || part.text.trim() === "") return null;
-    return (
-      <Streamdown
-        className="sd-theme text-sm leading-relaxed"
-        controls={false}
-        isAnimating={isStreaming}
-      >
-        {part.text}
-      </Streamdown>
-    );
-  }
-
-  if (part.type === "step-start") return null;
-
-  if (part.type === "reasoning") {
-    return <ReasoningBlock text={part.text} isStreaming={isStreaming} />;
-  }
-
-  const toolPart = asToolPart(part);
-  if (toolPart) {
-    return <ToolCard toolPart={toolPart} />;
-  }
-
-  return null;
-}
-
 function SettingsPanel({
   executor,
   onExecutorChange,
-  toolDef,
   loading,
   onClose
 }: {
   executor: ExecutorType;
   onExecutorChange: (e: ExecutorType) => void;
-  toolDef: {
-    name: string;
-    description: string;
-    inputSchema: unknown;
-  } | null;
   loading: boolean;
   onClose: () => void;
 }) {
-  const [showSchema, setShowSchema] = useState(false);
-
   return (
     <>
       <button
@@ -366,27 +321,6 @@ function SettingsPanel({
               ))}
             </div>
           </div>
-
-          {toolDef && (
-            <div>
-              <button
-                type="button"
-                className="flex items-center gap-2 w-full px-3 py-2 border border-kumo-line rounded-lg text-sm text-kumo-secondary hover:bg-kumo-elevated transition-colors cursor-pointer"
-                onClick={() => setShowSchema(!showSchema)}
-              >
-                <CaretRightIcon
-                  size={12}
-                  className={`transition-transform ${showSchema ? "rotate-90" : ""}`}
-                />
-                <span>Tool Schema</span>
-              </button>
-              {showSchema && (
-                <pre className="mt-2 p-3 bg-kumo-elevated border border-kumo-line rounded-lg font-mono text-xs text-kumo-subtle overflow-x-auto whitespace-pre-wrap leading-relaxed">
-                  {JSON.stringify(toolDef.inputSchema, null, 2)}
-                </pre>
-              )}
-            </div>
-          )}
         </div>
       </aside>
     </>
@@ -394,41 +328,26 @@ function SettingsPanel({
 }
 
 function App() {
-  const [messages, setMessages] = useState<UIMessage[]>([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
   const [executor, setExecutor] = useState<ExecutorType>("dynamic-worker");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
-  const [toolDef, setToolDef] = useState<{
-    name: string;
-    description: string;
-    inputSchema: unknown;
-  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const toolDefFetched = useRef(false);
 
-  const agent = useAgent<
-    Codemode,
-    { messages: UIMessage[]; loading: boolean; executor: ExecutorType }
-  >({
+  const agent = useAgent({
     agent: "codemode",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
-    onError: useCallback(() => setConnectionStatus("disconnected"), []),
-    onStateUpdate: (state) => {
-      setMessages(state.messages);
-      setLoading(state.loading);
-      setExecutor(state.executor);
-      if (!toolDefFetched.current) {
-        toolDefFetched.current = true;
-        agent.call("getToolDefinition", []).then((def: unknown) => {
-          setToolDef(def as typeof toolDef);
-        });
-      }
-    }
+    onError: useCallback(() => setConnectionStatus("disconnected"), [])
   });
+
+  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+    agent
+  });
+
+  const isStreaming = status === "streaming";
+  const isConnected = connectionStatus === "connected";
 
   const handleExecutorChange = useCallback(
     (newExecutor: ExecutorType) => {
@@ -438,27 +357,16 @@ function App() {
     [agent]
   );
 
-  const sendMessage = useCallback(() => {
+  const send = useCallback(() => {
     const text = input.trim();
-    if (!text) return;
-    const userMessage: UIMessage = {
-      id: generateId(),
-      role: "user",
-      parts: [{ type: "text", text }]
-    };
-    agent.setState({ messages: [...messages, userMessage], loading, executor });
+    if (!text || isStreaming) return;
     setInput("");
-  }, [input, messages, loading, executor, agent]);
-
-  const resetMessages = useCallback(() => {
-    agent.setState({ messages: [], loading: false, executor });
-  }, [agent, executor]);
+    sendMessage({ role: "user", parts: [{ type: "text", text }] });
+  }, [input, isStreaming, sendMessage]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
-
-  const isConnected = connectionStatus === "connected";
+  }, [messages]);
 
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
@@ -487,7 +395,7 @@ function App() {
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
-              onClick={resetMessages}
+              onClick={clearHistory}
               disabled={messages.length === 0}
             >
               Clear
@@ -498,7 +406,7 @@ function App() {
 
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
-          {messages.length === 0 && !loading && (
+          {messages.length === 0 && (
             <Empty
               icon={<LightningIcon size={32} />}
               title="Welcome to Codemode"
@@ -510,16 +418,21 @@ function App() {
             const isUser = message.role === "user";
             const isLastAssistant =
               message.role === "assistant" && msgIndex === messages.length - 1;
-            const isStreaming = loading && isLastAssistant;
+            const isAnimating = isStreaming && isLastAssistant;
 
             if (isUser) {
               return (
                 <div key={message.id} className="flex justify-end">
-                  <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed text-sm">
-                    {message.parts
-                      .filter((p) => p.type === "text")
-                      .map((p) => (p.type === "text" ? p.text : ""))
-                      .join("")}
+                  <div className="max-w-[80%] rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse">
+                    <Streamdown
+                      className="sd-theme px-4 py-2.5 text-sm leading-relaxed **:text-kumo-inverse"
+                      controls={false}
+                    >
+                      {message.parts
+                        .filter((p) => p.type === "text")
+                        .map((p) => (p.type === "text" ? p.text : ""))
+                        .join("")}
+                    </Streamdown>
                   </div>
                 </div>
               );
@@ -527,31 +440,53 @@ function App() {
 
             return (
               <div key={message.id} className="space-y-2">
-                {message.parts.map((part, index) => (
-                  <div
-                    key={`${message.id}-${index}`}
-                    className="flex justify-start"
-                  >
-                    <div className="max-w-[80%]">
-                      <MessagePart part={part} isStreaming={isStreaming} />
-                    </div>
-                  </div>
-                ))}
+                {message.parts.map((part, partIdx) => {
+                  if (part.type === "text") {
+                    if (!part.text || part.text.trim() === "") return null;
+                    return (
+                      <div key={partIdx} className="flex justify-start">
+                        <Surface className="max-w-[80%] rounded-2xl rounded-bl-md ring ring-kumo-line">
+                          <Streamdown
+                            className="sd-theme px-4 py-2.5 text-sm leading-relaxed"
+                            controls={false}
+                            isAnimating={isAnimating}
+                          >
+                            {part.text}
+                          </Streamdown>
+                        </Surface>
+                      </div>
+                    );
+                  }
+
+                  if (part.type === "step-start") return null;
+
+                  if (part.type === "reasoning") {
+                    return (
+                      <ReasoningBlock
+                        key={partIdx}
+                        text={part.text}
+                        isStreaming={isAnimating}
+                      />
+                    );
+                  }
+
+                  if (isToolUIPart(part)) {
+                    const toolPart = part as unknown as ToolPart;
+                    return (
+                      <div
+                        key={toolPart.toolCallId ?? partIdx}
+                        className="max-w-[80%]"
+                      >
+                        <ToolCard toolPart={toolPart} />
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })}
               </div>
             );
           })}
-
-          {loading && messages[messages.length - 1]?.role !== "assistant" && (
-            <div className="flex justify-start">
-              <Surface className="px-4 py-2.5 rounded-2xl rounded-bl-md ring ring-kumo-line">
-                <div className="flex gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-kumo-inactive animate-bounce" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-kumo-inactive animate-bounce [animation-delay:0.15s]" />
-                  <span className="w-1.5 h-1.5 rounded-full bg-kumo-inactive animate-bounce [animation-delay:0.3s]" />
-                </div>
-              </Surface>
-            </div>
-          )}
 
           <div ref={messagesEndRef} />
         </div>
@@ -561,7 +496,7 @@ function App() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            sendMessage();
+            send();
           }}
           className="max-w-3xl mx-auto px-5 py-4"
         >
@@ -572,7 +507,7 @@ function App() {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  sendMessage();
+                  send();
                 }
               }}
               placeholder={
@@ -580,7 +515,7 @@ function App() {
                   ? "Ask me to manage your projects..."
                   : "Connecting..."
               }
-              disabled={!isConnected || loading}
+              disabled={!isConnected || isStreaming}
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
             />
@@ -590,9 +525,9 @@ function App() {
               shape="square"
               size="sm"
               aria-label="Send message"
-              disabled={!input.trim() || !isConnected || loading}
+              disabled={!input.trim() || !isConnected || isStreaming}
               icon={<PaperPlaneRightIcon size={18} />}
-              loading={loading}
+              loading={isStreaming}
               className="mb-0.5"
             />
           </div>
@@ -606,8 +541,7 @@ function App() {
         <SettingsPanel
           executor={executor}
           onExecutorChange={handleExecutorChange}
-          toolDef={toolDef}
-          loading={loading}
+          loading={isStreaming}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -615,4 +549,8 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <ThemeProvider>
+    <App />
+  </ThemeProvider>
+);

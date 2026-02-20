@@ -248,6 +248,12 @@ sanitizeToolName("3d-render"); // "_3d_render"
 sanitizeToolName("delete"); // "delete_"
 ```
 
+## Limitations
+
+- **Tool approval (`needsApproval`) is not supported yet.** Tools with `needsApproval: true` execute immediately inside the sandbox without pausing for approval. Support for approval flows within codemode is planned. For now, do not pass approval-required tools to `createCodeTool` — use them through standard AI SDK tool calling instead.
+- Requires Cloudflare Workers environment for `DynamicWorkerExecutor`
+- Limited to JavaScript execution
+
 ## Examples
 
 - [`examples/codemode/`](../../examples/codemode/) — Full working example with task management tools

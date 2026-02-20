@@ -71,11 +71,21 @@ function normalizeCode(code: string): string {
  *
  * Returns an AI SDK compatible tool.
  */
+function hasNeedsApproval(t: Record<string, unknown>): boolean {
+  return "needsApproval" in t && t.needsApproval != null;
+}
+
 export function createCodeTool(
   options: CreateCodeToolOptions
 ): Tool<CodeInput, CodeOutput> {
-  const types = generateTypes(options.tools);
-  const tools = options.tools;
+  const tools: ToolDescriptors | ToolSet = {};
+  for (const [name, t] of Object.entries(options.tools)) {
+    if (!hasNeedsApproval(t as Record<string, unknown>)) {
+      (tools as Record<string, unknown>)[name] = t;
+    }
+  }
+
+  const types = generateTypes(tools);
   const executor = options.executor;
 
   const description = (options.description ?? DEFAULT_DESCRIPTION).replace(
