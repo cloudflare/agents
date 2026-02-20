@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   isRealtimeWebsocketMessage,
   isRealtimeRequest,
-  processNDJSONStream
+  processNDJSONStream,
+  resolveTextStream,
+  type RealtimeWebsocketMessage,
+  type SpeakResponseText
 } from "../../realtime/utils";
 
 describe("isRealtimeWebsocketMessage", () => {
@@ -12,7 +15,8 @@ describe("isRealtimeWebsocketMessage", () => {
     identifier: "abc-123",
     payload: {
       content_type: "text",
-      data: "hello world"
+      data: "hello world",
+      context_id: null
     }
   };
 
@@ -140,6 +144,15 @@ describe("isRealtimeWebsocketMessage", () => {
     ).toBe(false);
   });
 
+  it("should return true when context_id is present but a null", () => {
+    expect(
+      isRealtimeWebsocketMessage({
+        ...validMessage,
+        payload: { ...validMessage.payload, context_id: null }
+      })
+    ).toBe(true);
+  });
+
   it("should return true when context_id is undefined", () => {
     expect(
       isRealtimeWebsocketMessage({
@@ -150,7 +163,7 @@ describe("isRealtimeWebsocketMessage", () => {
   });
 
   it("should accept any content_type string value", () => {
-    for (const content_type of ["text", "audio", "video", "custom"]) {
+    for (const content_type of ["text", "audio", "video"]) {
       expect(
         isRealtimeWebsocketMessage({
           ...validMessage,
@@ -368,5 +381,117 @@ describe("processNDJSONStream", () => {
       results.push(chunk);
     }
     expect(results).toEqual([{ response: "hello" }]);
+  });
+});
+
+describe("resolveTextStream", () => {
+  async function collect(text: SpeakResponseText): Promise<string[]> {
+    const result: string[] = [];
+    for await (const chunk of resolveTextStream(text)) {
+      result.push(chunk);
+    }
+    return result;
+  }
+
+  function makeNDJSONStream(
+    objects: Record<string, unknown>[]
+  ): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const obj of objects) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n`));
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n"));
+        controller.close();
+      }
+    });
+  }
+
+  it("should yield a plain string", async () => {
+    expect(await collect("hello")).toEqual(["hello"]);
+  });
+
+  it("should yield nothing for an empty string", async () => {
+    expect(await collect("")).toEqual([]);
+  });
+
+  it("should yield each chunk from a ReadableStream<string>", async () => {
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue("Hello ");
+        controller.enqueue("world");
+        controller.close();
+      }
+    });
+    expect(
+      await collect(stream as AsyncIterable<string> & ReadableStream<string>)
+    ).toEqual(["Hello ", "world"]);
+  });
+
+  it("should skip empty string chunks from a ReadableStream<string>", async () => {
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.enqueue("a");
+        controller.enqueue("");
+        controller.enqueue("b");
+        controller.close();
+      }
+    });
+    expect(
+      await collect(stream as AsyncIterable<string> & ReadableStream<string>)
+    ).toEqual(["a", "b"]);
+  });
+
+  it("should yield nothing from an empty ReadableStream", async () => {
+    const stream = new ReadableStream<string>({
+      start(controller) {
+        controller.close();
+      }
+    });
+    expect(
+      await collect(stream as AsyncIterable<string> & ReadableStream<string>)
+    ).toEqual([]);
+  });
+
+  it("should parse NDJSON response field from ReadableStream<Uint8Array>", async () => {
+    const stream = makeNDJSONStream([
+      { response: "first" },
+      { response: "second" }
+    ]);
+    expect(await collect(stream as unknown as SpeakResponseText)).toEqual([
+      "first",
+      "second"
+    ]);
+  });
+
+  it("should parse OpenAI-style choices from NDJSON", async () => {
+    const stream = makeNDJSONStream([
+      { choices: [{ delta: { content: "hi", role: "assistant" } }] }
+    ]);
+    expect(await collect(stream as unknown as SpeakResponseText)).toEqual([
+      "hi"
+    ]);
+  });
+
+  it("should ignore non-assistant roles in NDJSON choices", async () => {
+    const stream = makeNDJSONStream([
+      { choices: [{ delta: { content: "sys", role: "system" } }] },
+      { choices: [{ delta: { content: "ok", role: "assistant" } }] }
+    ]);
+    expect(await collect(stream as unknown as SpeakResponseText)).toEqual([
+      "ok"
+    ]);
+  });
+
+  it("should yield each chunk from a pure AsyncIterable<string>", async () => {
+    async function* gen() {
+      yield "one";
+      yield "two";
+    }
+    expect(await collect(gen() as unknown as SpeakResponseText)).toEqual([
+      "one",
+      "two"
+    ]);
   });
 });

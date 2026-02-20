@@ -9,8 +9,9 @@ import {
 import {
   isRealtimeRequest,
   isRealtimeWebsocketMessage,
-  processNDJSONStream,
+  resolveTextStream,
   REALTIME_WS_TAG,
+  type SpeakResponseText,
   type RealtimeWebsocketMessage,
   type RealtimeState
 } from "./utils";
@@ -37,10 +38,7 @@ export {
 import { buildPipelineSchema } from "./pipeline-schema";
 
 export type SpeakResponse = {
-  text:
-    | string
-    | ReadableStream<Uint8Array>
-    | (AsyncIterable<string> & ReadableStream<string>);
+  text: SpeakResponseText;
   canInterrupt?: boolean;
 };
 
@@ -500,44 +498,14 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     const userText = message.payload.data;
 
     const response = await this.onRealtimeTranscript(userText);
-
     if (!response) return;
 
-    // if a user can interrupt whatever bot is speaking
     if (!response.canInterrupt) {
       contextId = undefined;
     }
 
-    if (typeof response.text === "string") {
-      this.speak(response.text, contextId);
-      return;
-    }
-
-    // Handle AI SDK streamText output (AsyncIterable<string>)
-    // Check if it's an AsyncIterable that yields strings directly (AI SDK textStream)
-    if (Symbol.asyncIterator in response.text) {
-      for await (const chunk of response.text as AsyncIterable<string>) {
-        if (typeof chunk === "string" && chunk) {
-          this.speak(chunk, contextId);
-        }
-      }
-      return;
-    }
-
-    if (response.text instanceof ReadableStream) {
-      // Handle ReadableStream<Uint8Array> (NDJSON format)
-      const stream = response.text;
-      for await (const chunk of processNDJSONStream(stream.getReader())) {
-        if (chunk.response) {
-          this.speak(chunk.response, contextId);
-        } else if (chunk.choices && chunk.choices.length > 0) {
-          const choice = chunk.choices[0];
-          if (choice.delta?.content && choice.delta?.role === "assistant") {
-            this.speak(choice.delta.content, contextId);
-          }
-        }
-      }
-      return;
+    for await (const chunk of resolveTextStream(response.text)) {
+      this.speak(chunk, contextId);
     }
   }
 

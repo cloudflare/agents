@@ -38,7 +38,10 @@ export function isRealtimeWebsocketMessage(
     "content_type" in p &&
     typeof p.content_type === "string" &&
     "data" in p &&
-    typeof p.data === "string"
+    typeof p.data === "string" &&
+    (("context_id" in p && typeof p.context_id === "string") ||
+      ("context_id" in p && p.context_id === null) ||
+      ("context_id" in p && p.context_id === undefined))
   );
 }
 
@@ -46,6 +49,65 @@ export function isRealtimeRequest(request: Request): boolean {
   const url = new URL(request.url);
   const split = url.pathname.split("/realtime/");
   return split.length >= 2;
+}
+
+export type SpeakResponseText =
+  | string
+  | ReadableStream<Uint8Array>
+  | (AsyncIterable<string> & ReadableStream<string>);
+
+export async function* resolveTextStream(
+  text: SpeakResponseText
+): AsyncGenerator<string> {
+  if (typeof text === "string") {
+    if (text) yield text;
+    return;
+  }
+
+  if (text instanceof ReadableStream) {
+    const reader = (text as ReadableStream<string | Uint8Array>).getReader();
+    const first = await reader.read();
+    if (first.done || first.value === undefined) return;
+
+    if (typeof first.value === "string") {
+      if (first.value) yield first.value;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (typeof value === "string" && value) yield value;
+      }
+    } else {
+      const peeked = first.value as Uint8Array;
+      const combined = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(peeked);
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value as Uint8Array);
+          }
+          controller.close();
+        }
+      });
+      for await (const chunk of processNDJSONStream(combined.getReader())) {
+        if (chunk.response) {
+          yield chunk.response;
+        } else if (chunk.choices && chunk.choices.length > 0) {
+          const choice = chunk.choices[0];
+          if (choice.delta?.content && choice.delta?.role === "assistant") {
+            yield choice.delta.content;
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  if (Symbol.asyncIterator in text) {
+    for await (const chunk of text as AsyncIterable<string>) {
+      if (typeof chunk === "string" && chunk) yield chunk;
+    }
+  }
 }
 
 export async function* processNDJSONStream(
