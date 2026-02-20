@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "python-agent-example",
+  "main": "src/entry.py",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["python_workers"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "COUNTER_AGENT",
+        "class_name": "CounterAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CounterAgent"]
+    }
+  ]
+}

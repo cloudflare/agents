@@ -1,0 +1,12 @@
+[project]
+name = "python-agent"
+version = "0.1.0"
+description = "Experimental Python Agent using Cloudflare Durable Objects"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "workers-py",
+    "workers-runtime-sdk",
+]
