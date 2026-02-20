@@ -1,6 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker from "./worker";
+import worker, { AgentWithSuperCall } from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
@@ -75,5 +75,31 @@ describe("GET /get-messages endpoint", () => {
 
     // The worker returns 404 for unknown routes
     expect(res.status).toBe(404);
+  });
+});
+
+describe("onRequest override patterns", () => {
+  it("/get-messages works when user overrides onRequest and calls super", async () => {
+    const room = crypto.randomUUID();
+
+    const { ws } = await connectChatWS(`/agents/agent-with-super-call/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.AgentWithSuperCall, room);
+    const messages: ChatMessage[] = [
+      { id: "test-1", role: "user", parts: [{ type: "text", text: "Hello" }] }
+    ];
+    await agentStub.persistMessages(messages);
+    ws.close(1000);
+
+    const req = new Request(
+      `http://example.com/agents/agent-with-super-call/${room}/get-messages`
+    );
+    const res = await worker.fetch(req, env, createExecutionContext());
+
+    expect(res.status).toBe(200);
+    const returned = (await res.json()) as ChatMessage[];
+    expect(returned.length).toBe(1);
+    expect(returned[0].id).toBe("test-1");
   });
 });
