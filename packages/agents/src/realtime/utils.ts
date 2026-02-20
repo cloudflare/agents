@@ -38,10 +38,7 @@ export function isRealtimeWebsocketMessage(
     "content_type" in p &&
     typeof p.content_type === "string" &&
     "data" in p &&
-    typeof p.data === "string" &&
-    (!("context_id" in p) ||
-      typeof p.context_id === "string" ||
-      p.context_id === undefined)
+    typeof p.data === "string"
   );
 }
 

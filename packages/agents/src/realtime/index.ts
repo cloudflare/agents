@@ -4,11 +4,13 @@ export {
   DeepgramSTT,
   ElevenLabsTTS,
   RealtimeKitTransport,
+  WebSocketTransport,
   type RealtimeKitClient,
   type RealtimeKitLayerFilter,
   type RealtimeKitMediaConfig,
   type RealtimeKitMeetingConfig,
-  type RealtimePipelineComponent
+  type RealtimePipelineComponent,
+  type WebSocketPipelineComponent
 } from "./components";
 export {
   RealtimeAgent,

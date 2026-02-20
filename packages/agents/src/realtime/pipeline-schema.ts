@@ -1,6 +1,7 @@
 import {
   DataKind,
   RealtimeKitTransport,
+  WebSocketTransport,
   type RealtimeKitLayerFilter,
   type RealtimePipelineComponent
 } from "./components";
@@ -27,7 +28,7 @@ export type PipelineLayer = {
   name: string;
   elements: string[];
   filters?: Array<{
-    media_kind: "audio" | "video";
+    media_kind: "audio" | "video" | "text";
   }>;
 };
 
@@ -76,7 +77,9 @@ export function buildPipelineSchema(
   // Build elements and find key components
   let elements: { name: string; [K: string]: unknown }[] = [];
   let realtimeKitComponent: RealtimeKitTransport | undefined;
+  let rtkMediaConfig: RealtimeKitTransport["media"] | undefined;
   let agentElementName = "agent";
+  let hasWebSocketComponent = false;
   let rtkElementName = "realtime_kit";
 
   // Audio filter for RTK
@@ -103,18 +106,25 @@ export function buildPipelineSchema(
   for (const component of pipeline) {
     const schema = component.schema();
 
-    // Handle Agent as websocket element
-    if (component.constructor.name === parentClassName) {
-      schema.type = "websocket";
-      schema.send_events = true;
-      schema.url = `wss://${agentUrl}/ws`;
+    // Handle websocket components (WebSocketTransport or Agent passed as `this`).
+    // The schema already has type/send_events set by the component itself.
+    // We only need to set the URL (not known at construction time) and track the element name.
+    if (
+      component instanceof WebSocketTransport ||
+      component.constructor.name === parentClassName
+    ) {
+      if (!schema.url) {
+        schema.url = `wss://${agentUrl}/ws`;
+      }
       agentElementName = schema.name;
+      hasWebSocketComponent = true;
     }
 
     // Handle RealtimeKit transport
     if (component instanceof RealtimeKitTransport) {
       schema.worker_url = `https://${agentUrl}`;
       rtkElementName = schema.name;
+      rtkMediaConfig = rtkMediaConfig ?? component.media;
       if (!component.authToken) {
         realtimeKitComponent = component;
       }
@@ -152,121 +162,106 @@ export function buildPipelineSchema(
   const layers: PipelineLayer[] = [];
   let layerId = 1;
 
-  // Get media config from RealtimeKit component
-  const mediaConfig = realtimeKitComponent?.media ?? { consumeAudio: true };
+  // Get media config from the first RTK component found (regardless of auth token)
+  const mediaConfig = rtkMediaConfig ?? { consumeAudio: true };
 
-  // Helper to check if a component is STT (Audio -> Text)
-  const isSTT = (component: RealtimePipelineComponent) =>
-    component.input_kind().includes(DataKind.Audio) &&
-    component.output_kind().includes(DataKind.Text);
+  // Helper to infer media filters from a component's kind list.
+  // Returns a filter for each applicable kind rather than picking just one.
+  const kindToMediaKind: Record<string, "audio" | "video" | "text"> = {
+    [DataKind.Audio]: "audio",
+    [DataKind.Video]: "video",
+    [DataKind.Text]: "text"
+  };
 
-  // Helper to check if a component is TTS (Text -> Audio)
-  const isTTS = (component: RealtimePipelineComponent) =>
-    component.input_kind().includes(DataKind.Text) &&
-    component.output_kind().includes(DataKind.Audio);
+  const inferFilter = (
+    kinds: DataKind[]
+  ): Array<{ media_kind: "audio" | "video" | "text" }> => {
+    return kinds
+      .map((k) => kindToMediaKind[k])
+      .filter(Boolean)
+      .map((mk) => ({ media_kind: mk }));
+  };
 
-  // Helper to check if a component is the Agent
-  const isAgent = (component: RealtimePipelineComponent) =>
-    component.constructor.name === parentClassName;
+  // Add a layer or merge filters into an existing layer with the same elements.
+  const addLayer = (
+    elementNames: string[],
+    filters: Array<{ media_kind: "audio" | "video" | "text" }>
+  ) => {
+    const key = elementNames.join(",");
+    const existing = layers.find((l) => l.elements.join(",") === key);
+    if (existing) {
+      // Merge filters into the existing layer
+      existing.filters = [...(existing.filters ?? []), ...filters];
+    } else {
+      layers.push({
+        id: layerId++,
+        name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
+        elements: elementNames,
+        ...(filters.length > 0 ? { filters } : {})
+      });
+    }
+  };
 
-  // Detect STT -> Agent pattern (audio input path)
-  let hasSttToAgent = false;
-  let sttIndex = -1;
-  let agentIndex = -1;
+  // Find all split points: agent (this) or WebSocketTransport instances
+  // that have elements on both sides. Each split point creates a layer boundary.
+  const isSplitCandidate = (c: RealtimePipelineComponent) =>
+    c.constructor.name === parentClassName || c instanceof WebSocketTransport;
 
+  const splitIndices: number[] = [];
   for (let i = 0; i < pipeline.length; i++) {
-    if (isSTT(pipeline[i])) {
-      sttIndex = i;
-    }
-    if (isAgent(pipeline[i])) {
-      agentIndex = i;
-      break;
+    if (isSplitCandidate(pipeline[i]) && i > 0 && i < pipeline.length - 1) {
+      splitIndices.push(i);
     }
   }
 
-  if (sttIndex !== -1 && agentIndex !== -1 && sttIndex < agentIndex) {
-    // Check if STT is immediately followed by Agent
-    hasSttToAgent = sttIndex + 1 === agentIndex;
-  }
+  if (splitIndices.length > 0) {
+    // Split mode: create layers between consecutive split points.
+    // Each layer runs from one boundary to the next, with split points shared
+    // between adjacent layers.
+    //
+    // For split points [s1, s2] in pipeline [A, B, s1, C, s2, D]:
+    //   Layer 1: [A, B, s1]       (start → first split)
+    //   Layer 2: [s1, C, s2]      (first split → second split)
+    //   Layer 3: [s2, D]          (last split → end)
 
-  // Detect Agent -> TTS pattern (audio output path)
-  let hasAgentToTts = false;
-  let ttsIndex = -1;
+    const boundaries = [0, ...splitIndices, pipeline.length];
 
-  for (let i = 0; i < pipeline.length; i++) {
-    if (isAgent(pipeline[i])) {
-      agentIndex = i;
+    for (let b = 0; b < boundaries.length - 1; b++) {
+      const start = b === 0 ? boundaries[b] : boundaries[b]; // split point included
+      const end = boundaries[b + 1]; // up to next boundary (inclusive for split points)
+
+      const slice =
+        b === 0
+          ? pipeline.slice(start, end + 1) // first layer: start to first split (inclusive)
+          : b === boundaries.length - 2
+            ? pipeline.slice(start, end) // last layer: last split to end
+            : pipeline.slice(start, end + 1); // middle: split to next split (inclusive)
+
+      const layerElements = slice.map((c) => c.schema().name);
+
+      // Infer filter from the 2nd element's input_kind in this layer segment
+      const secondInLayer = slice.length > 1 ? slice[1] : undefined;
+      const filters = secondInLayer
+        ? inferFilter(secondInLayer.input_kind())
+        : [];
+
+      addLayer(layerElements, filters);
     }
-    if (isTTS(pipeline[i])) {
-      ttsIndex = i;
-      break;
-    }
+  } else if (pipeline.length > 0) {
+    // No-split mode: no split point with elements on both sides.
+    // Single layer with all elements; filter inferred from 2nd component.
+    const allElementNames = pipeline.map((c) => c.schema().name);
+    const secondComponent = pipeline.length > 1 ? pipeline[1] : undefined;
+    const filters = secondComponent
+      ? inferFilter(secondComponent.input_kind())
+      : [];
+
+    addLayer(allElementNames, filters);
   }
 
-  if (agentIndex !== -1 && ttsIndex !== -1 && agentIndex < ttsIndex) {
-    // Check if Agent is immediately followed by TTS
-    hasAgentToTts = agentIndex + 1 === ttsIndex;
-  }
-
-  // Layer 1: Audio input path (only if STT -> Agent pattern exists)
-  if (hasSttToAgent && mediaConfig.consumeAudio) {
-    // Build element names from start to agent (inclusive)
-    const audioInputElements: string[] = [];
-    for (const component of pipeline) {
-      audioInputElements.push(component.schema().name);
-      if (isAgent(component)) {
-        break;
-      }
-    }
-
-    layers.push({
-      id: layerId++,
-      name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
-      elements: audioInputElements,
-      filters: [{ media_kind: "audio" }]
-    });
-  }
-
-  // Layer 2: Audio output path (only if Agent -> TTS pattern exists)
-  if (hasAgentToTts && mediaConfig.consumeAudio) {
-    // Build element names from agent onwards
-    const audioOutputElements: string[] = [];
-    let foundAgent = false;
-    for (const component of pipeline) {
-      if (isAgent(component)) {
-        foundAgent = true;
-      }
-      if (foundAgent) {
-        audioOutputElements.push(component.schema().name);
-      }
-    }
-
-    layers.push({
-      id: layerId++,
-      name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
-      elements: audioOutputElements,
-      filters: [{ media_kind: "audio" }]
-    });
-  }
-
-  // Video layer (only if consumeVideo is enabled)
-  if (mediaConfig.consumeVideo) {
-    layers.push({
-      id: layerId++,
-      name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
-      elements: [rtkElementName, agentElementName],
-      filters: [{ media_kind: "video" }]
-    });
-  }
-
-  // Screenshare layer (only if consumeScreenshare is enabled)
-  if (mediaConfig.consumeScreenshare) {
-    layers.push({
-      id: layerId++,
-      name: layers.length === 0 ? "default" : `default-${layerId - 1}`,
-      elements: [rtkElementName, agentElementName],
-      filters: [{ media_kind: "video" }]
-    });
+  // Video layer (only if consumeVideo is enabled and a websocket component exists)
+  if (hasWebSocketComponent && mediaConfig.consumeVideo) {
+    addLayer([rtkElementName, agentElementName], [{ media_kind: "video" }]);
   }
 
   return { layers, elements, realtimeKitComponent };

@@ -1,5 +1,6 @@
 import RealtimeKitClient from "@cloudflare/realtimekit";
 import { REALTIME_AGENTS_SERVICE } from "./api";
+import type { RealtimeAgent } from "../../dist/realtime";
 export type { RealtimeKitClient };
 
 export enum DataKind {
@@ -14,6 +15,23 @@ export type RealtimePipelineComponent = {
   output_kind(): DataKind[];
   schema(): { name: string; type: string; [K: string]: unknown };
 } & { setGatewayId?: (gatewayId: string) => void };
+
+/**
+ * Interface for websocket-based pipeline components.
+ * Both the RealtimeAgent (when passed as `this`) and WebSocketTransport
+ * implement this interface.
+ */
+export interface WebSocketPipelineComponent extends RealtimePipelineComponent {
+  /** The websocket URL. May be unset until buildPipelineSchema provides the agentUrl. */
+  readonly url?: string;
+  schema(): {
+    name: string;
+    type: string;
+    send_events: boolean;
+    url: string;
+    [K: string]: unknown;
+  };
+}
 
 /**
  * Configuration for media consumption in RealtimeKit
@@ -49,6 +67,90 @@ export type RealtimeKitLayerFilter =
       stream_kind: "screen_share" | "webcam";
       preset_name: string;
     };
+
+/**
+ * A websocket transport component for use in a realtime pipeline.
+ *
+ * Accepts either:
+ * - A `RealtimePipelineComponent` (typically `this`, the agent) — delegates
+ *   `input_kind`, `output_kind`, and uses the component's name.
+ * - A plain `{ url: string; name?: string }` — for a user's own websocket
+ *   endpoint. `input_kind` / `output_kind` default to all DataKinds.
+ *
+ * The websocket URL is set by `buildPipelineSchema` at pipeline build time
+ * when wrapping a pipeline component (since the agent URL isn't known at
+ * `setPipeline` time). For plain URL endpoints, the URL is provided directly.
+ *
+ * Usage:
+ * ```ts
+ * this.setPipeline([new DeepgramSTT(), new WebSocketTransport(this), new ElevenLabsTTS()], ai)
+ * ```
+ */
+export class WebSocketTransport implements WebSocketPipelineComponent {
+  url: string;
+  private _name: string = "websocket";
+  private readonly component?: WebSocketPipelineComponent;
+  private sendEvents: boolean = false;
+
+  constructor(
+    source: WebSocketPipelineComponent | { url: string; sendEvents?: boolean }
+  ) {
+    if (
+      "input_kind" in source &&
+      "output_kind" in source &&
+      "schema" in source
+    ) {
+      // It's a WebSocketPipelineComponent (e.g. the agent)
+      this.component = source;
+      this.url = this.component.schema().url;
+    } else {
+      // Plain websocket endpoint with a URL
+      this.url = source.url;
+      if (source.sendEvents) {
+        this.sendEvents = source.sendEvents;
+      }
+    }
+  }
+
+  get name(): string {
+    return this.component?.schema().name ?? this._name;
+  }
+
+  input_kind(): DataKind[] {
+    return (
+      this.component?.input_kind() ?? [
+        DataKind.Text,
+        DataKind.Audio,
+        DataKind.Video
+      ]
+    );
+  }
+
+  output_kind(): DataKind[] {
+    return (
+      this.component?.output_kind() ?? [
+        DataKind.Text,
+        DataKind.Audio,
+        DataKind.Video
+      ]
+    );
+  }
+
+  schema(): {
+    name: string;
+    type: string;
+    send_events: boolean;
+    url: string;
+    [K: string]: unknown;
+  } {
+    return {
+      name: this.name,
+      type: "websocket",
+      send_events: this.component?.schema().send_events ?? this.sendEvents,
+      url: this.url
+    };
+  }
+}
 
 export class RealtimeKitTransport implements RealtimePipelineComponent {
   #meeting?: RealtimeKitClient;

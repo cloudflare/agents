@@ -18,7 +18,8 @@ import { RealtimeAPI } from "./api";
 import {
   DataKind,
   RealtimeKitTransport,
-  type RealtimePipelineComponent
+  type RealtimePipelineComponent,
+  type WebSocketPipelineComponent
 } from "./components";
 import { camelCaseToKebabCase } from "../client";
 import { randomUUID } from "node:crypto";
@@ -50,7 +51,7 @@ export type RealtimeSnapshot = {
 
 export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   extends Agent<Env, State>
-  implements RealtimePipelineComponent
+  implements WebSocketPipelineComponent
 {
   public pipelineState: RealtimeState = "idle";
   private api?: RealtimeAPI;
@@ -95,12 +96,72 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
         // Not JSON, pass to parent
         return _onMessage(connection, message);
       }
-      if (await this.handleWebsocketMessage(parsed)) {
+
+      if (isRealtimeWebsocketMessage(parsed)) {
+        const connections = this.getConnections(REALTIME_WS_TAG);
+
+        const isServer = Array.from(connections).some(
+          (conn) => conn.id === connection.id
+        );
+
+        if (isServer) {
+          // Message from streamline server → handle locally
+          await this.handleWebsocketMessage(parsed);
+          return;
+        }
+
+        this.storeMediaClientConnId(connection);
+
+        // Message from client → forward to streamline server
+        this.sendToServer(message);
         return;
       }
 
       return _onMessage(connection, message);
     };
+
+    const _getConnectionTags = this.getConnectionTags.bind(this);
+
+    this.getConnectionTags = (
+      connection: Connection,
+      ctx: ConnectionContext
+    ) => {
+      if (ctx.request.url.endsWith("/realtime/ws")) {
+        return [REALTIME_WS_TAG];
+      }
+      return _getConnectionTags(connection, ctx);
+    };
+
+    const _onClose = this.onClose.bind(this);
+    this.onClose = async (
+      connection: Connection,
+      codc: number,
+      reason: string,
+      wasClean: boolean
+    ) => {
+      try {
+        await this.removeMediaClientConnId(connection.id);
+      } catch (e) {
+        console.error("Failed to remove media client conn id", e);
+      }
+
+      await _onClose(connection, codc, reason, wasClean);
+    };
+  }
+
+  private storeMediaClientConnId(connection: Connection) {
+    this.ctx.storage.put("mediaClientConnId", connection.id);
+  }
+
+  private async removeMediaClientConnId(id: string) {
+    const storedId = await this.getMediaClientConnId();
+    if (storedId && storedId === id) {
+      this.ctx.storage.delete("mediaClientConnId");
+    }
+  }
+
+  private async getMediaClientConnId(): Promise<string | undefined> {
+    return this.ctx.storage.get("mediaClientConnId");
   }
 
   public setPipeline(
@@ -407,11 +468,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     }
   }
 
-  override async onMessage(
-    connection: Connection,
-    message: WSMessage
-  ): Promise<void> {}
-
   /**
    * Handle websocket messages from the realtime pipeline
    * @param message The message to handle
@@ -486,8 +542,19 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   }
 
   async #handleAudioMessage(message: RealtimeWebsocketMessage) {
+    const clientConnId = await this.getMediaClientConnId();
+    if (clientConnId) {
+      const connection = this.getConnection(clientConnId);
+      if (connection) {
+        connection.send(JSON.stringify(message));
+      }
+      return;
+    }
+
     const frameData = Buffer.from(message.payload.data, "base64");
+
     this.lastAudioFrame = frameData;
+
     await this.onRealtimeAudio(frameData);
   }
 
@@ -497,38 +564,10 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     await this.onRealtimeVideoFrame(frameData);
   }
 
-  override getConnectionTags(
-    connection: Connection,
-    ctx: ConnectionContext
-  ): string[] | Promise<string[]> {
-    if (ctx.request.url.endsWith("/realtime/ws")) {
-      return [REALTIME_WS_TAG];
-    }
-    return super.getConnectionTags(connection, ctx);
-  }
-
-  /**
-   * Send text to speak through the realtime pipeline
-   * @param text The text to send
-   * @param contextId The context id of the message
-   */
-  async speak(text: string, contextId?: string) {
+  private sendToServer(message: WSMessage) {
     const connections = this.getConnections(REALTIME_WS_TAG);
 
     let connCount = 0;
-
-    let message: RealtimeWebsocketMessage | string = {
-      type: "media",
-      version: 1,
-      identifier: randomUUID(),
-      payload: {
-        content_type: "text",
-        context_id: contextId,
-        data: text
-      }
-    };
-
-    message = JSON.stringify(message);
 
     for (const conn of connections) {
       try {
@@ -542,6 +581,32 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       throw new Error("no connections to realtime agent found");
   }
 
+  /**
+   * Send text to speak through the realtime pipeline
+   * @param text The text to send
+   * @param contextId The context id of the message
+   */
+  async speak(text: string, contextId?: string) {
+    let message: RealtimeWebsocketMessage | string = {
+      type: "media",
+      version: 1,
+      identifier: randomUUID(),
+      payload: {
+        content_type: "text",
+        context_id: contextId,
+        data: text
+      }
+    };
+
+    message = JSON.stringify(message);
+
+    this.sendToServer(message);
+  }
+
+  get url(): string | undefined {
+    return this.agentUrl ? `wss://${this.agentUrl}/ws` : undefined;
+  }
+
   input_kind(): DataKind[] {
     return [DataKind.Text, DataKind.Audio, DataKind.Video];
   }
@@ -549,10 +614,13 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   output_kind(): DataKind[] {
     return [DataKind.Text, DataKind.Audio, DataKind.Video];
   }
+
   schema() {
     return {
       name: "agent",
-      type: "websocket"
+      type: "websocket",
+      send_events: true,
+      url: ""
     };
   }
 }
