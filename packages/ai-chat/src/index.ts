@@ -1046,10 +1046,16 @@ export class AIChatAgent<
       return incomingMessages;
     }
 
+    // Tracks the earliest server index we should consider for subsequent matches.
+    // This preserves ordering and prevents one server message from being reused for
+    // multiple incoming messages with identical content.
     let serverCursor = 0;
 
     return incomingMessages.map((incomingMessage) => {
       // Fast path: exact ID already exists in server history.
+      // This applies to any role (user/assistant/system/tool), so in-order
+      // round-trips naturally advance the cursor even when assistant content
+      // reconciliation is skipped.
       const exactMatchIndex = this.messages.findIndex(
         (serverMessage, index) =>
           index >= serverCursor && serverMessage.id === incomingMessage.id
@@ -1063,6 +1069,8 @@ export class AIChatAgent<
         incomingMessage.role !== "assistant" ||
         this._hasToolCallPart(incomingMessage)
       ) {
+        // Content-based reconciliation is only for non-tool assistant messages.
+        // Tool-bearing assistant messages are reconciled by _resolveMessageForToolMerge.
         return incomingMessage;
       }
 
@@ -1082,10 +1090,6 @@ export class AIChatAgent<
 
         if (this._assistantMessageContentKey(serverMessage) === incomingKey) {
           serverCursor = i + 1;
-
-          if (serverMessage.id === incomingMessage.id) {
-            return incomingMessage;
-          }
 
           return {
             ...incomingMessage,

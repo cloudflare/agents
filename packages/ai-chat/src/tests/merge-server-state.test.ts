@@ -154,4 +154,67 @@ describe("Merge Incoming With Server State", () => {
 
     ws.close(1000);
   });
+
+  it("matches repeated assistant text messages in order", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-server-1",
+        role: "user",
+        parts: [{ type: "text", text: "Say hi" }]
+      },
+      {
+        id: "assistant_server_1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there!" }]
+      },
+      {
+        id: "user-server-2",
+        role: "user",
+        parts: [{ type: "text", text: "Say hi again" }]
+      },
+      {
+        id: "assistant_server_2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there!" }]
+      }
+    ]);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-server-1",
+        role: "user",
+        parts: [{ type: "text", text: "Say hi" }]
+      },
+      {
+        id: "assistant_client_1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there!" }]
+      },
+      {
+        id: "user-server-2",
+        role: "user",
+        parts: [{ type: "text", text: "Say hi again" }]
+      },
+      {
+        id: "assistant_client_2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there!" }]
+      }
+    ]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    const assistantMessages = persisted.filter((m) => m.role === "assistant");
+    expect(assistantMessages.length).toBe(2);
+    expect(assistantMessages[0].id).toBe("assistant_server_1");
+    expect(assistantMessages[1].id).toBe("assistant_server_2");
+
+    ws.close(1000);
+  });
 });
