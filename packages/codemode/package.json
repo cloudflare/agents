@@ -11,12 +11,12 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "acorn": "^8.14.0",
+    "acorn": "^8.16.0",
     "zod-to-ts": "^2.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
-    "ai": "^6.0.91",
+    "ai": "^6.0.94",
     "vitest": "3.2.4",
     "zod": "^4.3.6"
   },

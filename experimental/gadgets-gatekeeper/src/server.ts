@@ -283,7 +283,6 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
     const agent = this;
 
     const result = streamText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system: `You are a helpful database administrator assistant. You manage a customer database.
 

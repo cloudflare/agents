@@ -16,7 +16,6 @@ export class HumanInTheLoop extends AIChatAgent {
 
     const result = streamText({
       messages: await convertToModelMessages(this.messages),
-      // @ts-expect-error — model not yet in workers-ai-provider types
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       tools,
       stopWhen: stepCountIs(5)

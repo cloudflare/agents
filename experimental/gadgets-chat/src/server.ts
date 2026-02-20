@@ -89,7 +89,6 @@ export class ChatRoom extends DurableObject<Env> {
     // Call the LLM inside the facet's context
     const workersai = createWorkersAI({ binding: this.env.AI });
     const result = await generateText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant. Each chat room has its own independent " +
@@ -317,7 +316,6 @@ export class OverseerAgent extends Agent<Env, RoomsState> {
     // 3. Stream the LLM response, pushing partial updates to the UI
     const workersai = createWorkersAI({ binding: this.env.AI });
     const result = streamText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant. Each chat room has its own independent " +

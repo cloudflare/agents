@@ -83,7 +83,6 @@ export class CodemodeAgent extends Agent<Env> {
     const body = (await request.json()) as { messages: UIMessage[] };
 
     const workersai = createWorkersAI({ binding: this.env.AI });
-    // @ts-expect-error — model not yet in workers-ai-provider types
     const model = workersai("@cf/zai-org/glm-4.7-flash");
 
     const executor = new DynamicWorkerExecutor({

@@ -16,7 +16,6 @@ export class ChatAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant running on Cloudflare Workers. " +

@@ -143,7 +143,6 @@ export class PerspectiveAgent extends DurableObject<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = await generateText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system: perspective.system,
       prompt: question
@@ -310,7 +309,6 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
     // Synthesize: ask the LLM to combine the three perspectives
     const workersai = createWorkersAI({ binding: this.env.AI });
     const synthesisResult = await generateText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a senior advisor synthesizing multiple perspectives into a " +
@@ -344,7 +342,6 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
     const agent = this;
 
     const result = streamText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system: `You are a coordinator that manages three specialist sub-agents to analyze questions from multiple perspectives.
 

@@ -15,7 +15,6 @@ const workersai = createWorkersAI({
   apiKey: process.env.CLOUDFLARE_API_TOKEN!
 });
 
-// @ts-expect-error — model not yet in workers-ai-provider types
 const model = workersai("@cf/zai-org/glm-4.7-flash");
 // const model = openai("gpt-4o");
 // const model = google("gemini-2.0-pro-exp-02-05");

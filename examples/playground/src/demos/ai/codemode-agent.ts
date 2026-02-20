@@ -69,7 +69,6 @@ export class CodemodeAgent extends AIChatAgent<Env> {
     const codemode = createCodeTool({ tools: pmTools, executor });
 
     const result = streamText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant with access to a codemode tool. " +
