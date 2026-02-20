@@ -156,7 +156,7 @@ function ChatUI() {
       description="Chat with an AI agent powered by Workers AI. Messages persist across reconnections."
       statusIndicator={<ConnectionStatus status={connectionStatus} />}
     >
-      <div className="flex flex-col h-[calc(100vh-16rem)] max-w-3xl">
+      <div className="flex flex-col h-full max-w-3xl">
         {/* Messages area */}
         <div className="flex-1 overflow-y-auto mb-4 space-y-4">
           {messages.length === 0 && (

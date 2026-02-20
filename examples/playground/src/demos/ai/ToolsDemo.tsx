@@ -274,7 +274,7 @@ function ToolsUI() {
       description="Server-side, client-side, and approval-required tools in action."
       statusIndicator={<ConnectionStatus status={connectionStatus} />}
     >
-      <div className="flex flex-col h-[calc(100vh-16rem)] max-w-3xl">
+      <div className="flex flex-col h-full max-w-3xl">
         {/* Tool legend */}
         <div className="flex flex-wrap gap-3 mb-4 px-1">
           <div className="flex items-center gap-1.5">

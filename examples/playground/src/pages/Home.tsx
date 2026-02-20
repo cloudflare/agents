@@ -138,7 +138,7 @@ const features = [
 export function Home() {
   return (
     <div className="h-full flex flex-col">
-      <header className="p-6 border-b border-kumo-line">
+      <header className="p-4 md:p-6 border-b border-kumo-line">
         <Text variant="heading1">Agents SDK Playground</Text>
         <div className="mt-1">
           <Text variant="secondary" size="sm">
@@ -147,13 +147,13 @@ export function Home() {
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-4 md:p-6">
         <div className="max-w-4xl">
           <div className="mb-8">
             <Text variant="secondary">
-              Select a feature from the sidebar to explore its capabilities.
-              Each demo includes interactive controls, real-time event logging,
-              and code examples you can copy.
+              Select a feature to explore its capabilities. Each demo includes
+              interactive controls, real-time event logging, and code examples
+              you can copy.
             </Text>
           </div>
 
