@@ -103,4 +103,55 @@ describe("Merge Incoming With Server State", () => {
 
     ws.close(1000);
   });
+
+  it("reuses server assistant IDs for plain text messages to avoid duplicates", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      },
+      {
+        id: "assistant_server_1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there!" }]
+      }
+    ]);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      },
+      {
+        id: "assistant_client_1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there!" }]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "How are you?" }]
+      }
+    ]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(3);
+
+    const assistantMessages = persisted.filter((m) => m.role === "assistant");
+    expect(assistantMessages.length).toBe(1);
+    expect(assistantMessages[0].id).toBe("assistant_server_1");
+    expect((assistantMessages[0].parts[0] as { text: string }).text).toBe(
+      "Hi there!"
+    );
+
+    ws.close(1000);
+  });
 });

@@ -998,36 +998,119 @@ export class AIChatAgent<
       }
     }
 
-    // If server has no tool outputs, return incoming messages as-is
-    if (serverToolOutputs.size === 0) {
+    // Merge server's tool outputs into incoming messages.
+    const withMergedToolOutputs =
+      serverToolOutputs.size === 0
+        ? incomingMessages
+        : incomingMessages.map((msg) => {
+            if (msg.role !== "assistant") return msg;
+
+            let hasChanges = false;
+            const updatedParts = msg.parts.map((part) => {
+              // If this is a tool part in input-available state and server has the output
+              if (
+                "toolCallId" in part &&
+                "state" in part &&
+                part.state === "input-available" &&
+                serverToolOutputs.has(part.toolCallId as string)
+              ) {
+                hasChanges = true;
+                return {
+                  ...part,
+                  state: "output-available" as const,
+                  output: serverToolOutputs.get(part.toolCallId as string)
+                };
+              }
+              return part;
+            }) as ChatMessage["parts"];
+
+            return hasChanges ? { ...msg, parts: updatedParts } : msg;
+          });
+
+    return this._reconcileAssistantIdsWithServerState(withMergedToolOutputs);
+  }
+
+  /**
+   * Reconciles assistant message IDs between incoming client state and server state.
+   *
+   * The client can keep a different local ID for an assistant message than the one
+   * persisted on the server (e.g. optimistic/local IDs). When that full history is
+   * sent back, persisting by ID alone creates duplicate assistant rows. To prevent
+   * this, we reuse the server ID for assistant messages that match by content and
+   * order, while leaving tool-call messages to _resolveMessageForToolMerge.
+   */
+  private _reconcileAssistantIdsWithServerState(
+    incomingMessages: ChatMessage[]
+  ): ChatMessage[] {
+    if (this.messages.length === 0) {
       return incomingMessages;
     }
 
-    // Merge server's tool outputs into incoming messages
-    return incomingMessages.map((msg) => {
-      if (msg.role !== "assistant") return msg;
+    let serverCursor = 0;
 
-      let hasChanges = false;
-      const updatedParts = msg.parts.map((part) => {
-        // If this is a tool part in input-available state and server has the output
+    return incomingMessages.map((incomingMessage) => {
+      // Fast path: exact ID already exists in server history.
+      const exactMatchIndex = this.messages.findIndex(
+        (serverMessage, index) =>
+          index >= serverCursor && serverMessage.id === incomingMessage.id
+      );
+      if (exactMatchIndex !== -1) {
+        serverCursor = exactMatchIndex + 1;
+        return incomingMessage;
+      }
+
+      if (
+        incomingMessage.role !== "assistant" ||
+        this._hasToolCallPart(incomingMessage)
+      ) {
+        return incomingMessage;
+      }
+
+      const incomingKey = this._assistantMessageContentKey(incomingMessage);
+      if (!incomingKey) {
+        return incomingMessage;
+      }
+
+      for (let i = serverCursor; i < this.messages.length; i++) {
+        const serverMessage = this.messages[i];
         if (
-          "toolCallId" in part &&
-          "state" in part &&
-          part.state === "input-available" &&
-          serverToolOutputs.has(part.toolCallId as string)
+          serverMessage.role !== "assistant" ||
+          this._hasToolCallPart(serverMessage)
         ) {
-          hasChanges = true;
+          continue;
+        }
+
+        if (this._assistantMessageContentKey(serverMessage) === incomingKey) {
+          serverCursor = i + 1;
+
+          if (serverMessage.id === incomingMessage.id) {
+            return incomingMessage;
+          }
+
           return {
-            ...part,
-            state: "output-available" as const,
-            output: serverToolOutputs.get(part.toolCallId as string)
+            ...incomingMessage,
+            id: serverMessage.id
           };
         }
-        return part;
-      }) as ChatMessage["parts"];
+      }
 
-      return hasChanges ? { ...msg, parts: updatedParts } : msg;
+      return incomingMessage;
     });
+  }
+
+  private _hasToolCallPart(message: ChatMessage): boolean {
+    return message.parts.some((part) => "toolCallId" in part);
+  }
+
+  private _assistantMessageContentKey(
+    message: ChatMessage
+  ): string | undefined {
+    if (message.role !== "assistant") {
+      return undefined;
+    }
+
+    const sanitized = this._sanitizeMessageForPersistence(message);
+    return JSON.stringify(sanitized.parts);
   }
 
   /**
