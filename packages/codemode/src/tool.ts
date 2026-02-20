@@ -10,7 +10,8 @@ const DEFAULT_DESCRIPTION = `Execute code to achieve a goal.
 Available:
 {{types}}
 
-Write an async arrow function that returns the result.
+Write an async arrow function in JavaScript that returns the result.
+Do NOT use TypeScript syntax — no type annotations, interfaces, or generics.
 Do NOT define named functions then call them — just write the arrow function body directly.
 
 Example: async () => { const r = await codemode.searchWeb({ query: "test" }); return r; }`;
