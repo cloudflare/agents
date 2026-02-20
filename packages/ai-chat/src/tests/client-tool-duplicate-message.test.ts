@@ -675,7 +675,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       state: string;
       approval?: { approved: boolean };
     };
-    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.state).toBe("output-denied");
     expect(toolPart.approval).toEqual({ approved: false });
 
     ws.close(1000);
@@ -742,6 +742,68 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     expect(toolPart.state).toBe("approval-responded");
     // approval.id is preserved from the approval-requested state
     expect(toolPart.approval).toEqual({ id: "approval-123", approved: true });
+
+    ws.close(1000);
+  });
+
+  it("CF_AGENT_TOOL_APPROVAL rejection from approval-requested sets output-denied", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_approval_requested_rejected";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-requested",
+            input: { param: "value" },
+            approval: { id: "approval-789" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: false
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+      approval?: { id: string; approved: boolean };
+    };
+    expect(toolPart.state).toBe("output-denied");
+    expect(toolPart.approval).toEqual({ id: "approval-789", approved: false });
 
     ws.close(1000);
   });
@@ -1066,7 +1128,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       state: string;
       approval?: { approved: boolean };
     };
-    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.state).toBe("output-denied");
     expect(toolPart.approval).toEqual({ approved: false });
 
     // No continuation parts

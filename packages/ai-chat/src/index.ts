@@ -1796,7 +1796,10 @@ export class AIChatAgent<
   /**
    * Applies a tool approval response from the client, updating the persisted message.
    * This is called when the client sends CF_AGENT_TOOL_APPROVAL for tools with needsApproval.
-   * Updates the tool part state from input-available/approval-requested to approval-responded.
+   *
+   * - approved=true transitions to approval-responded
+   * - approved=false transitions to output-denied so convertToModelMessages
+   *   emits a tool_result for providers (e.g. Anthropic) that require it.
    *
    * @param toolCallId - The tool call ID this approval is for
    * @param approved - Whether the tool execution was approved
@@ -1812,7 +1815,7 @@ export class AIChatAgent<
       ["input-available", "approval-requested"],
       (part) => ({
         ...part,
-        state: "approval-responded",
+        state: approved ? "approval-responded" : "output-denied",
         // Merge with existing approval data to preserve the id field.
         // convertToModelMessages needs approval.id to produce a valid
         // tool-approval-request content part with approvalId.
