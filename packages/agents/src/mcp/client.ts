@@ -16,6 +16,7 @@ import { type RetryOptions, tryN } from "../retries";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
+import { fromJSONSchema } from "zod";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
@@ -1020,10 +1021,6 @@ export class MCPClientManager {
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
-    if (!this.jsonSchema) {
-      throw new Error("jsonSchema not initialized.");
-    }
-
     // Warn if tools are being read from non-ready connections
     for (const [id, conn] of Object.entries(this.mcpConnections)) {
       if (
@@ -1061,9 +1058,9 @@ export class MCPClientManager {
               }
               return result;
             },
-            inputSchema: this.jsonSchema!(tool.inputSchema as JSONSchema7),
+            inputSchema: fromJSONSchema(tool.inputSchema as JSONSchema7),
             outputSchema: tool.outputSchema
-              ? this.jsonSchema!(tool.outputSchema as JSONSchema7)
+              ? fromJSONSchema(tool.outputSchema as JSONSchema7)
               : undefined
           }
         ];
