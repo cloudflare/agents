@@ -1,0 +1,31 @@
+{
+  "author": "",
+  "description": "Securing an Agents server with better-auth, JWT authentication, and Cloudflare D1",
+  "license": "ISC",
+  "name": "@cloudflare/agents-auth-agent",
+  "private": true,
+  "scripts": {
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "start": "vite dev",
+    "db:setup": "wrangler d1 execute auth-agent-db --local --file=db/setup.sql",
+    "db:reset": "wrangler d1 execute auth-agent-db --local --file=db/reset.sql"
+  },
+  "type": "module",
+  "version": "0.0.0",
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "better-auth": "^1.2.0",
+    "jose": "^6.0.11",
+    "kysely": "^0.28.5",
+    "kysely-d1": "^0.4.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
+  }
+}
