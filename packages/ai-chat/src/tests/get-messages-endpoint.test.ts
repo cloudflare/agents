@@ -1,6 +1,6 @@
 import { createExecutionContext, env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker, { AgentWithSuperCall } from "./worker";
+import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
