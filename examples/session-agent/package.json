@@ -1,0 +1,11 @@
+{
+  "name": "@cloudflare/agents-session-agent",
+  "version": "0.0.0",
+  "description": "Agent with experimental session primitives (sessions, events, working context)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}
