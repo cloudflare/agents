@@ -1,4 +1,4 @@
-import { callable, type Connection } from "agents";
+import { callable, type Connection, type ConnectionContext } from "agents";
 import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export interface ConnectionsAgentState {
@@ -10,8 +10,8 @@ export class ConnectionsAgent extends Agent<Env, ConnectionsAgentState> {
     messages: []
   };
 
-  onConnect(connection: Connection) {
-    super.onConnect(connection, {} as any);
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    super.onConnect(connection, ctx);
     this.broadcast(
       JSON.stringify({
         type: "connection_count",
