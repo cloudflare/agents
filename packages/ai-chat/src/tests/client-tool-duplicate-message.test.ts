@@ -3,6 +3,7 @@ import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
+import { convertToModelMessages } from "ai";
 import {
   applyChunkToParts,
   type MessageParts,
@@ -1356,6 +1357,80 @@ describe("Tool approval persistence across reconnect", () => {
       id: "approval-persist-test",
       approved: true
     });
+
+    ws.close(1000);
+  });
+});
+
+describe("Tool approval denial produces tool_result via convertToModelMessages", () => {
+  it("rejected approval yields tool-result in model messages (required by Anthropic)", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_e2e_denied";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Run the tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-requested",
+            input: { param: "value" },
+            approval: { id: "approval-e2e" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: false
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const modelMessages = await convertToModelMessages(messages);
+
+    const toolMessage = modelMessages.find((m) => m.role === "tool");
+    expect(toolMessage).toBeDefined();
+
+    const toolContent = toolMessage!.content as Array<{
+      type: string;
+      [key: string]: unknown;
+    }>;
+
+    const approvalResponse = toolContent.find(
+      (c) => c.type === "tool-approval-response"
+    );
+    expect(approvalResponse).toBeDefined();
+    expect(approvalResponse!.approved).toBe(false);
+
+    const toolResult = toolContent.find((c) => c.type === "tool-result");
+    expect(toolResult).toBeDefined();
+    expect(toolResult!.toolCallId).toBe(toolCallId);
+    expect(toolResult!.toolName).toBe("testTool");
 
     ws.close(1000);
   });
