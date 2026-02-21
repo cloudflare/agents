@@ -44,7 +44,7 @@ function createServer() {
           content: [
             {
               text: "No authentication context available",
-              type: "text" as const
+              type: "text"
             }
           ]
         };
@@ -62,7 +62,7 @@ function createServer() {
               null,
               2
             ),
-            type: "text" as const
+            type: "text"
           }
         ]
       };
@@ -72,13 +72,8 @@ function createServer() {
   return server;
 }
 
-/**
- * API Handler - handles authenticated MCP requests
- * This handler will receive requests that have a valid access token
- */
 const apiHandler = {
   async fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    //create the server instance every request
     const server = createServer();
     return createMcpHandler(server)(request, env, ctx);
   }

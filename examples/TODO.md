@@ -5,19 +5,19 @@ Tracked issues from the examples audit. See `AGENTS.md` in this folder for the c
 ## Missing README.md
 
 - [x] `resumable-stream-chat/` — add README
-- [ ] `x402/` — add README
+- [x] `x402/` — add README
 
 ## Add frontend + Vite plugin
 
 All examples must be full-stack (frontend + backend). These worker-only examples need a frontend, `index.html`, `vite.config.ts`, and `src/client.tsx` added:
 
 - [ ] `email-agent/` — add frontend demonstrating the email feature
-- [ ] `mcp-elicitation/` — add frontend demonstrating MCP elicitation
-- [ ] `mcp-server/` — add frontend demonstrating the MCP server
-- [ ] `mcp-worker/` — add frontend demonstrating the MCP worker
-- [ ] `mcp-worker-authenticated/` — add frontend demonstrating authenticated MCP
-- [ ] `x402/` — add frontend demonstrating x402 payments
-- [ ] `x402-mcp/` — add frontend demonstrating x402 MCP
+- [x] `mcp-elicitation/` — added landing page with connection instructions
+- [x] ~~`mcp-server/`~~ — removed (redundant with `mcp-worker/`)
+- [x] `mcp-worker/` — added MCP tool tester frontend
+- [x] `mcp-worker-authenticated/` — added info page with endpoint docs
+- [x] `x402/` — added React+Kumo frontend with "Fetch & Pay" UI
+- [x] `x402-mcp/` — added React+Kumo frontend with tool forms and payment modal
 
 ## Vite plugin fix
 
@@ -25,34 +25,24 @@ All examples must be full-stack (frontend + backend). These worker-only examples
 
 ## Type declarations
 
-- [ ] `x402/` — rename `worker-configuration.d.ts` to `env.d.ts`, regenerate with `npx wrangler types`
-- [ ] `x402-mcp/` — rename `worker-configuration.d.ts` to `env.d.ts`, regenerate with `npx wrangler types`
+- [x] `x402/` — renamed `worker-configuration.d.ts` to `env.d.ts`, regenerated
+- [x] `x402-mcp/` — renamed `worker-configuration.d.ts` to `env.d.ts`, regenerated
 
 ## Missing env.d.ts
 
 - [ ] `a2a/` — generate `env.d.ts` with `npx wrangler types`
 - [ ] `email-agent/` — generate `env.d.ts` with `npx wrangler types`
-- [ ] `mcp-worker-authenticated/` — generate `env.d.ts` with `npx wrangler types`
+- [x] `mcp-worker-authenticated/` — generated `env.d.ts`
 
 ## Secrets examples
 
 Standardise on `.env` / `.env.example` (not `.dev.vars` / `.dev.vars.example`).
 
 - [ ] `github-webhook/` — rename `.dev.vars.example` to `.env.example`
-- [ ] `mcp-client/` — rename `.dev.vars.example` to `.env.example`
-- [x] `playground/` — rename `.dev.vars.example` to `.env.example`
-- [x] `resumable-stream-chat/` — rename `.dev.vars.example` to `.env.example`
-- [x] `tictactoe/` — rename `.dev.vars.example` to `.env.example`
-
-## wrangler.jsonc assets cleanup
-
-Remove unnecessary `"directory"` from assets — the Vite plugin handles the build output directory automatically.
-
-- [ ] `codemode/wrangler.jsonc` — remove `"directory": "public"` from assets
-- [ ] `github-webhook/wrangler.jsonc` — remove `"directory": "public"` from assets
-- [x] `tictactoe/wrangler.jsonc` — remove `"directory": "public"` from assets
-- [ ] `workflows/wrangler.jsonc` — remove `"directory": "public"` from assets
-- [ ] `resumable-stream-chat/wrangler.jsonc` — remove `"directory": "dist"` and `"binding": "ASSETS"`, align with standard pattern
+- [x] `mcp-client/` — renamed `.dev.vars.example` to `.env.example`
+- [x] `playground/` — renamed `.dev.vars.example` to `.env.example`
+- [x] `resumable-stream-chat/` — renamed `.dev.vars.example` to `.env.example`
+- [x] `tictactoe/` — renamed `.dev.vars.example` to `.env.example`
 
 ## SPA routing
 
@@ -62,3 +52,15 @@ Check which full-stack examples with client-side routing are missing `"not_found
 - [ ] `github-webhook/` — audit whether it needs SPA fallback
 - [x] `tictactoe/` — no client-side routing, not needed
 - [ ] `workflows/` — audit whether it needs SPA fallback
+
+## Kumo + agents-ui migration
+
+Migrate examples to use Kumo components, agents-ui shared UI, and Tailwind.
+
+- [x] `mcp/` — migrated from Hello World to full Kumo tool tester
+- [x] `mcp-client/` — migrated from custom CSS to Kumo, replaced agentFetch with @callable
+- [x] `mcp-worker/` — added Kumo frontend
+- [x] `mcp-worker-authenticated/` — added Kumo frontend
+- [x] `mcp-elicitation/` — added Kumo landing page
+- [x] `x402/` — migrated from worker-only to Kumo frontend
+- [x] `x402-mcp/` — migrated from inline HTML to React+Kumo, replaced raw WebSocket with useAgent

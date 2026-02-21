@@ -1,15 +1,20 @@
 {
-  "author": "",
-  "dependencies": {
-    "agents": "*",
-    "mcp-remote": "^0.1.38"
-  },
-  "keywords": [],
   "name": "@cloudflare/agents-mcp-example",
   "private": true,
+  "type": "module",
   "scripts": {
-    "start": "concurrently \"npx @modelcontextprotocol/inspector\" \"vite dev\" --kill-others",
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
-  "type": "module"
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
+  }
 }

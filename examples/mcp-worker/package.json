@@ -1,16 +1,21 @@
 {
   "name": "@cloudflare/agents-mcp-worker",
-  "description": "The simplest way to run a stateless MCP Server on Cloudflare",
-  "author": "Matt Carey <mcarey@cloudflare.com>",
-  "version": "0.0.1",
+  "description": "The simplest way to run a stateless MCP server on Cloudflare Workers",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
   }
 }

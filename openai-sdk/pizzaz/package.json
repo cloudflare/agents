@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "start": "wrangler dev"
   },
   "dependencies": {
     "agents": "*"

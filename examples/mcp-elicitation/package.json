@@ -1,15 +1,21 @@
 {
-  "author": "Matt Carey <mcarey@cloudflare.com>",
-  "keywords": [],
   "name": "@cloudflare/agents-mcp-elicitation",
+  "description": "MCP server demonstrating elicitation (requesting user input mid-tool-call)",
   "private": true,
+  "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
-  "type": "module",
   "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
   }
 }

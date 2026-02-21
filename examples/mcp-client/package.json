@@ -1,16 +1,22 @@
 {
   "name": "@cloudflare/agents-mcp-client-example",
-  "type": "module",
+  "description": "MCP client demo — connect to remote MCP servers with OAuth support",
   "private": true,
-  "author": "",
+  "type": "module",
   "scripts": {
-    "deploy": "vite build && wrangler deploy",
     "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "nanoid": "^5.1.6"
   },
-  "keywords": []
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
+  }
 }

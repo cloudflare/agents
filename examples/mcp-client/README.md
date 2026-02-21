@@ -1,46 +1,81 @@
-# MCP Client Demo Using Agents
+# MCP Client
 
-A minimal example showing an `Agent` as an MCP client with support for both SSE and HTTP Streamable transports.
+An Agent that acts as an MCP **client** — dynamically connects to remote MCP servers, handles OAuth authentication, and aggregates tools, prompts, and resources from all connected servers.
 
-## Transport Options
+## What it demonstrates
 
-The MCP client supports two transport types:
+- **`addMcpServer` / `removeMcpServer`** — managing MCP server connections from an Agent
+- **`onMcpUpdate`** — real-time state updates pushed to the React frontend via WebSocket
+- **OAuth popup flow** — `configureOAuthCallback` with a custom handler that closes the popup after auth
+- **`agentFetch`** — making HTTP requests to the Agent's custom endpoints from the client
 
-- **HTTP Streamable** (recommended): Uses HTTP POST + SSE for better performance and reliability
-- **SSE (Server-Sent Events)**
+## Running
 
-## Instructions
+```sh
+npm install
+npm run dev
+```
 
-First, start an MCP server. A simple example can be found in `examples/mcp`, which already has a valid binding setup.
+The UI lets you add MCP server URLs, see their connection state, and browse their tools, prompts, and resources.
 
-Then, follow the steps below to setup the client:
+To test with an authenticated server, run the [`mcp-worker-authenticated`](../mcp-worker-authenticated/) example alongside this one and add its URL.
 
-1. This example uses a pre-built version of the agents package. Run `npm run build` in the root of this repo to build it.
-2. Copy the `.dev.vars.example` file in this directory to a new file called `.dev.vars`.
-3. Run `npm install` from this directory.
-4. Run `npm start` from this directory.
+## Environment variables
 
-Tap "O + enter" to open the front end. It should list out all the tools, prompts, and resources available for each server added.
+Copy `.env.example` to `.env` if you need to override the OAuth callback host:
 
-## Usage
+```sh
+cp .env.example .env
+```
 
-The recommended way to add MCP servers is via `Agent.addMcpServer()`:
+## How it works
+
+### Server side
+
+The Agent manages MCP connections via the built-in `mcp` property:
 
 ```typescript
-export class MyAgent extends Agent<Env, never> {
-  async addServer(name: string, url: string) {
-    // Simple usage - callback host derived from request
-    await this.addMcpServer(name, url);
+export class MyAgent extends Agent {
+  onStart() {
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => {
+        if (result.authSuccess) {
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" }
+          });
+        }
+        return new Response(`Auth failed: ${result.authError}`, {
+          status: 400
+        });
+      }
+    });
   }
 
-  async addServerWithOptions(name: string, url: string) {
-    // With options
-    await this.addMcpServer(name, url, {
-      callbackHost: "https://my-worker.workers.dev",
-      transport: { type: "sse" }
-    });
+  async onRequest(request) {
+    // Custom endpoints for the frontend
+    if (url.pathname.endsWith("add-mcp")) {
+      const { name, url } = await request.json();
+      await this.addMcpServer(name, url);
+      return new Response("Ok");
+    }
   }
 }
 ```
 
-The MCP client handles OAuth authentication automatically using the built-in `DurableObjectOAuthClientProvider`.
+### Client side
+
+The React frontend uses `useAgent` with `onMcpUpdate` to receive real-time server state:
+
+```typescript
+const agent = useAgent({
+  agent: "my-agent",
+  name: sessionId,
+  onMcpUpdate: (mcpServers) => setMcpState(mcpServers),
+  onOpen: () => setConnected(true)
+});
+```
+
+## Related examples
+
+- [`mcp`](../mcp/) — stateful MCP server (good target to connect to)
+- [`mcp-worker-authenticated`](../mcp-worker-authenticated/) — authenticated server (tests the OAuth flow)

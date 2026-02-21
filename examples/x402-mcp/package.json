@@ -1,15 +1,23 @@
 {
-  "author": "",
-  "keywords": [],
   "name": "@cloudflare/agents-x402-mcp-example",
+  "description": "Paid MCP tools using the x402 payment protocol",
   "private": true,
-  "scripts": {
-    "dev": "wrangler dev",
-    "types": "wrangler types --include-runtime false"
-  },
   "type": "module",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
   "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
+    "nanoid": "^5.1.6",
     "viem": "^2.46.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
   }
 }

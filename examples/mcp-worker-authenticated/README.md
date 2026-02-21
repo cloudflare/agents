@@ -1,43 +1,68 @@
-# Authenticated MCP Server Example
+# Authenticated MCP Server
 
-This example demonstrates using `createMcpHandler` to create an authenticated MCP server by wrapping it with [`OAuthProvider`](https://github.com/cloudflare/workers-oauth-provider) from `@cloudflare/workers-oauth-provider`.
+An MCP server protected by OAuth 2.1, using `@cloudflare/workers-oauth-provider`. Clients must complete the OAuth flow before calling tools — the auth context is then available inside tool handlers.
 
-This is the simplest way to deploy an authenticated MCP server on Cloudflare Workers.
+## What it demonstrates
 
-## Setup
+- **OAuth 2.1 with MCP** — dynamic client registration, authorization code flow, and token exchange
+- **`OAuthProvider`** — wrapping `createMcpHandler` with `@cloudflare/workers-oauth-provider`
+- **`getMcpAuthContext()`** — accessing the authenticated user's identity inside tool handlers
+- **Custom authorization UI** — a Hono-based approval page for the OAuth flow
 
-### 1. Create KV Namespace
+## Running
 
-```bash
-wrangler kv namespace create OAUTH_KV
+First, create a KV namespace for OAuth state:
+
+```sh
+npx wrangler kv namespace create OAUTH_KV
 ```
 
-### 2. Update wrangler.jsonc
+Update the `kv_namespaces` binding in `wrangler.jsonc` with the returned ID, then:
 
-```jsonc
-{
-  "kv_namespaces": [
-    {
-      "binding": "OAUTH_KV",
-      "id": "your-kv-namespace-id"
-    }
-  ]
-}
+```sh
+npm install
+npm run dev
 ```
 
-### 3. Deploy
+Open the browser to see the server info page. To test the tools, use the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) — it will handle the OAuth flow automatically.
 
-```bash
-npm run deploy
+## How it works
+
+The `OAuthProvider` wraps the entire Worker. It intercepts OAuth endpoints (`/authorize`, `/oauth/token`, `/oauth/register`) and validates Bearer tokens on the API route (`/mcp`).
+
+```typescript
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
+import { createMcpHandler, getMcpAuthContext } from "agents/mcp";
+
+const apiHandler = {
+  async fetch(request, env, ctx) {
+    const server = createServer();
+    return createMcpHandler(server)(request, env, ctx);
+  }
+};
+
+export default new OAuthProvider({
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/oauth/token",
+  clientRegistrationEndpoint: "/oauth/register",
+  apiRoute: "/mcp",
+  apiHandler,
+  defaultHandler: { fetch: (req, env, ctx) => AuthHandler.fetch(req, env, ctx) }
+});
 ```
 
-## How It Works
+Inside tool handlers, access the authenticated user:
 
-1. **OAuth Provider** handles authentication endpoints
-2. **API Handler** wraps your MCP server with `createMcpHandler`
-3. **OAuth Provider** validates tokens and sets `ctx.props`
-4. **MCP Tools** access user data via `getMcpAuthContext()`
+```typescript
+server.registerTool("whoami", { description: "Who am I?" }, async () => {
+  const auth = getMcpAuthContext();
+  return {
+    content: [{ type: "text", text: JSON.stringify(auth?.props) }]
+  };
+});
+```
 
-```
-Client → OAuth Flow → Token → MCP Request + Bearer Token → ctx.props → getMcpAuthContext()
-```
+## Related examples
+
+- [`mcp-worker`](../mcp-worker/) — same stateless pattern without authentication
+- [`mcp-client`](../mcp-client/) — connecting to authenticated MCP servers as a client (handles OAuth automatically)

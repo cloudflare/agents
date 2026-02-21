@@ -299,18 +299,11 @@ function App() {
         sessionRef.current
       );
       const result = res.data?.result as
-        | {
-            contents?: Array<{ text?: string; uri?: string }>;
-          }
+        | { contents?: Array<{ text?: string; uri?: string }> }
         | undefined;
       const text = result?.contents?.[0]?.text ?? JSON.stringify(result);
       setResults((prev) => [
-        {
-          label: uri,
-          text,
-          isError: false,
-          timestamp: Date.now()
-        },
+        { label: uri, text, isError: false, timestamp: Date.now() },
         ...prev
       ]);
     } catch (err) {
@@ -367,18 +360,21 @@ function App() {
               />
               <div>
                 <Text size="sm" bold>
-                  Stateful MCP Server
+                  Stateless MCP Server (createMcpHandler)
                 </Text>
                 <span className="mt-1 block">
                   <Text size="xs" variant="secondary">
-                    This demo runs an MCP server backed by a Durable Object
-                    using{" "}
+                    The simplest way to run an MCP server on Cloudflare Workers.
+                    Uses{" "}
                     <code className="text-xs px-1 py-0.5 rounded bg-kumo-elevated font-mono">
-                      McpAgent
-                    </code>
-                    . State persists across requests — try calling the
-                    &ldquo;add&rdquo; tool multiple times and reading the
-                    counter resource to see the value accumulate.
+                      createMcpHandler
+                    </code>{" "}
+                    from the Agents SDK to wrap an{" "}
+                    <code className="text-xs px-1 py-0.5 rounded bg-kumo-elevated font-mono">
+                      McpServer
+                    </code>{" "}
+                    into a Worker-compatible fetch handler in one line — no
+                    Durable Objects, no persistent state.
                   </Text>
                 </span>
               </div>
@@ -395,80 +391,76 @@ function App() {
 
           {status === "connected" && (
             <>
-              <div
-                className={`grid gap-8 ${resources.length > 0 ? "grid-cols-1 md:grid-cols-2 md:items-start" : ""}`}
-              >
+              <section>
+                <div className="flex items-center gap-2 mb-3">
+                  <WrenchIcon
+                    size={18}
+                    weight="bold"
+                    className="text-kumo-subtle"
+                  />
+                  <Text size="base" bold>
+                    Tools
+                  </Text>
+                  <Badge variant="secondary">{tools.length}</Badge>
+                </div>
+                {tools.length === 0 ? (
+                  <Empty
+                    icon={<WrenchIcon size={32} />}
+                    title="No tools"
+                    description="This server has no registered tools."
+                  />
+                ) : (
+                  <div className="space-y-3">
+                    {tools.map((tool) => (
+                      <ToolCard
+                        key={tool.name}
+                        tool={tool}
+                        onCall={handleCallTool}
+                      />
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              {resources.length > 0 && (
                 <section>
                   <div className="flex items-center gap-2 mb-3">
-                    <WrenchIcon
+                    <DatabaseIcon
                       size={18}
                       weight="bold"
                       className="text-kumo-subtle"
                     />
                     <Text size="base" bold>
-                      Tools
+                      Resources
                     </Text>
-                    <Badge variant="secondary">{tools.length}</Badge>
+                    <Badge variant="secondary">{resources.length}</Badge>
                   </div>
-                  {tools.length === 0 ? (
-                    <Empty
-                      icon={<WrenchIcon size={32} />}
-                      title="No tools"
-                      description="This server has no registered tools."
-                    />
-                  ) : (
-                    <div className="space-y-3">
-                      {tools.map((tool) => (
-                        <ToolCard
-                          key={tool.name}
-                          tool={tool}
-                          onCall={handleCallTool}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                {resources.length > 0 && (
-                  <section>
-                    <div className="flex items-center gap-2 mb-3">
-                      <DatabaseIcon
-                        size={18}
-                        weight="bold"
-                        className="text-kumo-subtle"
-                      />
-                      <Text size="base" bold>
-                        Resources
-                      </Text>
-                      <Badge variant="secondary">{resources.length}</Badge>
-                    </div>
-                    <div className="space-y-2">
-                      {resources.map((r) => (
-                        <Surface
-                          key={r.uri}
-                          className="p-3 rounded-xl ring ring-kumo-line flex items-center justify-between"
+                  <div className="space-y-2">
+                    {resources.map((r) => (
+                      <Surface
+                        key={r.uri}
+                        className="p-3 rounded-xl ring ring-kumo-line flex items-center justify-between"
+                      >
+                        <div>
+                          <Text size="sm" bold>
+                            {r.name}
+                          </Text>
+                          <Text size="xs" variant="secondary">
+                            {r.uri}
+                          </Text>
+                        </div>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => handleReadResource(r.uri)}
                         >
-                          <div>
-                            <Text size="sm" bold>
-                              {r.name}
-                            </Text>
-                            <Text size="xs" variant="secondary">
-                              {r.uri}
-                            </Text>
-                          </div>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => handleReadResource(r.uri)}
-                          >
-                            Read
-                          </Button>
-                        </Surface>
-                      ))}
-                    </div>
-                  </section>
-                )}
-              </div>
+                          Read
+                        </Button>
+                      </Surface>
+                    ))}
+                  </div>
+                </section>
+              )}
 
               {results.length > 0 && (
                 <section>
