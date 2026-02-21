@@ -82,6 +82,75 @@ const TOOLS = [
   }
 ];
 
+const MCP_HEADERS = {
+  "Content-Type": "application/json",
+  Accept: "application/json, text/event-stream"
+};
+
+async function mcpRequest(
+  url: string,
+  method: string,
+  params: Record<string, unknown>,
+  sessionId?: string
+): Promise<{ data: unknown; sessionId: string | null }> {
+  const headers: Record<string, string> = { ...MCP_HEADERS };
+  if (sessionId) {
+    headers["Mcp-Session-Id"] = sessionId;
+  }
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: crypto.randomUUID(),
+      method,
+      params
+    })
+  });
+
+  const newSessionId = response.headers.get("Mcp-Session-Id");
+  const contentType = response.headers.get("Content-Type") ?? "";
+
+  if (contentType.includes("text/event-stream")) {
+    const text = await response.text();
+    const lines = text.split("\n");
+    let lastData: unknown = null;
+    for (const line of lines) {
+      if (line.startsWith("data: ")) {
+        try {
+          lastData = JSON.parse(line.slice(6));
+        } catch {
+          // skip non-JSON data lines
+        }
+      }
+    }
+    return { data: lastData, sessionId: newSessionId };
+  }
+
+  const data = await response.json();
+  return { data, sessionId: newSessionId };
+}
+
+async function ensureSession(
+  url: string,
+  currentSessionId: string | null
+): Promise<string> {
+  if (currentSessionId) return currentSessionId;
+
+  const { sessionId } = await mcpRequest(url, "initialize", {
+    protocolVersion: "2025-03-26",
+    capabilities: {},
+    clientInfo: { name: "playground", version: "1.0.0" }
+  });
+
+  if (sessionId) {
+    await mcpRequest(url, "notifications/initialized", {}, sessionId);
+  }
+
+  return sessionId ?? "";
+}
+
 export function McpServerDemo() {
   const { logs, addLog, clearLogs } = useLogs();
   const [selectedTool, setSelectedTool] = useState(0);
@@ -90,6 +159,7 @@ export function McpServerDemo() {
   );
   const [result, setResult] = useState<unknown>(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
   const mcpUrl = `${window.location.origin}/mcp-server`;
 
@@ -111,25 +181,26 @@ export function McpServerDemo() {
 
     setIsRunning(true);
     setResult(null);
-    addLog("out", "call_tool", { name: tool.name, args });
 
     try {
-      const response = await fetch(mcpUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: crypto.randomUUID(),
-          method: "tools/call",
-          params: { name: tool.name, arguments: args }
-        })
-      });
+      const sid = await ensureSession(mcpUrl, sessionId);
+      if (!sessionId && sid) {
+        setSessionId(sid);
+        addLog("info", "session", { id: sid });
+      }
 
-      const data = await response.json();
+      addLog("out", "call_tool", { name: tool.name, args });
+      const { data } = await mcpRequest(
+        mcpUrl,
+        "tools/call",
+        { name: tool.name, arguments: args },
+        sid
+      );
       addLog("in", "result", data);
       setResult(data);
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
+      setSessionId(null);
     } finally {
       setIsRunning(false);
     }
