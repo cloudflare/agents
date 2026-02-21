@@ -54,7 +54,7 @@ export function hydrateEvent(row: StoredEvent): SessionEvent {
         ...base,
         action: EventAction.TOOL_CALL_REQUEST,
         content: row.content ?? "",
-        toolCalls: (meta.toolCalls as ToolCall[]) ?? []
+        toolCalls: (meta.toolCalls as ToolCall[] | undefined) ?? []
       };
 
     case EventAction.TOOL_RESULT:
@@ -62,9 +62,9 @@ export function hydrateEvent(row: StoredEvent): SessionEvent {
         ...base,
         action: EventAction.TOOL_RESULT,
         content: row.content ?? "",
-        toolCallId: meta.toolCallId as string,
-        toolName: meta.toolName as string,
-        isSuccess: (meta.isSuccess as boolean) ?? true
+        toolCallId: (meta.toolCallId as string | undefined) ?? "",
+        toolName: (meta.toolName as string | undefined) ?? "",
+        isSuccess: (meta.isSuccess as boolean | undefined) ?? true
       };
 
     case EventAction.SYSTEM_INSTRUCTION:
@@ -223,7 +223,7 @@ export function messageToEvent(
   if (msg.role === "user") {
     return { ...base, action: EventAction.USER_MESSAGE, content: msg.content };
   }
-  // TOOL_CALL_REQUEST are also stored as 'assistant' messages, eventhough it is a separate event, hence this extra check
+  // TOOL_CALL_REQUEST are also stored as 'assistant' messages, even though it is a separate event, hence this extra check
   if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
     return {
       ...base,
