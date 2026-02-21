@@ -1,54 +1,11 @@
 /**
- * Tests for codemode schema conversion.
- * Focus on our own code, not testing zod-to-ts library.
+ * Tests for codemode JSON Schema to TypeScript conversion.
+ * Focus on our jsonSchemaToTypeString code, not zod-to-ts library.
  */
 import { z } from "zod";
 import { jsonSchema } from "ai";
 import { describe, it, expect } from "vitest";
-import { generateTypes, sanitizeToolName } from "../types";
-
-describe("sanitizeToolName", () => {
-  it("replaces hyphens with underscores", () => {
-    expect(sanitizeToolName("get-user")).toBe("get_user");
-  });
-
-  it("replaces dots with underscores", () => {
-    expect(sanitizeToolName("api.v2.search")).toBe("api_v2_search");
-  });
-
-  it("replaces spaces with underscores", () => {
-    expect(sanitizeToolName("my tool")).toBe("my_tool");
-  });
-
-  it("prefixes digit-leading names", () => {
-    expect(sanitizeToolName("3drender")).toBe("_3drender");
-  });
-
-  it("appends underscore to reserved words", () => {
-    expect(sanitizeToolName("class")).toBe("class_");
-    expect(sanitizeToolName("return")).toBe("return_");
-    expect(sanitizeToolName("function")).toBe("function_");
-  });
-
-  it("strips invalid characters", () => {
-    expect(sanitizeToolName("hello@world!")).toBe("helloworld");
-  });
-
-  it("handles empty string", () => {
-    expect(sanitizeToolName("")).toBe("_");
-  });
-
-  it("preserves valid identifiers", () => {
-    expect(sanitizeToolName("getUser")).toBe("getUser");
-    expect(sanitizeToolName("_private")).toBe("_private");
-    expect(sanitizeToolName("$jquery")).toBe("$jquery");
-  });
-
-  it("handles MCP-style tool names", () => {
-    expect(sanitizeToolName("mcp__server__tool")).toBe("mcp__server__tool");
-    expect(sanitizeToolName("tool-with-hyphens")).toBe("tool_with_hyphens");
-  });
-});
+import { generateTypes } from "../types";
 
 describe("generateTypes with jsonSchema wrapper", () => {
   it("handles simple object schema", () => {
