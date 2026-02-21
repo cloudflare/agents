@@ -71,12 +71,17 @@ export function jsonSchemaToTs(
  * Convert a schema node to TypeScript
  */
 function convertSchema(schema: JSONSchema, ctx: ConversionContext): string {
-  // Handle boolean schemas
-  if (schema === true || Object.keys(schema).length === 0) {
+  // Handle boolean schemas (JSON Schema allows true/false as schemas)
+  if (schema === (true as unknown)) {
     return ctx.options.unknownType;
   }
-  if (schema === false) {
+  if (schema === (false as unknown)) {
     return "never";
+  }
+
+  // Handle empty object schema (matches everything)
+  if (Object.keys(schema).length === 0) {
+    return ctx.options.unknownType;
   }
 
   // Handle $ref
@@ -244,7 +249,14 @@ function convertType(schema: JSONSchema, ctx: ConversionContext): string {
     return types.join(" | ");
   }
 
-  return convertSingleType(type as string, schema, ctx);
+  let result = convertSingleType(type as string, schema, ctx);
+
+  // Handle OpenAPI nullable: true
+  if (schema.nullable === true) {
+    result = `${result} | null`;
+  }
+
+  return result;
 }
 
 /**

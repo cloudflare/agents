@@ -167,4 +167,33 @@ describe("Nullable Types", () => {
     );
     expect(result).toBe("string | number | boolean");
   });
+
+  it("OpenAPI nullable: true adds null to type", () => {
+    const result = jsonSchemaToTs(
+      { type: "string", nullable: true },
+      { name: undefined }
+    );
+    expect(result).toBe("string | null");
+  });
+
+  it("nullable: true with number", () => {
+    const result = jsonSchemaToTs(
+      { type: "number", nullable: true },
+      { name: undefined }
+    );
+    expect(result).toBe("number | null");
+  });
+
+  it("nullable: true with object", () => {
+    const result = jsonSchemaToTs(
+      {
+        type: "object",
+        properties: { name: { type: "string" } },
+        nullable: true
+      },
+      { name: undefined, includeComments: false }
+    );
+    expect(result).toContain("| null");
+    expect(result).toContain("name?: string");
+  });
 });
