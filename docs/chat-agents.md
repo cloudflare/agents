@@ -432,6 +432,8 @@ tools: {
 **Client:**
 
 ```tsx
+import { isToolUIPart, getToolName } from "ai";
+
 const { messages, addToolApprovalResponse } = useAgentChat({ agent });
 
 // Render pending approvals from message parts
@@ -439,15 +441,18 @@ const { messages, addToolApprovalResponse } = useAgentChat({ agent });
   messages.map((msg) =>
     msg.parts
       .filter(
-        (part) => part.type === "tool" && part.state === "approval-required"
+        (part) =>
+          isToolUIPart(part) &&
+          "approval" in part &&
+          part.state === "approval-requested"
       )
       .map((part) => (
         <div key={part.toolCallId}>
-          <p>Approve {part.toolName}?</p>
+          <p>Approve {getToolName(part)}?</p>
           <button
             onClick={() =>
               addToolApprovalResponse({
-                id: part.toolCallId,
+                id: part.approval?.id,
                 approved: true
               })
             }
@@ -457,7 +462,7 @@ const { messages, addToolApprovalResponse } = useAgentChat({ agent });
           <button
             onClick={() =>
               addToolApprovalResponse({
-                id: part.toolCallId,
+                id: part.approval?.id,
                 approved: false
               })
             }
@@ -470,7 +475,7 @@ const { messages, addToolApprovalResponse } = useAgentChat({ agent });
 }
 ```
 
-For more patterns, see [Human in the Loop](./human-in-the-loop.md).
+When denied, the tool part transitions to `output-denied`. You can also use `addToolOutput` with `state: "output-error"` for custom denial messages — see [Human in the Loop](./human-in-the-loop.md) for details.
 
 ## Custom Request Data
 

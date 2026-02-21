@@ -170,6 +170,8 @@ function ToolCard({
 
   const isApproval = state === "approval-requested";
   const isDone = state === "output-available";
+  const isDenied = state === "output-denied";
+  const isError = state === "output-error";
   const isRunning = state === "input-available" || state === "input-streaming";
 
   return (
@@ -198,6 +200,18 @@ function ToolCard({
             </Badge>
           )}
           {isApproval && <Badge variant="destructive">Needs Approval</Badge>}
+          {isDenied && (
+            <Badge variant="secondary">
+              <XCircleIcon size={10} className="mr-0.5" />
+              Denied
+            </Badge>
+          )}
+          {isError && (
+            <Badge variant="secondary">
+              <XCircleIcon size={10} className="mr-0.5" />
+              Error
+            </Badge>
+          )}
         </div>
 
         {toolInput != null && (

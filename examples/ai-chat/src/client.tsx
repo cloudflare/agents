@@ -251,6 +251,29 @@ function Chat() {
                       );
                     }
 
+                    // Tool denied
+                    if (part.state === "output-denied") {
+                      return (
+                        <div
+                          key={part.toolCallId}
+                          className="flex justify-start"
+                        >
+                          <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
+                            <div className="flex items-center gap-2">
+                              <XCircleIcon
+                                size={14}
+                                className="text-kumo-inactive"
+                              />
+                              <Text size="xs" variant="secondary" bold>
+                                {toolName}
+                              </Text>
+                              <Badge variant="secondary">Denied</Badge>
+                            </div>
+                          </Surface>
+                        </div>
+                      );
+                    }
+
                     // Tool executing
                     if (
                       part.state === "input-available" ||

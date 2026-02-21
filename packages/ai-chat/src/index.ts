@@ -526,8 +526,15 @@ export class AIChatAgent<
 
         // Handle client-side tool result
         if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
-          const { toolCallId, toolName, output, autoContinue, clientTools } =
-            data;
+          const {
+            toolCallId,
+            toolName,
+            output,
+            state,
+            errorText,
+            autoContinue,
+            clientTools
+          } = data;
 
           // Update cached client tools so subsequent continuations use the latest schemas
           if (clientTools?.length) {
@@ -535,81 +542,88 @@ export class AIChatAgent<
             this._persistRequestContext();
           }
 
+          const overrideState =
+            state === "output-error" ? "output-error" : undefined;
+
           // Apply the tool result
-          this._applyToolResult(toolCallId, toolName, output).then(
-            (applied) => {
-              // Only auto-continue if client requested it (opt-in behavior)
-              // This mimics server-executed tool behavior where the LLM
-              // automatically continues after seeing tool results
-              if (applied && autoContinue) {
-                // Wait for the original stream to complete and message to be persisted
-                // before calling onChatMessage, so this.messages includes the tool result
-                const waitForStream = async () => {
-                  if (this._streamCompletionPromise) {
-                    await this._streamCompletionPromise;
-                  } else {
-                    // TODO: The completion promise can be null if the stream finished
-                    // before the tool result arrived (race between stream end and tool
-                    // apply). The 500ms fallback is a pragmatic workaround — consider
-                    // a more deterministic signal (e.g. always setting the promise).
-                    await new Promise((resolve) => setTimeout(resolve, 500));
-                  }
-                };
+          this._applyToolResult(
+            toolCallId,
+            toolName,
+            output,
+            overrideState,
+            errorText
+          ).then((applied) => {
+            // Only auto-continue if client requested it (opt-in behavior)
+            // This mimics server-executed tool behavior where the LLM
+            // automatically continues after seeing tool results
+            if (applied && autoContinue) {
+              // Wait for the original stream to complete and message to be persisted
+              // before calling onChatMessage, so this.messages includes the tool result
+              const waitForStream = async () => {
+                if (this._streamCompletionPromise) {
+                  await this._streamCompletionPromise;
+                } else {
+                  // TODO: The completion promise can be null if the stream finished
+                  // before the tool result arrived (race between stream end and tool
+                  // apply). The 500ms fallback is a pragmatic workaround — consider
+                  // a more deterministic signal (e.g. always setting the promise).
+                  await new Promise((resolve) => setTimeout(resolve, 500));
+                }
+              };
 
-                waitForStream()
-                  .then(() => {
-                    const continuationId = nanoid();
-                    const abortSignal = this._getAbortSignal(continuationId);
+              waitForStream()
+                .then(() => {
+                  const continuationId = nanoid();
+                  const abortSignal = this._getAbortSignal(continuationId);
 
-                    return this._tryCatchChat(async () => {
-                      return agentContext.run(
-                        {
-                          agent: this,
-                          connection,
-                          request: undefined,
-                          email: undefined
-                        },
-                        async () => {
-                          const response = await this.onChatMessage(
-                            async (_finishResult) => {
-                              // User-provided hook. Cleanup handled by _reply.
-                            },
+                  return this._tryCatchChat(async () => {
+                    return agentContext.run(
+                      {
+                        agent: this,
+                        connection,
+                        request: undefined,
+                        email: undefined
+                      },
+                      async () => {
+                        const response = await this.onChatMessage(
+                          async (_finishResult) => {
+                            // User-provided hook. Cleanup handled by _reply.
+                          },
+                          {
+                            abortSignal,
+                            clientTools: clientTools ?? this._lastClientTools,
+                            body: this._lastBody
+                          }
+                        );
+
+                        if (response) {
+                          // Pass continuation flag to merge parts into last assistant message
+                          // Note: We pass an empty excludeBroadcastIds array because the sender
+                          // NEEDS to receive the continuation stream. Unlike regular chat requests
+                          // where aiFetch handles the response, tool continuations have no listener
+                          // waiting - the client relies on the broadcast.
+                          await this._reply(
+                            continuationId,
+                            response,
+                            [], // Don't exclude sender - they need the continuation
                             {
-                              abortSignal,
-                              clientTools: clientTools ?? this._lastClientTools,
-                              body: this._lastBody
+                              continuation: true,
+                              chatMessageId: continuationId
                             }
                           );
-
-                          if (response) {
-                            // Pass continuation flag to merge parts into last assistant message
-                            // Note: We pass an empty excludeBroadcastIds array because the sender
-                            // NEEDS to receive the continuation stream. Unlike regular chat requests
-                            // where aiFetch handles the response, tool continuations have no listener
-                            // waiting - the client relies on the broadcast.
-                            await this._reply(
-                              continuationId,
-                              response,
-                              [], // Don't exclude sender - they need the continuation
-                              {
-                                continuation: true,
-                                chatMessageId: continuationId
-                              }
-                            );
-                          }
                         }
-                      );
-                    });
-                  })
-                  .catch((error) => {
-                    console.error(
-                      "[AIChatAgent] Tool continuation failed:",
-                      error
+                      }
                     );
                   });
-              }
+                })
+                .catch((error) => {
+                  console.error(
+                    "[AIChatAgent] Tool continuation failed:",
+                    error
+                  );
+                });
             }
-          );
+          });
           return;
         }
 
@@ -617,8 +631,9 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
           const { toolCallId, approved, autoContinue } = data;
           this._applyToolApproval(toolCallId, approved).then((applied) => {
-            // Only auto-continue if approved AND client requested it
-            if (applied && approved && autoContinue) {
+            // Auto-continue for both approvals and rejections so the LLM
+            // sees the tool_result and can respond accordingly.
+            if (applied && autoContinue) {
               const waitForStream = async () => {
                 if (this._streamCompletionPromise) {
                   await this._streamCompletionPromise;
@@ -1051,6 +1066,7 @@ export class AIChatAgent<
         "toolCallId" in part &&
         "state" in part &&
         (part.state === "output-available" ||
+          part.state === "output-error" ||
           part.state === "approval-responded" ||
           part.state === "approval-requested")
       ) {
@@ -1513,22 +1529,29 @@ export class AIChatAgent<
    * @param toolCallId - The tool call ID this result is for
    * @param _toolName - The name of the tool (unused, kept for API compat)
    * @param output - The output from the tool execution
+   * @param overrideState - Optional state override ("output-error" to signal denial/failure)
+   * @param errorText - Error message when overrideState is "output-error"
    * @returns true if the result was applied, false if the message was not found
    */
   private async _applyToolResult(
     toolCallId: string,
     _toolName: string,
-    output: unknown
+    output: unknown,
+    overrideState?: "output-error",
+    errorText?: string
   ): Promise<boolean> {
     return this._findAndUpdateToolPart(
       toolCallId,
       "_applyToolResult",
-      ["input-available"],
+      ["input-available", "approval-requested", "approval-responded"],
       (part) => ({
         ...part,
-        state: "output-available",
-        output,
-        preliminary: false
+        ...(overrideState === "output-error"
+          ? {
+              state: "output-error",
+              errorText: errorText ?? "Tool execution denied by user"
+            }
+          : { state: "output-available", output, preliminary: false })
       })
     );
   }
