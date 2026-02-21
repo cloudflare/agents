@@ -61,6 +61,6 @@ Key primitives used:
 | Primitive                                     | Purpose                                                     |
 | --------------------------------------------- | ----------------------------------------------------------- |
 | `SessionAgent`                                | Agent subclass with session/event SQL tables                |
-| `buildContext` (wraps `_buildWorkingContext`) | Load completed events from SQL → `WorkingContext`           |
+| `buildWorkingContext`                         | Load completed events from SQL → `WorkingContext`           |
 | `workersAIAdapter`                            | Convert `WorkingContext` messages to Workers AI format      |
 | `persistWorkingContext`                       | Batch-persist all new messages (user + assistant) as events |

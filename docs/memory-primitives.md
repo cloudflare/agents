@@ -70,7 +70,7 @@ Pure functions with **no SQL dependency** — safe to use from Agents, Workflows
 
 **Local-only methods** (not for RPC — class instances lose methods over serialization):
 
-- **`_buildWorkingContext(sessionId, opts?)`** (`protected`) — loads events + builds a `WorkingContext`.
+- **`buildWorkingContext(sessionId, opts?)`** — loads events + builds a `WorkingContext`. **Local use only** — do not call via RPC.
 - **`persistWorkingContext(sessionId, ctx)`** — extracts new messages from a `WorkingContext`, converts to events, and appends them.
 
 ### `adapters/workers-ai.ts`
@@ -109,7 +109,7 @@ CREATE INDEX IF NOT EXISTS idx_events_session_seq
 ```ts
 class MyAgent extends SessionAgent<Env> {
   async handleUserMessage(sessionId: string, userMessage: string) {
-    const ctx = this._buildWorkingContext(sessionId, {
+    const ctx = this.buildWorkingContext(sessionId, {
       systemInstructions: ["You are a helpful assistant."],
       limit: 10
     });
@@ -176,7 +176,7 @@ npx vitest run --config src/experimental/memory/__tests__/vitest.config.ts
 - **No token estimation** — there is no built-in token counter. Use an external estimator or character-based heuristic if you need to enforce context limits.
 - **Concurrent request context divergence** — two simultaneous requests to the same agent DO will each build separate `WorkingContext` snapshots from the last completed turn. User messages should be added in-memory (via `ctx.addMessage`) and persisted atomically with the full turn via `persistWorkingContext` — **not** via `appendEvents` before the LLM call, which would leak in-flight messages to concurrent requests. Even with this pattern, concurrent LLM responses may be contextually divergent since neither request sees the other's in-flight messages.
 - **No Vercel AI SDK integration** — only raw Workers AI `env.AI.run()` is supported via the adapter.
-- **`_buildWorkingContext` is protected** — helper functions called from within the agent need a public wrapper method in the subclass to access it.
+- **`buildWorkingContext` is local-only** — do not call via RPC; the returned `WorkingContext` class instance loses its methods when serialized.
 
 ## Key Design Decisions
 
@@ -185,7 +185,7 @@ npx vitest run --config src/experimental/memory/__tests__/vitest.config.ts
 | Storage       | One event per row + `seq` column                 | Avoids 2MB row limit, deterministic ordering                  |
 | Timestamps    | Milliseconds everywhere (`Date.now()`)           | No seconds/ms mismatch                                        |
 | Session API   | `SessionAgent` subclass + pure utility functions | RPC-accessible CRUD; pure fns for local/testable logic        |
-| RPC safety    | `_buildWorkingContext` is `protected`            | Prevents dead-object trap over RPC boundary                   |
+| RPC safety    | `buildWorkingContext` is local-only (documented) | Prevents dead-object trap over RPC boundary                   |
 | Tool calls    | Structured `ToolCall[]` on `ContextMessage`      | Preserves structure through storage→load→adapter roundtrips   |
 | Validation    | Application-level (no FK constraints)            | SQLite FK OFF by default                                      |
 | Default limit | `loadEvents` defaults to 50                      | Prevents accidental full-table scans                          |
