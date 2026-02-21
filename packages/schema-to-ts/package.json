@@ -1,0 +1,36 @@
+{
+  "name": "@anthropic/schema-to-ts",
+  "version": "0.0.1",
+  "description": "Convert JSON Schema and Zod schemas to TypeScript types",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "ai": "^4.3.0",
+    "typescript": "^5.8.2",
+    "vitest": "^3.2.4",
+    "zod": "^3.25.0"
+  }
+}

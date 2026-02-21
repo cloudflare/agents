@@ -12,9 +12,9 @@ const simpleSchema = {
   type: "object" as const,
   properties: {
     name: { type: "string" as const },
-    age: { type: "number" as const },
+    age: { type: "number" as const }
   },
-  required: ["name"],
+  required: ["name"]
 };
 
 const complexSchema = {
@@ -28,20 +28,23 @@ const complexSchema = {
         minPrice: { type: "number" as const },
         maxPrice: { type: "number" as const },
         tags: { type: "array" as const, items: { type: "string" as const } },
-        inStock: { type: "boolean" as const },
-      },
+        inStock: { type: "boolean" as const }
+      }
     },
     pagination: {
       type: "object" as const,
       properties: {
         page: { type: "integer" as const },
         limit: { type: "integer" as const },
-        sortBy: { type: "string" as const, enum: ["relevance", "price", "date"] },
-        sortOrder: { type: "string" as const, enum: ["asc", "desc"] },
-      },
-    },
+        sortBy: {
+          type: "string" as const,
+          enum: ["relevance", "price", "date"]
+        },
+        sortOrder: { type: "string" as const, enum: ["asc", "desc"] }
+      }
+    }
   },
-  required: ["query"],
+  required: ["query"]
 };
 
 const deeplyNestedSchema = {
@@ -59,16 +62,19 @@ const deeplyNestedSchema = {
                 l4: {
                   type: "object" as const,
                   properties: {
-                    l5: { type: "object" as const, properties: { value: { type: "string" as const } } },
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-    },
-  },
+                    l5: {
+                      type: "object" as const,
+                      properties: { value: { type: "string" as const } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 };
 
 function formatBytes(bytes: number): string {
@@ -92,7 +98,11 @@ interface BenchResult {
   iterations: number;
 }
 
-function benchmark(name: string, fn: () => void, iterations: number = 10000): BenchResult {
+function benchmark(
+  name: string,
+  fn: () => void,
+  iterations: number = 10000
+): BenchResult {
   // Warmup
   for (let i = 0; i < 100; i++) fn();
 
@@ -122,14 +132,18 @@ function benchmark(name: string, fn: () => void, iterations: number = 10000): Be
     minTime: times[0],
     maxTime: times[times.length - 1],
     memoryDelta: memAfter - memBefore,
-    iterations,
+    iterations
   };
 }
 
 function printResult(result: BenchResult) {
   console.log(`  ${result.name}:`);
-  console.log(`    Avg: ${formatNs(result.avgTime)} | Min: ${formatNs(result.minTime)} | Max: ${formatNs(result.maxTime)}`);
-  console.log(`    Memory delta: ${formatBytes(result.memoryDelta)} (over ${result.iterations} iterations)`);
+  console.log(
+    `    Avg: ${formatNs(result.avgTime)} | Min: ${formatNs(result.minTime)} | Max: ${formatNs(result.maxTime)}`
+  );
+  console.log(
+    `    Memory delta: ${formatBytes(result.memoryDelta)} (over ${result.iterations} iterations)`
+  );
 }
 
 function compareResults(a: BenchResult, b: BenchResult) {
@@ -147,8 +161,12 @@ console.log();
 // Simple Schema
 console.log("📊 SIMPLE SCHEMA (2 properties)");
 console.log("-".repeat(40));
-const simpleFromJson = benchmark("fromJSONSchema", () => fromJSONSchema(simpleSchema));
-const simpleJsonSchema = benchmark("jsonSchema", () => jsonSchema(simpleSchema));
+const simpleFromJson = benchmark("fromJSONSchema", () =>
+  fromJSONSchema(simpleSchema)
+);
+const simpleJsonSchema = benchmark("jsonSchema", () =>
+  jsonSchema(simpleSchema)
+);
 printResult(simpleFromJson);
 printResult(simpleJsonSchema);
 compareResults(simpleFromJson, simpleJsonSchema);
@@ -157,8 +175,12 @@ console.log();
 // Complex Schema
 console.log("📊 COMPLEX MCP SCHEMA (nested, enums, arrays)");
 console.log("-".repeat(40));
-const complexFromJson = benchmark("fromJSONSchema", () => fromJSONSchema(complexSchema));
-const complexJsonSchema = benchmark("jsonSchema", () => jsonSchema(complexSchema));
+const complexFromJson = benchmark("fromJSONSchema", () =>
+  fromJSONSchema(complexSchema)
+);
+const complexJsonSchema = benchmark("jsonSchema", () =>
+  jsonSchema(complexSchema)
+);
 printResult(complexFromJson);
 printResult(complexJsonSchema);
 compareResults(complexFromJson, complexJsonSchema);
@@ -167,8 +189,12 @@ console.log();
 // Deeply Nested
 console.log("📊 DEEPLY NESTED SCHEMA (5 levels)");
 console.log("-".repeat(40));
-const deepFromJson = benchmark("fromJSONSchema", () => fromJSONSchema(deeplyNestedSchema));
-const deepJsonSchema = benchmark("jsonSchema", () => jsonSchema(deeplyNestedSchema));
+const deepFromJson = benchmark("fromJSONSchema", () =>
+  fromJSONSchema(deeplyNestedSchema)
+);
+const deepJsonSchema = benchmark("jsonSchema", () =>
+  jsonSchema(deeplyNestedSchema)
+);
 printResult(deepFromJson);
 printResult(deepJsonSchema);
 compareResults(deepFromJson, deepJsonSchema);
@@ -181,9 +207,11 @@ const complexZod = fromJSONSchema(complexSchema);
 const testData = {
   query: "test",
   filters: { category: "electronics", minPrice: 10, tags: ["new"] },
-  pagination: { page: 1, limit: 20, sortBy: "price", sortOrder: "asc" },
+  pagination: { page: 1, limit: 20, sortBy: "price", sortOrder: "asc" }
 };
-const validationResult = benchmark("Complex schema validation", () => complexZod.safeParse(testData));
+const validationResult = benchmark("Complex schema validation", () =>
+  complexZod.safeParse(testData)
+);
 printResult(validationResult);
 console.log();
 
