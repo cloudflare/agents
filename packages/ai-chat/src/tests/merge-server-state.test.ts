@@ -217,4 +217,127 @@ describe("Merge Incoming With Server State", () => {
 
     ws.close(1000);
   });
+
+  it("does not reconcile when assistant content differs at the same position", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      },
+      {
+        id: "assistant_server_1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there!" }]
+      }
+    ]);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      },
+      {
+        id: "assistant_client_1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Completely different response" }]
+      }
+    ]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    const assistantMessages = persisted.filter((m) => m.role === "assistant");
+    expect(assistantMessages.length).toBe(2);
+    expect(assistantMessages.map((m) => m.id)).toContain("assistant_server_1");
+    expect(assistantMessages.map((m) => m.id)).toContain("assistant_client_1");
+
+    ws.close(1000);
+  });
+
+  it("skips tool-bearing assistant messages during reconciliation without breaking cursor", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const toolPart: TestToolCallPart = {
+      type: "tool-getWeather",
+      toolCallId: "call_mixed_1",
+      state: "output-available",
+      input: { city: "London" },
+      output: "Rainy, 12°C"
+    };
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "What is the weather?" }]
+      },
+      {
+        id: "assistant_server_tool",
+        role: "assistant",
+        parts: [toolPart] as ChatMessage["parts"]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "Thanks" }]
+      },
+      {
+        id: "assistant_server_text",
+        role: "assistant",
+        parts: [{ type: "text", text: "You're welcome!" }]
+      }
+    ]);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "What is the weather?" }]
+      },
+      {
+        id: "assistant_server_tool",
+        role: "assistant",
+        parts: [toolPart] as ChatMessage["parts"]
+      },
+      {
+        id: "user-2",
+        role: "user",
+        parts: [{ type: "text", text: "Thanks" }]
+      },
+      {
+        id: "assistant_client_text",
+        role: "assistant",
+        parts: [{ type: "text", text: "You're welcome!" }]
+      }
+    ]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    expect(persisted.length).toBe(4);
+
+    const toolMsg = persisted.find((m) => m.id === "assistant_server_tool");
+    expect(toolMsg).toBeDefined();
+
+    const textAssistants = persisted.filter(
+      (m) => m.role === "assistant" && m.id !== "assistant_server_tool"
+    );
+    expect(textAssistants.length).toBe(1);
+    expect(textAssistants[0].id).toBe("assistant_server_text");
+    expect((textAssistants[0].parts[0] as { text: string }).text).toBe(
+      "You're welcome!"
+    );
+
+    ws.close(1000);
+  });
 });
