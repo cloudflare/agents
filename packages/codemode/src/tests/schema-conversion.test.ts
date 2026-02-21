@@ -148,10 +148,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
           type: "object" as const,
           properties: {
             value: {
-              anyOf: [
-                { type: "string" as const },
-                { type: "number" as const }
-              ]
+              anyOf: [{ type: "string" as const }, { type: "number" as const }]
             }
           }
         })
@@ -248,8 +245,12 @@ describe("generateTypes codemode declaration", () => {
     const result = generateTypes(tools as any);
 
     expect(result).toContain("declare const codemode: {");
-    expect(result).toContain("tool1: (input: Tool1Input) => Promise<Tool1Output>;");
-    expect(result).toContain("tool2: (input: Tool2Input) => Promise<Tool2Output>;");
+    expect(result).toContain(
+      "tool1: (input: Tool1Input) => Promise<Tool1Output>;"
+    );
+    expect(result).toContain(
+      "tool2: (input: Tool2Input) => Promise<Tool2Output>;"
+    );
   });
 
   it("sanitizes tool names in declaration", () => {

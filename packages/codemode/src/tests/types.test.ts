@@ -346,5 +346,4 @@ describe("generateTypes", () => {
     expect(result).toContain("@param input.query - Search query");
     expect(result).toContain("@param input.limit - Max results");
   });
-
 });

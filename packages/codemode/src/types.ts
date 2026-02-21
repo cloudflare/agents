@@ -162,11 +162,7 @@ function isJsonSchemaWrapper(
   const symbols = Object.getOwnPropertySymbols(value);
   for (const sym of symbols) {
     const symValue = (value as Record<symbol, unknown>)[sym];
-    if (
-      symValue &&
-      typeof symValue === "object" &&
-      "jsonSchema" in symValue
-    ) {
+    if (symValue && typeof symValue === "object" && "jsonSchema" in symValue) {
       return true;
     }
   }
@@ -189,11 +185,7 @@ function extractJsonSchema(wrapper: unknown): JSONSchema7 | null {
   const symbols = Object.getOwnPropertySymbols(wrapper);
   for (const sym of symbols) {
     const symValue = (wrapper as Record<symbol, unknown>)[sym];
-    if (
-      symValue &&
-      typeof symValue === "object" &&
-      "jsonSchema" in symValue
-    ) {
+    if (symValue && typeof symValue === "object" && "jsonSchema" in symValue) {
       return (symValue as { jsonSchema: JSONSchema7 }).jsonSchema;
     }
   }
@@ -304,7 +296,10 @@ function jsonSchemaToTypeString(
       const valueType =
         schema.additionalProperties === true
           ? "unknown"
-          : jsonSchemaToTypeString(schema.additionalProperties, indent + "    ");
+          : jsonSchemaToTypeString(
+              schema.additionalProperties,
+              indent + "    "
+            );
       lines.push(`${indent}    [key: string]: ${valueType};`);
     }
 
@@ -355,7 +350,9 @@ function extractDescriptions(schema: unknown): Record<string, string> {
   if (isJsonSchemaWrapper(schema)) {
     const jsonSchema = extractJsonSchema(schema);
     if (jsonSchema?.properties) {
-      for (const [fieldName, propSchema] of Object.entries(jsonSchema.properties)) {
+      for (const [fieldName, propSchema] of Object.entries(
+        jsonSchema.properties
+      )) {
         if (typeof propSchema === "object" && propSchema.description) {
           descriptions[fieldName] = propSchema.description;
         }

@@ -629,7 +629,7 @@ Tests HMAC-signed email replies for secure routing.
 - **Expected**:
   - Detail shows the reply body
   - Green "Signed" badge displayed
-  - Note about X-Agent-* headers shown
+  - Note about X-Agent-\* headers shown
 
 #### Test 6: Secure Reply Routing (Deployed Only)
 
