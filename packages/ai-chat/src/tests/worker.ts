@@ -16,6 +16,7 @@ type TestToolCallPart = Extract<
 
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
+  AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -317,6 +318,21 @@ export class TestChatAgent extends AIChatAgent<Env> {
         _chatMessageAbortControllers: Map<string, unknown>;
       }
     )._chatMessageAbortControllers.size;
+  }
+}
+
+// Test agent that overrides onRequest and calls super.onRequest()
+export class AgentWithSuperCall extends AIChatAgent<Env> {
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/custom-route")) {
+      return new Response("custom route");
+    }
+    return super.onRequest(request);
+  }
+
+  async onChatMessage() {
+    return new Response("chat response");
   }
 }
 
