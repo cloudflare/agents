@@ -30,7 +30,7 @@ export function DemoWrapper({
       <header className="flex items-start justify-between gap-4 px-4 md:px-6 pb-4 pt-2 border-b border-kumo-line">
         <div className="min-w-0">
           <Text variant="heading2">{title}</Text>
-          <div className="mt-2 max-w-2xl [&_*]:!leading-6">
+          <div className="mt-2 max-w-2xl **:leading-6!">
             <Text variant="secondary" size="sm">
               {description}
             </Text>

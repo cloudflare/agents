@@ -41,6 +41,12 @@
         "class_name": "TransformStageAgent"
       },
       { "name": "EnrichStageAgent", "class_name": "EnrichStageAgent" },
+      // MCP demo agents
+      {
+        "name": "PlaygroundMcpServer",
+        "class_name": "PlaygroundMcpServer"
+      },
+      { "name": "McpClientAgent", "class_name": "McpClientAgent" },
       // Workflow demo agents
       { "name": "BasicWorkflowAgent", "class_name": "BasicWorkflowAgent" },
       { "name": "ApprovalAgent", "class_name": "ApprovalAgent" },
@@ -90,6 +96,9 @@
         "ValidatorStageAgent",
         "TransformStageAgent",
         "EnrichStageAgent",
+        // MCP demo agents
+        "PlaygroundMcpServer",
+        "McpClientAgent",
         // Workflow demo agents
         "BasicWorkflowAgent",
         "ApprovalAgent",
@@ -110,6 +119,6 @@
   "assets": {
     "directory": "public",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*"]
+    "run_worker_first": ["/agents/*", "/mcp-server", "/mcp-server/*"]
   }
 }

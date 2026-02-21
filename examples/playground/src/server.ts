@@ -3,6 +3,11 @@ import {
   createAddressBasedEmailResolver,
   createSecureReplyEmailResolver
 } from "agents/email";
+import { PlaygroundMcpServer as McpServerClass } from "./demos/mcp/mcp-server-agent";
+
+const mcpHandler = McpServerClass.serve("/mcp-server", {
+  binding: "PlaygroundMcpServer"
+});
 
 // Core agents
 export { StateAgent } from "./demos/core/state-agent";
@@ -33,6 +38,10 @@ export {
   TransformStageAgent,
   EnrichStageAgent
 } from "./demos/multi-agent/stage-agents";
+
+// MCP demos
+export { PlaygroundMcpServer } from "./demos/mcp/mcp-server-agent";
+export { McpClientAgent } from "./demos/mcp/mcp-client-agent";
 
 // Workflow demos
 export { BasicWorkflowAgent } from "./demos/workflow/basic-workflow-agent";
@@ -102,8 +111,13 @@ export default {
     });
   },
 
-  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
+
+    // MCP server endpoint — handles both SSE and Streamable HTTP
+    if (url.pathname.startsWith("/mcp-server")) {
+      return mcpHandler.fetch(request, env, ctx);
+    }
 
     // Custom basePath routing example:
     // Routes /custom-routing/{instanceName} to a RoutingAgent instance.
