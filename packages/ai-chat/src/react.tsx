@@ -807,6 +807,10 @@ export function useAgentChat<
           output,
           ...(state ? { state } : {}),
           ...(errorText !== undefined ? { errorText } : {}),
+          // output-error is a deliberate client denial — don't auto-continue.
+          // The addToolApprovalResponse path does auto-continue for rejections
+          // because it's the standard approve/reject flow. If the user wants the
+          // LLM to respond to an output-error denial, they can call sendMessage().
           autoContinue:
             state === "output-error" ? false : autoContinueAfterToolResult,
           clientTools: toolsRef.current
@@ -815,7 +819,9 @@ export function useAgentChat<
         })
       );
 
-      setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+      if (state !== "output-error") {
+        setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+      }
     },
     [autoContinueAfterToolResult]
   );
