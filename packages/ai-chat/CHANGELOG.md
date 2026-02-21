@@ -1,5 +1,33 @@
 # @cloudflare/ai-chat
 
+## 0.1.4
+
+### Patch Changes
+
+- [#967](https://github.com/cloudflare/agents/pull/967) [`c128447`](https://github.com/cloudflare/agents/commit/c1284478fe212ddd6e1bc915877cee5c10fcfd49) Thanks [@threepointone](https://github.com/threepointone)! - Follow-up to #956. Allow `addToolOutput` to work with tools in `approval-requested` and `approval-responded` states, not just `input-available`. Also adds support for `state: "output-error"` and `errorText` fields, enabling custom denial messages when rejecting tool approvals (addresses remaining items from #955).
+
+  Additionally, tool approval rejections (`approved: false`) now auto-continue the conversation when `autoContinue` is set, so the LLM sees the denial and can respond naturally (e.g. suggest alternatives).
+
+  This enables the Vercel AI SDK recommended pattern for client-side tool denial:
+
+  ```ts
+  addToolOutput({
+    toolCallId: invocation.toolCallId,
+    state: "output-error",
+    errorText: "User declined: insufficient permissions",
+  });
+  ```
+
+- [#958](https://github.com/cloudflare/agents/pull/958) [`f70a8b9`](https://github.com/cloudflare/agents/commit/f70a8b9e2774d729825b8d85152c403d0c1e6dba) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix duplicate assistant message persistence when clients resend full history with local assistant IDs that differ from server IDs.
+
+  `AIChatAgent.persistMessages()` now reconciles non-tool assistant messages against existing server history by content and order, reusing the server ID instead of inserting duplicate rows.
+
+- [#956](https://github.com/cloudflare/agents/pull/956) [`ab401a0`](https://github.com/cloudflare/agents/commit/ab401a0e0b6942490e845cc9e34d9f17f65cbde8) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix denied tool approvals (`CF_AGENT_TOOL_APPROVAL` with `approved: false`) to transition tool parts to `output-denied` instead of `approval-responded`.
+
+  This ensures `convertToModelMessages` emits a `tool_result` for denied approvals, which is required by providers like Anthropic.
+
+  Also adds regression tests for denied approval behavior, including rejection from `approval-requested` state.
+
 ## 0.1.3
 
 ### Patch Changes
