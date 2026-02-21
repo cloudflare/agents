@@ -59,10 +59,9 @@ export class WorkingContext {
 
 /**
  * @experimental
- * Build a WorkingContext from a list of session events. This is an example,
- * Keep this outside of the Agent class to allow handling multiple independent threads in parallel.
- * This is a **pure function** — no SQL dependency. Safe to call from
- * Agents, Workflows, Workers, or tests.
+ * Build a WorkingContext from a list of session events.
+ * Pure function — keep outside the Agent class to allow use from
+ * Workflows, Workers, or tests. No SQL dependency.
  *
  * @param events - Session events (typically loaded via `agent.loadEvents()`)
  * @param options - System instructions, custom event→message mapper, etc.

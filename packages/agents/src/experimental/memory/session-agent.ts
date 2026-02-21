@@ -161,73 +161,32 @@ export class SessionAgent<
     const actions = opts.actions ?? null;
     const tail = opts.tail ?? true;
 
-    // Inner sort direction: DESC for tail (grab last N), ASC for head (grab first N).
-    // Final result is always ASC — for tail mode we wrap in a subquery.
-    const innerOrder = tail ? "DESC" : "ASC";
+    // Build WHERE clause dynamically to avoid combinatorial branching.
+    const conditions = ["session_id = ?"];
+    const params: unknown[] = [sessionId];
 
-    let rows: StoredEvent[];
-
-    if (since !== null && actions !== null && actions.length > 0) {
-      const placeholders = actions.map(() => "?").join(", ");
-      const inner = `SELECT id, session_id, seq, action, content, metadata, created_at
-        FROM cf_agents_events
-        WHERE session_id = ? AND created_at >= ? AND action IN (${placeholders})
-        ORDER BY seq ${innerOrder} LIMIT ?`;
-      const query = tail
-        ? `SELECT * FROM (${inner}) sub ORDER BY seq ASC`
-        : inner;
-      rows = [
-        ...this.ctx.storage.sql.exec(query, sessionId, since, ...actions, limit)
-      ] as unknown as StoredEvent[];
-    } else if (since !== null) {
-      if (tail) {
-        rows = this.sql<StoredEvent>`
-          SELECT * FROM (
-            SELECT id, session_id, seq, action, content, metadata, created_at
-            FROM cf_agents_events
-            WHERE session_id = ${sessionId} AND created_at >= ${since}
-            ORDER BY seq DESC LIMIT ${limit}
-          ) sub ORDER BY seq ASC
-        `;
-      } else {
-        rows = this.sql<StoredEvent>`
-          SELECT id, session_id, seq, action, content, metadata, created_at
-          FROM cf_agents_events
-          WHERE session_id = ${sessionId} AND created_at >= ${since}
-          ORDER BY seq ASC LIMIT ${limit}
-        `;
-      }
-    } else if (actions !== null && actions.length > 0) {
-      const placeholders = actions.map(() => "?").join(", ");
-      const inner = `SELECT id, session_id, seq, action, content, metadata, created_at
-        FROM cf_agents_events
-        WHERE session_id = ? AND action IN (${placeholders})
-        ORDER BY seq ${innerOrder} LIMIT ?`;
-      const query = tail
-        ? `SELECT * FROM (${inner}) sub ORDER BY seq ASC`
-        : inner;
-      rows = [
-        ...this.ctx.storage.sql.exec(query, sessionId, ...actions, limit)
-      ] as unknown as StoredEvent[];
-    } else {
-      if (tail) {
-        rows = this.sql<StoredEvent>`
-          SELECT * FROM (
-            SELECT id, session_id, seq, action, content, metadata, created_at
-            FROM cf_agents_events
-            WHERE session_id = ${sessionId}
-            ORDER BY seq DESC LIMIT ${limit}
-          ) sub ORDER BY seq ASC
-        `;
-      } else {
-        rows = this.sql<StoredEvent>`
-          SELECT id, session_id, seq, action, content, metadata, created_at
-          FROM cf_agents_events
-          WHERE session_id = ${sessionId}
-          ORDER BY seq ASC LIMIT ${limit}
-        `;
-      }
+    if (since !== null) {
+      conditions.push("created_at >= ?");
+      params.push(since);
     }
+    if (actions !== null && actions.length > 0) {
+      conditions.push(`action IN (${actions.map(() => "?").join(", ")})`);
+      params.push(...actions);
+    }
+
+    const where = conditions.join(" AND ");
+    const innerOrder = tail ? "DESC" : "ASC";
+    const inner = `SELECT id, session_id, seq, action, content, metadata, created_at FROM cf_agents_events WHERE ${where} ORDER BY seq ${innerOrder} LIMIT ?`;
+    params.push(limit);
+
+    // For tail mode, wrap in a subquery to restore ASC order.
+    const query = tail
+      ? `SELECT * FROM (${inner}) sub ORDER BY seq ASC`
+      : inner;
+
+    const rows = [
+      ...this.ctx.storage.sql.exec(query, ...params)
+    ] as unknown as StoredEvent[];
 
     return rows.map(hydrateEvent);
   }
@@ -245,29 +204,38 @@ export class SessionAgent<
       throw new Error(`Session ${sessionId} not found`);
     }
 
-    // Get the current max seq for this session
-    const maxSeqRows = this.sql<{ max_seq: number | null }>`
-      SELECT MAX(seq) as max_seq FROM cf_agents_events WHERE session_id = ${sessionId}
-    `;
-    let nextSeq = (maxSeqRows[0]?.max_seq ?? -1) + 1;
+    // Wrap batch insert in a transaction to prevent partial data on failure.
+    this.ctx.storage.sql.exec("BEGIN");
+    try {
+      // Get the current max seq for this session
+      const maxSeqRows = this.sql<{ max_seq: number | null }>`
+        SELECT MAX(seq) as max_seq FROM cf_agents_events WHERE session_id = ${sessionId}
+      `;
+      let nextSeq = (maxSeqRows[0]?.max_seq ?? -1) + 1;
 
-    for (const event of events) {
-      // Override seq with the correct monotonic value
-      const withSeq: SessionEvent = { ...event, seq: nextSeq, sessionId };
-      const row = dehydrateEvent(withSeq);
+      for (const event of events) {
+        // Override seq with the correct monotonic value
+        const withSeq: SessionEvent = { ...event, seq: nextSeq, sessionId };
+        const row = dehydrateEvent(withSeq);
 
+        this.sql`
+          INSERT INTO cf_agents_events (id, session_id, seq, action, content, metadata, created_at)
+          VALUES (${row.id}, ${row.session_id}, ${row.seq}, ${row.action}, ${row.content}, ${row.metadata}, ${row.created_at})
+        `;
+
+        nextSeq++;
+      }
+
+      // Touch the session's updated_at
       this.sql`
-        INSERT INTO cf_agents_events (id, session_id, seq, action, content, metadata, created_at)
-        VALUES (${row.id}, ${row.session_id}, ${row.seq}, ${row.action}, ${row.content}, ${row.metadata}, ${row.created_at})
+        UPDATE cf_agents_sessions SET updated_at = ${Date.now()} WHERE id = ${sessionId}
       `;
 
-      nextSeq++;
+      this.ctx.storage.sql.exec("COMMIT");
+    } catch (e) {
+      this.ctx.storage.sql.exec("ROLLBACK");
+      throw e;
     }
-
-    // Touch the session's updated_at
-    this.sql`
-      UPDATE cf_agents_sessions SET updated_at = ${Date.now()} WHERE id = ${sessionId}
-    `;
   }
 
   /**
@@ -322,5 +290,19 @@ export class SessionAgent<
 
     const events = newMessages.map((msg) => messageToEvent(sessionId, msg));
     this.appendEvents(sessionId, events);
+  }
+
+  // -----------------------------------------------------------------------
+  // Lifecycle
+  // -----------------------------------------------------------------------
+
+  /**
+   * @experimental
+   * Destroy the agent, cleaning up session tables before calling super.
+   */
+  async destroy() {
+    this.sql`DROP TABLE IF EXISTS cf_agents_events`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_sessions`;
+    await super.destroy();
   }
 }
