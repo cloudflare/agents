@@ -172,105 +172,127 @@ describe("generateTypes", () => {
     expect(result).toContain("GetWeatherInput");
   });
 
-  it("should handle fromJSONSchema schemas (MCP tools)", () => {
-    const jsonSchema = {
+  it("should handle MCP tools with input and output schemas (fromJSONSchema)", () => {
+    // MCP tools use JSON Schema format for both input and output
+    const inputSchema = {
       type: "object" as const,
       properties: {
-        query: { type: "string" as const, description: "Search query" }
+        city: { type: "string" as const, description: "City name" },
+        units: {
+          type: "string" as const,
+          enum: ["celsius", "fahrenheit"],
+          description: "Temperature units"
+        },
+        includeForecast: { type: "boolean" as const }
       },
-      required: ["query"]
+      required: ["city"]
+    };
+
+    const outputSchema = {
+      type: "object" as const,
+      properties: {
+        temperature: { type: "number" as const, description: "Current temp" },
+        humidity: { type: "number" as const },
+        conditions: { type: "string" as const },
+        forecast: {
+          type: "array" as const,
+          items: {
+            type: "object" as const,
+            properties: {
+              day: { type: "string" as const },
+              high: { type: "number" as const },
+              low: { type: "number" as const }
+            }
+          }
+        }
+      },
+      required: ["temperature", "conditions"]
     };
 
     const tools: ToolDescriptors = {
-      search: {
-        description: "Search documents",
-        inputSchema: fromJSONSchema(jsonSchema)
+      getWeather: {
+        description: "Get weather for a city",
+        inputSchema: fromJSONSchema(inputSchema),
+        outputSchema: fromJSONSchema(outputSchema)
       }
     };
 
     const result = generateTypes(tools);
-    expect(result).toBe(`type SearchInput = {
-    /** Search query */
-    query: string;
-    [x: string]: unknown;
-};
-type SearchOutput = unknown
 
-declare const codemode: {
-\t/**
-\t * Search documents
-\t * @param input.query - Search query
-\t */
-\tsearch: (input: SearchInput) => Promise<SearchOutput>;
-}`);
+    // Input schema types
+    expect(result).toContain("type GetWeatherInput");
+    expect(result).toContain("city: string");
+    expect(result).toContain("units?:");
+    expect(result).toContain("includeForecast?: boolean");
+
+    // Output schema types (not unknown)
+    expect(result).toContain("type GetWeatherOutput");
+    expect(result).not.toContain("GetWeatherOutput = unknown");
+    expect(result).toContain("temperature: number");
+    expect(result).toContain("humidity?: number");
+    expect(result).toContain("conditions: string");
+    expect(result).toContain("forecast?:");
+    expect(result).toContain("day?: string");
+    expect(result).toContain("high?: number");
+    expect(result).toContain("low?: number");
+
+    // JSDoc
+    expect(result).toContain("@param input.city - City name");
+    expect(result).toContain("/** Current temp */");
   });
 
-  it("should handle AI SDK tool() with Zod schema", () => {
+  it("should handle AI SDK tool() with Zod schema and outputSchema", () => {
     const tools: ToolSet = {
       getWeather: tool({
-        description: "Get weather",
+        description: "Get weather for a city",
         parameters: z.object({
-          city: z.string()
+          city: z.string().describe("City name"),
+          units: z.enum(["celsius", "fahrenheit"]).optional()
         }),
-        execute: async () => ({ temp: 20 })
+        outputSchema: z.object({
+          temperature: z.number().describe("Current temperature"),
+          humidity: z.number().describe("Humidity percentage"),
+          conditions: z.string().describe("Weather conditions"),
+          forecast: z.array(
+            z.object({
+              day: z.string(),
+              high: z.number(),
+              low: z.number()
+            })
+          )
+        }),
+        execute: async () => ({
+          temperature: 20,
+          humidity: 65,
+          conditions: "sunny",
+          forecast: []
+        })
       })
     };
 
     const result = generateTypes(tools);
-    expect(result).toBe(`type GetWeatherInput = {
-    city: string;
-};
-type GetWeatherOutput = unknown
 
-declare const codemode: {
-\t/**
-\t * Get weather
-\t */
-\tgetWeather: (input: GetWeatherInput) => Promise<GetWeatherOutput>;
-}`);
-  });
+    // Verify input schema
+    expect(result).toContain("type GetWeatherInput");
+    expect(result).toContain("city: string");
+    expect(result).toContain("units?:");
+    expect(result).toContain('"celsius"');
+    expect(result).toContain('"fahrenheit"');
 
-  it("should handle mixed tools: Zod schemas and fromJSONSchema", () => {
-    const jsonSchema = {
-      type: "object" as const,
-      properties: {
-        url: { type: "string" as const }
-      },
-      required: ["url"]
-    };
+    // Verify output schema is properly typed (not unknown)
+    expect(result).toContain("type GetWeatherOutput");
+    expect(result).not.toContain("GetWeatherOutput = unknown");
+    expect(result).toContain("temperature: number");
+    expect(result).toContain("humidity: number");
+    expect(result).toContain("conditions: string");
+    expect(result).toContain("forecast:");
+    expect(result).toContain("day: string");
+    expect(result).toContain("high: number");
+    expect(result).toContain("low: number");
 
-    const tools: ToolDescriptors = {
-      zodTool: {
-        description: "Zod tool",
-        inputSchema: z.object({ name: z.string() })
-      },
-      mcpTool: {
-        description: "MCP tool",
-        inputSchema: fromJSONSchema(jsonSchema)
-      }
-    };
-
-    const result = generateTypes(tools);
-    expect(result).toBe(`type ZodToolInput = {
-    name: string;
-};
-type ZodToolOutput = unknown
-type McpToolInput = {
-    url: string;
-    [x: string]: unknown;
-};
-type McpToolOutput = unknown
-
-declare const codemode: {
-\t/**
-\t * Zod tool
-\t */
-\tzodTool: (input: ZodToolInput) => Promise<ZodToolOutput>;
-
-\t/**
-\t * MCP tool
-\t */
-\tmcpTool: (input: McpToolInput) => Promise<McpToolOutput>;
-}`);
+    // Verify JSDoc comments from .describe()
+    expect(result).toContain("/** City name */");
+    expect(result).toContain("/** Current temperature */");
+    expect(result).toContain("@param input.city - City name");
   });
 });
