@@ -1664,7 +1664,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
             toolCallId,
             state: "output-denied",
             input: { param: "value" },
-            approval: { approved: false }
+            approval: { id: "approval-denied-guard", approved: false }
           }
         ] as ChatMessage["parts"]
       }
