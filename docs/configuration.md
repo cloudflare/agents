@@ -154,7 +154,7 @@ For Workers AI integration:
 Access in your agent:
 
 ```typescript
-const response = await this.env.AI.run("@cf/meta/llama-3-8b-instruct", {
+const response = await this.env.AI.run("@cf/zai-org/glm-4.7-flash", {
   prompt: "Hello!"
 });
 ```

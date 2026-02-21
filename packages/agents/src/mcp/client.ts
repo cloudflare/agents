@@ -60,7 +60,7 @@ export type MCPOAuthCallbackResult =
 export type RegisterServerOptions = {
   url: string;
   name: string;
-  callbackUrl: string;
+  callbackUrl?: string;
   client?: ConstructorParameters<typeof Client>[1];
   transport?: MCPTransportOptions;
   authUrl?: string;
@@ -322,17 +322,20 @@ export class MCPClientManager {
         ? JSON.parse(server.server_options)
         : null;
 
-      const authProvider = this._createAuthProviderFn
-        ? this._createAuthProviderFn(server.callback_url)
-        : this.createAuthProvider(
-            server.id,
-            server.callback_url,
-            clientName,
-            server.client_id ?? undefined
-          );
-      authProvider.serverId = server.id;
-      if (server.client_id) {
-        authProvider.clientId = server.client_id;
+      let authProvider: AgentMcpOAuthProvider | undefined;
+      if (server.callback_url) {
+        authProvider = this._createAuthProviderFn
+          ? this._createAuthProviderFn(server.callback_url)
+          : this.createAuthProvider(
+              server.id,
+              server.callback_url,
+              clientName,
+              server.client_id ?? undefined
+            );
+        authProvider.serverId = server.id;
+        if (server.client_id) {
+          authProvider.clientId = server.client_id;
+        }
       }
 
       // Create the in-memory connection object (no need to save to storage - we just read from it!)
@@ -611,7 +614,7 @@ export class MCPClientManager {
       id,
       name: options.name,
       server_url: options.url,
-      callback_url: options.callbackUrl,
+      callback_url: options.callbackUrl ?? "",
       client_id: options.clientId ?? null,
       auth_url: options.authUrl ?? null,
       server_options: JSON.stringify({

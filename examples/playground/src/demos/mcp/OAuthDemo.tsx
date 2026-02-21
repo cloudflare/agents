@@ -1,5 +1,6 @@
 import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
+import { CodeExplanation, type CodeSection } from "../../components";
 
 const FLOW_DESCRIPTION = `
 1. Client calls addMcpServer with OAuth-protected URL
@@ -12,11 +13,60 @@ const FLOW_DESCRIPTION = `
 8. Client is notified of successful connection
 `;
 
+const codeSections: CodeSection[] = [
+  {
+    title: "Connect to OAuth-protected MCP servers",
+    description:
+      "When an MCP server requires OAuth, the SDK handles the full flow — detecting the requirement, generating the auth URL, exchanging codes for tokens, and reconnecting.",
+    code: `// Client-side: initiate OAuth connection
+const result = await agent.call("connectWithOAuth", [serverUrl]);
+
+if (result.needsAuth) {
+  // Open the OAuth provider's login page
+  window.open(result.authUrl, "_blank");
+}
+
+// Listen for connection updates
+const agent = useAgent({
+  agent: "my-agent",
+  name: "demo",
+  onMcpUpdate: (servers) => {
+    const server = servers.find(s => s.id === "oauth-server");
+    if (server?.state === "ready") {
+      console.log("OAuth complete, connected!");
+    }
+  },
+});`
+  },
+  {
+    title: "Token management",
+    description:
+      "OAuth tokens are stored in the agent's Durable Object storage and automatically refreshed. The agent reconnects with saved tokens on restart.",
+    code: `// Tokens are managed automatically:
+// 1. Agent detects OAuth requirement
+// 2. Client opens auth URL in browser
+// 3. OAuth provider redirects to /callback
+// 4. Agent exchanges code for tokens
+// 5. Tokens stored in Durable Object storage
+// 6. Agent connects with tokens
+// 7. On restart, tokens are loaded and reused
+// 8. Expired tokens are refreshed automatically`
+  }
+];
+
 export function McpOAuthDemo() {
   return (
     <DemoWrapper
       title="MCP OAuth"
-      description="Connect to OAuth-protected MCP servers with automatic token management."
+      description={
+        <>
+          Some MCP servers require OAuth authentication. The SDK handles the
+          full flow automatically — detecting the requirement, generating an
+          auth URL, exchanging codes for tokens, and storing them in Durable
+          Object storage. On restart, saved tokens are reused and refreshed as
+          needed.
+        </>
+      }
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
@@ -114,6 +164,7 @@ const agent = useAgent({
           </Text>
         </Surface>
       </div>
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

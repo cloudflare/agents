@@ -38,6 +38,25 @@ describe("addMcpServer callbackPath enforcement", () => {
     );
   });
 
+  it("should not throw enforcement error when sendIdentityOnConnect is false and no callbackHost is provided", async () => {
+    const agentStub = await getAgentByName(
+      env.TestNoIdentityAgent,
+      "test-no-callback-host"
+    );
+    const result =
+      (await agentStub.testAddMcpServerWithoutCallbackHost()) as unknown as {
+        threw: boolean;
+        message: string;
+      };
+
+    // May throw for connection error, but should NOT throw the callbackPath enforcement error
+    if (result.threw) {
+      expect(result.message).not.toContain(
+        "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false"
+      );
+    }
+  });
+
   it("should not throw enforcement error when sendIdentityOnConnect is false and callbackPath is provided", async () => {
     const agentStub = await getAgentByName(
       env.TestNoIdentityAgent,
@@ -99,6 +118,26 @@ describe("addMcpServer API overloads", () => {
         url: "https://minimal.example.com",
         callbackHost: undefined,
         agentsPrefix: "agents", // default
+        transport: undefined,
+        client: undefined
+      });
+    });
+
+    it("should work with no options at all (no callbackHost needed for non-OAuth servers)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestAddMcpServerAgent,
+        "test-no-options"
+      );
+      const result = await agentStub.testNoOptions(
+        "simple-server",
+        "https://simple.example.com"
+      );
+
+      expect(result).toEqual({
+        serverName: "simple-server",
+        url: "https://simple.example.com",
+        callbackHost: undefined,
+        agentsPrefix: "agents",
         transport: undefined,
         client: undefined
       });

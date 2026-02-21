@@ -3,10 +3,56 @@ import { nanoid } from "nanoid";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Input, Surface, Empty, Badge, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs } from "../../hooks";
 import type { LobbyAgent, LobbyState, RoomInfo } from "./lobby-agent";
 import type { RoomAgent, RoomState, ChatMessage } from "./room-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Lobby + Room agent architecture",
+    description:
+      "A single LobbyAgent tracks all rooms. Each room is a separate RoomAgent instance. The lobby creates rooms via getAgentByName and the room handles its own members and messages.",
+    code: `// lobby-agent.ts
+class LobbyAgent extends Agent<Env> {
+  @callable()
+  async createRoom(roomId: string) {
+    const room = await getAgentByName(this.env.RoomAgent, roomId);
+    await room.initialize({ name: roomId });
+    this.setState({
+      ...this.state,
+      rooms: [...this.state.rooms, roomId],
+    });
+  }
+}
+
+// room-agent.ts
+class RoomAgent extends Agent<Env> {
+  @callable()
+  sendMessage(userId: string, text: string) {
+    const msg = { id: crypto.randomUUID(), userId, text };
+    this.broadcast(JSON.stringify({ type: "chat_message", message: msg }));
+  }
+}`
+  },
+  {
+    title: "Connect to multiple agents from one page",
+    description:
+      "Use multiple useAgent hooks — one for the lobby, one for the current room. Set enabled: false to defer the connection until a room is selected.",
+    code: `const lobby = useAgent({ agent: "lobby-agent", name: "main" });
+
+const room = useAgent({
+  agent: "room-agent",
+  name: currentRoom || "unused",
+  enabled: !!currentRoom, // only connect when a room is selected
+});`
+  }
+];
 
 export function ChatRoomsDemo() {
   const { logs, addLog, clearLogs } = useLogs();
@@ -182,7 +228,24 @@ export function ChatRoomsDemo() {
   return (
     <DemoWrapper
       title="Chat Rooms"
-      description="Multi-agent chat with a Lobby managing multiple Room agents. Users can create and join rooms."
+      description={
+        <>
+          A two-tier agent architecture: a single{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            LobbyAgent
+          </code>{" "}
+          tracks all rooms, while each room is a separate{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            RoomAgent
+          </code>{" "}
+          instance handling its own members and messages. The client uses two{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            useAgent
+          </code>{" "}
+          hooks simultaneously — one for the lobby, one for the active room.
+          Create a room and start chatting.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -255,31 +318,6 @@ export function ChatRoomsDemo() {
                 <Empty title="No rooms yet. Create one!" size="sm" />
               )}
             </div>
-          </Surface>
-
-          {/* How it Works */}
-          <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <div className="mb-2">
-              <Text variant="heading3">How it Works</Text>
-            </div>
-            <ul className="text-sm text-kumo-subtle space-y-1">
-              <li>
-                •{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  LobbyAgent
-                </code>{" "}
-                tracks all rooms
-              </li>
-              <li>
-                • Each room is a{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  RoomAgent
-                </code>{" "}
-                instance
-              </li>
-              <li>• Rooms notify Lobby of member changes</li>
-              <li>• Messages are broadcast to room members</li>
-            </ul>
           </Surface>
         </div>
 
@@ -381,6 +419,8 @@ export function ChatRoomsDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="600px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

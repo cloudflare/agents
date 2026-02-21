@@ -3,7 +3,12 @@ import { nanoid } from "nanoid";
 import { useState, useEffect, useCallback } from "react";
 import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type { ChildState } from "./child-agent";
 import type { SupervisorAgent, SupervisorState } from "./supervisor-agent";
@@ -12,6 +17,39 @@ interface ChildInfo {
   id: string;
   state: ChildState;
 }
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Spawn child agents with getAgentByName",
+    description:
+      "The supervisor creates child agents by calling getAgentByName(). Each child is a separate Durable Object with its own state and lifecycle.",
+    code: `import { Agent, callable, getAgentByName } from "agents";
+
+class SupervisorAgent extends Agent<Env> {
+  @callable()
+  async createChild(childId: string) {
+    const child = await getAgentByName(this.env.ChildAgent, childId);
+    await child.initialize({ createdBy: this.name });
+    return { id: childId, status: "created" };
+  }
+}`
+  },
+  {
+    title: "Coordinate across children",
+    description:
+      "The supervisor can call methods on any child via Durable Object RPC. Fan out to all children with Promise.all() for parallel operations.",
+    code: `  @callable()
+  async incrementAll() {
+    const results = await Promise.all(
+      this.state.childIds.map(async (id) => {
+        const child = await getAgentByName(this.env.ChildAgent, id);
+        return child.increment();
+      })
+    );
+    return { updated: results.length };
+  }`
+  }
+];
 
 export function SupervisorDemo() {
   const userId = useUserId();
@@ -108,7 +146,18 @@ export function SupervisorDemo() {
   return (
     <DemoWrapper
       title="Supervisor Pattern"
-      description="A supervisor agent manages multiple child agents using getAgentByName for Durable Object RPC."
+      description={
+        <>
+          A supervisor agent creates and manages child agents using{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            getAgentByName()
+          </code>
+          . Each child is a separate Durable Object with its own state and
+          lifecycle. The supervisor coordinates them via Durable Object RPC —
+          calling methods, aggregating results, and tracking their state. Create
+          a few children below and increment them individually or all at once.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -219,33 +268,7 @@ export function SupervisorDemo() {
             )}
           </Surface>
 
-          {/* How it Works */}
-          <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <div className="mb-2">
-              <Text variant="heading3">How it Works</Text>
-            </div>
-            <ul className="text-sm text-kumo-subtle space-y-1">
-              <li>
-                • The{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  SupervisorAgent
-                </code>{" "}
-                creates child agents using{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  getAgentByName()
-                </code>
-              </li>
-              <li>
-                • Each child is a separate Durable Object with its own state
-              </li>
-              <li>
-                • The supervisor calls child methods via Durable Object RPC
-              </li>
-              <li>
-                • Children are tracked by ID and can be managed individually
-              </li>
-            </ul>
-          </Surface>
+          <CodeExplanation sections={codeSections} />
         </div>
 
         {/* Logs */}

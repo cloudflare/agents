@@ -8,13 +8,75 @@ import {
 } from "@phosphor-icons/react";
 import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  LocalDevBanner,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type {
   ReceiveEmailAgent,
   ReceiveEmailState,
   ParsedEmail
 } from "./receive-email-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Handle incoming emails",
+    description:
+      "Override the onEmail method to process incoming messages. The agent receives a parsed AgentEmail object with from, to, and a getRaw() method for full MIME parsing with postal-mime.",
+    code: `import { Agent } from "agents";
+import type { AgentEmail } from "agents/email";
+import PostalMime from "postal-mime";
+
+class ReceiveEmailAgent extends Agent<Env> {
+  async onEmail(email: AgentEmail) {
+    const raw = await email.getRaw();
+    const parsed = await PostalMime.parse(raw);
+
+    this.setState({
+      ...this.state,
+      emails: [...this.state.emails, {
+        id: crypto.randomUUID(),
+        from: parsed.from?.address || email.from,
+        to: email.to,
+        subject: parsed.subject || "(No Subject)",
+        text: parsed.text,
+        timestamp: new Date().toISOString(),
+      }],
+    });
+
+    this.broadcast(JSON.stringify({ type: "new_email" }));
+  }
+}`
+  },
+  {
+    title: "Route emails with routeAgentEmail",
+    description:
+      "Use routeAgentEmail in your Worker's email handler with createAddressBasedEmailResolver. Plus-addressing (user+id@domain) automatically maps to the right agent and instance — no manual parsing needed.",
+    code: `import { routeAgentEmail } from "agents";
+import { createAddressBasedEmailResolver } from "agents/email";
+
+export default {
+  async email(message: ForwardableEmailMessage, env: Env) {
+    // "receive+demo@example.com" routes to
+    // ReceiveEmailAgent with agentId "demo"
+    const resolver = createAddressBasedEmailResolver(
+      "ReceiveEmailAgent"
+    );
+
+    await routeAgentEmail(message, env, {
+      resolver,
+      onNoRoute: async (email) => {
+        console.warn("No route for:", email.to);
+      },
+    });
+  },
+};`
+  }
+];
 
 export function ReceiveDemo() {
   const userId = useUserId();
@@ -56,7 +118,21 @@ export function ReceiveDemo() {
   return (
     <DemoWrapper
       title="Receive Emails"
-      description="Receive real emails via Cloudflare Email Routing. Emails sent to this agent are stored and displayed."
+      description={
+        <>
+          Agents can receive real emails via Cloudflare Email Routing. Override
+          the{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            onEmail
+          </code>{" "}
+          method to process incoming messages — parse them, store them in state,
+          and notify connected clients. Use plus-addressing (e.g.{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            receive+id@domain
+          </code>
+          ) to route emails to specific agent instances.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -261,6 +337,8 @@ export function ReceiveDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="500px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }
