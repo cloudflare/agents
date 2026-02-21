@@ -100,12 +100,6 @@ export class MyAgent extends SessionAgent<Env, AgentState> {
     }
   }
 
-  // Public wrapper — _buildWorkingContext is protected,
-  // but we need it from our own helper methods (?)
-  buildContext(sessionId: string, opts?: ContextBuilderOptions) {
-    return this._buildWorkingContext(sessionId, opts);
-  }
-
   private ensureSession(): string {
     let sessionId = this.state.sessionId;
     if (sessionId && this.getSession(sessionId)) return sessionId;
@@ -186,7 +180,7 @@ export class MyAgent extends SessionAgent<Env, AgentState> {
 
     // Build context from completed turns only, then add user message in-memory.
     // persistWorkingContext at the end writes user + assistant atomically.
-    const ctx = this.buildContext(sessionId, {
+    const ctx = this.buildWorkingContext(sessionId, {
       systemInstructions: [SYSTEM_PROMPT],
       limit: 100
     });

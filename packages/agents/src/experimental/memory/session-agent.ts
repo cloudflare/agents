@@ -5,14 +5,14 @@
  * Tables are created in the constructor (guaranteed to run).
  *
  * SQL-bound methods (loadEvents, appendEvents, etc.) are callable via RPC
- * from Workflows and Workers. WorkingContext helpers are protected
- * (local only) because class instances don't survive RPC serialization.
+ * from Workflows and Workers. `buildWorkingContext` is local-only — the
+ * returned class instance doesn't survive RPC serialization.
  *
  * @example Inside the Agent
  * ```ts
  * class MyAgent extends SessionAgent<Env> {
  *   async handleMessage(sessionId: string, msg: string) {
- *     const ctx = this._buildWorkingContext(sessionId, { limit: 10 });
+ *     const ctx = this.buildWorkingContext(sessionId, { limit: 10 });
  *     ctx.addMessage({ role: 'user', content: msg });
  *     // ... call LLM, accumulate messages ...
  *     this.persistWorkingContext(sessionId, ctx);
@@ -135,8 +135,15 @@ export class SessionAgent<
    * Delete a session and all its events.
    */
   deleteSession(sessionId: string): void {
-    this.sql`DELETE FROM cf_agents_events WHERE session_id = ${sessionId}`;
-    this.sql`DELETE FROM cf_agents_sessions WHERE id = ${sessionId}`;
+    this.ctx.storage.sql.exec("BEGIN");
+    try {
+      this.sql`DELETE FROM cf_agents_events WHERE session_id = ${sessionId}`;
+      this.sql`DELETE FROM cf_agents_sessions WHERE id = ${sessionId}`;
+      this.ctx.storage.sql.exec("COMMIT");
+    } catch (e) {
+      this.ctx.storage.sql.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -265,7 +272,7 @@ export class SessionAgent<
    * serialized over the RPC boundary. Workflows/Workers should use
    * `loadEvents()` via RPC + `buildWorkingContext()` pure function locally.
    */
-  protected _buildWorkingContext(
+  buildWorkingContext(
     sessionId: string,
     opts: ContextBuilderOptions = {}
   ): WorkingContext {
