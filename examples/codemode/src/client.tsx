@@ -423,9 +423,11 @@ function SettingsPanel({
                           className="text-orange-500"
                           weight="duotone"
                         />
-                        <Text size="xs" bold className="truncate flex-1">
-                          {serverId}
-                        </Text>
+                        <span className="truncate flex-1">
+                          <Text size="xs" bold>
+                            {serverId}
+                          </Text>
+                        </span>
                         <Badge variant="secondary" className="text-[10px]">
                           {tools.length} tools
                         </Badge>

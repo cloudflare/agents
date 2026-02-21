@@ -5,9 +5,7 @@ import { describe, it, expect } from "vitest";
 import { generateTypes, sanitizeToolName } from "../types";
 import { z } from "zod";
 import { fromJSONSchema } from "zod/v4";
-import { tool } from "ai";
 import type { ToolDescriptors } from "../types";
-import type { ToolSet } from "ai";
 
 describe("sanitizeToolName", () => {
   it("should replace hyphens with underscores", () => {
@@ -241,11 +239,12 @@ describe("generateTypes", () => {
     expect(result).toContain("/** Current temp */");
   });
 
-  it("should handle AI SDK tool() with Zod schema and outputSchema", () => {
-    const tools: ToolSet = {
-      getWeather: tool({
+  it("should handle Zod schemas with input and output schemas", () => {
+    // Direct ToolDescriptors with Zod schemas (what generateTypes operates on)
+    const tools: ToolDescriptors = {
+      getWeather: {
         description: "Get weather for a city",
-        parameters: z.object({
+        inputSchema: z.object({
           city: z.string().describe("City name"),
           units: z.enum(["celsius", "fahrenheit"]).optional()
         }),
@@ -260,14 +259,8 @@ describe("generateTypes", () => {
               low: z.number()
             })
           )
-        }),
-        execute: async () => ({
-          temperature: 20,
-          humidity: 65,
-          conditions: "sunny",
-          forecast: []
         })
-      })
+      }
     };
 
     const result = generateTypes(tools);

@@ -14,7 +14,6 @@ import type {
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { type RetryOptions, tryN } from "../retries";
 import type { ToolSet } from "ai";
-import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
 import { fromJSONSchema } from "zod/v4";
 import { Emitter, type Event, DisposableStore } from "../core/events";
@@ -1042,9 +1041,13 @@ export class MCPClientManager {
               }
               return result;
             },
-            inputSchema: fromJSONSchema(tool.inputSchema as JSONSchema7),
+            inputSchema: fromJSONSchema(
+              tool.inputSchema as Parameters<typeof fromJSONSchema>[0]
+            ),
             outputSchema: tool.outputSchema
-              ? fromJSONSchema(tool.outputSchema as JSONSchema7)
+              ? fromJSONSchema(
+                  tool.outputSchema as Parameters<typeof fromJSONSchema>[0]
+                )
               : undefined
           }
         ];
