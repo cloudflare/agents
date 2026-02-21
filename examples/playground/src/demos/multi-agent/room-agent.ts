@@ -1,4 +1,10 @@
-import { Agent, callable, getAgentByName, type Connection } from "agents";
+import {
+  callable,
+  getAgentByName,
+  type Connection,
+  type ConnectionContext
+} from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 import type { LobbyAgent } from "./lobby-agent";
 
 export interface RoomMember {
@@ -31,11 +37,13 @@ export class RoomAgent extends Agent<Env, RoomState> {
   // Track WebSocket connections to user IDs
   private connectionToUser: Map<string, string> = new Map();
 
-  onConnect(connection: Connection) {
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    super.onConnect(connection, ctx);
     console.log(`Connection to room: ${connection.id}`);
   }
 
   onClose(connection: Connection) {
+    super.onClose(connection);
     // Auto-leave when connection closes
     const odesc = this.connectionToUser.get(connection.id);
     if (odesc) {
