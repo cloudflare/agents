@@ -346,7 +346,9 @@ addToolOutput({
 
 This sends a `tool_result` to the LLM with your custom error text, so it can respond appropriately (e.g. suggest an alternative, ask clarifying questions). The `addToolOutput` function also works for tools in `approval-requested` or `approval-responded` states, not just `input-available`.
 
-Both `addToolApprovalResponse` (with `approved: false`) and `addToolOutput` (with `state: "output-error"`) auto-continue the conversation when `autoContinueAfterToolResult` is enabled (the default). The LLM sees the denial and can respond naturally — for example, suggesting an alternative or asking a follow-up question.
+`addToolApprovalResponse` (with `approved: false`) auto-continues the conversation when `autoContinueAfterToolResult` is enabled (the default), so the LLM sees the denial and can respond naturally.
+
+`addToolOutput` with `state: "output-error"` does **not** auto-continue — it gives you full control over what happens next. If you want the LLM to respond to the error, call `sendMessage()` afterward.
 
 See the complete example: [guides/human-in-the-loop/](../guides/human-in-the-loop/)
 
