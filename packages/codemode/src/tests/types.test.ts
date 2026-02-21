@@ -4,7 +4,10 @@
 import { describe, it, expect } from "vitest";
 import { generateTypes, sanitizeToolName } from "../types";
 import { z } from "zod";
+import { fromJSONSchema } from "zod/v4";
+import { tool } from "ai";
 import type { ToolDescriptors } from "../types";
+import type { ToolSet } from "ai";
 
 describe("sanitizeToolName", () => {
   it("should replace hyphens with underscores", () => {
@@ -167,5 +170,107 @@ describe("generateTypes", () => {
     expect(result).toContain("get_weather");
     // toCamelCase("get_weather") → "GetWeather"
     expect(result).toContain("GetWeatherInput");
+  });
+
+  it("should handle fromJSONSchema schemas (MCP tools)", () => {
+    const jsonSchema = {
+      type: "object" as const,
+      properties: {
+        query: { type: "string" as const, description: "Search query" }
+      },
+      required: ["query"]
+    };
+
+    const tools: ToolDescriptors = {
+      search: {
+        description: "Search documents",
+        inputSchema: fromJSONSchema(jsonSchema)
+      }
+    };
+
+    const result = generateTypes(tools);
+    expect(result).toBe(`type SearchInput = {
+    /** Search query */
+    query: string;
+    [x: string]: unknown;
+};
+type SearchOutput = unknown
+
+declare const codemode: {
+\t/**
+\t * Search documents
+\t * @param input.query - Search query
+\t */
+\tsearch: (input: SearchInput) => Promise<SearchOutput>;
+}`);
+  });
+
+  it("should handle AI SDK tool() with Zod schema", () => {
+    const tools: ToolSet = {
+      getWeather: tool({
+        description: "Get weather",
+        parameters: z.object({
+          city: z.string()
+        }),
+        execute: async () => ({ temp: 20 })
+      })
+    };
+
+    const result = generateTypes(tools);
+    expect(result).toBe(`type GetWeatherInput = {
+    city: string;
+};
+type GetWeatherOutput = unknown
+
+declare const codemode: {
+\t/**
+\t * Get weather
+\t */
+\tgetWeather: (input: GetWeatherInput) => Promise<GetWeatherOutput>;
+}`);
+  });
+
+  it("should handle mixed tools: Zod schemas and fromJSONSchema", () => {
+    const jsonSchema = {
+      type: "object" as const,
+      properties: {
+        url: { type: "string" as const }
+      },
+      required: ["url"]
+    };
+
+    const tools: ToolDescriptors = {
+      zodTool: {
+        description: "Zod tool",
+        inputSchema: z.object({ name: z.string() })
+      },
+      mcpTool: {
+        description: "MCP tool",
+        inputSchema: fromJSONSchema(jsonSchema)
+      }
+    };
+
+    const result = generateTypes(tools);
+    expect(result).toBe(`type ZodToolInput = {
+    name: string;
+};
+type ZodToolOutput = unknown
+type McpToolInput = {
+    url: string;
+    [x: string]: unknown;
+};
+type McpToolOutput = unknown
+
+declare const codemode: {
+\t/**
+\t * Zod tool
+\t */
+\tzodTool: (input: ZodToolInput) => Promise<ZodToolOutput>;
+
+\t/**
+\t * MCP tool
+\t */
+\tmcpTool: (input: McpToolInput) => Promise<McpToolOutput>;
+}`);
   });
 });

@@ -6,6 +6,9 @@
   "assets": {
     "directory": "public"
   },
+  "vars": {
+    "HOST": "http://localhost:5173"
+  },
   "durable_objects": {
     "bindings": [
       {

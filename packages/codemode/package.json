@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "acorn": "^8.16.0",
+    "json-schema-to-typescript": "^15.0.4",
     "zod-to-ts": "^2.0.0"
   },
   "devDependencies": {
