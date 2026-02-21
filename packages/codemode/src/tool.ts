@@ -1,5 +1,5 @@
 import { tool, type Tool } from "ai";
-import { z } from "zod";
+import { z, type ZodType } from "zod";
 import type { ToolSet } from "ai";
 import * as acorn from "acorn";
 import { generateTypes, sanitizeToolName, type ToolDescriptors } from "./types";
@@ -97,7 +97,9 @@ export function createCodeTool(
     description,
     inputSchema: codeSchema,
     execute: async ({ code }) => {
-      // Extract execute functions from tools, keyed by name
+      // Extract execute functions from tools, keyed by name.
+      // Wrap each with its Zod schema so arguments from the sandbox
+      // are validated before reaching the tool function.
       const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
 
       for (const [name, t] of Object.entries(tools)) {
@@ -106,7 +108,16 @@ export function createCodeTool(
             ? (t.execute as (args: unknown) => Promise<unknown>)
             : undefined;
         if (execute) {
-          fns[sanitizeToolName(name)] = execute;
+          const schema: ZodType | undefined =
+            "inputSchema" in t
+              ? (t.inputSchema as ZodType)
+              : "parameters" in t
+                ? ((t as Record<string, unknown>).parameters as ZodType)
+                : undefined;
+
+          fns[sanitizeToolName(name)] = schema
+            ? async (args: unknown) => execute(schema.parse(args))
+            : execute;
         }
       }
 
