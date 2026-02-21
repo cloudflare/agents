@@ -14,8 +14,8 @@ import type {
 import { CfWorkerJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/cfworker-provider.js";
 import { type RetryOptions, tryN } from "../retries";
 import type { ToolSet } from "ai";
+import type { JSONSchema7 } from "json-schema";
 import { nanoid } from "nanoid";
-import { fromJSONSchema } from "zod/v4";
 import { Emitter, type Event, DisposableStore } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import {
@@ -125,12 +125,6 @@ export type MCPClientManagerOptions = {
 export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   private _didWarnAboutUnstableGetAITools = false;
-  private _didWarnAboutEnsureJsonSchema = false;
-  /**
-   * @deprecated This property is no longer used internally. getAITools() now uses
-   * Zod's fromJSONSchema directly. Kept for backwards compatibility.
-   */
-  jsonSchema: typeof import("ai").jsonSchema | undefined;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
   private _storage: DurableObjectStorage;
@@ -238,6 +232,8 @@ export class MCPClientManager {
     this._onServerStateChanged.fire();
     return { serverId, authSuccess: false, authError: error };
   }
+
+  jsonSchema: typeof import("ai").jsonSchema | undefined;
 
   /**
    * Create an auth provider for a server
@@ -426,6 +422,16 @@ export class MCPClientManager {
     authUrl?: string;
     clientId?: string;
   }> {
+    /* Late initialization of jsonSchemaFn */
+    /**
+     * We need to delay loading ai sdk, because putting it in module scope is
+     * causing issues with startup time.
+     * The only place it's used is in getAITools, which only matters after
+     * .connect() is called on at least one server.
+     * So it's safe to delay loading it until .connect() is called.
+     */
+    await this.ensureJsonSchema();
+
     const id = options.reconnect?.id ?? nanoid(8);
 
     if (options.transport?.authProvider) {
@@ -993,17 +999,17 @@ export class MCPClientManager {
   }
 
   /**
-   * @deprecated No longer needed. getAITools() now uses Zod's fromJSONSchema directly.
-   * This method will be removed in the next major version.
+   * Lazy-loads the jsonSchema function from the AI SDK.
+   *
+   * This defers importing the "ai" package until it's actually needed, which helps reduce
+   * initial bundle size and startup time. The jsonSchema function is required for converting
+   * MCP tools into AI SDK tool definitions via getAITools().
+   *
+   * @internal This method is for internal use only. It's automatically called before operations
+   * that need jsonSchema (like getAITools() or OAuth flows). External consumers should not need
+   * to call this directly.
    */
   async ensureJsonSchema() {
-    if (!this._didWarnAboutEnsureJsonSchema) {
-      this._didWarnAboutEnsureJsonSchema = true;
-      console.warn(
-        "ensureJsonSchema is deprecated and no longer needed. getAITools() now uses Zod's fromJSONSchema directly. This method will be removed in the next major version."
-      );
-    }
-    // Still populate jsonSchema property for backwards compatibility
     if (!this.jsonSchema) {
       const { jsonSchema } = await import("ai");
       this.jsonSchema = jsonSchema;
@@ -1014,6 +1020,10 @@ export class MCPClientManager {
    * @returns a set of tools that you can use with the AI SDK
    */
   getAITools(): ToolSet {
+    if (!this.jsonSchema) {
+      throw new Error("jsonSchema not initialized.");
+    }
+
     // Warn if tools are being read from non-ready connections
     for (const [id, conn] of Object.entries(this.mcpConnections)) {
       if (
@@ -1051,13 +1061,9 @@ export class MCPClientManager {
               }
               return result;
             },
-            inputSchema: fromJSONSchema(
-              tool.inputSchema as Parameters<typeof fromJSONSchema>[0]
-            ),
+            inputSchema: this.jsonSchema!(tool.inputSchema as JSONSchema7),
             outputSchema: tool.outputSchema
-              ? fromJSONSchema(
-                  tool.outputSchema as Parameters<typeof fromJSONSchema>[0]
-                )
+              ? this.jsonSchema!(tool.outputSchema as JSONSchema7)
               : undefined
           }
         ];

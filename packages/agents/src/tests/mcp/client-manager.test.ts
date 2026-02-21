@@ -1925,48 +1925,24 @@ describe("MCPClientManager OAuth Integration", () => {
       );
     });
 
-    it("should return tools with _zod property on inputSchema for codemode type generation", async () => {
-      const serverId = "zod-schema-server";
+    it("should throw error if jsonSchema not initialized", () => {
+      // Create a new manager without initializing jsonSchema
+      const mockStorage = {
+        sql: {
+          exec: <T extends Record<string, SqlStorageValue>>() =>
+            ([] as T[])[Symbol.iterator]()
+        },
+        get: async () => undefined,
+        put: async () => {}
+      } as unknown as DurableObjectStorage;
 
-      // Register server
-      manager.registerServer(serverId, {
-        url: "http://test.com/mcp",
-        name: "Zod Schema Test Server",
-        callbackUrl: "http://localhost:3000/callback",
-        client: {},
-        transport: { type: "auto" }
+      const newManager = new MCPClientManager("test-client", "1.0.0", {
+        storage: mockStorage
       });
 
-      const conn = manager.mcpConnections[serverId];
-      conn.init = vi.fn().mockImplementation(async () => {
-        conn.connectionState = "ready";
-        conn.tools = [
-          {
-            name: "test_tool",
-            description: "Tool for testing Zod schema",
-            inputSchema: {
-              type: "object",
-              properties: {
-                name: { type: "string", description: "The name parameter" },
-                count: { type: "number", description: "The count parameter" }
-              },
-              required: ["name"]
-            }
-          }
-        ];
-      });
-
-      await manager.connectToServer(serverId);
-
-      const tools = manager.getAITools();
-      const toolKey = `tool_${serverId.replace(/-/g, "")}_test_tool`;
-
-      expect(tools[toolKey]).toBeDefined();
-      // Verify that the inputSchema has the _zod property (Zod v4 schema marker)
-      // This is required for codemode type generation
-      expect(
-        (tools[toolKey].inputSchema as { _zod?: unknown })._zod
-      ).toBeDefined();
+      expect(() => newManager.getAITools()).toThrow(
+        "jsonSchema not initialized."
+      );
     });
   });
 

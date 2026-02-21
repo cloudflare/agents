@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import { generateTypes, sanitizeToolName } from "../types";
 import { z } from "zod";
 import { fromJSONSchema } from "zod/v4";
+import { jsonSchema } from "ai";
 import type { ToolDescriptors } from "../types";
 
 describe("sanitizeToolName", () => {
@@ -287,5 +288,86 @@ describe("generateTypes", () => {
     expect(result).toContain("/** City name */");
     expect(result).toContain("/** Current temperature */");
     expect(result).toContain("@param input.city - City name");
+  });
+
+  it("should handle AI SDK jsonSchema wrapper (MCP tools)", () => {
+    // This is what MCP tools look like when using the AI SDK jsonSchema wrapper
+    const inputJsonSchema = {
+      type: "object" as const,
+      properties: {
+        query: { type: "string" as const, description: "Search query" },
+        limit: { type: "number" as const, description: "Max results" }
+      },
+      required: ["query"]
+    };
+
+    const outputJsonSchema = {
+      type: "object" as const,
+      properties: {
+        results: {
+          type: "array" as const,
+          items: {
+            type: "object" as const,
+            properties: {
+              title: { type: "string" as const },
+              url: { type: "string" as const }
+            }
+          }
+        },
+        total: { type: "number" as const }
+      }
+    };
+
+    // Use AI SDK jsonSchema wrapper (what MCP client returns)
+    const tools = {
+      search: {
+        description: "Search the web",
+        inputSchema: jsonSchema(inputJsonSchema),
+        outputSchema: jsonSchema(outputJsonSchema)
+      }
+    };
+
+    const result = generateTypes(tools as unknown as ToolDescriptors);
+
+    // Input schema types
+    expect(result).toContain("type SearchInput");
+    expect(result).toContain("query: string");
+    expect(result).toContain("limit?: number");
+
+    // Output schema types (not unknown)
+    expect(result).toContain("type SearchOutput");
+    expect(result).not.toContain("SearchOutput = unknown");
+    expect(result).toContain("results?:");
+    expect(result).toContain("title?: string");
+    expect(result).toContain("url?: string");
+    expect(result).toContain("total?: number");
+
+    // JSDoc from JSON Schema descriptions
+    expect(result).toContain("@param input.query - Search query");
+    expect(result).toContain("@param input.limit - Max results");
+  });
+
+  it("should handle raw JSON Schema objects", () => {
+    // Raw JSON Schema without any wrapper
+    const tools = {
+      getData: {
+        description: "Get data",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            id: { type: "string" as const, description: "Resource ID" },
+            format: { type: "string" as const, enum: ["json", "xml"] }
+          },
+          required: ["id"]
+        }
+      }
+    };
+
+    const result = generateTypes(tools as unknown as ToolDescriptors);
+
+    expect(result).toContain("type GetDataInput");
+    expect(result).toContain("id: string");
+    expect(result).toContain("format?:");
+    expect(result).toContain("@param input.id - Resource ID");
   });
 });
