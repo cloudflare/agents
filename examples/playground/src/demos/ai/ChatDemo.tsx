@@ -28,8 +28,46 @@ import {
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { DemoWrapper } from "../../layout";
-import { ConnectionStatus } from "../../components";
+import {
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useUserId } from "../../hooks";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Create an AI chat agent",
+    description:
+      "Extend AIChatAgent to get built-in message history, streaming, and tool support. Override onChatMessage to handle incoming messages with any AI provider.",
+    code: `import { AIChatAgent } from "@cloudflare/ai-chat";
+
+class ChatAgent extends AIChatAgent<Env> {
+  async onChatMessage(onFinish) {
+    const result = streamText({
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      messages: this.messages,
+      onFinish,
+    });
+    return result.toDataStreamResponse();
+  }
+}`
+  },
+  {
+    title: "Connect with useAgentChat",
+    description:
+      "The useAgentChat hook gives you a complete chat interface — messages array, input handling, submit function, and streaming status. It manages the full lifecycle over WebSocket.",
+    code: `import { useAgent } from "agents/react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
+
+const agent = useAgent({ agent: "chat-agent", name: "my-chat" });
+
+const { messages, input, setInput, handleSubmit, isLoading } =
+  useAgentChat(agent, {
+    onError: (err) => console.error(err),
+  });`
+  }
+];
 
 function ReasoningTrace({
   text,
@@ -111,7 +149,7 @@ function ChatUI() {
     "connected" | "connecting" | "disconnected"
   >("connecting");
   const [input, setInput] = useState("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
     agent: "ChatAgent",
@@ -140,7 +178,8 @@ function ChatUI() {
   const isConnected = connectionStatus === "connected";
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   const send = useCallback(() => {
@@ -153,12 +192,30 @@ function ChatUI() {
   return (
     <DemoWrapper
       title="AI Chat"
-      description="Chat with an AI agent powered by Workers AI. Messages persist across reconnections."
+      description={
+        <>
+          Extend{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            AIChatAgent
+          </code>{" "}
+          to get a full chat backend with built-in message history, streaming,
+          and tool support. On the client,{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            useAgentChat
+          </code>{" "}
+          gives you messages, input handling, and streaming status out of the
+          box. Messages persist in the agent's Durable Object, so they survive
+          page refreshes and reconnections. Try asking about the weather.
+        </>
+      }
       statusIndicator={<ConnectionStatus status={connectionStatus} />}
     >
       <div className="flex flex-col h-full max-w-3xl">
         {/* Messages area */}
-        <div className="flex-1 overflow-y-auto mb-4 space-y-4">
+        <div
+          ref={messagesContainerRef}
+          className="flex-1 overflow-y-auto mb-4 space-y-4"
+        >
           {messages.length === 0 && (
             <Empty
               icon={<ChatCircleDotsIcon size={32} />}
@@ -289,7 +346,7 @@ function ChatUI() {
             );
           })}
 
-          <div ref={messagesEndRef} />
+          <div />
         </div>
 
         {/* Input area */}
@@ -342,6 +399,7 @@ function ChatUI() {
           </form>
         </div>
       </div>
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

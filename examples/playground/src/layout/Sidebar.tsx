@@ -24,7 +24,6 @@ import {
   StackIcon,
   GitMergeIcon,
   ShieldIcon,
-  PaletteIcon,
   ArrowsClockwiseIcon,
   XIcon
 } from "@phosphor-icons/react";
@@ -284,28 +283,6 @@ function ModeToggle() {
   );
 }
 
-function ColorThemeToggle() {
-  const { colorTheme, setColorTheme, colorThemes } = useTheme();
-
-  const cycleColorTheme = () => {
-    const idx = colorThemes.indexOf(colorTheme);
-    const next = colorThemes[(idx + 1) % colorThemes.length];
-    setColorTheme(next);
-  };
-
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      icon={<PaletteIcon size={16} />}
-      onClick={cycleColorTheme}
-      title={`Color theme: ${colorTheme}`}
-    >
-      <span className="text-xs capitalize">{colorTheme}</span>
-    </Button>
-  );
-}
-
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
@@ -336,7 +313,6 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
       <div className="p-4 border-t border-kumo-line space-y-2">
         <ModeToggle />
-        <ColorThemeToggle />
         <div className="text-xs text-kumo-subtle">
           <Link href="https://github.com/cloudflare/agents" variant="inline">
             GitHub

@@ -1,4 +1,4 @@
-import { Agent } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export interface ChildState {
   counter: number;

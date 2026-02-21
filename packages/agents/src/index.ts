@@ -3787,8 +3787,12 @@ export class Agent<
       resolvedOptions = options;
     }
 
-    // Enforce callbackPath when sendIdentityOnConnect is false
-    if (!this._resolvedOptions.sendIdentityOnConnect && !resolvedCallbackPath) {
+    // Enforce callbackPath when sendIdentityOnConnect is false and callbackHost is provided
+    if (
+      !this._resolvedOptions.sendIdentityOnConnect &&
+      resolvedCallbackHost &&
+      !resolvedCallbackPath
+    ) {
       throw new Error(
         "callbackPath is required in addMcpServer options when sendIdentityOnConnect is false — " +
           "the default callback URL would expose the instance name. " +
@@ -3796,25 +3800,23 @@ export class Agent<
       );
     }
 
-    // If callbackHost is not provided, derive it from the current request
+    // Try to derive callbackHost from the current request if not explicitly provided
     if (!resolvedCallbackHost) {
       const { request } = getCurrentAgent();
-      if (!request) {
-        throw new Error(
-          "callbackHost is required when not called within a request context"
-        );
+      if (request) {
+        const requestUrl = new URL(request.url);
+        resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
       }
-
-      // Extract the origin from the request
-      const requestUrl = new URL(request.url);
-      resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
     }
 
-    // Build the callback URL: use callbackPath if provided, otherwise default to /agents/{class}/{name}/callback
-    const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
-    const callbackUrl = resolvedCallbackPath
-      ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
-      : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    // Build the callback URL if we have a host (needed for OAuth, optional for non-OAuth servers)
+    let callbackUrl: string | undefined;
+    if (resolvedCallbackHost) {
+      const normalizedHost = resolvedCallbackHost.replace(/\/$/, "");
+      callbackUrl = resolvedCallbackPath
+        ? `${normalizedHost}/${resolvedCallbackPath.replace(/^\//, "")}`
+        : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
+    }
 
     // TODO: make zod/ai sdk more performant and remove this
     // Late initialization of jsonSchemaFn (needed for getAITools)
@@ -3822,8 +3824,14 @@ export class Agent<
 
     const id = nanoid(8);
 
-    const authProvider = this.createMcpOAuthProvider(callbackUrl);
-    authProvider.serverId = id;
+    // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
+    let authProvider:
+      | ReturnType<typeof this.createMcpOAuthProvider>
+      | undefined;
+    if (callbackUrl) {
+      authProvider = this.createMcpOAuthProvider(callbackUrl);
+      authProvider.serverId = id;
+    }
 
     // Use the transport type specified in options, or default to "auto"
     const transportType: TransportType =
@@ -3871,6 +3879,12 @@ export class Agent<
     }
 
     if (result.state === MCPConnectionState.AUTHENTICATING) {
+      if (!callbackUrl) {
+        throw new Error(
+          "This MCP server requires OAuth authentication. " +
+            "Provide callbackHost in addMcpServer options to enable the OAuth flow."
+        );
+      }
       return { id, state: result.state, authUrl: result.authUrl };
     }
 

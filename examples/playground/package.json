@@ -18,6 +18,7 @@
     "nanoid": "^5.1.6",
     "postal-mime": "^2.7.3",
     "react-router-dom": "^7.13.0",
+    "shiki": "^3.22.0",
     "streamdown": "^2.2.0"
   },
   "devDependencies": {

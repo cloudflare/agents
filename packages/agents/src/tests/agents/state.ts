@@ -302,4 +302,20 @@ export class TestNoIdentityAgent extends Agent<
       };
     }
   }
+
+  // Test method: calls addMcpServer without callbackHost — should skip callbackPath enforcement
+  async testAddMcpServerWithoutCallbackHost(): Promise<{
+    threw: boolean;
+    message: string;
+  }> {
+    try {
+      await this.addMcpServer("test-server", "https://mcp.example.com");
+      return { threw: false, message: "" };
+    } catch (err) {
+      return {
+        threw: true,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
 }

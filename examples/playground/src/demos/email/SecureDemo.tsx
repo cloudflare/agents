@@ -17,7 +17,13 @@ import {
   Text
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  LocalDevBanner,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type {
   SecureEmailAgent,
@@ -27,6 +33,71 @@ import type {
 } from "./secure-email-agent";
 
 type TabType = "inbox" | "outbox";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Send signed replies with replyToEmail",
+    description:
+      "Use the built-in replyToEmail method to send HMAC-signed replies. The SDK attaches X-Agent-Name, X-Agent-ID, X-Agent-Sig, and X-Agent-Sig-Ts headers automatically. When the recipient replies, the signature is verified and routed back to the same agent instance.",
+    code: `import { Agent } from "agents";
+import type { AgentEmail } from "agents/email";
+import { isAutoReplyEmail } from "agents/email";
+import PostalMime from "postal-mime";
+
+class SecureEmailAgent extends Agent<Env> {
+  async onEmail(email: AgentEmail) {
+    const raw = await email.getRaw();
+    const parsed = await PostalMime.parse(raw);
+
+    // email._secureRouted is true when the SDK
+    // verified the HMAC signature on the reply
+    if (email._secureRouted) {
+      console.log("Verified reply from:", email.from);
+    }
+
+    // Avoid infinite auto-reply loops
+    if (!isAutoReplyEmail(parsed.headers)) {
+      await this.replyToEmail(email, {
+        fromName: "Secure Agent",
+        body: "Thanks for your message!",
+        secret: this.env.EMAIL_SECRET,
+      });
+    }
+  }
+}`
+  },
+  {
+    title: "Route with secure reply verification",
+    description:
+      "Combine createSecureReplyEmailResolver with createAddressBasedEmailResolver in routeAgentEmail. Secure replies are checked first — if the HMAC signature is valid, the email routes directly to the originating agent instance. Otherwise, address-based routing takes over.",
+    code: `import { routeAgentEmail } from "agents";
+import {
+  createSecureReplyEmailResolver,
+  createAddressBasedEmailResolver,
+} from "agents/email";
+
+export default {
+  async email(message: ForwardableEmailMessage, env: Env) {
+    const secureResolver = createSecureReplyEmailResolver(
+      env.EMAIL_SECRET
+    );
+    const addressResolver = createAddressBasedEmailResolver(
+      "SecureEmailAgent"
+    );
+
+    await routeAgentEmail(message, env, {
+      resolver: async (email, env) => {
+        // Signed replies get priority
+        const reply = await secureResolver(email, env);
+        if (reply) return reply;
+        // Fall back to address-based routing
+        return addressResolver(email, env);
+      },
+    });
+  },
+};`
+  }
+];
 
 export function SecureDemo() {
   const userId = useUserId();
@@ -93,7 +164,18 @@ export function SecureDemo() {
   return (
     <DemoWrapper
       title="Secure Email Replies"
-      description="Receive emails and send signed replies. Replies include cryptographic headers for secure routing back to this agent."
+      description={
+        <>
+          When replying to emails, agents can include HMAC-signed headers that
+          identify the originating instance. When the recipient replies back,
+          the signature is verified and the email routes to the correct agent
+          automatically. Tokens use the{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            EMAIL_SECRET
+          </code>{" "}
+          environment variable for signing.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -435,6 +517,8 @@ export function SecureDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="500px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

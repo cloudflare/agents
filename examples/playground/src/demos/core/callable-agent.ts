@@ -1,4 +1,5 @@
-import { Agent, callable } from "agents";
+import { callable } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export class CallableAgent extends Agent<Env, {}> {
   @callable({ description: "Add two numbers" })
