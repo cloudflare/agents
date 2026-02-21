@@ -126,6 +126,11 @@ export class MCPClientManager {
   public mcpConnections: Record<string, MCPClientConnection> = {};
   private _didWarnAboutUnstableGetAITools = false;
   private _didWarnAboutEnsureJsonSchema = false;
+  /**
+   * @deprecated This property is no longer used internally. getAITools() now uses
+   * Zod's fromJSONSchema directly. Kept for backwards compatibility.
+   */
+  jsonSchema: typeof import("ai").jsonSchema | undefined;
   private _oauthCallbackConfig?: MCPClientOAuthCallbackConfig;
   private _connectionDisposables = new Map<string, DisposableStore>();
   private _storage: DurableObjectStorage;
@@ -997,6 +1002,11 @@ export class MCPClientManager {
       console.warn(
         "ensureJsonSchema is deprecated and no longer needed. getAITools() now uses Zod's fromJSONSchema directly. This method will be removed in the next major version."
       );
+    }
+    // Still populate jsonSchema property for backwards compatibility
+    if (!this.jsonSchema) {
+      const { jsonSchema } = await import("ai");
+      this.jsonSchema = jsonSchema;
     }
   }
 
