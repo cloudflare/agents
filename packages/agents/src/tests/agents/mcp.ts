@@ -333,6 +333,11 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
     return this.lastResolvedArgs!;
   }
 
+  async testNoOptions(name: string, url: string) {
+    await this.addMcpServer(name, url);
+    return this.lastResolvedArgs!;
+  }
+
   async testLegacyApiWithOptions(
     name: string,
     url: string,
