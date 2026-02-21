@@ -17,7 +17,13 @@ import {
   Text
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  LocalDevBanner,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type {
   SecureEmailAgent,
@@ -27,6 +33,55 @@ import type {
 } from "./secure-email-agent";
 
 type TabType = "inbox" | "outbox";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Send signed email replies",
+    description:
+      "When replying to an email, include HMAC-signed headers that identify the agent instance. When the recipient replies back, the signature is verified and the email routes to the correct agent.",
+    code: `class SecureEmailAgent extends Agent<Env> {
+  async onEmail(from: string, to: string, rawEmail: ReadableStream) {
+    // Parse the incoming email
+    const email = await new PostalMime().parse(rawEmail);
+
+    // Check if this is a reply with a valid signature
+    if (email.headers["x-agent-sig"]) {
+      const isValid = await this.verifySignature(email.headers);
+      if (isValid) {
+        // This is a verified reply to our earlier message
+      }
+    }
+
+    // Send a signed reply
+    if (this.state.autoReplyEnabled) {
+      await this.sendSignedReply(from, email);
+    }
+  }
+}`
+  },
+  {
+    title: "HMAC signature headers",
+    description:
+      "The reply includes four custom headers: X-Agent-Name (agent type), X-Agent-ID (instance name), X-Agent-Sig (HMAC-SHA256), and X-Agent-Sig-Ts (timestamp). The secret comes from the EMAIL_SECRET environment variable.",
+    code: `  async sendSignedReply(to: string, original: Email) {
+    const timestamp = Date.now().toString();
+    const payload = \`\${this.name}:\${timestamp}\`;
+    const signature = await hmacSign(payload, this.env.EMAIL_SECRET);
+
+    await sendEmail({
+      to,
+      subject: \`Re: \${original.subject}\`,
+      headers: {
+        "X-Agent-Name": "secure-email-agent",
+        "X-Agent-ID": this.name,
+        "X-Agent-Sig": signature,
+        "X-Agent-Sig-Ts": timestamp,
+      },
+      body: "Thanks for your message!",
+    });
+  }`
+  }
+];
 
 export function SecureDemo() {
   const userId = useUserId();
@@ -93,7 +148,18 @@ export function SecureDemo() {
   return (
     <DemoWrapper
       title="Secure Email Replies"
-      description="Receive emails and send signed replies. Replies include cryptographic headers for secure routing back to this agent."
+      description={
+        <>
+          When replying to emails, agents can include HMAC-signed headers that
+          identify the originating instance. When the recipient replies back,
+          the signature is verified and the email routes to the correct agent
+          automatically. Tokens use the{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            EMAIL_SECRET
+          </code>{" "}
+          environment variable for signing.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -435,6 +501,8 @@ export function SecureDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="500px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

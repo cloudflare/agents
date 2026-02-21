@@ -25,6 +25,14 @@ export { SupervisorAgent } from "./demos/multi-agent/supervisor-agent";
 export { ChildAgent } from "./demos/multi-agent/child-agent";
 export { LobbyAgent } from "./demos/multi-agent/lobby-agent";
 export { RoomAgent } from "./demos/multi-agent/room-agent";
+export { ManagerAgent } from "./demos/multi-agent/manager-agent";
+export { FanoutWorkerAgent } from "./demos/multi-agent/fanout-worker-agent";
+export { PipelineOrchestratorAgent } from "./demos/multi-agent/pipeline-agent";
+export {
+  ValidatorStageAgent,
+  TransformStageAgent,
+  EnrichStageAgent
+} from "./demos/multi-agent/stage-agents";
 
 // Workflow demos
 export { BasicWorkflowAgent } from "./demos/workflow/basic-workflow-agent";

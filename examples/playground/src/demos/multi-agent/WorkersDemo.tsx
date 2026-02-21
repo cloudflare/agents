@@ -1,178 +1,250 @@
-import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
+import { useAgent } from "agents/react";
+import { useState } from "react";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
+import { useLogs, useUserId } from "../../hooks";
+import type { ManagerAgent, ManagerState } from "./manager-agent";
+import type { WorkerResult } from "./fanout-worker-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Fan out work to parallel agents",
+    description:
+      "The manager splits work into chunks and spawns worker agents using getAgentByName(). Each worker processes its chunk concurrently as a separate Durable Object, and results are aggregated with Promise.all().",
+    code: `import { Agent, callable, getAgentByName } from "agents";
+
+class ManagerAgent extends Agent<Env> {
+  @callable()
+  async processItems(items: string[], workerCount: number) {
+    const chunkSize = Math.ceil(items.length / workerCount);
+    const chunks = [];
+    for (let i = 0; i < items.length; i += chunkSize) {
+      chunks.push(items.slice(i, i + chunkSize));
+    }
+
+    const results = await Promise.all(
+      chunks.map(async (chunk, i) => {
+        const worker = await getAgentByName(
+          this.env.FanoutWorkerAgent,
+          \`worker-\${i}\`
+        );
+        return worker.processChunk(\`worker-\${i}\`, chunk);
+      })
+    );
+
+    return results;
+  }
+}`
+  },
+  {
+    title: "Worker agents process independently",
+    description:
+      "Each worker is a separate Durable Object with its own isolated execution. Workers do not need @callable — the manager calls them directly via Durable Object RPC.",
+    code: `class FanoutWorkerAgent extends Agent<Env> {
+  async processChunk(workerId: string, items: string[]) {
+    const processed = items.map(item => {
+      return item.toUpperCase();
+    });
+    return { workerId, items, processed };
+  }
+}`
+  }
+];
+
+const PRESETS = [
+  "apple, banana, cherry, date, elderberry, fig, grape, honeydew",
+  "react, vue, svelte, angular, solid, preact, lit, qwik",
+  "paris, london, tokyo, new york, sydney, berlin, rome, cairo, mumbai, toronto, seoul, lisbon"
+];
 
 export function WorkersDemo() {
+  const userId = useUserId();
+  const { logs, addLog, clearLogs } = useLogs();
+  const [items, setItems] = useState(PRESETS[0]);
+  const [workerCount, setWorkerCount] = useState("3");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [lastRun, setLastRun] = useState<ManagerState["lastRun"]>(null);
+
+  const agent = useAgent<ManagerAgent, ManagerState>({
+    agent: "manager-agent",
+    name: `workers-demo-${userId}`,
+    onOpen: () => addLog("info", "connected"),
+    onClose: () => addLog("info", "disconnected"),
+    onError: () => addLog("error", "error", "Connection error"),
+    onStateUpdate: (newState) => {
+      if (newState?.lastRun) setLastRun(newState.lastRun);
+    }
+  });
+
+  const handleProcess = async () => {
+    const parsed = items
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (parsed.length === 0) return;
+
+    setIsProcessing(true);
+    addLog("out", "processItems", {
+      items: parsed.length,
+      workers: Number(workerCount)
+    });
+
+    try {
+      const result = await agent.call("processItems", [
+        parsed,
+        Number(workerCount)
+      ]);
+      addLog("in", "result", {
+        workers: (result as ManagerState["lastRun"])?.workerCount,
+        totalMs: (result as ManagerState["lastRun"])?.totalDuration
+      });
+      setLastRun(result as ManagerState["lastRun"]);
+    } catch (e) {
+      addLog("error", "error", e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
   return (
     <DemoWrapper
       title="Workers Pattern"
-      description="Fan-out parallel processing with a manager agent delegating to multiple worker agents."
+      description={
+        <>
+          A manager agent splits work into chunks and distributes them across
+          multiple worker agents using{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            getAgentByName()
+          </code>
+          . Workers process their chunks concurrently as separate Durable
+          Objects, and the manager aggregates results with{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            Promise.all()
+          </code>
+          . Enter some items below and fan them out.
+        </>
+      }
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
-      <div className="max-w-3xl mx-auto space-y-8">
-        {/* Diagram */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">Architecture</Text>
-          </div>
-          <div className="flex flex-col items-center">
-            {/* Manager */}
-            <div className="bg-kumo-contrast text-kumo-inverse px-6 py-3 rounded-lg font-medium">
-              ManagerAgent
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Controls */}
+        <div className="space-y-6">
+          {/* Input */}
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Items to Process</Text>
             </div>
-
-            {/* Lines */}
-            <div className="flex items-center gap-8 my-4">
-              <div className="w-px h-8 bg-kumo-line" />
-              <div className="w-px h-8 bg-kumo-line" />
-              <div className="w-px h-8 bg-kumo-line" />
+            <Input
+              aria-label="Comma-separated items"
+              type="text"
+              value={items}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                setItems(e.target.value)
+              }
+              className="w-full mb-3"
+              placeholder="apple, banana, cherry, ..."
+            />
+            <div className="flex flex-wrap gap-2">
+              {PRESETS.map((preset, i) => (
+                <Button
+                  key={i}
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => setItems(preset)}
+                >
+                  Preset {i + 1}
+                </Button>
+              ))}
             </div>
+          </Surface>
 
-            {/* Fork */}
-            <div className="w-64 h-px bg-kumo-line" />
-
-            {/* More lines */}
-            <div className="flex items-center gap-8 my-4">
-              <div className="w-px h-8 bg-kumo-line" />
-              <div className="w-px h-8 bg-kumo-line" />
-              <div className="w-px h-8 bg-kumo-line" />
+          {/* Worker Count */}
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Workers</Text>
             </div>
-
-            {/* Workers */}
-            <div className="flex gap-4">
-              <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
-                Worker 1
-              </div>
-              <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
-                Worker 2
-              </div>
-              <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
-                Worker N
-              </div>
+            <div className="flex items-center gap-3 mb-4">
+              {["1", "2", "3", "4"].map((n) => (
+                <Button
+                  key={n}
+                  variant={workerCount === n ? "primary" : "secondary"}
+                  onClick={() => setWorkerCount(n)}
+                >
+                  {n}
+                </Button>
+              ))}
             </div>
-          </div>
-        </Surface>
+            <Button
+              variant="primary"
+              onClick={handleProcess}
+              disabled={isProcessing || !items.trim()}
+              className="w-full"
+            >
+              {isProcessing
+                ? "Processing..."
+                : `Fan out to ${workerCount} worker${workerCount === "1" ? "" : "s"}`}
+            </Button>
+          </Surface>
 
-        {/* Description */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">How It Works</Text>
-          </div>
-          <div className="space-y-4 text-kumo-subtle">
-            <p>
-              The Workers pattern uses a central{" "}
-              <strong className="text-kumo-default">ManagerAgent</strong> that
-              distributes tasks across multiple{" "}
-              <strong className="text-kumo-default">WorkerAgent</strong>{" "}
-              instances for parallel processing.
-            </p>
-            <ol className="list-decimal list-inside space-y-2">
-              <li>Manager receives a batch of work items</li>
-              <li>
-                Manager spawns N worker agents using{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  getAgentByName()
-                </code>
-              </li>
-              <li>Each worker processes its assigned items concurrently</li>
-              <li>Manager aggregates results from all workers</li>
-            </ol>
-          </div>
-        </Surface>
+          {/* Results */}
+          {lastRun && (
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
+              <div className="flex items-center justify-between mb-4">
+                <Text variant="heading3">Results</Text>
+                <span className="text-xs text-kumo-subtle">
+                  {lastRun.totalDuration}ms total
+                </span>
+              </div>
+              <div className="space-y-4">
+                {lastRun.results.map((worker: WorkerResult) => (
+                  <div
+                    key={worker.workerId}
+                    className="border border-kumo-line rounded p-3"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <code className="text-xs text-kumo-subtle">
+                        {worker.workerId}
+                      </code>
+                      <span className="text-xs text-kumo-inactive">
+                        {worker.duration}ms
+                      </span>
+                    </div>
+                    <div className="space-y-1">
+                      {worker.processed.map((result: string, j: number) => (
+                        <div
+                          key={j}
+                          className="text-sm text-kumo-default bg-kumo-elevated rounded px-2 py-1"
+                        >
+                          {result}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Surface>
+          )}
+        </div>
 
-        {/* Code Example */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">Example Code</Text>
-          </div>
-          <CodeBlock
-            lang="ts"
-            code={`// manager-agent.ts
-@callable()
-async processItems(items: string[]) {
-  const chunkSize = Math.ceil(items.length / 4);
-  const chunks = [];
-  
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
-  }
-  
-  // Spawn workers in parallel
-  const results = await Promise.all(
-    chunks.map(async (chunk, i) => {
-      const worker = await getAgentByName(
-        this.env.WorkerAgent,
-        \`worker-\${i}\`
-      );
-      return worker.processChunk(chunk);
-    })
-  );
-  
-  // Aggregate results
-  return results.flat();
-}`}
-          />
-        </Surface>
-
-        {/* Use Cases */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">Use Cases</Text>
-          </div>
-          <ul className="space-y-3 text-kumo-subtle">
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">Batch Processing</strong>{" "}
-                — Process large datasets by splitting work across workers
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">
-                  Parallel API Calls
-                </strong>{" "}
-                — Fan out requests to external APIs without blocking
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">Map-Reduce</strong> —
-                Distribute computation and aggregate results
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">Image Processing</strong>{" "}
-                — Process multiple images concurrently
-              </div>
-            </li>
-          </ul>
-        </Surface>
-
-        {/* Considerations */}
-        <Surface className="p-6 rounded-lg bg-kumo-elevated">
-          <div className="mb-4">
-            <Text variant="heading3">Considerations</Text>
-          </div>
-          <ul className="space-y-2 text-sm text-kumo-subtle">
-            <li>
-              • Workers are Durable Objects — each has isolated state and
-              single-threaded execution
-            </li>
-            <li>
-              • Use unique names for ephemeral workers, or stable names for
-              long-lived workers
-            </li>
-            <li>• Consider error handling and partial failure scenarios</li>
-            <li>
-              • Monitor worker count to avoid spawning too many concurrent
-              agents
-            </li>
-          </ul>
-        </Surface>
+        {/* Logs */}
+        <div className="space-y-6">
+          <LogPanel logs={logs} onClear={clearLogs} maxHeight="600px" />
+        </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

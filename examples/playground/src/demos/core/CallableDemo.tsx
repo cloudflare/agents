@@ -1,10 +1,76 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  HighlightedCode,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type { CallableAgent } from "./callable-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Expose methods with @callable",
+    description:
+      'Decorate any method with @callable() to make it available as an RPC endpoint. The decorator accepts an optional description that shows up in listMethods(). Requires "target": "ES2021" or later in your tsconfig.json. Do not enable "experimentalDecorators" — the SDK uses TC39 standard decorators, not TypeScript legacy decorators.',
+    code: `import { Agent, callable } from "agents";
+
+// tsconfig.json needs: "target": "ES2021" (or later)
+// Do NOT set "experimentalDecorators": true
+
+class CallableAgent extends Agent<Env> {
+  @callable({ description: "Add two numbers" })
+  add(a: number, b: number): number {
+    return a + b;
+  }
+
+  @callable({ description: "Simulate an async operation" })
+  async slowOperation(delayMs: number): Promise<string> {
+    await new Promise(resolve => setTimeout(resolve, delayMs));
+    return \`Completed after \${delayMs}ms\`;
+  }
+}`
+  },
+  {
+    title: "Call methods from the client",
+    description:
+      "Use agent.call() to invoke any @callable method. Arguments are passed as an array. Errors thrown on the server are re-thrown on the client.",
+    code: `const agent = useAgent({
+  agent: "callable-agent",
+  name: "my-instance",
+});
+
+// Positional arguments passed as an array
+const sum = await agent.call("add", [5, 3]);
+
+// Async methods work the same way
+const msg = await agent.call("slowOperation", [1000]);
+
+// Errors propagate to the client
+try {
+  await agent.call("throwError", ["oops"]);
+} catch (e) {
+  console.error(e.message); // "oops"
+}`
+  },
+  {
+    title: "Self-describing APIs",
+    description:
+      "Agents can introspect their own callable methods at runtime using getCallableMethods(). This makes it easy to build dynamic UIs or tooling on top of agents.",
+    code: `  @callable()
+  listMethods() {
+    return Array.from(this.getCallableMethods().entries())
+      .map(([name, meta]) => ({
+        name,
+        description: meta.description,
+      }));
+  }`
+  }
+];
 
 export function CallableDemo() {
   const userId = useUserId();
@@ -60,7 +126,21 @@ export function CallableDemo() {
   return (
     <DemoWrapper
       title="Callable Methods"
-      description="Expose agent methods as RPC endpoints using the @callable decorator."
+      description={
+        <>
+          Decorate any method with{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            @callable()
+          </code>{" "}
+          to expose it as an RPC endpoint. Clients call these methods using{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            agent.call()
+          </code>{" "}
+          over WebSocket — arguments are serialized, errors propagate, and async
+          methods just work. Methods can optionally include a description for
+          self-documenting APIs.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -243,7 +323,10 @@ export function CallableDemo() {
               <div className="mb-2">
                 <Text variant="heading3">Last Result</Text>
               </div>
-              <CodeBlock code={lastResult} lang="jsonc" />
+              <HighlightedCode
+                code={lastResult}
+                lang={lastResult.startsWith("Error:") ? "typescript" : "json"}
+              />
             </Surface>
           )}
         </div>
@@ -253,6 +336,8 @@ export function CallableDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="400px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

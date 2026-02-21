@@ -1,228 +1,263 @@
-import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
+import { useAgent } from "agents/react";
+import { useState } from "react";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  HighlightedJson,
+  type CodeSection
+} from "../../components";
+import { useLogs, useUserId } from "../../hooks";
+import type {
+  PipelineOrchestratorAgent,
+  PipelineState,
+  PipelineResult
+} from "./pipeline-agent";
+import type { StageResult } from "./stage-agents";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Chain agents into a pipeline",
+    description:
+      "Each stage processes data and passes it to the next agent via getAgentByName(). An orchestrator agent drives the pipeline and collects results from each stage.",
+    code: `import { Agent, callable, getAgentByName } from "agents";
+
+class PipelineOrchestratorAgent extends Agent<Env> {
+  @callable()
+  async runPipeline(input: string) {
+    const stages = [];
+
+    const validator = await getAgentByName(
+      this.env.ValidatorStageAgent, "validator"
+    );
+    const validated = await validator.process(input);
+    stages.push(validated);
+
+    const transformer = await getAgentByName(
+      this.env.TransformStageAgent, "transformer"
+    );
+    const transformed = await transformer.process(validated.output);
+    stages.push(transformed);
+
+    const enricher = await getAgentByName(
+      this.env.EnrichStageAgent, "enricher"
+    );
+    const enriched = await enricher.process(transformed.output);
+    stages.push(enriched);
+
+    return { input, stages };
+  }
+}`
+  },
+  {
+    title: "Stage agents are plain Durable Objects",
+    description:
+      "Each stage is a separate agent with a process() method. No @callable needed — the orchestrator calls them directly via Durable Object RPC. Each stage is isolated and independently scalable.",
+    code: `class ValidatorStageAgent extends Agent<Env> {
+  async process(input: string) {
+    const trimmed = input.trim();
+    if (!trimmed) throw new Error("Input cannot be empty");
+    return {
+      stage: "validate",
+      input,
+      output: { trimmed, lowercased: trimmed.toLowerCase() },
+    };
+  }
+}
+
+class TransformStageAgent extends Agent<Env> {
+  async process(validated: { trimmed: string }) {
+    return {
+      stage: "transform",
+      output: {
+        uppercase: validated.trimmed.toUpperCase(),
+        reversed: validated.trimmed.split("").reverse().join(""),
+      },
+    };
+  }
+}`
+  }
+];
+
+const PRESETS = [
+  "The quick brown fox jumps over the lazy dog",
+  "Cloudflare Workers run at the edge",
+  "Hello World from the Agents SDK"
+];
+
+const STAGE_LABELS: Record<string, string> = {
+  validate: "Validate",
+  transform: "Transform",
+  enrich: "Enrich"
+};
+
+function StageCard({ stage }: { stage: StageResult }) {
+  return (
+    <div className="border border-kumo-line rounded p-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm font-semibold text-kumo-default">
+          {STAGE_LABELS[stage.stage] || stage.stage}
+        </span>
+        <span className="text-xs text-kumo-inactive">{stage.duration}ms</span>
+      </div>
+      <HighlightedJson data={stage.output} />
+    </div>
+  );
+}
 
 export function PipelineDemo() {
+  const userId = useUserId();
+  const { logs, addLog, clearLogs } = useLogs();
+  const [input, setInput] = useState(PRESETS[0]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [lastRun, setLastRun] = useState<PipelineResult | null>(null);
+
+  const agent = useAgent<PipelineOrchestratorAgent, PipelineState>({
+    agent: "pipeline-orchestrator-agent",
+    name: `pipeline-demo-${userId}`,
+    onOpen: () => addLog("info", "connected"),
+    onClose: () => addLog("info", "disconnected"),
+    onError: () => addLog("error", "error", "Connection error"),
+    onStateUpdate: (newState) => {
+      if (newState?.lastRun) setLastRun(newState.lastRun);
+    }
+  });
+
+  const handleRun = async () => {
+    if (!input.trim()) return;
+    setIsRunning(true);
+    addLog("out", "runPipeline", { input });
+
+    try {
+      const result = await agent.call("runPipeline", [input]);
+      const typed = result as PipelineResult;
+      addLog("in", "result", {
+        stages: typed.stages.length,
+        totalMs: typed.totalDuration
+      });
+      setLastRun(typed);
+    } catch (e) {
+      addLog("error", "error", e instanceof Error ? e.message : String(e));
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
   return (
     <DemoWrapper
       title="Pipeline Pattern"
-      description="Chain of responsibility where data flows through a series of processing agents."
+      description={
+        <>
+          Data flows through a chain of agents, each performing a specific
+          transformation and passing the result to the next stage via{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            getAgentByName()
+          </code>
+          . Each stage is a separate Durable Object, so stages are isolated and
+          independently scalable. Enter some text and run it through the
+          validate, transform, enrich pipeline.
+        </>
+      }
+      statusIndicator={
+        <ConnectionStatus
+          status={
+            agent.readyState === WebSocket.OPEN ? "connected" : "connecting"
+          }
+        />
+      }
     >
-      <div className="max-w-3xl mx-auto space-y-8">
-        {/* Diagram */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">Architecture</Text>
-          </div>
-          <div className="flex items-center justify-center gap-4 flex-wrap">
-            <div className="text-sm text-kumo-subtle">Input</div>
-            <div className="w-8 h-px bg-kumo-line" />
-
-            <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
-              ValidatorAgent
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Controls */}
+        <div className="space-y-6">
+          {/* Input */}
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="mb-4">
+              <Text variant="heading3">Pipeline Input</Text>
             </div>
-            <div className="w-8 h-px bg-kumo-line" />
-
-            <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
-              TransformAgent
+            <Input
+              aria-label="Text to process"
+              type="text"
+              value={input}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                setInput(e.target.value)
+              }
+              onKeyDown={(e: React.KeyboardEvent) =>
+                e.key === "Enter" && handleRun()
+              }
+              className="w-full mb-3"
+              placeholder="Enter text to process..."
+            />
+            <div className="flex flex-wrap gap-2 mb-4">
+              {PRESETS.map((preset, i) => (
+                <Button
+                  key={i}
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => setInput(preset)}
+                >
+                  Preset {i + 1}
+                </Button>
+              ))}
             </div>
-            <div className="w-8 h-px bg-kumo-line" />
+            <Button
+              variant="primary"
+              onClick={handleRun}
+              disabled={isRunning || !input.trim()}
+              className="w-full"
+            >
+              {isRunning ? "Running Pipeline..." : "Run Pipeline"}
+            </Button>
+          </Surface>
 
-            <div className="bg-kumo-control px-4 py-2 rounded border border-kumo-line text-kumo-default">
-              EnricherAgent
+          {/* Pipeline visualization */}
+          <Surface className="p-4 rounded-lg ring ring-kumo-line">
+            <div className="flex items-center justify-between mb-4">
+              <Text variant="heading3">Pipeline Stages</Text>
+              {lastRun && (
+                <span className="text-xs text-kumo-subtle">
+                  {lastRun.totalDuration}ms total
+                </span>
+              )}
             </div>
-            <div className="w-8 h-px bg-kumo-line" />
 
-            <div className="bg-kumo-contrast text-kumo-inverse px-4 py-2 rounded">
-              StorageAgent
+            {/* Stage flow diagram */}
+            <div className="flex items-center justify-center gap-2 mb-4 text-xs text-kumo-subtle">
+              <span className="bg-kumo-control px-2 py-1 rounded text-kumo-default">
+                Validate
+              </span>
+              <span>→</span>
+              <span className="bg-kumo-control px-2 py-1 rounded text-kumo-default">
+                Transform
+              </span>
+              <span>→</span>
+              <span className="bg-kumo-control px-2 py-1 rounded text-kumo-default">
+                Enrich
+              </span>
             </div>
-            <div className="w-8 h-px bg-kumo-line" />
 
-            <div className="text-sm text-kumo-subtle">Output</div>
-          </div>
-        </Surface>
+            {lastRun ? (
+              <div className="space-y-3">
+                {lastRun.stages.map((stage) => (
+                  <StageCard key={stage.stage} stage={stage} />
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-kumo-inactive text-center py-4">
+                Run the pipeline to see stage results
+              </p>
+            )}
+          </Surface>
+        </div>
 
-        {/* Description */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">How It Works</Text>
-          </div>
-          <div className="space-y-4 text-kumo-subtle">
-            <p>
-              The Pipeline pattern chains multiple agents together, where each
-              agent performs a specific transformation and passes the result to
-              the next stage.
-            </p>
-            <ol className="list-decimal list-inside space-y-2">
-              <li>Data enters the pipeline at the first stage</li>
-              <li>Each stage processes and transforms the data</li>
-              <li>
-                Result is passed to the next agent via{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  getAgentByName()
-                </code>
-              </li>
-              <li>Final stage returns or stores the processed result</li>
-            </ol>
-          </div>
-        </Surface>
-
-        {/* Code Example */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">Example Code</Text>
-          </div>
-          <CodeBlock
-            lang="ts"
-            code={`// validator-agent.ts
-async process(data: RawInput): Promise<ValidatedData> {
-  // Validate the input
-  const validated = this.validate(data);
-  
-  // Pass to next stage
-  const transformer = await getAgentByName(
-    this.env.TransformAgent,
-    "main"
-  );
-  return transformer.process(validated);
-}
-
-// transform-agent.ts
-async process(data: ValidatedData): Promise<TransformedData> {
-  // Transform the data
-  const transformed = this.transform(data);
-  
-  // Pass to next stage
-  const enricher = await getAgentByName(
-    this.env.EnricherAgent,
-    "main"
-  );
-  return enricher.process(transformed);
-}
-
-// enricher-agent.ts
-async process(data: TransformedData): Promise<EnrichedData> {
-  // Enrich with external data
-  const enriched = await this.enrich(data);
-  
-  // Final stage - store
-  const storage = await getAgentByName(
-    this.env.StorageAgent,
-    "main"
-  );
-  return storage.store(enriched);
-}`}
-          />
-        </Surface>
-
-        {/* Use Cases */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">Use Cases</Text>
-          </div>
-          <ul className="space-y-3 text-kumo-subtle">
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">ETL Pipelines</strong> —
-                Extract, transform, and load data through stages
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">Validation Chains</strong>{" "}
-                — Multi-step validation with different rules per stage
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">
-                  Document Processing
-                </strong>{" "}
-                — Parse, analyze, summarize, store
-              </div>
-            </li>
-            <li className="flex gap-3">
-              <span className="text-kumo-inactive">•</span>
-              <div>
-                <strong className="text-kumo-default">Order Processing</strong>{" "}
-                — Validate → Reserve Inventory → Charge → Ship
-              </div>
-            </li>
-          </ul>
-        </Surface>
-
-        {/* Variations */}
-        <Surface className="p-6 rounded-lg ring ring-kumo-line">
-          <div className="mb-4">
-            <Text variant="heading3">Variations</Text>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="p-4 bg-kumo-elevated rounded">
-              <Text bold size="sm">
-                Linear Pipeline
-              </Text>
-              <div className="mt-1">
-                <Text variant="secondary" size="xs">
-                  Data flows A → B → C → D in order
-                </Text>
-              </div>
-            </div>
-            <div className="p-4 bg-kumo-elevated rounded">
-              <Text bold size="sm">
-                Branching Pipeline
-              </Text>
-              <div className="mt-1">
-                <Text variant="secondary" size="xs">
-                  Stage can route to different next stages based on data
-                </Text>
-              </div>
-            </div>
-            <div className="p-4 bg-kumo-elevated rounded">
-              <Text bold size="sm">
-                Saga Pipeline
-              </Text>
-              <div className="mt-1">
-                <Text variant="secondary" size="xs">
-                  Each stage has a compensating action for rollback
-                </Text>
-              </div>
-            </div>
-            <div className="p-4 bg-kumo-elevated rounded">
-              <Text bold size="sm">
-                Async Pipeline
-              </Text>
-              <div className="mt-1">
-                <Text variant="secondary" size="xs">
-                  Stages are decoupled via queues for resilience
-                </Text>
-              </div>
-            </div>
-          </div>
-        </Surface>
-
-        {/* Considerations */}
-        <Surface className="p-6 rounded-lg bg-kumo-elevated">
-          <div className="mb-4">
-            <Text variant="heading3">Considerations</Text>
-          </div>
-          <ul className="space-y-2 text-sm text-kumo-subtle">
-            <li>
-              • Each stage is a Durable Object with its own state for tracking
-              progress
-            </li>
-            <li>
-              • Consider using Workflows for pipelines that need durability
-              guarantees
-            </li>
-            <li>
-              • Add observability at each stage for debugging and monitoring
-            </li>
-            <li>• Handle partial failures and design for idempotency</li>
-          </ul>
-        </Surface>
+        {/* Logs */}
+        <div className="space-y-6">
+          <LogPanel logs={logs} onClear={clearLogs} maxHeight="600px" />
+        </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

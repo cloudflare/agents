@@ -1,11 +1,72 @@
 import { Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
+import { CodeExplanation, type CodeSection } from "../../components";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Create an MCP server agent",
+    description:
+      "Extend McpAgent instead of Agent. Create an McpServer instance and register tools, resources, and prompts in the init() method.",
+    code: `import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+class MyMcpAgent extends McpAgent<Env> {
+  server = new McpServer({ name: "my-server", version: "1.0.0" });
+
+  async init() {
+    this.server.tool(
+      "get_weather",
+      { city: z.string() },
+      async ({ city }) => ({
+        content: [{ type: "text", text: \`72°F in \${city}\` }],
+      })
+    );
+
+    this.server.resource(
+      "config",
+      "config://app",
+      async () => ({
+        contents: [{ uri: "config://app", text: "..." }],
+      })
+    );
+  }
+}`
+  },
+  {
+    title: "Connect from any MCP client",
+    description:
+      "Once deployed, any MCP-compatible client (Claude, Cursor, custom apps) can connect to your agent's URL and use its tools and resources.",
+    code: `// In Claude Desktop or Cursor settings:
+{
+  "mcpServers": {
+    "my-agent": {
+      "url": "https://my-agent.workers.dev/sse"
+    }
+  }
+}`
+  }
+];
 
 export function McpServerDemo() {
   return (
     <DemoWrapper
       title="MCP Server"
-      description="Create MCP (Model Context Protocol) servers with tools, resources, and prompts."
+      description={
+        <>
+          Turn your agent into an MCP server by extending{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            McpAgent
+          </code>{" "}
+          instead of{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            Agent
+          </code>
+          . Register tools, resources, and prompt templates, and any
+          MCP-compatible client — Claude, Cursor, or custom apps — can connect
+          and use your agent's capabilities.
+        </>
+      }
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
@@ -103,6 +164,7 @@ export function McpServerDemo() {
           </Text>
         </Surface>
       </div>
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

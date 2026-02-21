@@ -6,13 +6,65 @@ import {
   InputArea,
   Surface,
   Table,
-  CodeBlock,
   Text
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  HighlightedJson,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type { SqlAgent } from "./sql-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Query with the sql tagged template",
+    description:
+      "Every agent has a built-in SQLite database. Use this.sql with a tagged template literal for safe, parameterized queries — values are automatically escaped.",
+    code: `import { Agent, callable } from "agents";
+
+class SqlAgent extends Agent<Env> {
+  @callable()
+  insertRecord(key: string, value: string) {
+    this.sql\`
+      CREATE TABLE IF NOT EXISTS playground_data (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        created_at INTEGER DEFAULT (unixepoch())
+      )
+    \`;
+    this.sql\`
+      INSERT OR REPLACE INTO playground_data (key, value)
+      VALUES (\${key}, \${value})
+    \`;
+  }
+}`
+  },
+  {
+    title: "Read data back",
+    description:
+      "this.sql returns results as an array directly — no need to spread a cursor. For lower-level access, this.ctx.storage.sql.exec() returns a raw iterable cursor you can stream through.",
+    code: `  @callable()
+  getRecords() {
+    // this.sql returns T[] directly
+    return this.sql\`
+      SELECT * FROM playground_data ORDER BY created_at DESC
+    \`;
+  }
+
+  @callable()
+  listTables() {
+    return this.sql\`
+      SELECT name, type FROM sqlite_master
+      WHERE type IN ('table', 'index')
+      ORDER BY type, name
+    \`;
+  }`
+  }
+];
 
 export function SqlDemo() {
   const userId = useUserId();
@@ -113,7 +165,18 @@ export function SqlDemo() {
   return (
     <DemoWrapper
       title="SQL Queries"
-      description="Each agent has its own SQLite database. Use the sql template literal for type-safe queries."
+      description={
+        <>
+          Every agent instance has its own embedded SQLite database, backed by
+          Durable Object storage. Use{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            this.sql
+          </code>{" "}
+          as a tagged template literal for safe, parameterized queries — values
+          are automatically escaped. Explore the tables below, run custom
+          queries, or insert your own data.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -228,10 +291,7 @@ export function SqlDemo() {
                 </Text>
               </div>
               <div className="max-h-60 overflow-y-auto">
-                <CodeBlock
-                  code={JSON.stringify(queryResult, null, 2)}
-                  lang="jsonc"
-                />
+                <HighlightedJson data={queryResult} />
               </div>
             </Surface>
           )}
@@ -292,6 +352,8 @@ export function SqlDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="400px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

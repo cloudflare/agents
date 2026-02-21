@@ -8,13 +8,67 @@ import {
 } from "@phosphor-icons/react";
 import { Button, Surface, Empty, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus, LocalDevBanner } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  LocalDevBanner,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type {
   ReceiveEmailAgent,
   ReceiveEmailState,
   ParsedEmail
 } from "./receive-email-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Handle incoming emails",
+    description:
+      "Override the onEmail method to process incoming messages. The agent parses the email with postal-mime and stores it in state. Use address-based routing to direct emails to specific agent instances.",
+    code: `import { Agent } from "agents";
+import PostalMime from "postal-mime";
+
+class ReceiveEmailAgent extends Agent<Env> {
+  async onEmail(from: string, to: string, rawEmail: ReadableStream) {
+    const parser = new PostalMime();
+    const email = await parser.parse(rawEmail);
+
+    this.setState({
+      ...this.state,
+      emails: [...this.state.emails, {
+        id: crypto.randomUUID(),
+        from,
+        to,
+        subject: email.subject,
+        text: email.text,
+        timestamp: Date.now(),
+      }],
+    });
+
+    this.broadcast(JSON.stringify({ type: "new_email" }));
+  }
+}`
+  },
+  {
+    title: "Route emails to agent instances",
+    description:
+      "Use plus-addressing (user+id@domain) to route emails to specific agent instances. Configure Cloudflare Email Routing to forward to your Worker.",
+    code: `// In your Worker's email handler:
+export default {
+  async email(message, env) {
+    // Extract instance ID from the address
+    // receive+demo@example.com -> instance "demo"
+    const to = message.to;
+    const instanceId = to.split("+")[1]?.split("@")[0] || "default";
+
+    const agent = getAgentByName(env.ReceiveEmailAgent, instanceId);
+    await agent.onEmail(message.from, message.to, message.raw);
+  }
+}`
+  }
+];
 
 export function ReceiveDemo() {
   const userId = useUserId();
@@ -56,7 +110,21 @@ export function ReceiveDemo() {
   return (
     <DemoWrapper
       title="Receive Emails"
-      description="Receive real emails via Cloudflare Email Routing. Emails sent to this agent are stored and displayed."
+      description={
+        <>
+          Agents can receive real emails via Cloudflare Email Routing. Override
+          the{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            onEmail
+          </code>{" "}
+          method to process incoming messages — parse them, store them in state,
+          and notify connected clients. Use plus-addressing (e.g.{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            receive+id@domain
+          </code>
+          ) to route emails to specific agent instances.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -261,6 +329,8 @@ export function ReceiveDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="500px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

@@ -2,9 +2,81 @@ import { useAgent } from "agents/react";
 import { useState } from "react";
 import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type { RetryAgent, RetryAgentState } from "./retry-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Retry with this.retry()",
+    description:
+      "Wrap any fallible operation in this.retry(). It uses exponential backoff by default. Set class-level defaults with static options, or pass per-call overrides.",
+    code: `import { Agent, callable } from "agents";
+
+class RetryAgent extends Agent<Env> {
+  static options = {
+    retry: { maxAttempts: 4, baseDelayMs: 50, maxDelayMs: 1000 },
+  };
+
+  @callable()
+  async retryFlaky(succeedOnAttempt: number) {
+    return await this.retry(async (attempt) => {
+      if (attempt < succeedOnAttempt) {
+        throw new Error(\`Transient failure on attempt \${attempt}\`);
+      }
+      return \`Success on attempt \${attempt}\`;
+    });
+  }
+}`
+  },
+  {
+    title: "Selective retry with shouldRetry",
+    description:
+      "Pass a shouldRetry callback to decide whether a specific error is worth retrying. Return false to bail immediately on permanent failures.",
+    code: `  @callable()
+  async retryWithFilter(failCount: number, permanent: boolean) {
+    return await this.retry(
+      async (attempt) => {
+        if (attempt <= failCount) {
+          const err = new Error("failure");
+          err.permanent = permanent;
+          throw err;
+        }
+        return "success";
+      },
+      {
+        maxAttempts: 10,
+        shouldRetry: (err) => !err.permanent,
+      }
+    );
+  }`
+  },
+  {
+    title: "Queue with retry options",
+    description:
+      "this.queue() also supports retry options. The queued callback will be retried with backoff if it throws.",
+    code: `  @callable()
+  async queueWithRetry(maxAttempts: number) {
+    return await this.queue("onQueuedTask", { maxAttempts }, {
+      retry: { maxAttempts, baseDelayMs: 50, maxDelayMs: 500 },
+    });
+  }
+
+  async onQueuedTask(payload: { maxAttempts: number }) {
+    // Fails until last attempt, then succeeds
+    this._attempts++;
+    if (this._attempts < payload.maxAttempts) {
+      throw new Error("Not yet");
+    }
+    // Success!
+  }`
+  }
+];
 
 export function RetryDemo() {
   const userId = useUserId();
@@ -91,7 +163,25 @@ export function RetryDemo() {
   return (
     <DemoWrapper
       title="Retries"
-      description="Retry operations with exponential backoff, selective retry via shouldRetry, and queue retry options."
+      description={
+        <>
+          Wrap any fallible operation in{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            this.retry()
+          </code>{" "}
+          to automatically retry with exponential backoff. Set class-level
+          defaults with{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            static options
+          </code>
+          , or pass per-call overrides. Use a{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            shouldRetry
+          </code>{" "}
+          callback to bail early on permanent errors. Queued tasks and scheduled
+          tasks also support retry options.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -228,6 +318,8 @@ export function RetryDemo() {
           <LogPanel logs={logs} onClear={handleClear} maxHeight="500px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

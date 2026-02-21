@@ -1,10 +1,55 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  HighlightedCode,
+  HighlightedJson,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type { StreamingAgent } from "./streaming-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Define a streaming method",
+    description:
+      "Add streaming: true to the @callable decorator. The method receives a StreamingResponse as its first argument — call stream.send() to push chunks and stream.end() to finish.",
+    code: `import { Agent, callable, type StreamingResponse } from "agents";
+
+class StreamingAgent extends Agent<Env> {
+  @callable({ streaming: true })
+  async countdown(stream: StreamingResponse, from: number) {
+    for (let i = from; i >= 0; i--) {
+      stream.send({ count: i, label: i === 0 ? "Liftoff!" : \`\${i}...\` });
+      await new Promise(r => setTimeout(r, 500));
+    }
+    stream.end({ launched: true });
+  }
+}`
+  },
+  {
+    title: "Consume the stream on the client",
+    description:
+      "Pass onChunk, onDone, and onError callbacks as the third argument to agent.call(). Chunks arrive as they are sent from the server.",
+    code: `await agent.call("countdown", [5], {
+  onChunk: (chunk) => {
+    // { count: 4, label: "4..." }
+    console.log(chunk);
+  },
+  onDone: (final) => {
+    // { launched: true }
+    console.log("Stream complete:", final);
+  },
+  onError: (error) => {
+    console.error("Stream error:", error);
+  },
+});`
+  }
+];
 
 export function StreamingDemo() {
   const userId = useUserId();
@@ -61,7 +106,32 @@ export function StreamingDemo() {
   return (
     <DemoWrapper
       title="Streaming RPC"
-      description="Stream data from the agent to the client in real-time using @callable({ streaming: true })."
+      description={
+        <>
+          Add{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            streaming: true
+          </code>{" "}
+          to any{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            @callable
+          </code>{" "}
+          decorator to stream data chunk-by-chunk from server to client. The
+          method receives a{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            StreamingResponse
+          </code>{" "}
+          object — call{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            stream.send()
+          </code>{" "}
+          to push data and{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            stream.end()
+          </code>{" "}
+          to finish. Try the countdown to see streaming with delays.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -185,19 +255,16 @@ export function StreamingDemo() {
                 {chunks.length === 0 ? (
                   <p className="text-xs text-kumo-inactive">No chunks yet</p>
                 ) : (
-                  <CodeBlock
+                  <HighlightedCode
                     code={chunks.map((c) => JSON.stringify(c)).join("\n")}
-                    lang="jsonc"
+                    lang="json"
                   />
                 )}
               </div>
               {finalResult !== null && (
                 <div>
                   <span className="text-xs text-kumo-subtle">Final Result</span>
-                  <CodeBlock
-                    code={JSON.stringify(finalResult, null, 2)}
-                    lang="jsonc"
-                  />
+                  <HighlightedJson data={finalResult} />
                 </div>
               )}
             </div>
@@ -209,6 +276,8 @@ export function StreamingDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="400px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

@@ -1,10 +1,75 @@
 import { useAgent } from "agents/react";
 import { useState } from "react";
-import { Button, Input, Surface, CodeBlock, Text } from "@cloudflare/kumo";
+import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  HighlightedJson,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type { StateAgent, StateAgentState } from "./state-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Define your agent with typed state",
+    description:
+      "Extend the Agent class with a state type. Set initialState and it will be automatically persisted — surviving restarts, hibernation, and reconnections.",
+    code: `import { Agent, callable } from "agents";
+
+interface StateAgentState {
+  counter: number;
+  items: string[];
+  lastUpdated: string | null;
+}
+
+class StateAgent extends Agent<Env, StateAgentState> {
+  initialState: StateAgentState = {
+    counter: 0,
+    items: [],
+    lastUpdated: null,
+  };
+}`
+  },
+  {
+    title: "Mutate state with @callable methods",
+    description:
+      "Methods decorated with @callable are exposed as RPC endpoints. Call this.setState() to update — the new state is automatically broadcast to every connected client.",
+    code: `  @callable()
+  increment(): StateAgentState {
+    const newState = {
+      ...this.state,
+      counter: this.state.counter + 1,
+      lastUpdated: new Date().toISOString(),
+    };
+    this.setState(newState);
+    return newState;
+  }`
+  },
+  {
+    title: "Connect from React with useAgent",
+    description:
+      "The useAgent hook opens a WebSocket to your agent. The onStateUpdate callback fires whenever state changes — from this client, another client, or the server itself.",
+    code: `import { useAgent } from "agents/react";
+
+const agent = useAgent({
+  agent: "state-agent",
+  name: "my-instance",
+  onStateUpdate: (newState, source) => {
+    // source is "server" or "client"
+    setState(newState);
+  },
+});
+
+// Call server methods
+await agent.call("increment");
+
+// Or set state directly from the client
+agent.setState({ ...state, counter: 42 });`
+  }
+];
 
 export function StateDemo() {
   const userId = useUserId();
@@ -105,7 +170,22 @@ export function StateDemo() {
   return (
     <DemoWrapper
       title="State Management"
-      description="Real-time state synchronization between server and clients. State persists across reconnections."
+      description={
+        <>
+          Every agent has a{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            state
+          </code>{" "}
+          object that is automatically persisted and synchronized. When you call{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            this.setState()
+          </code>{" "}
+          on the server, every connected client receives the update instantly
+          over WebSocket. Clients can also set state directly — changes flow
+          both ways. State survives restarts, hibernation, and reconnections.
+          Try incrementing the counter, then refresh the page.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -205,7 +285,7 @@ export function StateDemo() {
                 Reset
               </Button>
             </div>
-            <CodeBlock code={JSON.stringify(state, null, 2)} lang="jsonc" />
+            <HighlightedJson data={state} />
             {state.lastUpdated && (
               <p className="text-xs text-kumo-inactive mt-2">
                 Last updated: {new Date(state.lastUpdated).toLocaleString()}
@@ -219,6 +299,8 @@ export function StateDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="400px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

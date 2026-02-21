@@ -18,13 +18,74 @@ import {
   Text
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type {
   ApprovalAgent,
   ApprovalAgentState,
   ApprovalRequest
 } from "./approval-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Wait for human approval in a workflow",
+    description:
+      "AgentWorkflow provides a built-in waitForApproval() helper. The workflow suspends durably — it can wait for minutes, hours, or days — and resumes when the agent calls approveWorkflow() or rejectWorkflow(). If rejected, it throws a WorkflowRejectedError.",
+    code: `import { AgentWorkflow } from "agents/workflows";
+import type { AgentWorkflowEvent, AgentWorkflowStep } from "agents/workflows";
+
+class ApprovalWorkflow extends AgentWorkflow<MyAgent, RequestParams> {
+  async run(event: AgentWorkflowEvent<RequestParams>, step: AgentWorkflowStep) {
+    const request = await step.do("prepare", async () => {
+      return { ...event.payload, preparedAt: Date.now() };
+    });
+
+    await this.reportProgress({
+      step: "approval",
+      status: "pending",
+      message: "Awaiting approval",
+    });
+
+    // Suspends until approved — throws WorkflowRejectedError if rejected
+    const approvalData = await this.waitForApproval<{ approvedBy: string }>(
+      step,
+      { timeout: "7 days" }
+    );
+
+    const result = await step.do("execute", async () => {
+      return executeRequest(request);
+    });
+
+    await step.reportComplete(result);
+    return result;
+  }
+}`
+  },
+  {
+    title: "Approve or reject from the agent",
+    description:
+      "The agent has built-in approveWorkflow() and rejectWorkflow() convenience methods. Both accept optional metadata — for approvals, this data is returned to the waiting workflow.",
+    code: `class MyAgent extends Agent {
+  @callable()
+  async approve(instanceId: string, userId: string) {
+    await this.approveWorkflow(instanceId, {
+      reason: "Approved by admin",
+      metadata: { approvedBy: userId },
+    });
+  }
+
+  @callable()
+  async reject(instanceId: string, reason: string) {
+    await this.rejectWorkflow(instanceId, { reason });
+  }
+}`
+  }
+];
 
 function ApprovalCard({
   request,
@@ -261,7 +322,24 @@ export function WorkflowApprovalDemo() {
   return (
     <DemoWrapper
       title="Approval Workflow"
-      description="Human-in-the-loop workflow patterns using waitForApproval(). Workflows pause until approved or rejected."
+      description={
+        <>
+          Workflows can pause and wait for human input using{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            waitForApproval()
+          </code>
+          . The workflow suspends durably — it can wait for minutes, hours, or
+          days — and resumes when someone calls{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            approveWorkflow()
+          </code>{" "}
+          or{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            rejectWorkflow()
+          </code>
+          . Submit a request below and then approve or reject it.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -330,40 +408,6 @@ export function WorkflowApprovalDemo() {
                 </button>
               ))}
             </div>
-          </Surface>
-
-          <Surface className="p-4 rounded-lg bg-kumo-elevated">
-            <div className="mb-2">
-              <Text variant="heading3">How it Works</Text>
-            </div>
-            <ul className="text-sm text-kumo-subtle space-y-1">
-              <li>
-                1.{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  runWorkflow()
-                </code>{" "}
-                starts an ApprovalWorkflow
-              </li>
-              <li>
-                2.{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  waitForApproval()
-                </code>{" "}
-                pauses the workflow
-              </li>
-              <li>3. Human clicks Approve or Reject</li>
-              <li>
-                4.{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  approveWorkflow()
-                </code>{" "}
-                or{" "}
-                <code className="text-xs bg-kumo-control px-1 rounded text-kumo-default">
-                  rejectWorkflow()
-                </code>{" "}
-                resumes it
-              </li>
-            </ul>
           </Surface>
         </div>
 
@@ -447,6 +491,8 @@ export function WorkflowApprovalDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="500px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

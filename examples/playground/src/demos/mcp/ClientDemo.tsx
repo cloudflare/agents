@@ -1,11 +1,63 @@
 import { Surface, Text, CodeBlock } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
+import { CodeExplanation, type CodeSection } from "../../components";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Connect to external MCP servers",
+    description:
+      "Use this.addMcpServer() to connect your agent to any MCP server. The connection persists across restarts — the agent automatically reconnects.",
+    code: `import { McpClientAgent } from "agents/mcp";
+
+class MyAgent extends McpClientAgent<Env> {
+  async onStart() {
+    await this.addMcpServer("weather", "https://weather-mcp.example.com", {
+      transport: "sse",
+      headers: { Authorization: "Bearer token" },
+    });
+  }
+}`
+  },
+  {
+    title: "Use MCP tools with AI",
+    description:
+      "Call mcp.getAITools() to convert all connected MCP tools into AI SDK format. Pass them directly to streamText or generateText.",
+    code: `  async onChatMessage(onFinish) {
+    const mcpTools = await this.mcp.getAITools();
+
+    const result = streamText({
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      messages: this.messages,
+      tools: mcpTools,
+      onFinish,
+    });
+    return result.toDataStreamResponse();
+  }`
+  }
+];
 
 export function McpClientDemo() {
   return (
     <DemoWrapper
       title="MCP Client"
-      description="Connect your agent to external MCP servers to access their tools and resources."
+      description={
+        <>
+          Your agent can connect to external MCP servers using{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            this.addMcpServer()
+          </code>
+          . Once connected, use{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            mcp.getAITools()
+          </code>{" "}
+          to convert their tools into AI SDK format and pass them directly to{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            streamText
+          </code>
+          . Connections persist across restarts — the agent automatically
+          reconnects.
+        </>
+      }
     >
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
@@ -80,6 +132,7 @@ export function McpClientDemo() {
           </Text>
         </Surface>
       </div>
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }
