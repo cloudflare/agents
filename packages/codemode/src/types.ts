@@ -6,8 +6,7 @@ import {
 } from "zod-to-ts";
 import type { ZodType } from "zod";
 import type { ToolSet } from "ai";
-import { fromJSONSchema } from "zod/v4";
-import type { JSONSchema7 } from "json-schema";
+import type { JSONSchema7, JSONSchema7Definition } from "json-schema";
 
 const JS_RESERVED = new Set([
   "abstract",
@@ -203,64 +202,139 @@ function extractJsonSchema(wrapper: unknown): JSONSchema7 | null {
 }
 
 /**
- * Check if a value looks like a raw JSON Schema object.
+ * Check if a property name needs quoting in TypeScript.
  */
-function isRawJsonSchema(value: unknown): value is JSONSchema7 {
-  if (value === null || typeof value !== "object") return false;
-  const obj = value as Record<string, unknown>;
-  // JSON Schema typically has "type" or "$schema" or "properties"
-  return (
-    "type" in obj ||
-    "$schema" in obj ||
-    "properties" in obj ||
-    "items" in obj ||
-    "anyOf" in obj ||
-    "oneOf" in obj ||
-    "allOf" in obj
-  );
+function needsQuotes(name: string): boolean {
+  // Valid JS identifier: starts with letter, $, or _, followed by letters, digits, $, _
+  return !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
 }
 
 /**
- * Normalize a schema to a Zod schema.
- * Handles: Zod schemas, AI SDK jsonSchema wrappers, and raw JSON schemas.
+ * Quote a property name if needed.
  */
-function normalizeToZodSchema(schema: unknown): ZodType | null {
-  // Already a Zod schema
-  if (isZodSchema(schema)) {
-    return schema;
+function quoteProp(name: string): string {
+  if (needsQuotes(name)) {
+    return `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+  return name;
+}
+
+/**
+ * Convert a JSON Schema to a TypeScript type string.
+ * This is a direct conversion without going through Zod.
+ */
+function jsonSchemaToTypeString(
+  schema: JSONSchema7Definition,
+  indent: string = ""
+): string {
+  // Handle boolean schemas
+  if (typeof schema === "boolean") {
+    return schema ? "unknown" : "never";
   }
 
-  // AI SDK jsonSchema wrapper
-  if (isJsonSchemaWrapper(schema)) {
-    const jsonSchema = extractJsonSchema(schema);
-    if (jsonSchema) {
-      try {
-        return fromJSONSchema(
-          jsonSchema as Parameters<typeof fromJSONSchema>[0]
-        ) as unknown as ZodType;
-      } catch {
-        return null;
+  // Handle anyOf/oneOf (union types)
+  if (schema.anyOf) {
+    const types = schema.anyOf.map((s) => jsonSchemaToTypeString(s, indent));
+    return types.join(" | ");
+  }
+  if (schema.oneOf) {
+    const types = schema.oneOf.map((s) => jsonSchemaToTypeString(s, indent));
+    return types.join(" | ");
+  }
+
+  // Handle allOf (intersection types)
+  if (schema.allOf) {
+    const types = schema.allOf.map((s) => jsonSchemaToTypeString(s, indent));
+    return types.join(" & ");
+  }
+
+  // Handle enum
+  if (schema.enum) {
+    return schema.enum
+      .map((v) => (typeof v === "string" ? `"${v}"` : String(v)))
+      .join(" | ");
+  }
+
+  // Handle const
+  if (schema.const !== undefined) {
+    return typeof schema.const === "string"
+      ? `"${schema.const}"`
+      : String(schema.const);
+  }
+
+  // Handle type
+  const type = schema.type;
+
+  if (type === "string") return "string";
+  if (type === "number" || type === "integer") return "number";
+  if (type === "boolean") return "boolean";
+  if (type === "null") return "null";
+
+  if (type === "array") {
+    if (schema.items) {
+      const itemType = jsonSchemaToTypeString(schema.items, indent);
+      return `${itemType}[]`;
+    }
+    return "unknown[]";
+  }
+
+  if (type === "object" || schema.properties) {
+    const props = schema.properties || {};
+    const required = new Set(schema.required || []);
+    const lines: string[] = [];
+
+    for (const [propName, propSchema] of Object.entries(props)) {
+      if (typeof propSchema === "boolean") continue;
+
+      const isRequired = required.has(propName);
+      const propType = jsonSchemaToTypeString(propSchema, indent + "    ");
+      const desc = propSchema.description;
+
+      if (desc) {
+        lines.push(`${indent}    /** ${desc} */`);
       }
+
+      const quotedName = quoteProp(propName);
+      const optionalMark = isRequired ? "" : "?";
+      lines.push(`${indent}    ${quotedName}${optionalMark}: ${propType};`);
     }
+
+    // Handle additionalProperties
+    if (schema.additionalProperties && schema.additionalProperties !== false) {
+      const valueType =
+        schema.additionalProperties === true
+          ? "unknown"
+          : jsonSchemaToTypeString(schema.additionalProperties, indent + "    ");
+      lines.push(`${indent}    [key: string]: ${valueType};`);
+    }
+
+    if (lines.length === 0) {
+      return "Record<string, unknown>";
+    }
+
+    return `{\n${lines.join("\n")}\n${indent}}`;
   }
 
-  // Raw JSON Schema
-  if (isRawJsonSchema(schema)) {
-    try {
-      return fromJSONSchema(
-        schema as Parameters<typeof fromJSONSchema>[0]
-      ) as unknown as ZodType;
-    } catch {
-      return null;
-    }
+  // Handle array of types (e.g., ["string", "null"])
+  if (Array.isArray(type)) {
+    const types = type.map((t) => {
+      if (t === "string") return "string";
+      if (t === "number" || t === "integer") return "number";
+      if (t === "boolean") return "boolean";
+      if (t === "null") return "null";
+      if (t === "array") return "unknown[]";
+      if (t === "object") return "Record<string, unknown>";
+      return "unknown";
+    });
+    return types.join(" | ");
   }
 
-  return null;
+  return "unknown";
 }
 
 /**
  * Extract field descriptions from a schema.
- * Works with Zod schemas (via .shape) and JSON schemas (via .properties).
+ * Works with Zod schemas (via .shape) and jsonSchema wrappers (via .properties).
  */
 function extractDescriptions(schema: unknown): Record<string, string> {
   const descriptions: Record<string, string> = {};
@@ -277,18 +351,14 @@ function extractDescriptions(schema: unknown): Record<string, string> {
     return descriptions;
   }
 
-  // Try JSON Schema properties (for jsonSchema wrapper or raw JSON schema)
-  let jsonSchema: JSONSchema7 | null = null;
+  // Try JSON Schema properties (for jsonSchema wrapper)
   if (isJsonSchemaWrapper(schema)) {
-    jsonSchema = extractJsonSchema(schema);
-  } else if (isRawJsonSchema(schema)) {
-    jsonSchema = schema;
-  }
-
-  if (jsonSchema?.properties) {
-    for (const [fieldName, propSchema] of Object.entries(jsonSchema.properties)) {
-      if (typeof propSchema === "object" && propSchema.description) {
-        descriptions[fieldName] = propSchema.description;
+    const jsonSchema = extractJsonSchema(schema);
+    if (jsonSchema?.properties) {
+      for (const [fieldName, propSchema] of Object.entries(jsonSchema.properties)) {
+        if (typeof propSchema === "object" && propSchema.description) {
+          descriptions[fieldName] = propSchema.description;
+        }
       }
     }
   }
@@ -298,7 +368,7 @@ function extractDescriptions(schema: unknown): Record<string, string> {
 
 /**
  * Safely convert a schema to TypeScript type string.
- * Handles Zod schemas, AI SDK jsonSchema wrappers, and raw JSON schemas.
+ * Handles Zod schemas and AI SDK jsonSchema wrappers.
  * Returns "unknown" if the schema cannot be represented in TypeScript.
  */
 function safeSchemaToTs(
@@ -307,14 +377,24 @@ function safeSchemaToTs(
   auxiliaryTypeStore: ReturnType<typeof createAuxiliaryTypeStore>
 ): string {
   try {
-    const zodSchema = normalizeToZodSchema(schema);
-    if (!zodSchema) {
-      return `type ${typeName} = unknown`;
+    // For Zod schemas, use zod-to-ts
+    if (isZodSchema(schema)) {
+      const result = zodToTs(schema, { auxiliaryTypeStore });
+      return printNodeZodToTs(createTypeAlias(result.node, typeName));
     }
-    const result = zodToTs(zodSchema, { auxiliaryTypeStore });
-    return printNodeZodToTs(createTypeAlias(result.node, typeName));
+
+    // For JSON Schema wrapper, convert directly to TypeScript
+    if (isJsonSchemaWrapper(schema)) {
+      const jsonSchema = extractJsonSchema(schema);
+      if (jsonSchema) {
+        const typeBody = jsonSchemaToTypeString(jsonSchema);
+        return `type ${typeName} = ${typeBody}`;
+      }
+    }
+
+    return `type ${typeName} = unknown`;
   } catch {
-    // If the schema cannot be represented (e.g., transform), fall back to unknown
+    // If the schema cannot be represented, fall back to unknown
     return `type ${typeName} = unknown`;
   }
 }

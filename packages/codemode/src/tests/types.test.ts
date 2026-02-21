@@ -347,27 +347,4 @@ describe("generateTypes", () => {
     expect(result).toContain("@param input.limit - Max results");
   });
 
-  it("should handle raw JSON Schema objects", () => {
-    // Raw JSON Schema without any wrapper
-    const tools = {
-      getData: {
-        description: "Get data",
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            id: { type: "string" as const, description: "Resource ID" },
-            format: { type: "string" as const, enum: ["json", "xml"] }
-          },
-          required: ["id"]
-        }
-      }
-    };
-
-    const result = generateTypes(tools as unknown as ToolDescriptors);
-
-    expect(result).toContain("type GetDataInput");
-    expect(result).toContain("id: string");
-    expect(result).toContain("format?:");
-    expect(result).toContain("@param input.id - Resource ID");
-  });
 });
