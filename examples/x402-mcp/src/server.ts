@@ -8,6 +8,7 @@ import {
   type PaymentRequirements
 } from "agents/x402";
 import { z } from "zod";
+import { toClientEvmSigner } from "@x402/evm";
 import { privateKeyToAccount } from "viem/accounts";
 
 // --- MCP Server with paid tools ---
@@ -71,7 +72,7 @@ export class PayAgent extends Agent<Env> {
 
     this.x402Client = withX402Client(this.mcp.mcpConnections[id].client, {
       network: "eip155:84532",
-      account
+      account: toClientEvmSigner(account)
     });
   }
 
