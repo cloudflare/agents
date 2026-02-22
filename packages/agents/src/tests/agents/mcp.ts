@@ -448,6 +448,41 @@ export class TestRpcMcpClientAgent extends Agent<{
       };
     }
   }
+
+  async testRemoveRpcMcpServer() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-remove-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "to-be-removed" }
+        }
+      );
+
+      const toolsBefore = this.mcp.listTools().length;
+      const storageBefore = this.mcp.getRpcServersFromStorage().length;
+
+      await this.removeMcpServer(id);
+
+      const toolsAfter = this.mcp.listTools().length;
+      const storageAfter = this.mcp.getRpcServersFromStorage().length;
+      const connectionExists = !!this.mcp.mcpConnections[id];
+
+      return {
+        success: true,
+        toolsBefore,
+        toolsAfter,
+        storageBefore,
+        storageAfter,
+        connectionExists
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
 }
 
 // Test Agent for addMcpServer overload verification.

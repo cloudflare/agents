@@ -24,6 +24,7 @@ import {
   type MCPTransportOptions
 } from "./client-connection";
 import { toErrorMessage } from "./errors";
+import { RPC_DO_PREFIX } from "./rpc";
 import type { TransportType } from "./types";
 import type { MCPServerRow } from "./client-storage";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
@@ -268,7 +269,7 @@ export class MCPClientManager {
    */
   getRpcServersFromStorage(): MCPServerRow[] {
     return this.getServersFromStorage().filter((s) =>
-      s.server_url.startsWith("rpc:")
+      s.server_url.startsWith(RPC_DO_PREFIX)
     );
   }
 
@@ -287,7 +288,7 @@ export class MCPClientManager {
     this.saveServerToStorage({
       id,
       name,
-      server_url: `rpc:${normalizedName}`,
+      server_url: `${RPC_DO_PREFIX}${normalizedName}`,
       client_id: null,
       auth_url: null,
       callback_url: "",
@@ -316,7 +317,7 @@ export class MCPClientManager {
     }
 
     for (const server of servers) {
-      if (server.server_url.startsWith("rpc:")) {
+      if (server.server_url.startsWith(RPC_DO_PREFIX)) {
         continue;
       }
 

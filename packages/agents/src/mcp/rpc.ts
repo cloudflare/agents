@@ -60,13 +60,9 @@ export class RPCClientTransport implements Transport {
     }
 
     const doName = `${RPC_DO_PREFIX}${this._name}`;
-    console.log(
-      `[RPCClientTransport] start: calling getServerByName("${doName}")`
-    );
     this._stub = await getServerByName(this._namespace, doName, {
       props: this._props
     });
-    console.log(`[RPCClientTransport] start: stub obtained for "${doName}"`);
 
     this._started = true;
   }
@@ -86,15 +82,8 @@ export class RPCClientTransport implements Transport {
     }
 
     try {
-      const msgSummary = Array.isArray(message)
-        ? `batch[${message.length}]`
-        : ((message as { method?: string }).method ?? "response");
-      console.log(
-        `[RPCClientTransport] send: calling handleMcpMessage("${msgSummary}")`
-      );
       const result: JSONRPCMessage | JSONRPCMessage[] | undefined =
         await this._stub.handleMcpMessage(message);
-      console.log(`[RPCClientTransport] send: got result for "${msgSummary}"`);
 
       if (!result) {
         return;

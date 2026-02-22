@@ -395,13 +395,7 @@ export abstract class McpAgent<
   async handleMcpMessage(
     message: JSONRPCMessage | JSONRPCMessage[]
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
-    console.log(
-      `[McpAgent.handleMcpMessage] name="${this.name}", hasTransport=${!!this._transport}`
-    );
     if (!this._transport) {
-      console.log(
-        `[McpAgent.handleMcpMessage] lazy init: loading props, calling init(), creating transport`
-      );
       this.props = await this.ctx.storage.get("props");
 
       await this.init();
@@ -415,9 +409,6 @@ export abstract class McpAgent<
       await server.connect(this._transport);
 
       await this.reinitializeServer();
-      console.log(
-        `[McpAgent.handleMcpMessage] lazy init complete, transportType="${this.getTransportType()}"`
-      );
     }
 
     if (!(this._transport instanceof RPCServerTransport)) {

@@ -129,6 +129,32 @@ describe("addMcpServer with RPC binding", () => {
     expect(result.connectionCount).toBe(1);
   });
 
+  it("should clean up connection and storage when removing an RPC server", async () => {
+    const agentStub = await getAgentByName(
+      env.TestRpcMcpClientAgent,
+      "test-rpc-remove"
+    );
+    const result = (await agentStub.testRemoveRpcMcpServer()) as unknown as {
+      success: boolean;
+      toolsBefore?: number;
+      toolsAfter?: number;
+      storageBefore?: number;
+      storageAfter?: number;
+      connectionExists?: boolean;
+      error?: string;
+    };
+
+    if (!result.success) {
+      throw new Error(`Test failed: ${result.error}`);
+    }
+
+    expect(result.toolsBefore).toBeGreaterThan(0);
+    expect(result.toolsAfter).toBe(0);
+    expect(result.storageBefore).toBeGreaterThan(0);
+    expect(result.storageAfter).toBe(0);
+    expect(result.connectionExists).toBe(false);
+  });
+
   it("should pass props to McpAgent via RPC and verify they arrive", async () => {
     const agentStub = await getAgentByName(
       env.TestRpcMcpClientAgent,

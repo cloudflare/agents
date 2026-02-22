@@ -49,15 +49,9 @@ export class MyMCP extends McpAgent<Env, State, Props> {
 
 export class Chat extends AIChatAgent<Env> {
   async onStart() {
-    console.log(
-      `[Chat.onStart] called, name="${this.name}", connections=${Object.keys(this.mcp.mcpConnections).length}`
-    );
     await this.addMcpServer("test-server", this.env.MyMCP, {
       props: { userId: "demo-user-123", role: "admin" }
     });
-    console.log(
-      `[Chat.onStart] after addMcpServer, connections=${Object.keys(this.mcp.mcpConnections).length}, tools=${this.mcp.listTools().length}`
-    );
   }
 
   async onChatMessage() {

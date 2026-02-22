@@ -1131,15 +1131,8 @@ export class Agent<
         },
         async () => {
           await this._tryCatch(async () => {
-            console.log(
-              `[Agent.onStart] restoring connections, name="${this.name}"`
-            );
             await this.mcp.restoreConnectionsFromStorage(this.name);
-            console.log(`[Agent.onStart] restoring RPC MCP servers`);
             await this._restoreRpcMcpServers();
-            console.log(
-              `[Agent.onStart] restore complete, connections=${Object.keys(this.mcp.mcpConnections).length}`
-            );
             this.broadcastMcpServers();
 
             this._checkOrphanedWorkflows();
@@ -3555,13 +3548,7 @@ export class Agent<
 
   private async _restoreRpcMcpServers(): Promise<void> {
     const rpcServers = this.mcp.getRpcServersFromStorage();
-    console.log(
-      `[_restoreRpcMcpServers] found ${rpcServers.length} RPC server(s) in storage`
-    );
     for (const server of rpcServers) {
-      console.log(
-        `[_restoreRpcMcpServers] server="${server.name}" id="${server.id}" alreadyConnected=${!!this.mcp.mcpConnections[server.id]}`
-      );
       if (this.mcp.mcpConnections[server.id]) {
         continue;
       }
@@ -3579,7 +3566,7 @@ export class Agent<
         continue;
       }
 
-      const normalizedName = server.server_url.replace("rpc:", "");
+      const normalizedName = server.server_url.replace(RPC_DO_PREFIX, "");
 
       try {
         await this.mcp.connect(`${RPC_DO_PREFIX}${normalizedName}`, {
@@ -3854,9 +3841,6 @@ export class Agent<
     const existingServer = this.mcp
       .listServers()
       .find((s) => s.name === serverName);
-    console.log(
-      `[addMcpServer] name="${serverName}", existingInStorage=${!!existingServer}, existingInMemory=${!!(existingServer && this.mcp.mcpConnections[existingServer?.id ?? ""])}`
-    );
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
       if (
@@ -3868,6 +3852,11 @@ export class Agent<
           state: MCPConnectionState.AUTHENTICATING,
           authUrl: conn.options.transport.authProvider.authUrl
         };
+      }
+      if (conn.connectionState === MCPConnectionState.FAILED) {
+        throw new Error(
+          `MCP server "${serverName}" is in failed state: ${conn.connectionError}`
+        );
       }
       return { id: existingServer.id, state: MCPConnectionState.READY };
     }
